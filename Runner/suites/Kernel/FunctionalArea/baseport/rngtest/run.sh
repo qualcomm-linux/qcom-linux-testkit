@@ -1,0 +1,29 @@
+#!/bin/sh
+# Import test suite definitions
+/var/Runner/init_env
+TESTNAME="rngtest"
+
+#import test functions library
+source $TOOLS/functestlib.sh
+test_path=$(find_test_case_by_name "$TESTNAME")
+log_info "-----------------------------------------------------------------------------------------"
+log_info "-------------------Starting $TESTNAME Testcase----------------------------"
+
+chmod -R 777 /rngtest
+
+cd /rngtest
+
+cat /dev/random | rngtest -c 1000 > /tmp/rngtest_output.txt
+
+grep 'count of bits' /tmp/rngtest_output.txt | awk '{print $NF}' > /tmp/rngtest_value.txt
+
+value=$(cat /tmp/rngtest_value.txt)
+
+if [ "$value" -lt 10 ]; then
+    log_pass "$TESTNAME : Test Passed"
+    echo "$TESTNAME : Test Passed" > $test_path/$TESTNAME.res
+else
+	log_fail "$TESTNAME : Test Failed"
+	echo "$TESTNAME : Test Failed" > $test_path/$TESTNAME.res
+fi
+log_info "-------------------Completed $TESTNAME Testcase----------------------------"

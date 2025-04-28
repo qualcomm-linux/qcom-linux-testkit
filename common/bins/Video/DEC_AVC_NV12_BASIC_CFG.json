@@ -1,0 +1,22 @@
+{
+	"ExecutionMode": "Sequential",
+	"TestCases": [
+		{
+			"Name" : "Decoder TestCase",
+			"TestConfigs" : {
+				"Domain": "Decoder",
+				"InputPath": "/data/vendor/iris_test_app/input/FVDO_Freeway_720p.264",
+				"NumFrames": -1,
+				"CodecName": "AVC",
+				"PixelFormat": "NV12",
+				"Width": 1280,
+				"Height": 720,
+				"Outputpath": "/data/vendor/iris_test_app/output/output_FVDO_Freeway_720p.yuv",
+				"InputBufferCount": 16,
+				"OutputBufferCount": 16,
+				"MemoryType": "MMAP",
+			}
+		}
+	]	
+}
+
