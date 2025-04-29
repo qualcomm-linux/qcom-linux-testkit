@@ -1,140 +1,108 @@
-Linux Feature Validation Scripts
+Linux Feature Validation Framework
 
 Overview
+This repository provides standalone validation scripts designed to test and verify various Linux features, particularly for Qualcomm RB3Gen2 and platforms based on meta-qcom and meta-qcom-distros.
+The tests aim to cover functional, sanity, and smoke validations, and can be easily integrated into CI/CD pipelines.
 
-This repository provides standalone test scripts aimed at functional validation of key Linux system features.
-It focuses on sanity, smoke, and functional testing for environments using Qualcomm kernels, meta-qcom, and meta-qcom-distros Yocto layers.
-
-These scripts are lightweight, extensible, and designed to integrate easily with CI/CD pipelines or run manually for system validation.
-The goal is to ensure critical Linux subsystems are operational and behave correctly.
-
-
----
-
-Key Features
-
-Standalone scripts — No dependency on specific frameworks.
-
-Functional validation of Linux features like:
-
-CPU Frequency Scaling
-
-Reboot health check
-
-Audio, USB, Sensors, Bluetooth, Wi-Fi, Camera, GPS, Ethernet, Touchscreen, Display, Power management, and more.
-
-
-Per-feature pass/fail reporting with detailed logs.
-
-Extensible — Scripts can be easily plugged into any CI/CD framework.
-
-Error Handling — Robust detection and logging of failures.
-
-Support for Yocto-based Systems — Especially with meta-qcom and meta-qcom-distros.
-
-
+These scripts focus on:
+Core Linux kernel functionality validation.
+Robust error handling and dynamic environment detection.
+Easy extension for continuous integration (CI) frameworks.
+Designed to be run directly on target hardware.
 
 ---
 
+Intent
+
+Validate Linux kernel and userspace features systematically.
+Offer flexibility to run standalone or plug into any CI/CD system.
+Cover positive and negative scenarios for strong functional validation.
+Support sanity checks, smoke tests, and full system tests.
+Minimal dependencies — usable even on minimal Yocto-based images.
+
+---
 Usage
 
-To run a specific test:
-
+Run a specific test using:
+```
 ./run-test.sh <testname>
 
-Where <testname> is the name of the test you want to run (example: cpufreq, reboot_health, etc).
+<testname> is the name of the script to be executed.
 
 Example:
 
 ./run-test.sh cpufreq
+./run-test.sh reboot_health
+```
+---
+Features
 
-The run-test.sh script will dynamically call the appropriate test script, handle basic setup, and consolidate test results.
+1. Standalone scripts: Shell scripts and C programs.
 
+2. Extensible: Easily pluggable into any existing CI framework.
+
+3. Cross-Platform: Tested primarily on Yocto images, Qualcomm platforms.
+
+4. Dynamic: Auto-detects hardware interfaces dynamically wherever possible.
+
+5. Strong Error Handling: Failure of any validation immediately flagged.
 
 ---
 
-Folder Structure
+Test Coverage (Examples)
 
-├── run-test.sh           # Launcher script
-├── tests/
-│   ├── cpufreq_test.sh    # CPU frequency scaling validation
-│   ├── reboot_health.c    # C program to validate reboot health
-│   ├── audio_test.sh      # Audio validation script
-│   ├── usb_test.sh        # USB validation script
-│   └── ...                # Other feature validation scripts
-├── results/
-│   ├── logs/              # Log files
-│   ├── summary.txt        # Test summary (pass/fail per test)
-├── README.md              # This file
-└── LICENSE
+| Area          | Test Type      | Status        |
+|---------------|----------------|----------------
+| CPU Frequency (cpufreq)  | Functional        | Available |
+| Reboot Health Validation | Functional        | Available |
+| Audo, USB, Sensors, WiFi, Bluetooth  | Sanity       | Planned |
+| Camera, GPS, Ethernet, Touchsceen, Display  | Functional | Planned |
 
+> Note: Coverage is under active enhancement for broader validation.
 
 ---
 
-Integrating with CI/CD
+Extending for CI/CD
 
-Scripts are designed to be called independently.
+These standalone tests can be wrapped inside any CI frameworks (like Jenkins, GitLab CI, GitHub Actions).
+Sample integration flow:
 
-CI pipelines (like GitLab CI, Jenkins, GitHub Actions) can invoke run-test.sh with a specific test or loop through all available tests.
+1. Prepare the DUT (Device Under Test).
 
-Results can be collected from results/summary.txt and logs for reporting and visualization.
+2. Copy and launch relevant test scripts.
 
-Failures can automatically stop pipelines if configured.
+3. Parse results (stdout/logs).
 
-
-Example CI/CD Pseudocode:
-
-for test in cpufreq reboot_health audio_test usb_test; do
-    ./run-test.sh $test || exit 1
-done
-
+4. Decide pass/fail status based on outputs.
 
 ---
 
-Extending the Framework
+Contributions
 
-Adding a new test:
+Contributions to add more validations, improve robustness, or extend for more platforms are welcome!
 
-Write a new script inside the tests/ folder.
-
-Follow the simple pattern: initialize, run checks, output PASS or FAIL.
-
-Update run-test.sh if needed to add the mapping.
-
-
-Improving validations:
-
-Extend existing scripts with deeper corner case handling, stress tests, or coverage expansion.
-
-
-
-
+Please make sure to sign your commits:
+```
+git commit -s -m "your commit message"
+```
+---
+Quick Example
+```
+git clone <this-repo>
+cd <this-repo>
+chmod +x run-test.sh
+./run-test.sh cpufreq
+```
+Output:
+```
+[INFO] Starting CPU frequency validation...
+[PASS] Core 0 validated successfully
+[FAIL] Core 1 failed at frequency setting...
+```
 ---
 
-Requirements
+Maintainers
 
-Basic Linux environment.
+Qualcomm - Initial framework
 
-Root (sudo) permissions (for accessing system files like /sys, /dev, etc).
-
-Compilers/tools installed on-device if needed for C programs (gcc).
-
-
-
----
-
-Targeted Platforms
-
-Qualcomm-based devices (Snapdragon SoCs, automotive, robotics platforms, etc).
-
-Yocto builds using meta-qcom, meta-qcom-distros.
-
-Other Linux distributions after basic compatibility validation.
-
-
-
----
-
-Contribution
-
-Feel free to open issues, suggest improvements, or submit pull requests if you wish to extend or improve the scripts for broader hardware coverage, kernel feature validation, or CI enhancements.
+Future contributors - Enhancements & new validations
