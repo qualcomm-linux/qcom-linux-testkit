@@ -23,17 +23,31 @@ Minimal dependencies — usable even on minimal Yocto-based images.
 ---
 Usage
 
+Instructions
+
+1. Copy repo to Target Device: Use scp to transfer the scripts from the host to the target device. The scripts should be copied to the /var directory on the target device.
+
+2. Verify Transfer: Ensure that the repo have been successfully copied to the /var directory on the target device.
+
+3. Run Scripts: Navigate to the /var directory on the target device and execute the scripts as needed.
+
 Run a specific test using:
+---
+Quick Example
 ```
-./run-test.sh <testname>
-
-<testname> is the name of the script to be executed.
-
-Example:
-
-./run-test.sh cpufreq
-./run-test.sh reboot_health
+git clone <this-repo>
+cd <this-repo>
+scp -r common Runner user@target_device_ip:/var
+ssh user@target_device_ip 
+cd /var/Runner && ./run-test.sh cpufreq
 ```
+Output:
+```
+[INFO] Starting CPU frequency validation...
+[PASS] Core 0 validated successfully
+[FAIL] Core 1 failed at frequency setting...
+```
+> Note: Refer https://docs.qualcomm.com/bundle/publicresource/topics/80-70017-254/how_to.html#use-ssh
 ---
 Features
 
@@ -85,21 +99,6 @@ Please make sure to sign your commits:
 ```
 git commit -s -m "your commit message"
 ```
----
-Quick Example
-```
-git clone <this-repo>
-cd <this-repo>
-chmod +x run-test.sh
-./run-test.sh cpufreq
-```
-Output:
-```
-[INFO] Starting CPU frequency validation...
-[PASS] Core 0 validated successfully
-[FAIL] Core 1 failed at frequency setting...
-```
----
 
 Maintainers
 
