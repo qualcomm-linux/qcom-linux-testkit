@@ -1,6 +1,6 @@
 #!/bin/sh
 # Import test suite definitions
-/var/Runner/init_env
+$(pwd)/init_env
 TESTNAME="video_encode"
 
 #import test functions library
@@ -17,9 +17,9 @@ iris_v4l2_test --config /Video/ENC_AVC_NV12_BASIC_CFG.json --loglevel 15 >> vide
 
 if grep -q "Test Passed" "video_enc.txt"; then
     log_pass "$TESTNAME : Test Passed"
-    echo "$TESTNAME : Test Passed" > $test_path/$TESTNAME.res
+    echo "$TESTNAME PASS" > $test_path/$TESTNAME.res
 else
 	log_fail "$TESTNAME : Test Failed"
-	echo "$TESTNAME : Test Failed" > $test_path/$TESTNAME.res
+	echo "$TESTNAME FAIL" > $test_path/$TESTNAME.res
 fi
 log_info "-------------------Completed $TESTNAME Testcase----------------------------"

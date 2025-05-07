@@ -1,6 +1,6 @@
 #!/bin/sh
 # Import test suite definitions
-/var/Runner/init_env
+$(pwd)/init_env
 TESTNAME="Reboot_health_check"
 #import test functions library
 source $TOOLS/functestlib.sh

@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # CPUFreq Validator: Parallel, Colorized
-/var/Runner/init_env
+$(pwd)/init_env
 TESTNAME="CPUFreq_Validation"
 
 #import test functions library
@@ -116,12 +116,12 @@ log_info "=== Overall CPUFreq Validation Result ==="
 if $overall_pass; then
     echo -e "${GREEN}[OVERALL PASS]${NC} All CPUs validated successfully."
 	log_pass "$TESTNAME : Test Passed"
-    echo "$TESTNAME : Test Passed" > $test_path/$TESTNAME.res
+    echo "$TESTNAME PASS" > $test_path/$TESTNAME.res
     exit 0
 else
     echo -e "${RED}[OVERALL FAIL]${NC} Some CPUs failed frequency validation."
 	log_fail "$TESTNAME : Test Failed"
-	echo "$TESTNAME : Test Failed" > $test_path/$TESTNAME.res
+	echo "$TESTNAME FAIL" > $test_path/$TESTNAME.res
     exit 1
 fi
 
