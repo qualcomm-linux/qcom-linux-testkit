@@ -2,12 +2,12 @@
 
 ## Overview
 
-Graphics scripts automates the validation of Graphics gles2 capabilities on the Qualcomm RB3 Gen2 platform running a Yocto-based Linux system. It utilizes GLmark2-es2-wayland test app which is publicly available @https://github.com/glmark2/glmark2
+Graphics scripts automates the validation of Graphics gles2 capabilities on the Qualcomm RB3 Gen2 platform running a Yocto-based Linux system. It utilizes GLmark2-es2-wayland test app which is publicly available at https://github.com/glmark2/glmark2
 
 ## Features
 
 - OpenGL ES 2.0 API level test
-- Various standard features , such as vertex arrays, vertex buffer objects (VBOs), texturing, and shaders 
+- Various standard features, such as vertex arrays, vertex buffer objects (VBOs), texturing, and shaders 
 - Provides detailed performance metrics, including frame rates and scores
 - Supports offscreen rendering, allowing you to benchmark without displaying the output on the screen
 - Specifically designed to run as a Wayland client, making it suitable for modern Linux desktop environments

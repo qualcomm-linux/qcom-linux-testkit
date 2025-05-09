@@ -3,11 +3,11 @@
 # GLMark2 Validator Script (Yocto-Compatible)
 # No arguments expected. This script auto-detects and validates onscreen/offscreen rendering
 
-/var/Runner/init_env
+. $(pwd)/init_env
 TESTNAME="GLMark2"
 
 # Import test functions
-source $TOOLS/functestlib.sh
+. $TOOLS/functestlib.sh
 
 test_path=$(find_test_case_by_name "$TESTNAME")
 log_info "-----------------------------------------------------------------------------------------"
@@ -23,13 +23,12 @@ NC="\e[0m" # No Color
 # Validate if glmark2 binary is available
 if ! command -v /usr/bin/glmark2-es2-wayland &> /dev/null; then
     echo -e "${RED}[ERROR]${NC} glmark2-es2-wayland not found in system path."
-    log_fail "$TESTNAME : glmark2-es2-wayland not found"
-    echo "$TESTNAME : Test Failed" > "$test_path/$TESTNAME.res"
+    log_fail "$TESTNAME : glmark2-es2-wayland binary not found"
+    echo "$TESTNAME SKIP " > "$test_path/$TESTNAME.res"
     exit 1
 fi
 
 # Prepare environment
-mount -o remount,rw /
 . /etc/profile
 export XDG_RUNTIME_DIR=/dev/socket/weston
 mkdir -p "$XDG_RUNTIME_DIR"
@@ -79,13 +78,13 @@ log_info ""
 log_info "=== Overall GLMark2 Validation Result ==="
 if $overall_pass; then
     echo -e "${GREEN}[OVERALL PASS]${NC} GLMark2 rendering validated."
-    log_pass "$TESTNAME : Test Passed"
-    echo "$TESTNAME : Test Passed" > "$test_path/$TESTNAME.res"
+    log_pass "$TESTNAME PASS"
+    echo "$TESTNAME PASS" > "$test_path/$TESTNAME.res"
     exit 0
 else
     echo -e "${RED}[OVERALL FAIL]${NC} One or more GLMark2 tests failed."
-    log_fail "$TESTNAME : Test Failed"
-    echo "$TESTNAME : Test Failed" > "$test_path/$TESTNAME.res"
+    log_fail "$TESTNAME  FAIL"
+    echo "$TESTNAME FAIL" > "$test_path/$TESTNAME.res"
     exit 1
 fi
 
