@@ -15,7 +15,7 @@ Video scripts automates the validation of video encoding and decoding capabiliti
 
 Ensure the following components are present in the target Yocto build:
 
-- `iris_v4l2_test` (installed or in `$PATH` or in Runner/utils/) - this test app can be compiled from https://github.com/quic/v4l-video-test-app
+- `iris_v4l2_test` (available in /usr/bin/) - this test app can be compiled from https://github.com/quic/v4l-video-test-app
 - input json file for iris_v4l2_test app
 - input bitstream for decode script
 - input YUV for encode script

@@ -11,6 +11,8 @@ log_info "-------------------Starting $TESTNAME Testcase------------------------
 
 log_info "Checking if dependency binary is available"
 check_dependencies iris_v4l2_test
+check_network_status
+extract_tar_from_url https://github.com/qualcomm-linux/qcom-linux-testkit/releases/download/IRIS-Video-Files-v1.0/video_clips_iris.tar.gz
 
 # Run the first test
 iris_v4l2_test --config ./suites/Multimedia/Video/iris_v4l2_video_decode/h264Decoder.json --loglevel 15 >> ./suites/Multimedia/Video/iris_v4l2_video_decode/video_dec.txt

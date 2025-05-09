@@ -5,13 +5,13 @@
             "Name" : "Decoder Testcase",
             "TestConfigs" : {
                 "Domain": "Decoder",
-                "InputPath": "/usr/bin/iris_v4l2_video_decode/simple_AVC_720p_10fps_90frames.264",
+                "InputPath": "./simple_AVC_720p_10fps_90frames.264",
                 "NumFrames": -1,
                 "CodecName": "AVC",
                 "PixelFormat": "NV12",
                 "Width": 1280,
                 "Height": 720,
-                "Outputpath": "/usr/bin/iris_v4l2_video_decode/output_simple_nv12_720p_90frms.yuv",
+                "Outputpath": "./output_simple_nv12_720p_90frms.yuv",
                 "InputBufferCount": 16,
                 "OutputBufferCount": 16
             }
