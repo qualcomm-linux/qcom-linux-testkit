@@ -1,7 +1,7 @@
 #!/bin/sh
 # Import test suite definitions
 /var/Runner/init_env
-TESTNAME="video_encode"
+TESTNAME="iris_v4l2_video_encode"
 
 #import test functions library
 source $TOOLS/functestlib.sh
@@ -13,9 +13,9 @@ log_info "Checking if dependency binary is available"
 check_dependencies iris_v4l2_test
 
 # Run the first test
-iris_v4l2_test --config /Video/ENC_AVC_NV12_BASIC_CFG.json --loglevel 15 >> video_enc.txt
+iris_v4l2_test --config ./suites/Multimedia/Video/iris_v4l2_video_encode/h264Encoder.json --loglevel 15 >> ./suites/Multimedia/Video/iris_v4l2_video_encode/video_enc.txt
 
-if grep -q "Test Passed" "video_enc.txt"; then
+if grep -q "SUCCESS" ./suites/Multimedia/Video/iris_v4l2_video_encode/video_enc.txt; then
     log_pass "$TESTNAME : Test Passed"
     echo "$TESTNAME : Test Passed" > $test_path/$TESTNAME.res
 else
