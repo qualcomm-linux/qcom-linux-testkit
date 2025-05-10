@@ -1,3 +1,6 @@
+# Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+# SPDX-License-Identifier: BSD-3-Clause-Clear
+
 #	
 # Import test suite definitions
 source /var/Runner/init_env
@@ -78,4 +81,66 @@ functestlibdoc()
     echo ""
   done
   echo "Note, these functions will probably not work with >=32 CPUs"
+}
+
+check_network_status() {
+    echo "[INFO] Checking network connectivity..."
+ 
+    # Get first active IPv4 address (excluding loopback)
+    ip_addr=$(ip -4 addr show scope global up | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n 1)
+ 
+    if [ -n "$ip_addr" ]; then
+        echo "[PASS] Network is active. IP address: $ip_addr"
+ 
+        if ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1; then
+            echo "[PASS] Internet is reachable."
+            return 0
+        else
+            echo "[WARN] Network active but no internet access."
+            return 2
+        fi
+    else
+        echo "[FAIL] No active network interface found."
+        return 1
+    fi
+}
+
+extract_tar_from_url() {
+    local url="$1"
+    local filename
+    local extracted_files
+
+    # Extract the filename from the URL
+    filename=$(basename "$url")
+
+    # Download the file using wget
+    echo "[INFO] Downloading $url..."
+    wget -O "$filename" "$url"
+
+    # Check if wget was successful
+    if [ $? -ne 0 ]; then
+        echo "[FAIL] Failed to download the file."
+        return 1
+    fi
+
+    # Extract the tar file
+    echo "[INFO] Extracting $filename..."
+    tar -xvf "$filename"
+
+    # Check if tar was successful
+    if [ $? -ne 0 ]; then
+        echo "[FAIL] Failed to extract the file."
+        return 1
+    fi
+
+    # Check if any files were extracted
+    extracted_files=$(tar -tf "$filename")
+    if [ -z "$extracted_files" ]; then
+        echo "[FAIL] No files were extracted."
+        return 1
+    else
+        echo "[PASS] Files extracted successfully:"
+        echo "[INFO] $extracted_files"
+        return 0
+    fi
 }
