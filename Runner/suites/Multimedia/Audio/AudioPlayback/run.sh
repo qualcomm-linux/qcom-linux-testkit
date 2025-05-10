@@ -1,3 +1,6 @@
+# Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+# SPDX-License-Identifier: BSD-3-Clause-Clear
+
 #!/bin/bash
 
 # Import test suite definitions
@@ -9,7 +12,7 @@ TESTBINARY="paplay"
 KILLPID=()
 
 # Import test functions
-source $TOOLS/functestlib.sh
+. $TOOLS/functestlib.sh
 
 test_path=$(find_test_case_by_name "$TESTNAME")
 echo "--------------------------------------------------------------------------"
