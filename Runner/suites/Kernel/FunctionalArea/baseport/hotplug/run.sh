@@ -66,9 +66,10 @@ check_cpu_status | tee -a "$LOG_FILE"
 # Print overall test result
 if [ "$test_passed" = true ]; then
         log_pass "$TESTNAME : Test Passed"
+        echo "$TESTNAME PASS" > $test_path/$TESTNAME.res
 		echo "$TESTNAME : Test Passed" > $test_path/$TESTNAME.res
 else
 	log_fail "$TESTNAME : Test Failed"
-	echo "$TESTNAME : Test Failed" > $test_path/$TESTNAME.res
+    echo "$TESTNAME FAIL" > $test_path/$TESTNAME.res
 fi
 log_info "-------------------Completed $TESTNAME Testcase----------------------------"

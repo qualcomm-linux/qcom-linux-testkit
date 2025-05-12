@@ -28,7 +28,7 @@ state1=$(cat ${remoteproc_path}/state)
 
 if [ "$state1" != "running" ]; then
     log_fail "$TESTNAME : Test Failed"
-    echo "$TESTNAME : Test Failed" > $test_path/$TESTNAME.res
+    echo "$TESTNAME FAIL" > $test_path/$TESTNAME.res
 	exit 1
 fi
 
@@ -40,7 +40,7 @@ echo stop > ${remoteproc_path}/state
 state3=$(cat ${remoteproc_path}/state)
 if [ "$state3" != "offline" ]; then
 	log_fail "adsp stop failed"
-	echo "$TESTNAME : Test Failed" > $test_path/$TESTNAME.res
+    echo "$TESTNAME FAIL" > $test_path/$TESTNAME.res
     exit 1
 else
 	log_pass "adsp stop successful"
@@ -53,12 +53,12 @@ echo start > ${remoteproc_path}/state
 state5=$(cat ${remoteproc_path}/state)
 if [ "$state5" != "running" ]; then
 	log_fail "adsp start failed"
-	echo "$TESTNAME : Test Failed" > $test_path/$TESTNAME.res
+    echo "$TESTNAME FAIL" > $test_path/$TESTNAME.res
     exit 1
 fi
 
 # If all checks pass, print "PASS"
 echo "adsp PASS"
 log_pass "adsp PASS"
-echo "$TESTNAME : Test Passed" > $test_path/$TESTNAME.res
+echo "$TESTNAME PASS" > $test_path/$TESTNAME.res
 log_info "-------------------Completed $TESTNAME Testcase----------------------------"

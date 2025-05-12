@@ -2,13 +2,6 @@
 # SPDX-License-Identifier: BSD-3-Clause-Clear
 
 # Source this file to setup the test suite environment
-if [ -e '/var/Runner' ];then
-    export BASEDIR='/var/Runner'
-    export TOOLS='/var/Runner/utils'
-    export SUITES='/var/Runner/suites'
-    export CALIBRATION='/var/Runner/calib.txt'
-    export FTRACE_EVENTS='/var/Runner/ftrace_events'
-	export PATH=$PATH:'/bin'
-	export PATH=$PATH:'/sbin'
-fi
-
+export BASEDIR=$(pwd)
+export TOOLS=$(pwd)/utils
+export SUITES=$(pwd)/suites
