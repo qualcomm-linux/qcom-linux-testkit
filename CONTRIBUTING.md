@@ -1,3 +1,6 @@
+# Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+# SPDX-License-Identifier: BSD-3-Clause-Clear
+
 # Contributing to the Shell Scripts Repository
 
 Welcome! This repository contains hardware validation shell scripts for Qualcomm embedded robotic platform boards running Linux systems. These scripts follow POSIX standards for maximum portability and integration into CI tools like LAVA.
