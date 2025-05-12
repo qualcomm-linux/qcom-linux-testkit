@@ -43,7 +43,7 @@ echo "$initial_count" | while read -r line; do
         final_value=$(echo "$final_values_list" | sed -n "$((i+1))p")
         if [ "$initial_value" -lt "$final_value" ]; then
             echo "CPU $i: Timer count has incremented. Test PASSED"
-			log_pass "CPU $i: Timer count has incremented. Test PASSED"
+            log_pass "CPU $i: Timer count has incremented. Test PASSED"
         else
             echo "CPU $i: Timer count has not incremented. Test FAILED"
             log_fail "CPU $i: Timer count has not incremented. Test FAILED"
@@ -51,13 +51,13 @@ echo "$initial_count" | while read -r line; do
         fi
         i=$((i+1))
     done
-	echo $fail_test
-	if [ "$fail_test" = false ]; then
-		log_pass "$TESTNAME : Test Passed"
-	else
-		log_fail "$TESTNAME : Test Failed"
-	fi
+    echo $fail_test
+    if [ "$fail_test" = false ]; then
+        log_pass "$TESTNAME : Test Passed"
         echo "$TESTNAME PASS" > $test_path/$TESTNAME.res
+    else
+        log_fail "$TESTNAME : Test Failed"
         echo "$TESTNAME FAIL" > $test_path/$TESTNAME.res
+    fi
 done
 log_info "-------------------Completed $TESTNAME Testcase----------------------------"

@@ -1,18 +1,18 @@
-#	
+#   
 # Import test suite definitions
 . $(pwd)/init_env
 #import platform
 . $TOOLS/platform.sh
 
-__RUNNER_SUITES_DIR="/var/Runner/suites"
+__RUNNER_SUITES_DIR="$(pwd)/suites"
 __RUNNER_UTILS_BIN_DIR="/var/common"
 
 #This function used for test logging
 log() {
     local level="$1"
-	shift
+    shift
     # echo "$(date '+%Y-%m-%d %H:%M:%S') - $message" | tee -a /var/test_framework.log
-	echo "[$level] $(date '+%Y-%m-%d %H:%M:%S') - $*" | tee -a /var/test_output.log
+    echo "[$level] $(date '+%Y-%m-%d %H:%M:%S') - $*" | tee -a /var/test_output.log
 }
 # Find test case path by name
 find_test_case_by_name() {
@@ -44,7 +44,7 @@ check_dependencies() {
         log_error "Exiting due to missing dependencies."
         exit 1
     else
-	log_pass "Test related dependencies are present."
+    log_pass "Test related dependencies are present."
     fi
 }
 

@@ -36,12 +36,12 @@ TEST=$(/sbin/insmod "$PATH")
 log_info "output of insmod $TEST"
 
 if /sbin/lsmod | /bin/grep "rmnet"; then
-	log_info "$(/sbin/lsmod | /bin/grep "rmnet")" 
+    log_info "$(/sbin/lsmod | /bin/grep "rmnet")" 
     log_pass "$TESTNAME : Test Passed"
     echo "$TESTNAME PASS" > $test_path/$TESTNAME.res
 else
-	log_error "rmnet module not running"
-	log_fail "$TESTNAME : Test Failed"
+    log_error "rmnet module not running"
+    log_fail "$TESTNAME : Test Failed"
     echo "$TESTNAME FAIL" > $test_path/$TESTNAME.res
 fi
 log_info "-------------------Completed $TESTNAME Testcase----------------------------"
