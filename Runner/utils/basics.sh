@@ -1,5 +1,5 @@
 # Import test suite definitions
-source ../../../../init_env
+. $(pwd)/init_env
 
 #import platform
 . $TOOLS/platform.sh

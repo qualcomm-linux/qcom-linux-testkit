@@ -1,6 +1,6 @@
 #!/bin/sh
 # Import test suite definitions
-source /var/Runner/init_env
+source $(pwd)/init_env
 
 #import test functions library
 source $TOOLS/functestlib.sh

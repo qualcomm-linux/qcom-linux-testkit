@@ -1,10 +1,10 @@
 #!/bin/sh
 # Import test suite definitions
-/var/Runner/init_env
+. $(pwd)/init_env
 TESTNAME="GIC"
 
 #import test functions library
-source $TOOLS/functestlib.sh
+. $TOOLS/functestlib.sh
 test_path=$(find_test_case_by_name "$TESTNAME")
 log_info "-----------------------------------------------------------------------------------------"
 log_info "-------------------Starting $TESTNAME Testcase----------------------------"
