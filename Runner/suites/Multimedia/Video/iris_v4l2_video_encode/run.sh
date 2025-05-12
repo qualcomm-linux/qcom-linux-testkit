@@ -3,7 +3,7 @@
 
 #!/bin/sh
 # Import test suite definitions
-/var/Runner/init_env
+. $(pwd)/init_env
 TESTNAME="iris_v4l2_video_encode"
 
 #import test functions library
@@ -32,10 +32,10 @@ iris_v4l2_test --config ./suites/Multimedia/Video/iris_v4l2_video_encode/h264Enc
 
 if grep -q "SUCCESS" ./suites/Multimedia/Video/iris_v4l2_video_encode/video_enc.txt; then
     log_pass "$TESTNAME : Test Passed"
-    echo "$TESTNAME : Test Passed" > $test_path/$TESTNAME.res
+    echo "$TESTNAME PASS" > $test_path/$TESTNAME.res
 else
 	log_fail "$TESTNAME : Test Failed"
-	echo "$TESTNAME : Test Failed" > $test_path/$TESTNAME.res
+	echo "$TESTNAME FAIL" > $test_path/$TESTNAME.res
 fi
 
 # Cleanup
