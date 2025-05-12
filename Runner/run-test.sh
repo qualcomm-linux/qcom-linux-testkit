@@ -8,8 +8,34 @@ source $TOOLS/functestlib.sh
 
 # Find test case path by name
 find_test_case_by_name() {
-    local test_name="$1"
-    find /var/Runner/suites -type d -iname "$test_name" 2>/dev/null
+    # local test_name="$1"
+    # dir= "."
+    # Check if the file is a directory
+  if [ -d "$1" ]; then
+    # Get the directory name
+    dir_name_in_dir=${1##*/}
+
+    # Check if the directory name matches the user input (ignoring case)
+    if [ "${dir_name_in_dir,,}" = "$test_name" ]; then
+      # Get the absolute path of the directory
+      abs_path=$(readlink -f "$1")
+      echo "$abs_path"  
+      # Check if the run.sh file is present in the absolute path (ignoring case)
+      # if [ -f "$abs_path/run.sh" ]; then
+        # Print the absolute path of run.sh
+        # echo "Absolute path of run.sh: $abs_path/run.sh"
+      # fi
+    fi
+  fi
+
+  # Recursively search for the directory in the subdirectory
+  for file in "$1"/*; do
+    # Check if the file is a directory
+    if [ -d "$file" ]; then
+      # Recursively search for the directory in the subdirectory
+      find_test_case_by_name "$file"
+    fi
+  done
 }
 
 # Execute a test case
@@ -35,8 +61,9 @@ execute_test_case() {
 
 # Function to run a specific test case by name
 run_specific_test_by_name() {
-    local test_name="$1"
-    test_path=$(find_test_case_by_name "$test_name")
+    test_name="$1"
+    test_name=${test_name,,}
+    test_path=$(find_test_case_by_name ".")
     if [ -z "$test_path" ]; then
         log "Test case with name $test_name not found."
     else
