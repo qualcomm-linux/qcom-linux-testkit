@@ -1,10 +1,10 @@
 #!/bin/sh
 # Import test suite definitions
-/var/Runner/init_env
+. $(pwd)/init_env
 TESTNAME="core_auth"
 
 # Import test functions
-source $TOOLS/functestlib.sh
+. $TOOLS/functestlib.sh
 
 test_path=$(find_test_case_by_name "$TESTNAME")
 log_info "-----------------------------------------------------------------------------------------"
@@ -31,11 +31,13 @@ cd /data/igt/tests/
 # Check the log file for the string "SUCCESS" to determine if the test passed
 if grep -q "SUCCESS" /data/core_auth_log.txt; then
 # If "SUCCESS" is found, print that the test passe
-	echo "$TESTNAME : Test Passed"
+	log_pass "$TESTNAME : Test Passed"
+	echo "$TESTNAME PASS" > $test_path/$TESTNAME.res
 
 else
 	# If "SUCCESS" is not found, print that the test failed
-	echo "$TESTNAME : Test Failed"
+	log_pass "$TESTNAME : Test Failed"
+	echo "$TESTNAME Fail" > $test_path/$TESTNAME.res
 fi
 
 # Print the completion of the test case
