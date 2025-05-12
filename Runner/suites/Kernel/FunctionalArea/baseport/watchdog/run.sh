@@ -15,10 +15,10 @@ log_info "-------------------Starting $TESTNAME Testcase------------------------
 if [ -e /dev/watchdog ]; then
     log_pass "/dev/watchdog node is present."
     log_pass "$TESTNAME : Test Passed"
-    echo "$TESTNAME : Test Passed" > $test_path/$TESTNAME.res
+    echo "$TESTNAME PASS" > $test_path/$TESTNAME.res
 else
 	log_fail "/dev/watchdog node is not present."
 	log_fail "$TESTNAME : Test Failed"
-	echo "$TESTNAME : Test Failed" > $test_path/$TESTNAME.res
+    echo "$TESTNAME FAIL" > $test_path/$TESTNAME.res
 fi
 log_info "-------------------Completed $TESTNAME Testcase---------------------------"

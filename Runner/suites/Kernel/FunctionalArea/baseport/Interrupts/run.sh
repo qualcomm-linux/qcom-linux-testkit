@@ -54,13 +54,13 @@ echo "$initial_count" | while read -r line; do
         fi
         i=$((i+1))
     done
-	echo $fail_test
-	if [ "$fail_test" = false ]; then
-		log_pass "$TESTNAME : Test Passed"
-		echo "$TESTNAME : Test Passed" > $test_path/$TESTNAME.res
-	else
-		log_fail "$TESTNAME : Test Failed"
-		echo "$TESTNAME : Test Failed" > $test_path/$TESTNAME.res
-	fi
+    echo $fail_test
+    if [ "$fail_test" = false ]; then
+        log_pass "$TESTNAME : Test Passed"
+	echo "$TESTNAME PASS" > $test_path/$TESTNAME.res
+    else
+        log_fail "$TESTNAME : Test Failed"
+	echo "$TESTNAME FAIL" > $test_path/$TESTNAME.res
+    fi
 done
 log_info "-------------------Completed $TESTNAME Testcase----------------------------"
