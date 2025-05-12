@@ -20,9 +20,9 @@ OUTPUT=$($BINARY_PATH)
 # Check if "pass:7" is in the output
 if [[ $OUTPUT == *"pass:7"* ]]; then
     log_pass "$TESTNAME : Test Passed"
-    echo "$TESTNAME : Test Passed" > $test_path/$TESTNAME.res
+    echo "$TESTNAME PASS" > $test_path/$TESTNAME.res
 else
 	log_fail "$TESTNAME : Test Failed"
-	echo "$TESTNAME : Test Failed" > $test_path/$TESTNAME.res
+    echo "$TESTNAME FAIL" > $test_path/$TESTNAME.res
 fi
 log_info "-------------------Completed $TESTNAME Testcase----------------------------"

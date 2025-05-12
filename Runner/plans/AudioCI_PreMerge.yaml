@@ -1,0 +1,17 @@
+metadata:
+    format: Lava-Test Test Definition 1.0
+    name: AUSanity
+    description: "Baseline AU Sanity test plan"
+    maintainer:
+        - vnarapar@qti.qualcomm.com
+    os:
+        - openembedded
+    scope:
+        - functional
+    devices:
+        - rb3gen2
+
+run:
+    steps:
+        - cd Runner
+        - chmod -R 777 *
