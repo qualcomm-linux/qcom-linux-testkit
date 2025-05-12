@@ -1,10 +1,10 @@
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause-Clear
 
-#!/bin/bash
+#!/bin/sh
 
 # Import test suite definitions
-/var/Runner/init_env
+. $(pwd)/init_env
 TESTNAME="audio_playback_test"
 TESTBINARY="paplay"
 
@@ -13,21 +13,15 @@ KILLPID=()
 
 # Import test functions
 . $TOOLS/functestlib.sh
-
 test_path=$(find_test_case_by_name "$TESTNAME")
 echo "--------------------------------------------------------------------------"
 echo "-------------------Starting $TESTNAME Testcase----------------------------"
 
 echo "Checking if dependency binary is available"
 check_dependencies $TESTBINARY
+extract_tar_from_url https://github.com/qualcomm-linux/qcom-linux-testkit/releases/download/Pulse-Audio-Files-v1.0/AudioClips.tar.gz
 
 # Prepare environment
-mount -o remount,rw /
-. /etc/profile
-export XDG_RUNTIME_DIR=/run/user/1000
-mkdir -p "$XDG_RUNTIME_DIR"
-chmod 0700 "$XDG_RUNTIME_DIR"
-
 mkdir -p results/audiotestresult
 chmod -R 777 results/audiotestresult
 
@@ -40,14 +34,14 @@ dmesg -w > results/audiotestresult/dmesg_log.txt &
 KILLPID[${#KILLPID[@]}+1]="$!"
 
 #Start the Playback
-paplay /tmp/yesterday_48KHz.wav -d low-latency0 &
+paplay ./suites/Multimedia/Audio/AudioPlayback/yesterday_48KHz.wav -d low-latency0 &
 PID = $!
 KILLPID[${#KILLPID[@]}+1]="$!"
 sleep 10
 
 #Check whether playback started
 if [-z "$PID"]; then
-  echo "Failed to start the test binary $TESTBINARY"
+  echo "Fail to start the test binary $TESTBINARY"
   exit 1
 else
   echo "Test Binary $TESTBINARY is running successfully"
@@ -63,7 +57,7 @@ check_audio_pid_alive() {
 		echo "Successfully audio playback completed"
 		return 0
 	else 
-		echo "failed to start audio playback"
+		echo "Fail to start audio playback"
 		return 1
 	fi
 }
@@ -71,13 +65,11 @@ check_audio_pid_alive() {
 # Final status, Print overall test result
 echo "=== Overall Audio Test Validation Result ==="
 if check_audio_pid_alive "$PID"; then
-    log_pass "$TESTNAME : Test Passed"
-	echo "Test Passed"
-    echo "$TESTNAME : Test Passed" > $test_path/$TESTNAME.res
+    log_pass "$TESTNAME : Test PASS"
+    echo "$TESTNAME : Test Pass" > $test_path/$TESTNAME.res
 else
-	log_fail "$TESTNAME : Test Failed"
-	echo "Test Failed"
-	echo "$TESTNAME : Test Failed" > $test_path/$TESTNAME.res
+	log_fail "$TESTNAME : Test FAIL"
+	echo "$TESTNAME : Test Fail" > $test_path/$TESTNAME.res
 fi
 
 

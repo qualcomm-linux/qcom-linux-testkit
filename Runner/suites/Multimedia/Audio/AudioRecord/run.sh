@@ -1,7 +1,10 @@
-#!/bin/bash
+# Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+# SPDX-License-Identifier: BSD-3-Clause-Clear
+
+#!/bin/sh
 
 # Import test suite definitions
-/var/Runner/init_env
+. $(pwd)/init_env
 TESTNAME="audio_record_test"
 TESTBINARY="parec"
 
@@ -9,8 +12,7 @@ TESTBINARY="parec"
 KILLPID=()
 
 # Import test functions
-source $TOOLS/functestlib.sh
-
+. $TOOLS/functestlib.sh
 test_path=$(find_test_case_by_name "$TESTNAME")
 echo "--------------------------------------------------------------------------"
 echo "-------------------Starting $TESTNAME Testcase----------------------------"
@@ -19,12 +21,6 @@ echo "Checking if dependency binary is available"
 check_dependencies $TESTBINARY
 
 # Prepare environment
-mount -o remount,rw /
-. /etc/profile
-export XDG_RUNTIME_DIR=/run/user/1000
-mkdir -p "$XDG_RUNTIME_DIR"
-chmod 0700 "$XDG_RUNTIME_DIR"
-
 mkdir -p results/audiotestresult
 chmod -R 777 results/audiotestresult
 
@@ -44,7 +40,7 @@ sleep 10
 
 #Check whether playback started
 if [-z "$PID"]; then
-  echo "Failed to start the test binary $TESTBINARY"
+  echo "Fail to start the test binary $TESTBINARY"
   exit 1
 else
   echo "Test Binary $TESTBINARY is running successfully"
@@ -60,7 +56,7 @@ check_audio_pid_alive() {
 		echo "Successfully audio record completed"
 		return 0
 	else 
-		echo "failed to start audio record"
+		echo "Fail to start audio record"
 		return 1
 	fi
 }
@@ -68,13 +64,11 @@ check_audio_pid_alive() {
 # Final status, Print overall test result
 echo "=== Overall Audio Test Validation Result ==="
 if check_audio_pid_alive "$PID"; then
-    log_pass "$TESTNAME : Test Passed"
-	echo "Test Passed"
-    echo "$TESTNAME : Test Passed" > $test_path/$TESTNAME.res
+    log_pass "$TESTNAME : Test PASS"
+    echo "$TESTNAME : Test Pass" > $test_path/$TESTNAME.res
 else
-	log_fail "$TESTNAME : Test Failed"
-	echo "Test Failed"
-	echo "$TESTNAME : Test Failed" > $test_path/$TESTNAME.res
+	log_fail "$TESTNAME : Test FAIL"
+	echo "$TESTNAME : Test Fail" > $test_path/$TESTNAME.res
 fi
 
 
