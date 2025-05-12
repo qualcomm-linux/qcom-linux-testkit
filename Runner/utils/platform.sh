@@ -1,3 +1,6 @@
+# Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+# SPDX-License-Identifier: BSD-3-Clause-Clear
+
 # Detect Android userland
 ANDROID_PATH=/system/build.prop
 if [ -f $ANDROID_PATH ]; then
