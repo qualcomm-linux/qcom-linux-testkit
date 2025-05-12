@@ -5,7 +5,7 @@
 . $TOOLS/platform.sh
 
 #import test functions library
-source $TOOLS/functestlib.sh
+. $TOOLS/functestlib.sh
 
 # CPU_FAST CPU_SLOW FTRACE_START_MARKER are used by the ftrace libraries
 

@@ -4,7 +4,7 @@
 TESTNAME="Graphics"
 
 #import test functions library
-source $TOOLS/functestlib.sh
+. $TOOLS/functestlib.sh
 test_path=$(find_test_case_by_name "$TESTNAME")
 log_info "-----------------------------------------------------------------------------------------"
 log_info "-------------------Starting $TESTNAME Testcase----------------------------"

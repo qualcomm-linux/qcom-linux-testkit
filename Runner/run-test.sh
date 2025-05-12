@@ -1,9 +1,9 @@
 #!/bin/sh
 # Import test suite definitions
-source $(pwd)/init_env
+. $(pwd)/init_env
 
 #import test functions library
-source $TOOLS/functestlib.sh
+. $TOOLS/functestlib.sh
 
 
 # Find test case path by name
