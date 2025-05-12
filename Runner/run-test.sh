@@ -11,8 +11,27 @@
 
 # Find test case path by name
 find_test_case_by_name() {
-    local test_name="$1"
-    find /var/Runner/suites -type d -iname "$test_name" 2>/dev/null
+    # Check if the file is a directory
+  if [ -d "$1" ]; then
+    # Get the directory name
+    dir_name_in_dir=${1##*/}
+
+    # Check if the directory name matches the user input (ignoring case)
+    if [ "${dir_name_in_dir,,}" = "$test_name" ]; then
+      # Get the absolute path of the directory
+      abs_path=$(readlink -f "$1")
+      echo "$abs_path"  
+    fi
+  fi
+
+  # Recursively search for the directory in the subdirectory
+  for file in "$1"/*; do
+    # Check if the file is a directory
+    if [ -d "$file" ]; then
+      # Recursively search for the directory in the subdirectory
+      find_test_case_by_name "$file"
+    fi
+  done
 }
 
 # Execute a test case
@@ -23,11 +42,6 @@ execute_test_case() {
         if [ -f "$run_script" ]; then
             log "Executing test case: $test_path"
             sh "$run_script" 2>&1 
-            # if [ $? -eq 0 ]; then
-            #     log "Test case $test_path passed."
-            # else
-            #     log "Test case $test_path failed."
-            # fi
         else
             log "No run.sh found in $test_path"
         fi
@@ -38,8 +52,9 @@ execute_test_case() {
 
 # Function to run a specific test case by name
 run_specific_test_by_name() {
-    local test_name="$1"
-    test_path=$(find_test_case_by_name "$test_name")
+    test_name="$1"
+    test_name=${test_name,,}
+    test_path=$(find_test_case_by_name ".")
     if [ -z "$test_path" ]; then
         log "Test case with name $test_name not found."
     else
