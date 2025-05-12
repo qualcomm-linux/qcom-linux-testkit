@@ -3,24 +3,6 @@
 . $(pwd)/init_env
 TESTNAME="RMNET"
 
-#import test functions library
-log() {
-    local level="$1"
-	shift
-    # echo "$(date '+%Y-%m-%d %H:%M:%S') - $message" | tee -a /var/test_framework.log
-	echo "[$level] $(/bin/date '+%Y-%m-%d %H:%M:%S') - $*" | /usr/bin/tee -a /var/test_output.log
-}
-# Find test case path by name
-find_test_case_by_name() {
-    local test_name="$1"
-    find /var/Runner/suites -type d -name "$test_name" 2>/dev/null
-}
-# Logging levels
-log_info() { log "INFO" "$@"; }
-log_pass() { log "PASS" "$@"; }
-log_fail() { log "FAIL" "$@"; }
-log_error() { log "ERROR" "$@"; }
-
 test_path=$(find_test_case_by_name "$TESTNAME")
 log_info "-----------------------------------------------------------------------------------------"
 log_info "-------------------Starting $TESTNAME Testcase----------------------------"
