@@ -3,11 +3,11 @@
 
 #	
 # Import test suite definitions
-source /var/Runner/init_env
+. $(pwd)/init_env
 #import platform
-source $TOOLS/platform.sh
+. $TOOLS/platform.sh
 
-__RUNNER_SUITES_DIR="/var/Runner/suites"
+__RUNNER_SUITES_DIR="$(pwd)/suites"
 __RUNNER_UTILS_BIN_DIR="/var/common"
 
 #This function used for test logging

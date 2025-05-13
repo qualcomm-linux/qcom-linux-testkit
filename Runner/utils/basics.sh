@@ -2,13 +2,13 @@
 # SPDX-License-Identifier: BSD-3-Clause-Clear
 
 # Import test suite definitions
-source ../../../../init_env
+. $(pwd)/init_env
 
 #import platform
 . $TOOLS/platform.sh
 
 #import test functions library
-source $TOOLS/functestlib.sh
+. $TOOLS/functestlib.sh
 
 # CPU_FAST CPU_SLOW FTRACE_START_MARKER are used by the ftrace libraries
 

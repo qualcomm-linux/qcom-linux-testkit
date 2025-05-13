@@ -1,14 +1,14 @@
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause-Clear
 
-#!/bin/bash
+#!/bin/sh
 
+. "$(pwd)/init_env"
 # CPUFreq Validator: Parallel, Colorized
 /var/Runner/init_env
 TESTNAME="CPUFreq_Validation"
+. "$TOOLS/functestlib.sh"
 
-#import test functions library
-source $TOOLS/functestlib.sh
 test_path=$(find_test_case_by_name "$TESTNAME")
 log_info "-----------------------------------------------------------------------------------------"
 log_info "-------------------Starting $TESTNAME Testcase----------------------------"

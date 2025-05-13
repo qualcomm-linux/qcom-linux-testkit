@@ -3,10 +3,10 @@
 
 #!/bin/sh
 # Import test suite definitions
-/var/Runner/init_env
+. $(pwd)/init_env
 TESTNAME="MEMLAT"
 #import test functions library
-source $TOOLS/functestlib.sh
+. $TOOLS/functestlib.sh
 test_path=$(find_test_case_by_name "$TESTNAME")
 test_bin_path=$(find_test_case_bin_by_name "lat_mem_rd")
 log_info "-----------------------------------------------------------------------------------------"
