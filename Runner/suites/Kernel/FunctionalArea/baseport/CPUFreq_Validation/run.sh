@@ -123,10 +123,6 @@ else
     echo "$TESTNAME FAIL" > "$test_path/$TESTNAME.res"
     rm -r "$status_dir"
     exit 1
-<<<<<<< HEAD
 fi
 
 log_info "-------------------Completed $TESTNAME Testcase----------------------------"
-=======
-fi
->>>>>>> 7acac23 (CPU frequency changes to support sh)
