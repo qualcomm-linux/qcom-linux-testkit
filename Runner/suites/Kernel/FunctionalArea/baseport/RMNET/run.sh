@@ -3,7 +3,7 @@
 
 #!/bin/sh
 # Import test suite definitions
-source /var/Runner/init_env
+. $(pwd)/init_env
 TESTNAME="RMNET"
 
 #import test functions library
