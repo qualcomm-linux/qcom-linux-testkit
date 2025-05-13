@@ -1,0 +1,21 @@
+metadata:
+    format: Lava-Test Test Definition 1.0
+    name: SmokeSanity
+    description: "Pre-merge LAVA plan to run AudioRecord and AudioPlayback on every PR"
+    maintainer:
+        - abbajaj@qti.qualcomm.com
+    os:
+        - openembedded
+    scope:
+        - functional
+    devices:
+        - rb3gen2
+
+run:
+    steps:
+        - cd Runner
+        - $PWD/suites/Multimedia/Audio/AudioPlayback/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/Audio/AudioPlayback/AudioPlayback.res || true  
+        - $PWD/suites/Multimedia/Audio/AudioRecord/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/Audio/AudioRecord/AudioRecord.res || true
+
