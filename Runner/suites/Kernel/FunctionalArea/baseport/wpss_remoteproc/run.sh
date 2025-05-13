@@ -27,7 +27,7 @@ state1=$(cat ${remoteproc_path}/state)
 if [ "$state1" != "running" ]; then
     log_fail "$TESTNAME : Test Failed"
     echo "$TESTNAME FAIL" > $test_path/$TESTNAME.res
-	exit 1
+    exit 1
 fi
 
 # Execute command 2 (no output expected)
@@ -40,7 +40,7 @@ if [ "$state3" != "offline" ]; then
     echo "$TESTNAME FAIL" > $test_path/$TESTNAME.res
     exit 1
 else
-	log_pass "wpss stop successful"
+    log_pass "wpss stop successful"
 fi
 
 # Execute command 4 (no output expected)

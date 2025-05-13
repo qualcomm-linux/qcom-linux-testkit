@@ -18,16 +18,16 @@ check_cpu_status() {
 op=0
 offline_cpu() {
     echo 0 > "/sys/devices/system/cpu/$1/online"
-	op=$(cat "/sys/devices/system/cpu/$1/online")
-	if [ "$op" -ne 1 ]; then
+    op=$(cat "/sys/devices/system/cpu/$1/online")
+    if [ "$op" -ne 1 ]; then
         log_pass "/sys/devices/system/cpu/$1/online is offline as expected"
     fi
 }
 
 online_cpu() {
     echo 1 > "/sys/devices/system/cpu/$1/online"
-	op=$(cat "/sys/devices/system/cpu/$1/online")
-	if [ "$op" -ne 0 ]; then
+    op=$(cat "/sys/devices/system/cpu/$1/online")
+    if [ "$op" -ne 0 ]; then
         log_pass "/sys/devices/system/cpu/$1/online is online as expected"
     fi
 }
@@ -67,9 +67,8 @@ check_cpu_status | tee -a "$LOG_FILE"
 if [ "$test_passed" = true ]; then
         log_pass "$TESTNAME : Test Passed"
         echo "$TESTNAME PASS" > $test_path/$TESTNAME.res
-		echo "$TESTNAME : Test Passed" > $test_path/$TESTNAME.res
 else
-	log_fail "$TESTNAME : Test Failed"
+    log_fail "$TESTNAME : Test Failed"
     echo "$TESTNAME FAIL" > $test_path/$TESTNAME.res
 fi
 log_info "-------------------Completed $TESTNAME Testcase----------------------------"

@@ -17,8 +17,8 @@ if [ -e /dev/watchdog ]; then
     log_pass "$TESTNAME : Test Passed"
     echo "$TESTNAME PASS" > $test_path/$TESTNAME.res
 else
-	log_fail "/dev/watchdog node is not present."
-	log_fail "$TESTNAME : Test Failed"
+    log_fail "/dev/watchdog node is not present."
+    log_fail "$TESTNAME : Test Failed"
     echo "$TESTNAME FAIL" > $test_path/$TESTNAME.res
 fi
 log_info "-------------------Completed $TESTNAME Testcase---------------------------"

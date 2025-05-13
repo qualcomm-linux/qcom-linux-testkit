@@ -28,7 +28,7 @@ state1=$(cat ${remoteproc_path}/state)
 if [ "$state1" != "running" ]; then
     log_fail "$TESTNAME : Test Failed"
     echo "$TESTNAME FAIL" > $test_path/$TESTNAME.res
-	exit 1
+    exit 1
 fi
 
 # Execute command 2 (no output expected)
@@ -37,11 +37,11 @@ echo stop > ${remoteproc_path}/state
 # Execute command 3 and check if the output is "offline"
 state3=$(cat ${remoteproc_path}/state)
 if [ "$state3" != "offline" ]; then
-	log_fail "cdsp stop failed"
+    log_fail "cdsp stop failed"
     echo "$TESTNAME FAIL" > $test_path/$TESTNAME.res
     exit 1
 else
-	log_pass "cdsp stop successful"
+    log_pass "cdsp stop successful"
 fi
 log_info "Restarting remoteproc"
 # Execute command 4 (no output expected)
