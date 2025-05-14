@@ -20,13 +20,6 @@ extract_tar_from_url https://github.com/qualcomm-linux/qcom-linux-testkit/releas
 mkdir -p results/iris_v4l2_video_encode
 chmod -R 755 results/iris_v4l2_video_encode
 
-# Start logs
-dmesg -C
-tail -f /var/log/syslog > results/iris_v4l2_video_encode/syslog_log.txt &
-SYSLOG_PID=$!
-dmesg -w > results/iris_v4l2_video_encode/dmesg_log.txt &
-DMESG_PID=$!
-
 # Run the first test
 iris_v4l2_test --config ./suites/Multimedia/Video/iris_v4l2_video_encode/h264Encoder.json --loglevel 15 >> ./suites/Multimedia/Video/iris_v4l2_video_encode/video_enc.txt
 
@@ -37,9 +30,5 @@ else
 	log_fail "$TESTNAME : Test Failed"
 	echo "$TESTNAME FAIL" > $test_path/$TESTNAME.res
 fi
-
-# Cleanup
-kill $DMESG_PID
-kill $SYSLOG_PID
 
 log_info "-------------------Completed $TESTNAME Testcase----------------------------"
