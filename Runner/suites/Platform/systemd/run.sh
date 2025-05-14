@@ -1,6 +1,6 @@
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause-Clear
-#!/bin/bash
+#!/bin/sh
 
 # Function to check if systemd is running with PID 1
 check_systemd_pid() {
