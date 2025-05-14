@@ -19,8 +19,14 @@ echo "-------------------Starting $TESTNAME Testcase----------------------------
 echo "Checking if dependency binary is available"
 
 # Set the library path for the IGT tests
-LD_LIBRARY_PATH=/data/igt/lib
-export LD_LIBRARY_PATH
+if [ -d "/data/" ] && [ -d "/data/igt/lib" ]; then
+    # Set the LD_LIBRARY_PATH environment variable
+    export LD_LIBRARY_PATH=/data/igt/lib
+    echo "LD_LIBRARY_PATH is set to /data/igt/lib"
+else
+    echo "Directory either /data/ or /data/igt/lib or both does not exist"
+    exit 1
+fi
 
 # Navigate to the directory containing the IGT tests
 cd /data/igt/tests/
@@ -37,7 +43,7 @@ if grep -q "SUCCESS" /data/core_auth_log.txt; then
 else
 	# If "SUCCESS" is not found, print that the test failed
 	log_pass "$TESTNAME : Test Failed"
-	echo "$TESTNAME Fail" > $test_path/$TESTNAME.res
+	echo "$TESTNAME FAIL" > $test_path/$TESTNAME.res
 fi
 
 # Print the completion of the test case
