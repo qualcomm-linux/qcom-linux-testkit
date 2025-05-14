@@ -1,5 +1,3 @@
-Sure, here is a README for the IGT Core Auth Test:
-
 # IGT Core Auth Test Script
 
 ## Overview
@@ -29,8 +27,7 @@ Ensure the following components are present in the target environment:
 results/
 ├── igt_core_auth/
 │   ├── auth_test_<test>.txt
-│   ├── dmesg_log.txt
-│   └── syslog_log.txt
+
 ```
 
 ## Usage
@@ -38,21 +35,19 @@ results/
 1. Copy the script to your target system and make it executable:
 
 ```bash
-chmod +x igt_core_auth_test.sh
+chmod +x run.sh
 ```
 
 2. Run the script:
 
 ```bash
-./igt_core_auth_test.sh
+./run.sh
 ```
 
 3. Logs and test results will be available in the `results/igt_core_auth` directory.
 
 ## Output
 
-- **Test Logs**: Stored in individual files for each test variant.
-- **Kernel Logs**: Captured via `dmesg` and `syslog`.
 - **Validation Result**: Printed to console and saved in a results file with PASS/FAIL status.
 
 ## Notes
