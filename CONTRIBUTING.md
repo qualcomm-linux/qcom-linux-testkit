@@ -39,14 +39,20 @@ Welcome! This repository contains hardware validation shell scripts for Qualcomm
 
 ## Commit and PR Guidelines
 
+To ensure consistency and traceability across all contributions, all commits must follow these rules:
 - One logical change per commit
-- Always add sign-off:
-  ```bash
-  git commit -s -m "Add test for Bluetooth functionality"
-  ```
-
+- Clear commit message**: Descriptive and meaningful message (avoid "fix" or "update" alone).
+- Author information**: Must include your full name and correct email.
+- Sign-off**: Each commit must include a `Signed-off-by:` line. This indicates you agree to the Developer Certificate of Origin (DCO).
+- Branch naming**: Use descriptive prefixes, e.g.:
+  - `fix/issue-description`
+  - `feature/component-name`
+  - `chore/cleanup-topic`
+- Target branch**: Always open PRs against the `main` branch unless instructed otherwise.
 - Mention reviewers if needed and explain validation steps
 - PRs should be raised against `main` unless otherwise noted
+
+Automated checks will validate all of the above in CI workflows. PRs with failing commit checks will not be merged.
 
 ## License
 
