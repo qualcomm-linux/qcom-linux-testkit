@@ -1,12 +1,13 @@
+#!/bin/sh
+
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause-Clear
 
-#!/bin/sh
 # Import test suite definitions
-. $(pwd)/init_env
+. "${PWD}"/init_env
 
 #import test functions library
-. $TOOLS/functestlib.sh
+. "${TOOLS}"/functestlib.sh
 
 
 # Find test case path by name
@@ -16,8 +17,8 @@ find_test_case_by_name() {
     # Get the directory name
     dir_name_in_dir=${1##*/}
 
-    # Check if the directory name matches the user input (ignoring case)
-    if [ "${dir_name_in_dir,,}" = "$test_name" ]; then
+    # Check if the directory name matches the user input
+    if [ "${dir_name_in_dir}" = "$test_name" ]; then
       # Get the absolute path of the directory
       abs_path=$(readlink -f "$1")
       echo "$abs_path"  
@@ -53,7 +54,6 @@ execute_test_case() {
 # Function to run a specific test case by name
 run_specific_test_by_name() {
     test_name="$1"
-    test_name=${test_name,,}
     test_path=$(find_test_case_by_name ".")
     if [ -z "$test_path" ]; then
         log "Test case with name $test_name not found."

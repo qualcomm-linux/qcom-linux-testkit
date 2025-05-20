@@ -1,9 +1,9 @@
+#!/bin/sh
+
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause-Clear
 
-#!/bin/sh
-
-. "$(pwd)/init_env"
+. "${PWD}/init_env"
 TESTNAME="CPUFreq_Validation"
 . "$TOOLS/functestlib.sh"
 

@@ -1,12 +1,13 @@
+#!/bin/sh
+
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause-Clear
 
-#!/bin/sh
 # Import test suite definitions
-. $(pwd)/init_env
+. "${PWD}"/init_env
 TESTNAME="MEMLAT"
 #import test functions library
-. $TOOLS/functestlib.sh
+. "${TOOLS}"/functestlib.sh
 test_path=$(find_test_case_by_name "$TESTNAME")
 test_bin_path=$(find_test_case_bin_by_name "lat_mem_rd")
 log_info "-----------------------------------------------------------------------------------------"
@@ -37,6 +38,7 @@ wait
 log_info "Comparing votes..."
 
 incremented=true
+# shellcheck disable=SC2046
 for i in $(seq 1 $(echo "$initial_votes" | wc -l)); do
   initial_vote=$(echo "$initial_votes" | sed -n "${i}p")
   final_vote=$(echo "$final_votes" | sed -n "${i}p")

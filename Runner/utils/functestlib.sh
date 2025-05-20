@@ -1,10 +1,12 @@
+#!/bin/sh
+
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause-Clear
 
 # Import test suite definitions
-. $(pwd)/init_env
+. "${PWD}"/init_env
 #import platform
-. $TOOLS/platform.sh
+. "${TOOLS}"/platform.sh
 
 __RUNNER_SUITES_DIR="/var/Runner/suites"
 __RUNNER_UTILS_BIN_DIR="/var/common"
@@ -37,7 +39,7 @@ find_test_case_script_by_name() {
 check_dependencies() {
     local missing=0
     for cmd in "$@"; do
-        if ! command -v "$cmd" &>/dev/null; then
+        if ! command -v "$cmd" > /dev/null 2>&1; then
             log_error "ERROR: Required command '$cmd' not found in PATH."
             missing=1
         fi

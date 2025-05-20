@@ -1,12 +1,13 @@
+#!/bin/sh
+
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause-Clear
 
-#!/bin/sh
 # Import test suite definitions
-. $(pwd)/init_env
+. "${PWD}"/init_env
 TESTNAME="kaslr"
 #import test functions library
-. $TOOLS/functestlib.sh
+. "${TOOLS}"/functestlib.sh
 test_path=$(find_test_case_by_name "$TESTNAME")
 
 log_info "--------------------------------------------------------------------------"
@@ -19,7 +20,7 @@ value=$(echo $output | awk '{print $1}')
 
 
 
-if [ $value == "0000000000000000" ]; then
+if [ $value = "0000000000000000" ]; then
     log_pass "$TESTNAME : Test Passed"
     echo "$TESTNAME PASS" > $test_path/$TESTNAME.res
 else

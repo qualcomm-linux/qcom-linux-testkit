@@ -1,13 +1,14 @@
+#!/bin/sh
+
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause-Clear
 
-#!/bin/sh
 # Import test suite definitions
-. $(pwd)/init_env
+. "${PWD}"/init_env
 TESTNAME="irq"
 
 #import test functions library
-. $TOOLS/functestlib.sh
+. "${TOOLS}"/functestlib.sh
 test_path=$(find_test_case_by_name "$TESTNAME")
 log_info "-----------------------------------------------------------------------------------------"
 log_info "-------------------Starting $TESTNAME Testcase----------------------------"

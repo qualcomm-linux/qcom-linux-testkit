@@ -18,7 +18,7 @@ dmesg -c
 cat /dev/dri/card0 &
 OUTPUT=$(dmesg)
 
-if [ $OUTPUT == *"Loaded GMU firmware"* ]; then
+if echo "${OUTPUT}" | grep "Loaded GMU firmware"; then
     log_pass "$TESTNAME : Test Passed"
     echo "$TESTNAME : Test Passed" > $test_path/$TESTNAME.res
 else

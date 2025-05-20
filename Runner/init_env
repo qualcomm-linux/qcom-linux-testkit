@@ -1,7 +1,11 @@
+#!/bin/sh
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause-Clear
 
 # Source this file to setup the test suite environment
-export BASEDIR=$(pwd)
-export TOOLS=$(pwd)/utils
-export SUITES=$(pwd)/suites
+BASEDIR=$(pwd)
+export BASEDIR
+TOOLS=$(pwd)/utils
+export TOOLS
+SUITES=$(pwd)/suites
+export SUITES

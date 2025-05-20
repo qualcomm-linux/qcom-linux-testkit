@@ -1,17 +1,15 @@
+#!/bin/sh
+
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause-Clear
 
-#!/bin/sh
 # Import test suite definitions
-. $(pwd)/init_env
-TESTNAME="Reboot_health_check"
+. "{PWD}"/init_env
 #import test functions library
-. $TOOLS/functestlib.sh
-test_path=$(find_test_case_by_name "$TESTNAME")
+. "${TOOLS}"/functestlib.sh
 
 # Directory for health check files
 HEALTH_DIR="/var/reboot_health"
-LOG_FILE="$HEALTH_DIR/reboot_test.log"
 RETRY_FILE="$HEALTH_DIR/reboot_retry_count"
 MAX_RETRIES=3
 

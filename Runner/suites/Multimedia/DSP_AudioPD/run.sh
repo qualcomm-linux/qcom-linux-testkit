@@ -13,7 +13,7 @@ log_info "Checking if dependency binary is available"
 check_dependencies adsprpcd
 
 adsprpcd &
-PID = $!
+PID=$!
 
 if [ -z "$PID" ]; then
   echo "Failed to start the binary"
@@ -23,10 +23,10 @@ else
 fi
 
 check_stack_trace() {
-	local pid = $1
-	if cat /proc/$pid/stack 2>/dev/null | grep -q "do_sys_poll"
+	local pid=$1
+	if cat /proc/$pid/stack 2>/dev/null | grep -q "do_sys_poll"; then
 		return 0
-	else 
+	else
 		return 1
 	fi
 }
