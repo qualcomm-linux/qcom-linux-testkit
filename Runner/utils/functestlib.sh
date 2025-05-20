@@ -21,7 +21,11 @@ log() {
 # Find test case path by name
 find_test_case_by_name() {
     local test_name="$1"
-    find $__RUNNER_SUITES_DIR -type d -iname "$test_name" 2>/dev/null
+    if [ -d "$__RUNNER_SUITES_DIR" ]; then
+        find $__RUNNER_SUITES_DIR -type d -iname "$test_name" 2>/dev/null
+    else
+        find "${PWD}" -type d -iname "$test_name" 2>/dev/null
+    fi
 }
 
 # Find test case path by name
@@ -33,7 +37,11 @@ find_test_case_bin_by_name() {
 # Find test case path by name
 find_test_case_script_by_name() {
     local test_name="$1"
-    find $__RUNNER_UTILS_BIN_DIR -type d -iname "$test_name" 2>/dev/null
+    if [ -d "$__RUNNER_UTILS_BIN_DIR" ]; then
+        find $__RUNNER_UTILS_BIN_DIR -type d -iname "$test_name" 2>/dev/null
+    else
+        find "${PWD}" -type d -iname "$test_name" 2>/dev/null
+    fi
 }
 
 check_dependencies() {
