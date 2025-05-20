@@ -1,0 +1,17 @@
+metadata:
+  name: cpufreq-validation
+  format: "Lava-Test Test Definition 1.0"
+  description: "The test validates the CPU frequency scaling capabilities of a system using the Linux `cpufreq` subsystem. It verifies the ability to set and reflect CPU frequencies across shared policy domains (e.g., clusters of CPUs sharing frequency control)."
+  os:
+    - linux
+  scope:
+    - functional
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/CPUFreq_Validation
+    - ./run.sh || true
+    - pwd
+    - ls -l
+    - $REPO_PATH/Runner/utils/send-to-lava.sh CPUFreq_Validation.res

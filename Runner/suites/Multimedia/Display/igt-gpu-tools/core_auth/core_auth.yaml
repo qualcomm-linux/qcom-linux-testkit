@@ -1,0 +1,18 @@
+metadata:
+  name: core-auth
+  format: "Lava-Test Test Definition 1.0"
+  description: "This script automates the validation of authentication mechanisms within the IGT Core framework. It performs a series of tests to ensure that the authentication processes are functioning correctly and securely. The script captures detailed logs and provides a comprehensive summary of the test results with subtest-level analysis."
+  os:
+    - linux
+  scope:
+    - functional
+
+params:
+  CORE_AUTH_PATH: "/usr/libexec/igt-gpu-tools/core_auth"
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Multimedia/Display/igt-gpu-tools/core_auth
+    - ./run.sh --core-auth-path "${CORE_AUTH_PATH}" || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh core_auth.res || true

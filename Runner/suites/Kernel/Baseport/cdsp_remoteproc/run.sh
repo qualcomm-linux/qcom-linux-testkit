@@ -52,7 +52,8 @@ if dt_has_remoteproc_fw "$FW"; then
     log_info "DT indicates $FW is present"
 else
     log_skip "$TESTNAME SKIP – $FW not described in DT"
-    echo "${TESTNAME} SKIP" >"$RES_FILE"
+    log_info "Writing to $RES_FILE"
+    echo "${TESTNAME} SKIP" > "$RES_FILE"
     exit 0
 fi
 
@@ -161,10 +162,12 @@ log_info "Instance results:$RESULT_LINES"
 
 if [ "$inst_fail" -gt 0 ]; then
     log_fail "One or more $FW instance(s) failed ($inst_fail/$count_instances)"
-    echo "$TESTNAME FAIL" >"$RES_FILE"
+    log_info "Writing to $RES_FILE"
+    echo "$TESTNAME FAIL" > "$RES_FILE"
     exit 1
 fi
 
 log_pass "All $count_instances $FW instance(s) passed"
-echo "$TESTNAME PASS" >"$RES_FILE"
+log_info "Writing to $RES_FILE"
+echo "$TESTNAME PASS" > "$RES_FILE"
 exit 0

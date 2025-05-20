@@ -1,0 +1,16 @@
+metadata:
+  name: remoteproc
+  format: "Lava-Test Test Definition 1.0"
+  description: "Test remoteproc basic features"
+  os:
+    - linux
+  scope:
+    - functional
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/remoteproc
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh remoteproc.res || true
+
