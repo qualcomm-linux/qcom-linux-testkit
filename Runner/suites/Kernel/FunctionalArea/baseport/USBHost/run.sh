@@ -32,14 +32,14 @@ echo "$usb_output"
 
 # Check if any USB devices were found
 if [ "$device_count" -eq 0 ]; then
-    log_fail "$TESTNAME : Test Failed - No USB devices found."
-    echo "$TESTNAME FAIL" > $test_path/$TESTNAME.res
+    log_fail "$TESTNAME : Test Failed - No USB devices found."
+    echo "$TESTNAME FAIL" > $test_path/$TESTNAME.res
 elif [ "$non_hub_count" -eq 0 ]; then
-    log_fail "$TESTNAME : Test Failed - Only USB hubs detected, no functional USB devices."
-    echo "$TESTNAME FAIL" > $test_path/$TESTNAME.res
+    log_fail "$TESTNAME : Test Failed - Only USB hubs detected, no functional USB devices."
+    echo "$TESTNAME FAIL" > $test_path/$TESTNAME.res
 else
-    log_pass "$TESTNAME : Test Passed - $non_hub_count non-hub USB device(s) found."
-    echo "$TESTNAME PASS" > $test_path/$TESTNAME.res
+    log_pass "$TESTNAME : Test Passed - $non_hub_count non-hub USB device(s) found."
+    echo "$TESTNAME PASS" > $test_path/$TESTNAME.res
 fi
 
 log_info "-------------------Completed $TESTNAME Testcase----------------------------"
