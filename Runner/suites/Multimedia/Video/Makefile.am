@@ -1,0 +1,1 @@
+SUBDIRS = iris_v4l2_video_decode iris_v4l2_video_encode
