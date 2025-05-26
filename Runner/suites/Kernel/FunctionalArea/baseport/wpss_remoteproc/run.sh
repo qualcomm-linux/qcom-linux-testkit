@@ -3,15 +3,15 @@
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause-Clear
 
-# Import test suite definitions
-. "${PWD}"/init_env
 TESTNAME="wpss_remoteproc"
-
-#import test functions library
-. "${TOOLS}"/functestlib.sh
 test_path=$(find_test_case_by_name "$TESTNAME")
+cd "$test_path" || exit 1
+# shellcheck disable=SC2034
+res_file="./$TESTNAME.res"
+
 log_info "-----------------------------------------------------------------------------------------"
 log_info "-------------------Starting $TESTNAME Testcase----------------------------"
+log_info "=== Test Initialization ==="
 
 # Get the firmware output and find the position of wpss
 firmware_output=$(cat /sys/class/remoteproc/remoteproc*/firmware)
@@ -51,12 +51,12 @@ echo start > ${remoteproc_path}/state
 state5=$(cat ${remoteproc_path}/state)
 if [ "$state5" != "running" ]; then
     log_fail "wpss start failed"
-    echo "$TESTNAME FAIL" > $test_path/$TESTNAME.res
+    echo "$TESTNAME FAIL" > "$res_file"
     exit 1
 fi
 
 # If all checks pass, print "PASS"
 echo "wpss PASS"
 log_pass "wpss PASS"
-echo "$TESTNAME PASS" > $test_path/$TESTNAME.res
+echo "$TESTNAME PASS" > "$res_file"
 log_info "-------------------Completed $TESTNAME Testcase----------------------------"
