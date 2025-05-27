@@ -17,7 +17,7 @@ Ensure the following components are present in the target:
 - `rngtest` (Binary Available in /usr/bin) - this test app can be compiled from https://github.com/cernekee/rng-tools/
 
 ## Directory Structure
-
+```
 Runner/
 ├── suites/
 │   ├── Kernel/
@@ -25,7 +25,7 @@ Runner/
 │   │   │   ├── baseport/
 │   │   │   │   ├── qcom_hwrng/
 │   │   │   │   │   ├── run.sh
-
+```
 ## Usage
 
 1. Copy repo to Target Device: Use scp to transfer the scripts from the host to the target device. The scripts should be copied to the /var directory on the target device.
@@ -42,7 +42,7 @@ cd <this-repo>
 scp -r common Runner user@target_device_ip:/var
 ssh user@target_device_ip 
 cd /var/Runner && ./run-test.sh qcom_hwrng
-```
+
 Sample output:
 sh-5.2# ./run-test.sh qcom_hwrng
 [Executing test case: /var/Runner/suites/Kernel/FunctionalArea/baseport/qcom_hwrng] 2025-05-16 06:08:41 -
@@ -54,7 +54,7 @@ sh-5.2# ./run-test.sh qcom_hwrng
 cat: write error: Broken pipe
 [PASS] 2025-05-16 06:08:41 - qcom_hwrng : Test Passed
 [INFO] 2025-05-16 06:08:41 - -------------------Completed qcom_hwrng Testcase----------------------------
-
+```
 4. Results will be available in the `/var/Runner/suites/Kernel/FunctionalArea/baseport/qcom_hwrng/` directory.
 
 ## Notes
