@@ -5,7 +5,7 @@
 # Function to check if systemd is running with PID 1
 directory=$(dirname "$0")
 check_systemd_pid() {
-    if [ "$(ps -p 1 -o comm=)" == "systemd" ]; then
+    if [ "$(ps -p 1 -o comm=)" = "systemd" ]; then
         echo "PASS: Check systemd PID" > $directory/CheckSystemdPID.res
     else
         echo "FAIL: Check systemd PID" > $directory/CheckSystemdPID.res
