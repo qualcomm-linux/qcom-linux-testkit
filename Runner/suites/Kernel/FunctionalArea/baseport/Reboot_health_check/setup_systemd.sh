@@ -1,7 +1,8 @@
+#!/bin/sh
+
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause-Clear
 
-#!/bin/sh
 # Import test suite definitions
 set -x
 chmod 777 -R /var/common/*
@@ -25,15 +26,15 @@ NC="\033[0m" # No Color
 
 # Function to log
 log_info() {
-    echo -e "${YELLOW}[INFO]${NC} $1"
+    echo "${YELLOW}[INFO]${NC} $1"
 }
 
 log_success() {
-    echo -e "${GREEN}[SUCCESS]${NC} $1"
+    echo "${GREEN}[SUCCESS]${NC} $1"
 }
 
 log_error() {
-    echo -e "${RED}[ERROR]${NC} $1"
+    echo "${RED}[ERROR]${NC} $1"
 }
 
 # Verify app binary exists

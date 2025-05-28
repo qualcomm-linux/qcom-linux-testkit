@@ -1,72 +1,112 @@
+#!/bin/sh
+
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause-Clear
 
-#!/bin/sh
-# Import test suite definitions
-. $(pwd)/init_env
+# Resolve the real path of this script
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-#import test functions library
-. $TOOLS/functestlib.sh
+# Set TOOLS path to utils under the script directory
+TOOLS="$SCRIPT_DIR/utils"
 
+# Safely source init_env from the same directory as this script
+if [ -f "$SCRIPT_DIR/init_env" ]; then
+    # shellcheck source=/dev/null
+    . "$SCRIPT_DIR/init_env"
+else
+    echo "[INFO] init_env not found at $SCRIPT_DIR/init_env — skipping."
+fi
 
-# Find test case path by name
-find_test_case_by_name() {
-    # Check if the file is a directory
-  if [ -d "$1" ]; then
-    # Get the directory name
-    dir_name_in_dir=${1##*/}
+# Source functestlib.sh from utils/
+if [ -f "$TOOLS/functestlib.sh" ]; then
+    # shellcheck source=/dev/null
+    . "$TOOLS/functestlib.sh"
+    # Export key vars so they are visible to child scripts like ./run.sh
+    export ROOT_DIR
+    export TOOLS
+    export __RUNNER_SUITES_DIR
+    export __RUNNER_UTILS_BIN_DIR
+else
+    echo "[ERROR] functestlib.sh not found at $TOOLS/functestlib.sh"
+    exit 1
+fi
 
-    # Check if the directory name matches the user input (ignoring case)
-    if [ "${dir_name_in_dir,,}" = "$test_name" ]; then
-      # Get the absolute path of the directory
-      abs_path=$(readlink -f "$1")
-      echo "$abs_path"  
-    fi
-  fi
+# Store results
+RESULTS_PASS=""
+RESULTS_FAIL=""
 
-  # Recursively search for the directory in the subdirectory
-  for file in "$1"/*; do
-    # Check if the file is a directory
-    if [ -d "$file" ]; then
-      # Recursively search for the directory in the subdirectory
-      find_test_case_by_name "$file"
-    fi
-  done
-}
-
-# Execute a test case
 execute_test_case() {
-    local test_path="$1"
+    test_path=$1
+    test_name=$(basename "$test_path")
+
     if [ -d "$test_path" ]; then
         run_script="$test_path/run.sh"
         if [ -f "$run_script" ]; then
-            log "Executing test case: $test_path"
-            sh "$run_script" 2>&1 
+            log "Executing test case: $test_name"
+            if (cd "$test_path" && sh "./run.sh"); then
+                log_pass "$test_name passed"
+                if [ -z "$RESULTS_PASS" ]; then
+                    RESULTS_PASS="$test_name"
+                else
+                    RESULTS_PASS=$(printf "%s\n%s" "$RESULTS_PASS" "$test_name")
+                fi
+            else
+                log_fail "$test_name failed"
+                if [ -z "$RESULTS_FAIL" ]; then
+                    RESULTS_FAIL="$test_name"
+                else
+                    RESULTS_FAIL=$(printf "%s\n%s" "$RESULTS_FAIL" "$test_name")
+                fi
+            fi
         else
-            log "No run.sh found in $test_path"
+            log_error "No run.sh found in $test_path"
+            RESULTS_FAIL=$(printf "%s\n%s" "$RESULTS_FAIL" "$test_name (missing run.sh)")
         fi
     else
-        log "Test case directory not found: $test_path"
+        log_error "Test case directory not found: $test_path"
+        RESULTS_FAIL=$(printf "%s\n%s" "$RESULTS_FAIL" "$test_name (directory not found)")
     fi
 }
 
-# Function to run a specific test case by name
 run_specific_test_by_name() {
-    test_name="$1"
-    test_name=${test_name,,}
-    test_path=$(find_test_case_by_name ".")
+    test_name=$1
+    test_path=$(find_test_case_by_name "$test_name")
     if [ -z "$test_path" ]; then
-        log "Test case with name $test_name not found."
+        log_error "Test case with name $test_name not found."
+        RESULTS_FAIL=$(printf "%s\n%s" "$RESULTS_FAIL" "$test_name (not found)")
     else
         execute_test_case "$test_path"
     fi
 }
 
-# Main script logic
+run_all_tests() {
+    find "${__RUNNER_SUITES_DIR}" -maxdepth 3 -type d -name '[A-Za-z]*' | while IFS= read -r test_dir; do
+        if [ -f "$test_dir/run.sh" ]; then
+            execute_test_case "$test_dir"
+        fi
+    done
+}
+
+print_summary() {
+    echo
+    log_info "========== Test Summary =========="
+    echo "PASSED:"
+    [ -n "$RESULTS_PASS" ] && printf "%s\n" "$RESULTS_PASS" || echo " None"
+    echo
+    echo "FAILED:"
+    [ -n "$RESULTS_FAIL" ] && printf "%s\n" "$RESULTS_FAIL" || echo " None"
+    log_info "=================================="
+}
+
 if [ "$#" -eq 0 ]; then
     log "Usage: $0 [all | <testcase_name>]"
     exit 1
 fi
 
+if [ "$1" = "all" ]; then
+    run_all_tests
+else
+    run_specific_test_by_name "$1"
+fi
 
-run_specific_test_by_name "$1"
+print_summary
