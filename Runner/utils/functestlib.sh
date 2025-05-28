@@ -49,6 +49,56 @@ find_test_case_script_by_name() {
     find "$base_dir" -type d -iname "$test_name" -print -quit 2>/dev/null
 }
 
+check_kernel_config() {
+    configs="$1"
+    for config_key in $configs; do
+        if zcat /proc/config.gz | grep -qE "^$config_key=(y|m)"; then
+            log_pass "Kernel config $config_key is enabled"
+        else
+            log_fail "Kernel config $config_key is missing or not enabled"
+            return 1
+        fi
+    done
+    return 0
+}
+
+check_dt_nodes() {
+    node_paths="$1"
+    log_info "$node_paths"
+    found=false
+    for node in $node_paths; do
+        log_info "$node"
+        if [ -d "$node" ] || [ -f "$node" ]; then
+            log_pass "Device tree node exists: $node"
+            found=true
+        fi
+    done
+ 
+    if [ "$found" = true ]; then
+        return 0
+    else
+        log_fail "Device tree node(s) missing: $node_paths"
+        return 1
+    fi
+}
+
+check_driver_loaded() {
+    drivers="$1"
+    for driver in $drivers; do
+        if [ -z "$driver" ]; then
+            log_fail "No driver/module name provided to check_driver_loaded"
+            return 1
+        fi
+        if grep -qw "$driver" /proc/modules || lsmod | awk '{print $1}' | grep -qw "$driver"; then
+            log_pass "Driver/module '$driver' is loaded"
+            return 0
+        else
+            log_fail "Driver/module '$driver' is not loaded"
+            return 1
+        fi
+    done
+}
+
 # --- Optional: POSIX-safe repo root detector ---
 detect_runner_root() {
     path=$1
