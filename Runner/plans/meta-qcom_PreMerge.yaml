@@ -56,3 +56,4 @@ run:
         - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/FunctionalArea/baseport/watchdog/watchdog.res || true
         - $PWD/suites/Kernel/FunctionalArea/baseport/wpss_remoteproc/run.sh || true
         - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/FunctionalArea/baseport/wpss_remoteproc/wpss_remoteproc.res || true
+        - $PWD/utils/result_parse.sh
