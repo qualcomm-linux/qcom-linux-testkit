@@ -56,3 +56,8 @@ run:
         - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/FunctionalArea/baseport/watchdog/watchdog.res || true
         - $PWD/suites/Kernel/FunctionalArea/baseport/wpss_remoteproc/run.sh || true
         - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/FunctionalArea/baseport/wpss_remoteproc/wpss_remoteproc.res || true
+        - $PWD/suites/Multimedia/Audio/AudioPlayback/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/Audio/AudioPlayback/AudioPlayback.res || true  
+        - $PWD/suites/Multimedia/Audio/AudioRecord/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/Audio/AudioRecord/AudioRecord.res || true
+        
