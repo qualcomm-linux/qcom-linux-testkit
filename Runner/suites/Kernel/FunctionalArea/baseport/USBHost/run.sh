@@ -3,6 +3,8 @@
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause-Clear
 
+#Setup requires at least one USB peripheral connected to USB port that supports Host mode function
+
 # Robustly find and source init_env
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 INIT_ENV=""
@@ -29,7 +31,7 @@ fi
 # shellcheck disable=SC1090,SC1091
 . "$TOOLS/functestlib.sh"
 
-TESTNAME="IPA"
+TESTNAME="USBHost"
 test_path=$(find_test_case_by_name "$TESTNAME")
 cd "$test_path" || exit 1
 # shellcheck disable=SC2034
@@ -39,25 +41,30 @@ log_info "----------------------------------------------------------------------
 log_info "-------------------Starting $TESTNAME Testcase----------------------------"
 log_info "=== Test Initialization ==="
 
-PATH=$(find / -name "ipa.ko" 2>/dev/null)
+# Check if lsusb is installed
+check_dependencies lsusb
 
-# Check if the file was found
-if [ -z "$PATH" ]; then
-  log_error "ipa.ko file not found."
-  exit 1
-fi
+# Run lsusb and capture output
+usb_output=$(lsusb)
+device_count=$(echo "$usb_output" | wc -l)
 
-# Insert the module
-TEST=$(/sbin/insmod "$PATH")
-log_info "output of insmod $TEST"
+# Filter out USB hubs
+non_hub_count=$(echo "$usb_output" | grep -vi "hub" | wc -l)
 
-if /sbin/lsmod | /bin/grep "ipa"; then
-    log_info "$(/sbin/lsmod | /bin/grep "ipa")" 
-    log_pass "$TESTNAME : Test Passed"
-    echo "$TESTNAME PASS" > "$res_file"
-else
-    log_error "rmnet module not running"
-    log_fail "$TESTNAME : Test Failed"
+echo "Enumerated USB devices..."
+echo "$usb_output"
+
+# Check if any USB devices were found
+if [ "$device_count" -eq 0 ]; then
+    log_fail "$TESTNAME : Test Failed - No USB devices found."
     echo "$TESTNAME FAIL" > "$res_file"
+
+elif [ "$non_hub_count" -eq 0 ]; then
+    log_fail "$TESTNAME : Test Failed - Only USB hubs detected, no functional USB devices."
+    echo "$TESTNAME FAIL" > "$res_file"
+else
+    log_pass "$TESTNAME : Test Passed - $non_hub_count non-hub USB device(s) found."
+    echo "$TESTNAME PASS" > "$res_file"
 fi
+
 log_info "-------------------Completed $TESTNAME Testcase----------------------------"

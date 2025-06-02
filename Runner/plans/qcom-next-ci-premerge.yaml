@@ -37,6 +37,8 @@ run:
         - $PWD/suites/Kernel/FunctionalArea/baseport/kaslr/run.sh || true
         - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/FunctionalArea/baseport/kaslr/kaslr.res || true
         - $PWD/suites/Kernel/FunctionalArea/baseport/MEMLAT/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/FunctionalArea/baseport/MEMLAT/MEMLAT.res || true
+        - $PWD/suites/Kernel/FunctionalArea/baseport/pinctrl/run.sh || true
         - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/FunctionalArea/baseport/pinctrl/pinctrl.res || true
         - $PWD/suites/Kernel/FunctionalArea/baseport/Reboot_health_check/run.sh || true
         - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/FunctionalArea/baseport/Reboot_health_check/Reboot_health_check.res || true
@@ -45,6 +47,8 @@ run:
         - $PWD/suites/Kernel/FunctionalArea/baseport/RMNET/run.sh || true
         - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/FunctionalArea/baseport/RMNET/RMNET.res || true
         - $PWD/suites/Kernel/FunctionalArea/baseport/rngtest/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/FunctionalArea/baseport/rngtest/rngtest.res || true
+        - $PWD/suites/Kernel/FunctionalArea/baseport/smmu/run.sh || true
         - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/FunctionalArea/baseport/smmu/smmu.res || true
         - $PWD/suites/Kernel/FunctionalArea/baseport/storage/run.sh || true
         - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/FunctionalArea/baseport/storage/storage.res || true

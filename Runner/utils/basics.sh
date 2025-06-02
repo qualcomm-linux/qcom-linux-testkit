@@ -1,14 +1,16 @@
+#!/bin/sh
+
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause-Clear
 
 # Import test suite definitions
-. $(pwd)/init_env
+. "${PWD}"/init_env
 
 #import platform
-. $TOOLS/platform.sh
+. "${TOOLS}"/platform.sh
 
 #import test functions library
-. $TOOLS/functestlib.sh
+. "${TOOLS}"/functestlib.sh
 
 # CPU_FAST CPU_SLOW FTRACE_START_MARKER are used by the ftrace libraries
 
@@ -17,6 +19,7 @@ LOAD_GENERATOR=$TOOLS/tasklibrary
 FTRACE_ANALYZER_EXE=$TOOLS/ftrace
 TRACE_CMD_EXE=$TOOLS/trace-cmd
 BIG_LITTLE_SWITCH_SO=$TOOLS/libbiglittleswitch.so.1.0.0
+export BIG_LITTLE_SWITCH_SO
 HOG_CPU=$TOOLS/affinity_tools
 TASKSET=$TOOLS/affinity_tools
 CONFIG_FTRACE_EVENTS="-e sched:*"
@@ -28,25 +31,25 @@ IMPLEMENTER=0x41
 #A7
 default_little_cpulist
 HMPSLOWCPUS=$__RET
-littlecore=`echo $HMPSLOWCPUS|busybox awk {'print $1'}`
+littlecore=$(echo "${HMPSLOWCPUS}"|busybox awk '{print $1}')
 CONFIG_TARGET_LITTLE_CPUPART=$( cpupart $littlecore )
 PART_SLOW=`echo $CONFIG_TARGET_LITTLE_CPUPART`
 #A15
 default_big_cpulist
 HMPFASTCPUS=$__RET
-bigcore=`echo $HMPFASTCPUS|busybox awk {'print $1'}`
+bigcore=$(echo "${HMPFASTCPUS}"|busybox awk '{print $1}')
 CONFIG_TARGET_BIG_CPUPART=$( cpupart $bigcore )
 PART_FAST=`echo $CONFIG_TARGET_BIG_CPUPART`
 commaslow=
 commafast=
 for cpu in 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 21 22 23 24 25 26 ; do
     $TASKSET -part $cpu,$IMPLEMENTER,$PART_SLOW >/dev/null
-    if [ $? == 0 ] ; then
+    if [ $? = 0 ] ; then
         CPU_SLOW=$CPU_SLOW$commaslow$cpu
         commaslow=,
     fi
     $TASKSET -part $cpu,$IMPLEMENTER,$PART_FAST >/dev/null
-    if [ $? == 0 ] ; then
+    if [ $? = 0 ] ; then
         CPU_FAST=$CPU_FAST$commafast$cpu
         commafast=,
     fi
@@ -61,28 +64,34 @@ fi
 
 UP_THRESHOLD_1024=$(cat '/proc/sys/kernel/sched_upmigrate' | cut -f 1)
 DOWN_THRESHOLD_1024=$(cat '/proc/sys/kernel/sched_downmigrate' | cut -f 1)
-let UP_THRESHOLD=$UP_THRESHOLD_1024*100/1024
-let DOWN_THRESHOLD=$DOWN_THRESHOLD_1024*100/1024
-let UNDER_DOWN_THRESHOLD=$DOWN_THRESHOLD_1024*50/1024
-let LITTLE_THRESHOLD=$DOWN_THRESHOLD*70/100
-let NOCHANGE_THRESHOLD=\($DOWN_THRESHOLD_1024+$UP_THRESHOLD_1024\)*100/1024/2
-let BIG_THRESHOLD=$UP_THRESHOLD*130/100
-let THRESHOLD_TOLERANCE=15
+UP_THRESHOLD=$((UP_THRESHOLD_1024*100/1024))
+DOWN_THRESHOLD=$((DOWN_THRESHOLD_1024*100/1024))
+UNDER_DOWN_THRESHOLD=$((DOWN_THRESHOLD_1024*50/1024))
+export UNDER_DOWN_THRESHOLD
+LITTLE_THRESHOLD=$((DOWN_THRESHOLD*70/100))
+export LITTLE_THRESHOLD
+NOCHANGE_THRESHOLD=$((\($DOWN_THRESHOLD_1024+$UP_THRESHOLD_1024\)*100/1024/2))
+BIG_THRESHOLD=$((UP_THRESHOLD*130/100))
+export BIG_THRESHOLD
+THRESHOLD_TOLERANCE=15
 # separate down threshold as test load is +/- 10% accurate at best
-let NODOWN_THRESHOLD=$NOCHANGE_THRESHOLD
+NODOWN_THRESHOLD=$NOCHANGE_THRESHOLD
 if [ "$NODOWN_THRESHOLD" -lt "$(($DOWN_THRESHOLD+$THRESHOLD_TOLERANCE))" ] ; then
   NODOWN_THRESHOLD=$(($DOWN_THRESHOLD+$THRESHOLD_TOLERANCE))
   echo "Setting NODOWN_THRESHOLD to $NODOWN_THRESHOLD"
 fi
 # separate up threshold as test load is +/- 10% accurate at best
-let NOUP_THRESHOLD=$NOCHANGE_THRESHOLD
+NOUP_THRESHOLD=$NOCHANGE_THRESHOLD
 if [ "$NOUP_THRESHOLD" -gt "$(($UP_THRESHOLD-$THRESHOLD_TOLERANCE))" ] ; then
   NOUP_THRESHOLD=$(($UP_THRESHOLD-$THRESHOLD_TOLERANCE))
   echo "Setting NOUP_THRESHOLD to $NOUP_THRESHOLD"
 fi
 CUTOFF_PRIORITY_GT=-5
+export CUTOFF_PRIORITY_GT
 CUTOFF_PRIORITY_LT=2
+export CUTOFF_PRIORITY_LT
 TIME_ERROR_MS=100
+export TIME_ERROR_MS
 HOG_PID=
 
 copy_trace_events()
@@ -95,14 +104,14 @@ copy_trace_events()
 
     echo "Copying trace events..."
     odir=`pwd`
-    cd /sys/kernel/debug/tracing/events
+    cd /sys/kernel/debug/tracing/events || exit 1
     mkdir $FTRACE_EVENTS
     for i in * ; do
         if [ -f $i ] ; then
             cat $i > $FTRACE_EVENTS/$i
         else
             old=`pwd`
-            cd $i
+            cd $i || exit 1
             mkdir $FTRACE_EVENTS/$i/
             for j in * ; do
                 if [ -f $j/format ] ; then
@@ -110,10 +119,10 @@ copy_trace_events()
                     cat $j/format > $FTRACE_EVENTS/$i/$j/format
                 fi
             done
-            cd $old
+            cd $old || exit 1
         fi
     done
-    cd $odir
+    cd $odir || exit 1
     TRACE_EVENTS_PATH=$FTRACE_EVENTS
 }
 
@@ -177,23 +186,29 @@ calibrate_tasklib()
 # calibration file once it is called by a test, even for the first time.
 calibrate_tasklib
 
+taskset_sleep()
+{
+    sleep 1
+    taskset_cpuany $RESULT
+}
+
 load_generator()
 {
     echo "Using tasklibrary calibdation file: $CALIBRATION"
     $LOAD_GENERATOR --calibfile=$CALIBRATION --loadseq=$1 &
     RESULT=$!
-    if [ "$2" == "START_SLOW" ] ; then
+    if [ "$2" = "START_SLOW" ] ; then
         taskset_cpuslow $RESULT
-        for ii in 0 ; do sleep 1; taskset_cpuany $RESULT ; done &
+		taskset_sleep &
     fi
-    if [ "$2" == "START_FAST" ] ; then
+    if [ "$2" = "START_FAST" ] ; then
         taskset_cpufast $RESULT
-        for ii in 0 ; do sleep 1; taskset_cpuany $RESULT ; done &
+		taskset_sleep &
     fi
-    if [ "$2" == "STARTSTOP_SLOW" ] ; then
+    if [ "$2" = "STARTSTOP_SLOW" ] ; then
         taskset_cpuslow $RESULT
     fi
-    if [ "$2" == "STARTSTOP_FAST" ] ; then
+    if [ "$2" = "STARTSTOP_FAST" ] ; then
         taskset_cpufast $RESULT
     fi
     echo "#load_generator PID=$RESULT COMMAND=$1"
@@ -214,10 +229,10 @@ ftrace_start()
         FTRACE_OLD_GOV=""
         while [ $i != 9999 ] ; do
             temp="` cat /sys/devices/system/cpu/cpu$i/cpufreq/scaling_governor 2>/dev/null`"
-            if [ "$temp" == "" ] ; then
+            if [ "$temp" = "" ] ; then
                 i=9999
             else
-                let i=$i+1
+				i=$(($i+1))
                 FTRACE_OLD_GOV="$FTRACE_OLD_GOV $temp"
             fi
         done
@@ -226,11 +241,11 @@ ftrace_start()
         i=0
         while [ $i != 9999 ] ; do
             temp="` cat /sys/devices/system/cpu/cpu$i/cpufreq/scaling_governor 2>/dev/null`"
-            if [ "$temp" == "" ] ; then
+            if [ "$temp" = "" ] ; then
                 i=9999
             else
                 echo performance > /sys/devices/system/cpu/cpu$i/cpufreq/scaling_governor
-                let i=$i+1
+				i=$(($i+1))
             fi
         done
     fi
@@ -257,7 +272,7 @@ ftrace_stop()
     echo "Tracing stopped"
 
     rm $FTRACE_FILE 2>/dev/null
-    if [ "$CONFIG_FTRACE_BINARY" == "n" ] ; then
+    if [ "$CONFIG_FTRACE_BINARY" = "n" ] ; then
         echo "Extracting ASCII trace buffer..."
         $TRACE_CMD_EXE show > $FTRACE_FILE 2>/dev/null
     else
@@ -273,7 +288,7 @@ ftrace_stop()
         i=0
         for value  in $FTRACE_OLD_GOV ; do
             echo $value > /sys/devices/system/cpu/cpu$i/cpufreq/scaling_governor
-            let i=$i+1
+			i=$(($i+1))
         done
     fi
 
@@ -319,7 +334,7 @@ ftrace_check()
     commandline="$commandline CPU_SLOW=$CPU_SLOW"
     commandline="$commandline $FTRACE_ANALYZER_EXE -l $1 -t $FTRACE_FILE"
     echo "# $commandline"
-    if [ "$CONFIG_FTRACE_BINARY" == "y" ] ; then
+    if [ "$CONFIG_FTRACE_BINARY" = "y" ] ; then
         $TRACE_CMD_EXE report -i $FTRACE_FILE > trace.txt 2>/dev/null
         $FTRACE_ANALYZER_EXE -l $1 -t trace.txt
         RESULT0=$?
@@ -334,7 +349,7 @@ ftrace_check()
 
     # remove ftrace files if it was a success to limit
     # space used on sdcard.
-    if [ "x$CONFIG_FTRACE_CLEANUP" == "xy" -a "$RESULT0" == "0" ] ; then
+    if [ "x$CONFIG_FTRACE_CLEANUP" = "xy" ] && [ "$RESULT0" = "0" ] ; then
         rm $FTRACE_FILE
     else
         gzip $FTRACE_FILE
@@ -346,8 +361,8 @@ get_task_pid() {
     TRACE=$1
     TASK_NAME=$2
 
-    TASK=`awk -v PATTERN="$TASK_NAME-([0-9]+)" '$1 ~ PATTERN {print $1; exit 0;}' $TRACE`
-    TASK_PID=${TASK/${TASK_NAME}-/}
+	TASK=$(awk -v PATTERN="$TASK_NAME-([0-9]+)" '$1 ~ PATTERN {print $1; exit 0;}' $TRACE)
+	TASK_PID=$(echo "${TASK}" | sed "s/${TASK_NAME}-//")
 
     echo "Found task [$TASK_NAME] PID: $TASK_PID"
     RESULT=$TASK_PID
@@ -359,7 +374,7 @@ ftrace_check_tasks()
     export TRACE_TASKS
 
     # Generate TXT file required for analysis
-    if [ "$CONFIG_FTRACE_BINARY" == "y" ] ; then
+    if [ "$CONFIG_FTRACE_BINARY" = "y" ] ; then
         $TRACE_CMD_EXE report -i $FTRACE_FILE > trace.txt 2>/dev/null
         mv $FTRACE_FILE $FTRACE_FILE.bin
         mv trace.txt $FTRACE_FILE
@@ -369,7 +384,7 @@ ftrace_check_tasks()
     for TASK in $TRACE_TASKS; do
       get_task_pid $FTRACE_FILE $TASK
       TASK_PID=$RESULT
-      PIDS+="$TASK_PID,"
+      PIDS="${PIDS},$TASK_PID"
     done
 
     echo "Computing CPUs usages for PIDs: $PIDS"
@@ -390,14 +405,14 @@ ftrace_check_tasks()
     RESULT0=$?
 
     # Recover original binary file
-    if [ "$CONFIG_FTRACE_BINARY" == "y" ] ; then
+    if [ "$CONFIG_FTRACE_BINARY" = "y" ] ; then
         rm $FTRACE_FILE
         mv $FTRACE_FILE.bin $FTRACE_FILE
     fi
 
     # remove ftrace files if it was a success to limit
     # space used on sdcard.
-    if [ "x$CONFIG_FTRACE_CLEANUP" == "xy" -a "$RESULT0" == "0" ] ; then
+    if [ "x$CONFIG_FTRACE_CLEANUP" = "xy" ] && [ "$RESULT0" = "0" ] ; then
         rm $FTRACE_FILE
     else
         gzip $FTRACE_FILE
