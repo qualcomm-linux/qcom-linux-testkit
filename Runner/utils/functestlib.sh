@@ -163,3 +163,58 @@ check_tar_file() {
     return 2
 }
 
+# Check if weston is running
+weston_is_running() {
+    pgrep -x weston >/dev/null 2>&1
+}
+
+# Stop all Weston processes
+weston_stop() {
+    if weston_is_running; then
+        log_info "Stopping Weston..."
+        pkill -x weston
+        for i in $(seq 1 10); do
+			log_info "Waiting for Weston to stop with $i attempt "
+            if ! weston_is_running; then
+                log_info "Weston stopped successfully"
+                return 0
+            fi
+            sleep 1
+        done
+        log_error "Failed to stop Weston after waiting."
+        return 1
+    else
+        log_info "Weston is not running."
+    fi
+    return 0
+}
+
+# Start weston with correct env if not running
+weston_start() {
+    export XDG_RUNTIME_DIR="/dev/socket/weston"
+    mkdir -p "$XDG_RUNTIME_DIR"
+
+    # Remove stale Weston socket if it exists
+    if [ -S "$XDG_RUNTIME_DIR/weston" ]; then
+        log_info "Removing stale Weston socket."
+        rm -f "$XDG_RUNTIME_DIR/weston"
+    fi
+
+    if weston_is_running; then
+        log_info "Weston already running."
+        return 0
+    fi
+    # Clean up stale sockets for wayland-0 (optional)
+    [ -S "$XDG_RUNTIME_DIR/wayland-1" ] && rm -f "$XDG_RUNTIME_DIR/wayland-1"
+    nohup weston --continue-without-input --idle-time=0 > weston.log 2>&1 &
+    sleep 3
+
+    if weston_is_running; then
+        log_info "Weston started."
+        return 0
+    else
+        log_error "Failed to start Weston."
+        return 1
+    fi
+}
+
