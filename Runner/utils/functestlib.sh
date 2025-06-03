@@ -14,6 +14,7 @@ log_pass()  { log "PASS"  "$@"; }
 log_fail()  { log "FAIL"  "$@"; }
 log_error() { log "ERROR" "$@"; }
 log_skip()  { log "SKIP"  "$@"; }
+log_warn()  { log "WARN"  "$@"; }
 
 # --- Dependency check ---
 check_dependencies() {
