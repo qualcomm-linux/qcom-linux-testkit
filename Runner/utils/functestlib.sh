@@ -16,6 +16,20 @@ log_error() { log "ERROR" "$@"; }
 log_skip()  { log "SKIP"  "$@"; }
 log_warn()  { log "WARN"  "$@"; }
 
+# --- Kernel Log Collection ---
+get_kernel_log() {
+    if command -v journalctl >/dev/null 2>&1; then
+        journalctl -k -b
+    elif command -v dmesg >/dev/null 2>&1; then
+        dmesg
+    elif [ -f /var/log/kern.log ]; then
+        cat /var/log/kern.log
+    else
+        log_warn "No kernel log source found"
+        return 1
+    fi
+}
+
 # --- Dependency check ---
 check_dependencies() {
     missing=0
