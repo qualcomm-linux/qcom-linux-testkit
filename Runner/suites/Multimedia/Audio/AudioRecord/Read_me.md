@@ -44,7 +44,7 @@ Quick Example
 ```
 git clone <this-repo>
 cd <this-repo>
-scp -r common Runner user@target_device_ip:<Path in device>
+scp -r Runner user@target_device_ip:<Path in device>
 ssh user@target_device_ip 
 cd <Path in device>Runner && ./run-test.sh AudioRecord
 ```

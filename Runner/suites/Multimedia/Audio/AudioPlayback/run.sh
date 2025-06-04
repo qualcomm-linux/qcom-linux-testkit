@@ -69,7 +69,6 @@ log_info "Playback clip present: $PLAYBACK_CLIP"
 
 # --- Capture logs BEFORE playback (for debugging) ---
 dmesg > "$LOGDIR/dmesg_before.log"
-cp /var/log/syslog "$LOGDIR/syslog_before.log" 2>/dev/null
 
 # --- Start the Playback, capture output ---
 timeout 15s paplay "$PLAYBACK_CLIP" -d "$AUDIO_DEVICE" > "$LOGDIR/playback_stdout.log" 2>&1
@@ -77,7 +76,6 @@ ret=$?
 
 # --- Capture logs AFTER playback (for debugging) ---
 dmesg > "$LOGDIR/dmesg_after.log"
-cp /var/log/syslog "$LOGDIR/syslog_after.log" 2>/dev/null
 
 if [ "$ret" -eq 0 ] || [ "$ret" -eq 124 ] ; then
     log_pass "Playback completed or timed out (ret=$ret) as expected."

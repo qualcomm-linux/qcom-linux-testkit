@@ -48,7 +48,6 @@ check_dependencies "$TESTBINARY" pgrep timeout
  
 # --- Capture logs BEFORE recording (for debugging) ---
 dmesg > "$LOGDIR/dmesg_before.log"
-cp /var/log/syslog "$LOGDIR/syslog_before.log" 2>/dev/null
 
 # Remove old record file if present
 rm -f "$RECORD_FILE"
@@ -59,7 +58,6 @@ ret=$?
 
 # --- Capture logs AFTER recording (for debugging) ---
 dmesg > "$LOGDIR/dmesg_after.log"
-cp /var/log/syslog "$LOGDIR/syslog_after.log" 2>/dev/null
 
 # --- Evaluate result: pass only if process completed successfully and file is non-empty ---
 if ([ "$ret" -eq 0 ] || [ "$ret" -eq 124 ]) && [ -s "$RECORD_FILE" ]; then
