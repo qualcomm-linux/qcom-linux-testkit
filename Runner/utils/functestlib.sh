@@ -19,13 +19,22 @@ log_warn()  { log "WARN"  "$@"; }
 # --- Dependency check ---
 check_dependencies() {
     missing=0
-    for cmd in "$@"; do
-        if ! command -v "$cmd" >/dev/null 2>&1; then
-            log_error "Required command '$cmd' not found in PATH."
+    for item in "$@"; do
+        if command -v "$item" >/dev/null 2>&1; then
+            continue
+        elif [ -d "$item" ]; then
+            continue
+        else
+            log_error "ERROR: Required command or directory '$item' not found."
             missing=1
         fi
     done
-    [ "$missing" -ne 0 ] && exit 1
+    if [ "$missing" -ne 0 ]; then
+        log_error "Exiting due to missing dependencies."
+        exit 1
+    else
+        log_pass "All dependencies are present."
+    fi
 }
 
 # --- Test case directory lookup ---
