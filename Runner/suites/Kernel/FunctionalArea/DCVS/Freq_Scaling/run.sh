@@ -46,9 +46,6 @@ check_kernel_config "$CONFIGS" || {
     exit 1
 }
 
-CPUFREQ_BASE_PATH="/sys/devices/system/cpu"
-i=0
-
 miss=0
 
 for cpu_dir in /sys/devices/system/cpu/cpu[0-8]*; do
