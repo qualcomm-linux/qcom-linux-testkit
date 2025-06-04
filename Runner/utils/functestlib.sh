@@ -391,3 +391,11 @@ weston_start() {
     fi
 }
 
+getsocId() {
+    if [ -r /sys/devices/soc0/soc_id ]; then
+        cat /sys/devices/soc0/soc_id
+    else
+        log_error "soc_id file not found or not readable"
+        return 1
+    fi
+}
