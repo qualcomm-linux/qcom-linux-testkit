@@ -40,6 +40,10 @@ run:
         - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/FunctionalArea/baseport/remoteproc/remoteproc.res || true
         - $PWD/suites/Kernel/FunctionalArea/baseport/RMNET/run.sh || true
         - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/FunctionalArea/baseport/RMNET/RMNET.res || true
+        - $PWD/suites/Kernel/FunctionalArea/baseport/IPA/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/FunctionalArea/baseport/IPA/IPA.res || true
+        - $PWD/suites/Kernel/FunctionalArea/baseport/Probe_Failure_Check/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/FunctionalArea/baseport/Probe_Failure_Check/Probe_Failure_Check.res || true
         - $PWD/suites/Kernel/FunctionalArea/baseport/rngtest/run.sh || true
         - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/FunctionalArea/baseport/rngtest/rngtest.res || true
         - $PWD/suites/Kernel/FunctionalArea/baseport/smmu/run.sh || true

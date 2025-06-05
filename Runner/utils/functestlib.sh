@@ -30,6 +30,105 @@ get_kernel_log() {
     fi
 }
 
+# Locate a kernel module (.ko) file by name
+# Tries to find it under current kernel version first, then all module trees
+find_kernel_module() {
+    module_name="$1"
+    kver=$(uname -r)
+
+    # Attempt to find module under the currently running kernel
+    module_path=$(find "/lib/modules/$kver" -name "${module_name}.ko" 2>/dev/null | head -n 1)
+
+    # If not found, search all available module directories
+    if [ -z "$module_path" ]; then
+        log_warn "Module not found under /lib/modules/$kver, falling back to full search in /lib/modules/"
+        module_path=$(find /lib/modules/ -name "${module_name}.ko" 2>/dev/null | head -n 1)
+
+        # Warn if found outside current kernel version
+        if [ -n "$module_path" ]; then
+            found_version=$(echo "$module_path" | cut -d'/' -f4)
+            if [ "$found_version" != "$kver" ]; then
+                log_warn "Found ${module_name}.ko under $found_version, not under current kernel ($kver)"
+            fi
+        fi
+    fi
+    echo "$module_path"
+}
+
+# Check if a kernel module is currently loaded
+is_module_loaded() {
+    module_name="$1"
+    /sbin/lsmod | awk '{print $1}' | grep -q "^${module_name}$"
+}
+
+# Insert a kernel module with optional parameters
+load_kernel_module() {
+    module_path="$1"
+    shift
+    params="$*"
+
+    module_name=$(basename "$module_path" .ko)
+
+    if is_module_loaded "$module_name"; then
+        log_info "Module $module_name is already loaded"
+        return 0
+    fi
+
+    if [ ! -f "$module_path" ]; then
+        log_error "Module file not found: $module_path"
+        return 1
+    fi
+
+    log_info "Loading module: $module_path $params"
+    if /sbin/insmod "$module_path" "$params" 2>insmod_err.log; then
+        log_info "Module $module_name loaded successfully"
+        return 0
+    else
+        log_error "insmod failed: $(cat insmod_err.log)"
+        return 1
+    fi
+}
+
+# Remove a kernel module by name with optional forced removal
+unload_kernel_module() {
+    module_name="$1"
+    force="$2"
+
+    if ! is_module_loaded "$module_name"; then
+        log_info "Module $module_name is not loaded, skipping unload"
+        return 0
+    fi
+
+    log_info "Attempting to remove module: $module_name"
+    if /sbin/rmmod "$module_name" 2>rmmod_err.log; then
+        log_info "Module $module_name removed via rmmod"
+        return 0
+    fi
+
+    log_warn "rmmod failed: $(cat rmmod_err.log)"
+    log_info "Trying modprobe -r as fallback"
+    if /sbin/modprobe -r "$module_name" 2>modprobe_err.log; then
+        log_info "Module $module_name removed via modprobe"
+        return 0
+    fi
+
+    log_warn "modprobe -r failed: $(cat modprobe_err.log)"
+
+    if [ "$force" = "true" ]; then
+        log_warn "Trying forced rmmod: $module_name"
+        if /sbin/rmmod -f "$module_name" 2>>rmmod_err.log; then
+            log_info "Module $module_name force removed"
+            return 0
+        else
+            log_error "Forced rmmod failed: $(cat rmmod_err.log)"
+            return 1
+        fi
+    fi
+
+    log_error "Unable to unload module: $module_name"
+    return 1
+}
+
 # --- Dependency check ---
 check_dependencies() {
     missing=0
