@@ -14,6 +14,21 @@ log_pass()  { log "PASS"  "$@"; }
 log_fail()  { log "FAIL"  "$@"; }
 log_error() { log "ERROR" "$@"; }
 log_skip()  { log "SKIP"  "$@"; }
+log_warn()  { log "WARN"  "$@"; }
+
+# --- Kernel Log Collection ---
+get_kernel_log() {
+    if command -v journalctl >/dev/null 2>&1; then
+        journalctl -k -b
+    elif command -v dmesg >/dev/null 2>&1; then
+        dmesg
+    elif [ -f /var/log/kern.log ]; then
+        cat /var/log/kern.log
+    else
+        log_warn "No kernel log source found"
+        return 1
+    fi
+}
 
 # --- Dependency check ---
 check_dependencies() {
@@ -46,6 +61,56 @@ find_test_case_script_by_name() {
     test_name=$1
     base_dir="${__RUNNER_UTILS_BIN_DIR:-$ROOT_DIR/common}"
     find "$base_dir" -type d -iname "$test_name" -print -quit 2>/dev/null
+}
+
+check_kernel_config() {
+    configs="$1"
+    for config_key in $configs; do
+        if zcat /proc/config.gz | grep -qE "^$config_key=(y|m)"; then
+            log_pass "Kernel config $config_key is enabled"
+        else
+            log_fail "Kernel config $config_key is missing or not enabled"
+            return 1
+        fi
+    done
+    return 0
+}
+
+check_dt_nodes() {
+    node_paths="$1"
+    log_info "$node_paths"
+    found=false
+    for node in $node_paths; do
+        log_info "$node"
+        if [ -d "$node" ] || [ -f "$node" ]; then
+            log_pass "Device tree node exists: $node"
+            found=true
+        fi
+    done
+ 
+    if [ "$found" = true ]; then
+        return 0
+    else
+        log_fail "Device tree node(s) missing: $node_paths"
+        return 1
+    fi
+}
+
+check_driver_loaded() {
+    drivers="$1"
+    for driver in $drivers; do
+        if [ -z "$driver" ]; then
+            log_fail "No driver/module name provided to check_driver_loaded"
+            return 1
+        fi
+        if grep -qw "$driver" /proc/modules || lsmod | awk '{print $1}' | grep -qw "$driver"; then
+            log_pass "Driver/module '$driver' is loaded"
+            return 0
+        else
+            log_fail "Driver/module '$driver' is not loaded"
+            return 1
+        fi
+    done
 }
 
 # --- Optional: POSIX-safe repo root detector ---
@@ -161,5 +226,60 @@ check_tar_file() {
 
     log_info "$filename exists and is valid, but not yet extracted."
     return 2
+}
+
+# Check if weston is running
+weston_is_running() {
+    pgrep -x weston >/dev/null 2>&1
+}
+
+# Stop all Weston processes
+weston_stop() {
+    if weston_is_running; then
+        log_info "Stopping Weston..."
+        pkill -x weston
+        for i in $(seq 1 10); do
+			log_info "Waiting for Weston to stop with $i attempt "
+            if ! weston_is_running; then
+                log_info "Weston stopped successfully"
+                return 0
+            fi
+            sleep 1
+        done
+        log_error "Failed to stop Weston after waiting."
+        return 1
+    else
+        log_info "Weston is not running."
+    fi
+    return 0
+}
+
+# Start weston with correct env if not running
+weston_start() {
+    export XDG_RUNTIME_DIR="/dev/socket/weston"
+    mkdir -p "$XDG_RUNTIME_DIR"
+
+    # Remove stale Weston socket if it exists
+    if [ -S "$XDG_RUNTIME_DIR/weston" ]; then
+        log_info "Removing stale Weston socket."
+        rm -f "$XDG_RUNTIME_DIR/weston"
+    fi
+
+    if weston_is_running; then
+        log_info "Weston already running."
+        return 0
+    fi
+    # Clean up stale sockets for wayland-0 (optional)
+    [ -S "$XDG_RUNTIME_DIR/wayland-1" ] && rm -f "$XDG_RUNTIME_DIR/wayland-1"
+    nohup weston --continue-without-input --idle-time=0 > weston.log 2>&1 &
+    sleep 3
+
+    if weston_is_running; then
+        log_info "Weston started."
+        return 0
+    else
+        log_error "Failed to start Weston."
+        return 1
+    fi
 }
 

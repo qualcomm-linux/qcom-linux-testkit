@@ -43,7 +43,7 @@ output=$(cat /proc/kallsyms | grep stext)
 
 value=$(echo $output | awk '{print $1}')
 
-if [ $value = "0000000000000000" ]; then
+if [ $value != "0000000000000000" ]; then
     log_pass "$TESTNAME : Test Passed"
     echo "$TESTNAME PASS" > "$res_file"
 else

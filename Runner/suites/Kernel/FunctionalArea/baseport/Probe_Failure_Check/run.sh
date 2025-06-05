@@ -3,7 +3,7 @@
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause-Clear
 
-# Robustly find and source init_env
+# Robustly source init_env and functestlib.sh
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 INIT_ENV=""
 SEARCH="$SCRIPT_DIR"
@@ -20,39 +20,40 @@ if [ -z "$INIT_ENV" ]; then
     exit 1
 fi
 
-# Only source if not already loaded (idempotent)
 if [ -z "$__INIT_ENV_LOADED" ]; then
     # shellcheck disable=SC1090
     . "$INIT_ENV"
 fi
-# Always source functestlib.sh, using $TOOLS exported by init_env
+
 # shellcheck disable=SC1090,SC1091
 . "$TOOLS/functestlib.sh"
 
-TESTNAME="Graphics"
+TESTNAME="Probe_Failure_Check"
 test_path=$(find_test_case_by_name "$TESTNAME")
 cd "$test_path" || exit 1
-# shellcheck disable=SC2034
+
 res_file="./$TESTNAME.res"
+log_file="./probe_failures.log"
 
 log_info "-----------------------------------------------------------------------------------------"
-log_info "-------------------Starting $TESTNAME Testcase----------------------------"
-log_info "=== Test Initialization ==="
+log_info "------------------- Starting $TESTNAME Testcase ----------------------------"
 
-log_info "Checking if dependency binary is available"
-check_dependencies a660_sqe.fw a660_zap.mbn a660_gmu.bin
+rm -f "$res_file" "$log_file"
+{
+    echo "Probe Failure Report - $(date)"
+    echo "--------------------------------------------------"
+} > "$log_file"
 
-# Clear dmesg logs
-dmesg -c
-
-cat /dev/dri/card0 &
-OUTPUT=$(dmesg)
-
-if echo "${OUTPUT}" | grep "Loaded GMU firmware"; then
-    log_pass "$TESTNAME : Test Passed"
-    echo "$TESTNAME PASS" > "$res_file"
-else
-    log_fail "$TESTNAME : Test Failed"
+if get_kernel_log 2>/dev/null | \
+   grep -iE '([[:alnum:]_.-]+:)?[[:space:]]*(probe failed|failed to probe|probe error)' \
+   >> "$log_file"; then
+    log_error "Probe failures detected; see $log_file"
+    log_fail "$TESTNAME : Probe failures found"
     echo "$TESTNAME FAIL" > "$res_file"
+    exit 1
+else
+    rm -f "$log_file"
+    log_pass "$TESTNAME : No probe failures found"
+    echo "$TESTNAME PASS" > "$res_file"
+    exit 0
 fi
-log_info "-------------------Completed $TESTNAME Testcase----------------------------"
