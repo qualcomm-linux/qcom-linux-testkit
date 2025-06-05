@@ -1,0 +1,14 @@
+[Unit]
+Description=Reboot Health Check Service
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=/var/common/reboot_health_check
+StandardOutput=tty
+StandardError=tty
+Restar=no
+
+
+[Install]
+WantedBy=multi-user.target
