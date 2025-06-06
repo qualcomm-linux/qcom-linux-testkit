@@ -382,3 +382,27 @@ weston_start() {
     fi
 }
 
+# Get systemd service status
+check_systemd_services() {
+    for service in "$@"; do
+        if systemctl is-enabled "$service" >/dev/null 2>&1; then
+            if ! systemctl is-active --quiet "$service"; then
+                log_warn "$service is not running, attempting to start..."
+                systemctl start "$service"
+                sleep 2
+                if systemctl is-active --quiet "$service"; then
+                    log_pass "$service started successfully."
+                else
+                    log_fail "$service failed to start."
+                    return 1
+                fi
+            else
+                log_info "$service is already active."
+            fi
+        else
+            log_warn "$service is not enabled or not found"
+        fi
+    done
+    return 0
+}
+
