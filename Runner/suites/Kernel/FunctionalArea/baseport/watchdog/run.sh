@@ -44,8 +44,13 @@ if [ -e /dev/watchdog ]; then
     log_pass "$TESTNAME : Test Passed"
     echo "$TESTNAME PASS" > "$res_file"
 else
-    log_fail "/dev/watchdog node is not present."
-    log_fail "$TESTNAME : Test Failed"
-    echo "$TESTNAME FAIL" > "$res_file"
+    CONFIGS="CONFIG_WATCHDOG CONFIG_ARM_SMC_WATCHDOG CONFIG_WATCHDOG_HANDLE_BOOT_ENABLED"
+    check_kernel_config "$CONFIGS" || {
+        log_fail "$TESTNAME FAIL"
+        echo "$TESTNAME FAIL" > "$res_file"
+        exit 1
+    }
+    log_pass "$TESTNAME : Test Passed"
+    echo "$TESTNAME PASS" > "$res_file"
 fi
 log_info "-------------------Completed $TESTNAME Testcase---------------------------"
