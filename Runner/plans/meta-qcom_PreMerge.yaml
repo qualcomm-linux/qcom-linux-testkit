@@ -56,4 +56,12 @@ run:
         - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/FunctionalArea/baseport/watchdog/watchdog.res || true
         - $PWD/suites/Kernel/FunctionalArea/baseport/wpss_remoteproc/run.sh || true
         - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/FunctionalArea/baseport/wpss_remoteproc/wpss_remoteproc.res || true
+        - $PWD/suites/Multimedia/Audio/AudioPlayback/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/Audio/AudioPlayback/AudioPlayback.res || true  
+        - $PWD/suites/Multimedia/Audio/AudioRecord/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/Audio/AudioRecord/AudioRecord.res || true
+        - $PWD/suites/Multimedia/Graphics/KMSCube/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/Graphics/KMSCube/kmscube.res || true  
+        - $PWD/suites/Multimedia/Graphics/weston-simple-egl/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/Graphics/weston-simple-egl/weston-simple-egl.res || true
         - $PWD/utils/result_parse.sh
