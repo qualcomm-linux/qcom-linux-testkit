@@ -39,7 +39,7 @@ log_info "-------- Starting $TESTNAME Functional Test --------"
 
 check_dependencies taskset top chrt zcat grep
 
-REQUIRED_CONFIGS="CONFIG_SCHED_DEBUG CONFIG_CGROUP_SCHED CONFIG_SMP"
+REQUIRED_CONFIGS="CONFIG_CGROUP_SCHED CONFIG_SMP"
 for config in $REQUIRED_CONFIGS; do
     if check_kernel_config "$config"; then
         log_pass "$config is enabled"

@@ -52,4 +52,8 @@ run:
         - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/FunctionalArea/baseport/storage/storage.res || true
         - $PWD/suites/Kernel/FunctionalArea/baseport/wpss_remoteproc/run.sh || true
         - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/FunctionalArea/baseport/wpss_remoteproc/wpss_remoteproc.res || true
+        - $PWD/suites/Kernel/FunctionalArea/DCVS/Freq_Scaling/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/FunctionalArea/DCVS/Freq_Scaling/Freq_Scaling.res || true
+        - $PWD/suites/Kernel/FunctionalArea/Scheduler/CPU_affinity/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/FunctionalArea/Scheduler/CPU_affinity/CPU_affinity.res || true
         - $PWD/utils/result_parse.sh
