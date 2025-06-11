@@ -132,13 +132,22 @@ unload_kernel_module() {
 # --- Dependency check ---
 check_dependencies() {
     missing=0
+    missing_cmds=""
     for cmd in "$@"; do
         if ! command -v "$cmd" >/dev/null 2>&1; then
-            log_error "Required command '$cmd' not found in PATH."
+            log_warn "Required command '$cmd' not found in PATH."
             missing=1
+            missing_cmds="$missing_cmds $cmd"
         fi
     done
-    [ "$missing" -ne 0 ] && exit 1
+    if [ "$missing" -ne 0 ]; then
+        testname="${TESTNAME:-}"
+        log_skip "${testname:-UnknownTest} SKIP: missing dependencies:$missing_cmds"
+        if [ -n "$testname" ]; then
+            echo "$testname SKIP" > "./$testname.res"
+        fi
+        exit 0
+    fi
 }
 
 # --- Test case directory lookup ---
