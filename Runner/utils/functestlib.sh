@@ -391,3 +391,133 @@ weston_start() {
     fi
 }
 
+# Retry a shell command up to N times with a delay
+retry_command() {
+    cmd="$1"
+    retries="$2"
+    delay="$3"
+    attempt=1
+    while [ "$attempt" -le "$retries" ]; do
+        if eval "$cmd"; then
+            return 0
+        fi
+        log_warn "Attempt $attempt/$retries failed for: $cmd"
+        attempt=$((attempt + 1))
+        sleep "$delay"
+    done
+    return 1
+}
+
+# Check and ensure given systemd services are active (with retries and logging)
+check_systemd_services() {
+    # Skip if systemd is not present
+    if ! command -v systemctl >/dev/null 2>&1; then
+        log_warn "systemd is not available. Skipping systemd service checks."
+        return 0
+    fi
+
+    for service in "$@"; do
+        if systemctl is-enabled "$service" >/dev/null 2>&1; then
+            if ! systemctl is-active --quiet "$service"; then
+                log_warn "$service is not running. Attempting to start with retries..."
+                retry_command "systemctl start $service" 3 2
+                if systemctl is-active --quiet "$service"; then
+                    log_pass "$service started successfully after retry."
+                else
+                    log_fail "$service failed to start after 3 retries."
+                    return 1
+                fi
+            else
+                log_info "$service is already active."
+            fi
+        else
+            log_warn "$service is not enabled or not found."
+        fi
+    done
+    return 0
+}
+
+# Ensure at least one network tool is available
+check_net_tools() {
+    # At least one of ifconfig or ip must be available
+    if command -v ifconfig >/dev/null 2>&1 || command -v ip >/dev/null 2>&1; then
+        return 0
+    else
+        log_error "Neither ifconfig nor ip found in PATH"
+        return 1
+    fi
+}
+
+# Get IP address using ifconfig or ip (fallback logic)
+get_ip_address() {
+    iface="$1"
+    ip=""
+    if command -v ifconfig >/dev/null 2>&1; then
+        ip=$(ifconfig "$iface" 2>/dev/null | awk '/inet / {print $2; exit}')
+    fi
+    if [ -z "$ip" ] && command -v ip >/dev/null 2>&1; then
+        ip=$(ip addr show "$iface" 2>/dev/null | awk '/inet / {print $2}' | cut -d/ -f1 | head -n1)
+    fi
+    echo "$ip"
+}
+
+# Extracts WiFi SSID and password from arguments, env, or ssid_list.txt
+get_wifi_credentials() {
+    ssid="$1"
+    pass="$2"
+ 
+    # Try arguments first, then env
+    if [ -z "$ssid" ] || [ -z "$pass" ]; then
+        ssid="${SSID_ENV:-$ssid}"
+        pass="${PASSWORD_ENV:-$pass}"
+    fi
+ 
+    # Try ssid_list.txt if still missing
+    if [ -z "$ssid" ] || [ -z "$pass" ]; then
+        if [ -f "./ssid_list.txt" ]; then
+            read -r ssid pass _ < ./ssid_list.txt
+        fi
+    fi
+ 
+    # Final trim & validate
+    ssid=$(echo "$ssid" | xargs)
+    pass=$(echo "$pass" | xargs)
+    if [ -z "$ssid" ] || [ -z "$pass" ]; then
+        return 1
+    fi
+    printf '%s %s\n' "$ssid" "$pass"
+    return 0
+}
+
+# Find the first available WiFi interface.
+# Prints the interface name and sets WIFI_IF variable.
+get_wifi_interface() {
+    # Try with 'ip' first
+    if command -v ip >/dev/null 2>&1; then
+        WIFI_IF=$(ip link | awk -F: '/ wl/ {print $2}' | tr -d ' ' | head -n1)
+        if [ -z "$WIFI_IF" ]; then
+            WIFI_IF=$(ip link | awk -F: '/^[0-9]+: wl/ {print $2}' | tr -d ' ' | head -n1)
+        fi
+        if [ -z "$WIFI_IF" ]; then
+            # fallback: see if wlan0 exists
+            if ip link show wlan0 >/dev/null 2>&1; then
+                WIFI_IF="wlan0"
+            fi
+        fi
+    else
+        # Fallback to ifconfig
+        WIFI_IF=$(ifconfig -a 2>/dev/null | grep -o '^wl[^:]*' | head -n1)
+        if [ -z "$WIFI_IF" ]; then
+            if ifconfig wlan0 >/dev/null 2>&1; then
+                WIFI_IF="wlan0"
+            fi
+        fi
+    fi
+
+    if [ -n "$WIFI_IF" ]; then
+        echo "$WIFI_IF"
+        return 0
+    else
+        return 1
+    fi
+}
