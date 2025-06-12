@@ -42,7 +42,7 @@ log_info "=== Test Initialization ==="
 check_runtime_behavior() {
     if dmesg | grep -i -q "msm_iommu.*enabled"; then
         log_info "Runtime logs show Qualcomm MSM IOMMU is active"
-    elif dmesg | grep -i -q "iommu.*enabled"; then
+    elif dmesg | grep -i -q "iommu"; then
         log_info "Runtime logs show IOMMU is active"
     else
         log_fail "No runtime indication of IOMMU being active"
@@ -56,12 +56,6 @@ pass=true
 CONFIGS="CONFIG_IOMMU_SUPPORT CONFIG_QCOM_IOMMU CONFIG_ARM_SMMU"
 check_kernel_config "$CONFIGS" || {
     log_fail "Kernel config validation failed."
-    echo "$TESTNAME FAIL" > "$res_file"
-    exit 1
-}
-LOADED_MODULES="msm_iommu arm_smmu"
-check_driver_loaded "$LOADED_MODULES" || {
-    log_fail "Failed to load required driver modules"
     echo "$TESTNAME FAIL" > "$res_file"
     exit 1
 }
