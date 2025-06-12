@@ -84,6 +84,7 @@ if echo start > "$wpss_path/state" 2>/dev/null; then
     if [ "$final_state" = "running" ]; then
         log_pass "WPSS remoteproc started successfully"
         echo "$TESTNAME PASS" > "$res_file"
+        exit 0
     else
         log_fail "WPSS remoteproc failed to start, state: $final_state"
         echo "$TESTNAME FAIL" > "$res_file"

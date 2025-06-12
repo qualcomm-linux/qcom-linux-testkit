@@ -81,10 +81,12 @@ if [ "$ret" -eq 0 ] || [ "$ret" -eq 124 ] ; then
     log_pass "Playback completed or timed out (ret=$ret) as expected."
     log_pass "$TESTNAME : Test Passed"
     echo "$TESTNAME PASS" > "$RESULT_FILE"
+    exit 0
 else
     log_fail "$TESTBINARY playback exited with error code $ret"
     log_fail "$TESTNAME : Test Failed"
     echo "$TESTNAME FAIL" > "$RESULT_FILE"
+    exit 1
 fi
 
 log_info "See $LOGDIR/playback_stdout.log, dmesg_before/after.log, syslog_before/after.log for debug details"

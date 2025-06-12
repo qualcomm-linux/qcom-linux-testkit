@@ -83,9 +83,11 @@ log_info "Scheduling Policy: $SCHED_POLICY"
 if echo "$SCHED_POLICY" | grep -q "SCHED_OTHER"; then
     log_pass "Default scheduling policy detected. Test passed"
     echo "$TESTNAME PASS" > "$res_file"
+    exit 0
 else
     log_fail "Unexpected scheduling policy. Test Failed"
     echo "$TESTNAME FAIL" > "$res_file"
+    exit 1
 fi
 
 kill $TASK_PID

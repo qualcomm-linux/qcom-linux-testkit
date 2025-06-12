@@ -59,10 +59,12 @@ if kmscube --count="$FRAME_COUNT" > "$LOG_FILE" 2>&1; then
     else
         log_fail "$TESTNAME : Expected output not found (Rendered $EXPECTED_FRAMES frames)"
         echo "$TESTNAME FAIL" > "$RES_FILE"
+        exit 1
     fi
 else
     log_fail "$TESTNAME : Execution failed (non-zero exit code)"
     echo "$TESTNAME FAIL" > "$RES_FILE"
+    exit 1
 fi
 
 if [ "$weston_was_running" -eq 1 ]; then

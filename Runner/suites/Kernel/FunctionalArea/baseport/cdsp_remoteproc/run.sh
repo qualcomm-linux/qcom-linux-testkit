@@ -87,3 +87,4 @@ echo "cdsp PASS"
 log_pass "cdsp PASS"
 echo "$TESTNAME PASS" > "$res_file" 
 log_info "-------------------Completed $TESTNAME Testcase----------------------------"
+exit 0

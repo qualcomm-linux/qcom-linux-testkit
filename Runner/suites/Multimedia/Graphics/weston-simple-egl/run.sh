@@ -69,9 +69,11 @@ count=$(grep -i -o "5 seconds" "$LOG_FILE" | wc -l)
 if [ "$count" -ge 5 ]; then
     log_pass "$TESTNAME : Test Passed"
     echo "$TESTNAME PASS" > "$RES_FILE"
+    exit 0
 else
     log_fail "$TESTNAME : Test Failed"
     echo "$TESTNAME FAIL" > "$RES_FILE"
+    exit 1
 fi
 
 log_info "------------------- Completed $TESTNAME Testcase ------------------------"

@@ -64,10 +64,12 @@ if ([ "$ret" -eq 0 ] || [ "$ret" -eq 124 ]) && [ -s "$RECORD_FILE" ]; then
     log_pass "Recording completed or timed out (ret=$ret) as expected and output file exists."
     log_pass "$TESTNAME : Test Passed"
     echo "$TESTNAME PASS" > "$RESULT_FILE"
+    exit 0
 else
     log_fail "parec failed (status $ret) or recorded file missing/empty"
     log_fail "$TESTNAME : Test Failed"
     echo "$TESTNAME FAIL" > "$RESULT_FILE"
+    exit 1
 fi
 
 log_info "See $LOGDIR/parec_stdout.log, dmesg_before/after.log, syslog_before/after.log for debug details"

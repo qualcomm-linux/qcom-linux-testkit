@@ -69,9 +69,11 @@ echo $output
 if echo "$output" | grep -q "All tests completed successfully"; then
     log_pass "$TESTNAME : Test Passed"
     echo "$TESTNAME : PASS" > "$RESULT_FILE"
+    exit 0
 else
     log_fail "$TESTNAME : Test Failed"
     echo "$TESTNAME : FAIL" > "$RESULT_FILE"
+    exit 1
 fi
 
 log_info "-------------------Completed $TESTNAME Testcase----------------------------"

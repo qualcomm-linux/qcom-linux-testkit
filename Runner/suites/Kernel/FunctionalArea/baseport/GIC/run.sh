@@ -87,9 +87,11 @@ echo "$initial_count" | while read -r line; do
     if [ "$fail_test" = false ]; then
         log_pass "$TESTNAME : Test Passed"
         echo "$TESTNAME PASS" > "$res_file"
+        exit 0
     else
         log_fail "$TESTNAME : Test Failed"
         echo "$TESTNAME FAIL" > "$res_file"
+        exit 1
     fi
 done
 log_info "-------------------Completed $TESTNAME Testcase----------------------------"

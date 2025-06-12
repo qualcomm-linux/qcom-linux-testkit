@@ -55,10 +55,12 @@ if is_module_loaded "rmnet"; then
     log_info "rmnet module is loaded"
     log_pass "$TESTNAME : Test Passed"
     echo "$TESTNAME PASS" > "$res_file"
+    exit 0
 else
     log_error "rmnet module not listed in lsmod"
     log_fail "$TESTNAME : Test Failed"
     echo "$TESTNAME FAIL" > "$res_file"
+    exit 1
 fi
 
 log_info "=== Cleanup ==="

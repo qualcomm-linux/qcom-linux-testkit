@@ -86,9 +86,11 @@ kill $LOAD_PID
 if [ "$CURRENT_FREQ" -gt "$MIN_FREQ" ]; then
     log_pass "DCVS scaling appears functional. Test Passed"
     echo "$TESTNAME PASS" > "$res_file"
+    exit 0
 else
     log_fail "DCVS did not scale as expected. Test Failed"
     echo "$TESTNAME FAIL" > "$res_file"
+    exit 1
 fi
 
 log_info "----------- Completed $TESTNAME Test ------------"

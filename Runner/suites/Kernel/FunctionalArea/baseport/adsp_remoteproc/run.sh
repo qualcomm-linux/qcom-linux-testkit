@@ -89,3 +89,4 @@ echo "adsp PASS"
 log_pass "adsp PASS"
 echo "$TESTNAME PASS" > "$res_file"
 log_info "-------------------Completed $TESTNAME Testcase----------------------------"
+exit 0

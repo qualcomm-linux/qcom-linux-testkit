@@ -62,9 +62,11 @@ if [ "$device_count" -eq 0 ]; then
 elif [ "$non_hub_count" -eq 0 ]; then
     log_fail "$TESTNAME : Test Failed - Only USB hubs detected, no functional USB devices."
     echo "$TESTNAME FAIL" > "$res_file"
+    exit 1
 else
     log_pass "$TESTNAME : Test Passed - $non_hub_count non-hub USB device(s) found."
     echo "$TESTNAME PASS" > "$res_file"
+    exit 0
 fi
 
 log_info "-------------------Completed $TESTNAME Testcase----------------------------"

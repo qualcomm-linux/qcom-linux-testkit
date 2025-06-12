@@ -109,9 +109,11 @@ log_info "=== Final Result ==="
 if [ "$overall_pass" -eq 0 ]; then
     log_pass "$TESTNAME: All policies passed"
     echo "$TESTNAME PASS" > "$res_file"
+    exit 0
 else
     log_fail "$TESTNAME: One or more policies failed"
     echo "$TESTNAME FAIL" > "$res_file"
+    exit 1
 fi
 
 rm -rf "$status_dir"

@@ -50,8 +50,10 @@ echo "${KCAPI_RET}"
 if [ ${KCAPI_RET} -eq 0 ]; then
     log_pass "$TESTNAME : Test Passed"
     echo "$TESTNAME PASS" > "$res_file"
+    exit 1
 else
     log_fail "$TESTNAME : Test Failed"
     echo "$TESTNAME FAIL" > "$res_file"
+    exit 0
 fi
 log_info "-------------------Completed $TESTNAME Testcase----------------------------"
