@@ -28,6 +28,8 @@ cd <this-repo>
 scp -r common Runner user@target_device_ip:<Path in device>
 ssh user@target_device_ip
 cd <Path in device>/Runner && ./run-test.sh Ethernet
+# Optional: specify preferred interface (e.g., eth1)
+./run.sh [preferred-interface]
 ```
 
 ## Prerequisites
@@ -53,5 +55,14 @@ Test result will be saved in `Ethernet.res` as:
 ## Output
 A .res file is generated in the same directory:
 
-`PASS Ethernet`  OR   `FAIL Ethernet`
+`Ethernet PASS`  OR   `Ethernet FAIL`
 
+## Sample Log
+```
+Output
+
+[INFO] 2025-06-11 10:12:23 - Detected Ethernet interface: enP1p4s0u1u1
+[PASS] 2025-06-11 10:12:30 - enP1p4s0u1u1 is UP
+[INFO] 2025-06-11 10:12:31 - Assigned IP: 10.0.0.55
+[PASS] 2025-06-11 10:12:35 - Ping successful on enP1p4s0u1u1
+```

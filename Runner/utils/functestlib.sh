@@ -3,6 +3,9 @@
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause-Clear
 
+# Suppress 'Broken pipe' errors globally in this shell (put this at the very top once)
+trap '' PIPE
+
 # --- Logging helpers ---
 log() {
     level=$1
@@ -391,3 +394,94 @@ weston_start() {
     fi
 }
 
+# Returns true (0) if interface is administratively and physically up
+is_interface_up() {
+    iface="$1"
+    if [ -f "/sys/class/net/$iface/operstate" ]; then
+        [ "$(cat "/sys/class/net/$iface/operstate")" = "up" ]
+    elif command -v ip >/dev/null 2>&1; then
+        ip link show "$iface" 2>/dev/null | grep -qw "state UP"
+    elif command -v ifconfig >/dev/null 2>&1; then
+        ifconfig "$iface" 2>/dev/null | grep -qw "UP"
+    else
+        return 1
+    fi
+}
+
+# Returns true (0) if physical link/carrier is detected (cable plugged in)
+is_link_up() {
+    iface="$1"
+    [ -f "/sys/class/net/$iface/carrier" ] && [ "$(cat "/sys/class/net/$iface/carrier")" = "1" ]
+}
+
+# Returns true (0) if interface is Ethernet type (type 1 in sysfs)
+is_ethernet_interface() {
+    iface="$1"
+    [ -f "/sys/class/net/$iface/type" ] && [ "$(cat "/sys/class/net/$iface/type")" = "1" ]
+}
+
+# Get all Ethernet interfaces (excluding common virtual types)
+get_ethernet_interfaces() {
+    for path in /sys/class/net/*; do
+        iface=$(basename "$path")
+        case "$iface" in
+            lo|docker*|br-*|veth*|virbr*|tap*|tun*|wl*) continue ;;
+        esac
+        if is_ethernet_interface "$iface"; then
+            echo "$iface"
+        fi
+    done
+}
+
+# Bring up interface with retries: always down before up
+bringup_interface() {
+    iface="$1"
+    retries="$2"
+    sleep_sec="$3"
+    i=0
+    while [ $i -lt "$retries" ]; do
+        if command -v ip >/dev/null 2>&1; then
+            ip link set "$iface" down
+            sleep 1
+            ip link set "$iface" up
+            sleep "$sleep_sec"
+            if is_interface_up "$iface"; then return 0; fi
+        elif command -v ifconfig >/dev/null 2>&1; then
+            ifconfig "$iface" down
+            sleep 1
+            ifconfig "$iface" up
+            sleep "$sleep_sec"
+            if is_interface_up "$iface"; then return 0; fi
+        fi
+        i=$((i + 1))
+    done
+    return 1
+}
+
+# Wait for a valid IPv4 address on the given interface, up to a timeout (default 30s)
+wait_for_ip_address() {
+    iface="$1"
+    timeout="${2:-30}"
+    elapsed=0
+    while [ "$elapsed" -lt "$timeout" ]; do
+        ip_addr=$(get_ip_address "$iface")
+        # Exclude empty and link-local addresses
+        if [ -n "$ip_addr" ] && ! echo "$ip_addr" | grep -q '^169\.254'; then
+            echo "$ip_addr"
+            return 0
+        fi
+        sleep 1
+        elapsed=$((elapsed + 1))
+    done
+    return 1
+}
+
+# Get the IPv4 address for a given interface
+get_ip_address() {
+    iface="$1"
+    if command -v ip >/dev/null 2>&1; then
+        ip -4 -o addr show "$iface" | awk '{print $4}' | cut -d/ -f1 | head -n1
+    elif command -v ifconfig >/dev/null 2>&1; then
+        ifconfig "$iface" 2>/dev/null | awk '/inet / {print $2}' | head -n1
+    fi
+}
