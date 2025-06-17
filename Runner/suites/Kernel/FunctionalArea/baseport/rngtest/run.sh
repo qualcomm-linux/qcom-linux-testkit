@@ -20,19 +20,16 @@ if [ -z "$INIT_ENV" ]; then
     exit 1
 fi
 
-# Only source if not already loaded (idempotent)
 if [ -z "$__INIT_ENV_LOADED" ]; then
     # shellcheck disable=SC1090
     . "$INIT_ENV"
 fi
-# Always source functestlib.sh, using $TOOLS exported by init_env
 # shellcheck disable=SC1090,SC1091
 . "$TOOLS/functestlib.sh"
 
 TESTNAME="rngtest"
 test_path=$(find_test_case_by_name "$TESTNAME")
 cd "$test_path" || exit 1
-# shellcheck disable=SC2034
 res_file="./$TESTNAME.res"
 
 log_info "-----------------------------------------------------------------------------------------"
@@ -40,22 +37,57 @@ log_info "-------------------Starting $TESTNAME Testcase------------------------
 log_info "=== Test Initialization ==="
 
 log_info "Checking if dependency binary is available"
-check_dependencies rngtest
+check_dependencies rngtest dd
 
-cat /dev/random | rngtest -c 1000 > /tmp/rngtest_output.txt
+TMP_BIN="/tmp/rngtest_input.bin"
+TMP_OUT="/tmp/rngtest_output.txt"
+ENTROPY_MB=10
+RNG_SOURCE="/dev/urandom" # Use /dev/random if you want slow but highest entropy
 
-grep 'count of bits' /tmp/rngtest_output.txt | awk '{print $NF}' > /tmp/rngtest_value.txt
-
-value=$(cat /tmp/rngtest_value.txt)
-
-
-if [ "$value" -lt 10 ]; then
-    log_pass "$TESTNAME : Test Passed"
-    echo "$TESTNAME PASS" > "$res_file"
-    exit 0
-else
-    log_fail "$TESTNAME : Test Failed"
+log_info "Generating ${ENTROPY_MB}MB entropy input from $RNG_SOURCE using dd..."
+if ! dd if="$RNG_SOURCE" of="$TMP_BIN" bs=1M count="$ENTROPY_MB" status=none 2>/dev/null; then
+    log_fail "$TESTNAME : Failed to read random data from $RNG_SOURCE"
     echo "$TESTNAME FAIL" > "$res_file"
+    rm -f "$TMP_BIN"
     exit 1
 fi
+
+log_info "Running rngtest -c 1000 < $TMP_BIN"
+if ! rngtest -c 1000 < "$TMP_BIN" > "$TMP_OUT" 2>&1; then
+    log_fail "$TESTNAME : rngtest execution failed"
+    echo "$TESTNAME FAIL" > "$res_file"
+    rm -f "$TMP_BIN" "$TMP_OUT"
+    exit 1
+fi
+
+# Check for entropy errors or source drained
+if grep -q "entropy source drained" "$TMP_OUT"; then
+    log_fail "rngtest: entropy source drained, input too small"
+    echo "$TESTNAME FAIL" > "$res_file"
+    rm -f "$TMP_BIN" "$TMP_OUT"
+    exit 1
+fi
+
+# Parse FIPS 140-2 successes (robust to output variations)
+successes=$(awk '/FIPS 140-2 successes:/ {print $NF}' "$TMP_OUT" | head -n1)
+
+if [ -z "$successes" ] || ! echo "$successes" | grep -Eq '^[0-9]+$'; then
+    log_fail "rngtest did not return a valid integer for successes; got: '$successes'"
+    echo "$TESTNAME FAIL" > "$res_file"
+    rm -f "$TMP_BIN" "$TMP_OUT"
+    exit 1
+fi
+
+log_info "rngtest: FIPS 140-2 successes = $successes"
+# You can tune this threshold as needed (10 means <1% fail allowed)
+if [ "$successes" -ge 10 ]; then
+    log_pass "$TESTNAME : Test Passed ($successes FIPS 140-2 successes)"
+    echo "$TESTNAME PASS" > "$res_file"
+else
+    log_fail "$TESTNAME : Test Failed ($successes FIPS 140-2 successes)"
+    echo "$TESTNAME FAIL" > "$res_file"
+fi
+
+rm -f "$TMP_BIN" "$TMP_OUT"
+
 log_info "-------------------Completed $TESTNAME Testcase----------------------------"

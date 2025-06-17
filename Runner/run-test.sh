@@ -34,6 +34,7 @@ fi
 # Store results
 RESULTS_PASS=""
 RESULTS_FAIL=""
+RESULTS_SKIP=""
 
 execute_test_case() {
     test_path=$1
@@ -43,20 +44,37 @@ execute_test_case() {
         run_script="$test_path/run.sh"
         if [ -f "$run_script" ]; then
             log "Executing test case: $test_name"
-            if (cd "$test_path" && sh "./run.sh"); then
-                log_pass "$test_name passed"
-                if [ -z "$RESULTS_PASS" ]; then
-                    RESULTS_PASS="$test_name"
+            (cd "$test_path" && sh "./run.sh")
+            res_file="$test_path/$test_name.res"
+            if [ -f "$res_file" ]; then
+                if grep -q "SKIP" "$res_file"; then
+                    log_skip "$test_name skipped"
+                    if [ -z "$RESULTS_SKIP" ]; then
+                        RESULTS_SKIP="$test_name"
+                    else
+                        RESULTS_SKIP=$(printf "%s\n%s" "$RESULTS_SKIP" "$test_name")
+                    fi
+                elif grep -q "PASS" "$res_file"; then
+                    log_pass "$test_name passed"
+                    if [ -z "$RESULTS_PASS" ]; then
+                        RESULTS_PASS="$test_name"
+                    else
+                        RESULTS_PASS=$(printf "%s\n%s" "$RESULTS_PASS" "$test_name")
+                    fi
+                elif grep -q "FAIL" "$res_file"; then
+                    log_fail "$test_name failed"
+                    if [ -z "$RESULTS_FAIL" ]; then
+                        RESULTS_FAIL="$test_name"
+                    else
+                        RESULTS_FAIL=$(printf "%s\n%s" "$RESULTS_FAIL" "$test_name")
+                    fi
                 else
-                    RESULTS_PASS=$(printf "%s\n%s" "$RESULTS_PASS" "$test_name")
+                    log_fail "$test_name: unknown result in .res file"
+                    RESULTS_FAIL=$(printf "%s\n%s" "$RESULTS_FAIL" "$test_name (unknown result)")
                 fi
             else
-                log_fail "$test_name failed"
-                if [ -z "$RESULTS_FAIL" ]; then
-                    RESULTS_FAIL="$test_name"
-                else
-                    RESULTS_FAIL=$(printf "%s\n%s" "$RESULTS_FAIL" "$test_name")
-                fi
+                log_fail "$test_name: .res file not found"
+                RESULTS_FAIL=$(printf "%s\n%s" "$RESULTS_FAIL" "$test_name (.res not found)")
             fi
         else
             log_error "No run.sh found in $test_path"
@@ -95,6 +113,9 @@ print_summary() {
     echo
     echo "FAILED:"
     [ -n "$RESULTS_FAIL" ] && printf "%s\n" "$RESULTS_FAIL" || echo " None"
+    echo
+    echo "SKIPPED:"
+    [ -n "$RESULTS_SKIP" ] && printf "%s\n" "$RESULTS_SKIP" || echo " None"
     log_info "=================================="
 }
 
