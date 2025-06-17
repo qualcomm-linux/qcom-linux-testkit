@@ -83,11 +83,13 @@ log_info "rngtest: FIPS 140-2 successes = $successes"
 if [ "$successes" -ge 10 ]; then
     log_pass "$TESTNAME : Test Passed ($successes FIPS 140-2 successes)"
     echo "$TESTNAME PASS" > "$res_file"
+    rm -f "$TMP_BIN" "$TMP_OUT"
+    exit 0
 else
     log_fail "$TESTNAME : Test Failed ($successes FIPS 140-2 successes)"
     echo "$TESTNAME FAIL" > "$res_file"
+    rm -f "$TMP_BIN" "$TMP_OUT"
+    exit 1
 fi
-
-rm -f "$TMP_BIN" "$TMP_OUT"
 
 log_info "-------------------Completed $TESTNAME Testcase----------------------------"
