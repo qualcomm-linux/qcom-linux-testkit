@@ -16,7 +16,7 @@ jobs:
       - name: Detect missing executable permissions on shell scripts
         run: |
           # Find all .sh and run.sh scripts without +x
-          BAD=$(find . -type f -name 'run.sh' -o -name '*.sh' ! -perm -u=x)
+          BAD=$(find . -type f \( -name "*.sh" -o -name "run.sh" \) ! -perm -u=x)
           if [ -n "$BAD" ]; then
             echo "::error file=run.sh,line=1::❌ Some shell scripts are missing executable permissions. This can break CI and LAVA. Please fix before merging."
             echo "::error file=run.sh,line=2::To fix, run: find . -name '*.sh' -o -name 'run.sh' | xargs chmod +x && git add . && git commit -m 'Fix: restore executable bits on scripts' && git push"
