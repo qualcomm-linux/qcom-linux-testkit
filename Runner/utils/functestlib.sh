@@ -391,3 +391,51 @@ weston_start() {
     fi
 }
 
+# Find the remoteproc path for a given firmware substring (e.g., "adsp", "cdsp", "gdsp").
+get_remoteproc_path_by_firmware() {
+    name="$1"
+    local idx path
+    # List all remoteproc firmware nodes, match name, and return the remoteproc path
+    idx=$(cat /sys/class/remoteproc/remoteproc*/firmware 2>/dev/null | grep -n "$name" | cut -d: -f1 | head -n1)
+    [ -z "$idx" ] && return 1
+    idx=$((idx - 1))
+    path="/sys/class/remoteproc/remoteproc${idx}"
+    [ -d "$path" ] && echo "$path" && return 0
+    return 1
+}
+ 
+# Get current remoteproc state
+get_remoteproc_state() {
+    rproc_path="$1"
+    [ -f "$rproc_path/state" ] && cat "$rproc_path/state"
+}
+ 
+# Wait until remoteproc reaches a given state (with retries)
+wait_remoteproc_state() {
+    rproc_path="$1"
+    target="$2"
+    retries="${3:-6}"
+    i=0
+    while [ $i -lt "$retries" ]; do
+        state=$(get_remoteproc_state "$rproc_path")
+        [ "$state" = "$target" ] && return 0
+        sleep 1
+        i=$((i+1))
+    done
+    return 1
+}
+ 
+# Stop remoteproc (wait for "offline")
+stop_remoteproc() {
+    rproc_path="$1"
+    echo stop > "$rproc_path/state"
+    wait_remoteproc_state "$rproc_path" "offline" 6
+}
+ 
+# Start remoteproc (wait for "running")
+start_remoteproc() {
+    rproc_path="$1"
+    echo start > "$rproc_path/state"
+    wait_remoteproc_state "$rproc_path" "running" 6
+}
+ 

@@ -20,54 +20,58 @@ if [ -z "$INIT_ENV" ]; then
     exit 1
 fi
 
-# Only source if not already loaded (idempotent)
 if [ -z "$__INIT_ENV_LOADED" ]; then
     # shellcheck disable=SC1090
     . "$INIT_ENV"
 fi
-# Always source functestlib.sh, using $TOOLS exported by init_env
 # shellcheck disable=SC1090,SC1091
 . "$TOOLS/functestlib.sh"
 
-TESTNAME="storage"
+TESTNAME="gdsp_remoteproc"
 test_path=$(find_test_case_by_name "$TESTNAME")
 cd "$test_path" || exit 1
-# shellcheck disable=SC2034
 res_file="./$TESTNAME.res"
 
 log_info "-----------------------------------------------------------------------------------------"
 log_info "-------------------Starting $TESTNAME Testcase----------------------------"
 log_info "=== Test Initialization ==="
 
-log_info "Run the dd command to create a file with random data"
-dd if=/dev/random of=/tmp/a.txt bs=1M count=1024
-
-# Check if the file is created
-if [ -f /tmp/a.txt ]; then
-    echo "File /tmp/a.txt is created."
-
-    # Check if the file is not empty
-    if [ -s /tmp/a.txt ]; then
-        log_pass "File /tmp/a.txt is not empty. Test Passed"
-        log_pass "$TESTNAME : Test Passed"
-	echo "$TESTNAME PASS" > "$res_file"
-    else
-        log_fail "File /tmp/a.txt is empty. Test Failed."
-        log_fail "$TESTNAME : Test Failed"
-	echo "$TESTNAME FAIL" > "$res_file"
+for gdsp_firmware in gpdsp0 gpdsp1; do
+    log_info "Processing $gdsp_firmware"
+    rproc_path=$(get_remoteproc_path_by_firmware "$gdsp_firmware")
+    if [ -z "$rproc_path" ]; then
+        log_fail "$gdsp_firmware remoteproc path not found"
+        echo "$TESTNAME FAIL" > "$res_file"
+        exit 1
     fi
-else
-    log_fail "File /tmp/a.txt is not created. Test Failed"
-    log_fail "$TESTNAME : Test Failed"
-    echo "$TESTNAME FAIL" > "$res_file"
-fi
-if [ -f /tmp/a.txt ]; then
-    log_pass "$TESTNAME : Test Passed"
-    echo "$TESTNAME PASS" > "$res_file"
-    exit 0
-else
-    log_fail "$TESTNAME : Test Failed"
-    echo "$TESTNAME FAIL" > "$res_file"
-    exit 1
-fi
+
+    log_info "Found $gdsp_firmware remoteproc at $rproc_path"
+
+    state=$(get_remoteproc_state "$rproc_path")
+    if [ "$state" != "running" ]; then
+        log_fail "$gdsp_firmware not running initially"
+        echo "$TESTNAME FAIL" > "$res_file"
+        exit 1
+    fi
+
+    if ! stop_remoteproc "$rproc_path"; then
+        log_fail "$gdsp_firmware stop failed"
+        echo "$TESTNAME FAIL" > "$res_file"
+        exit 1
+    else
+        log_pass "$gdsp_firmware stop successful"
+    fi
+
+    log_info "Restarting $gdsp_firmware"
+    if ! start_remoteproc "$rproc_path"; then
+        log_fail "$gdsp_firmware start failed"
+        echo "$TESTNAME FAIL" > "$res_file"
+        exit 1
+    fi
+
+    log_pass "$gdsp_firmware PASS"
+done
+
+echo "$TESTNAME PASS" > "$res_file"
 log_info "-------------------Completed $TESTNAME Testcase----------------------------"
+exit 0
