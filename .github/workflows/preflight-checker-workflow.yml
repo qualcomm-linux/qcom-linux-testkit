@@ -6,6 +6,10 @@ on:
     branches: [ "main" ]
   workflow_dispatch:
 
+permissions:
+ contents: read
+ security-events: write
+
 jobs:
   checker:
     uses: qualcomm-linux/qli-actions/.github/workflows/multi-checker.yml@main
