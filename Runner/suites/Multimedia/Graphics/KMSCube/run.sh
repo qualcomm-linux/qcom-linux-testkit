@@ -27,7 +27,7 @@ fi
 # shellcheck disable=SC1090,SC1091
 . "$TOOLS/functestlib.sh"
 
-TESTNAME="kmscube"
+TESTNAME="KMSCube"
 FRAME_COUNT=999
 EXPECTED_FRAMES=$((FRAME_COUNT - 1))
 test_path=$(find_test_case_by_name "$TESTNAME")
