@@ -17,17 +17,27 @@ Ensure the following components are present in the target Yocto build:
 
 - `yavta and media-ctl` (available in /usr/bin/) 
 - To find the exact /dev/media node for our camss driver
-  # media-ctl -p -d /dev/media 'y' | grep camss ['y' has to be replaced with media0 or media1 eg: /dev/media0, /dev/media1]
+  ```
+  media-ctl -p -d /dev/media 'y' | grep camss ['y' has to be replaced with media0 or media1 eg: /dev/media0, /dev/media1]
+
   Output will be # driver   qcom-camss [for probed media]
+  ```
 - To find list avaliable device files
-  #v4l2-ctl --list-devices
+  ```
+  v4l2-ctl --list-devices
+  ```
   Output will be # video0 video1 video2 ...
 - /dev/video# linking to RDI port is dynamic not fixed , user need to identify the correct video device file(by trail and error) to use in yavta RDI dump command
+
   'y' has to be replaced eg: /dev/video0, /dev/video1 depending on RDI port configured..
-  #yavta -B capture-mplane -c -I -n 5 -f SRGGB10P -s 4056x3040 -F /dev/video'y' --capture=5 --file='frame-#.bin'  
+  ```
+  yavta -B capture-mplane -c -I -n 5 -f SRGGB10P -s 4056x3040 -F /dev/video'y' --capture=5 --file='frame-#.bin'  
+  ```
 - Write access to root filesystem (for environment setup)
+  ```
   mount -o rw,remount /
   mount -o rw,remount /usr
+  ```
   
 ## Directory Structure
 
