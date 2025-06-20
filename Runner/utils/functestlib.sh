@@ -3,6 +3,9 @@
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause-Clear
 
+# Suppress 'Broken pipe' errors globally in this shell (put this at the very top once)
+trap '' PIPE
+
 # --- Logging helpers ---
 log() {
     level=$1
@@ -391,3 +394,168 @@ weston_start() {
     fi
 }
 
+# Returns true (0) if interface is administratively and physically up
+is_interface_up() {
+    iface="$1"
+    if [ -f "/sys/class/net/$iface/operstate" ]; then
+        [ "$(cat "/sys/class/net/$iface/operstate")" = "up" ]
+    elif command -v ip >/dev/null 2>&1; then
+        ip link show "$iface" 2>/dev/null | grep -qw "state UP"
+    elif command -v ifconfig >/dev/null 2>&1; then
+        ifconfig "$iface" 2>/dev/null | grep -qw "UP"
+    else
+        return 1
+    fi
+}
+
+# Returns true (0) if physical link/carrier is detected (cable plugged in)
+is_link_up() {
+    iface="$1"
+    [ -f "/sys/class/net/$iface/carrier" ] && [ "$(cat "/sys/class/net/$iface/carrier")" = "1" ]
+}
+
+# Returns true (0) if interface is Ethernet type (type 1 in sysfs)
+is_ethernet_interface() {
+    iface="$1"
+    [ -f "/sys/class/net/$iface/type" ] && [ "$(cat "/sys/class/net/$iface/type")" = "1" ]
+}
+
+# Get all Ethernet interfaces (excluding common virtual types)
+get_ethernet_interfaces() {
+    for path in /sys/class/net/*; do
+        iface=$(basename "$path")
+        case "$iface" in
+            lo|docker*|br-*|veth*|virbr*|tap*|tun*|wl*) continue ;;
+        esac
+        if is_ethernet_interface "$iface"; then
+            echo "$iface"
+        fi
+    done
+}
+
+# Bring up interface with retries (down before up).
+bringup_interface() {
+    iface="$1"; retries="${2:-3}"; sleep_sec="${3:-2}"; i=0
+    while [ $i -lt "$retries" ]; do
+        if command -v ip >/dev/null 2>&1; then
+            ip link set "$iface" down
+            sleep 1
+            ip link set "$iface" up
+            sleep "$sleep_sec"
+            ip link show "$iface" | grep -q "state UP" && return 0
+        elif command -v ifconfig >/dev/null 2>&1; then
+            ifconfig "$iface" down
+            sleep 1
+            ifconfig "$iface" up
+            sleep "$sleep_sec"
+            ifconfig "$iface" | grep -q "UP" && return 0
+        fi
+        i=$((i + 1))
+    done
+    return 1
+}
+
+# Wait for a valid IPv4 address on the given interface, up to a timeout (default 30s)
+wait_for_ip_address() {
+    iface="$1"
+    timeout="${2:-30}"
+    elapsed=0
+    while [ "$elapsed" -lt "$timeout" ]; do
+        ip_addr=$(get_ip_address "$iface")
+        if [ -n "$ip_addr" ]; then
+            if echo "$ip_addr" | grep -q '^169\.254'; then
+                echo "$ip_addr"
+                return 2
+            fi
+            echo "$ip_addr"
+            return 0
+        fi
+        sleep 1
+        elapsed=$((elapsed + 1))
+    done
+    return 1
+}
+
+# Get the IPv4 address for a given interface.
+get_ip_address() {
+    iface="$1"
+    if command -v ip >/dev/null 2>&1; then
+        ip -4 -o addr show "$iface" | awk '{print $4}' | cut -d/ -f1 | head -n1
+    elif command -v ifconfig >/dev/null 2>&1; then
+        ifconfig "$iface" 2>/dev/null | awk '/inet / {print $2}' | head -n1
+    fi
+}
+
+# Run a command with a timeout (in seconds)
+run_with_timeout() {
+    timeout="$1"; shift
+    ( "$@" ) &
+    pid=$!
+    ( sleep "$timeout"; kill "$pid" 2>/dev/null ) &
+    watcher=$!
+    wait $pid 2>/dev/null
+    status=$?
+    kill $watcher 2>/dev/null
+    return $status
+}
+
+# DHCP client logic (dhclient and udhcpc with timeouts)
+run_dhcp_client() {
+    iface="$1"
+    timeout="${2:-10}"
+    ip_addr=""
+    log_info "Attempting DHCP on $iface (timeout ${timeout}s)..."
+    if command -v dhclient >/dev/null 2>&1; then
+        log_info "Trying dhclient for $iface"
+        run_with_timeout "$timeout" dhclient "$iface"
+        ip_addr=$(wait_for_ip_address "$iface" 5)
+        if [ -n "$ip_addr" ]; then
+            echo "$ip_addr"
+            return 0
+        fi
+    fi
+    if command -v udhcpc >/dev/null 2>&1; then
+        log_info "Trying udhcpc for $iface"
+        run_with_timeout "$timeout" udhcpc -i "$iface" -T 3 -t 3
+        ip_addr=$(wait_for_ip_address "$iface" 5)
+        if [ -n "$ip_addr" ]; then
+            echo "$ip_addr"
+            return 0
+        fi
+    fi
+    log_warn "DHCP failed for $iface"
+    return 1
+}
+
+# Safely run DHCP client without disrupting existing config
+try_dhcp_client_safe() {
+    iface="$1"
+    timeout="${2:-10}"
+
+    current_ip=$(get_ip_address "$iface")
+    if [ -n "$current_ip" ] && ! echo "$current_ip" | grep -q '^169\.254'; then
+        log_info "$iface already has valid IP: $current_ip. Skipping DHCP."
+        return 0
+    fi
+
+    if ! command -v udhcpc >/dev/null 2>&1; then
+        log_warn "udhcpc not found, skipping DHCP attempt"
+        return 1
+    fi
+
+    # Use a no-op script to avoid flushing IPs
+    safe_dhcp_script="/tmp/dhcp-noop-$$.sh"
+    cat <<'EOF' > "$safe_dhcp_script"
+#!/bin/sh
+exit 0
+EOF
+    chmod +x "$safe_dhcp_script"
+
+    log_info "Attempting DHCP on $iface safely..."
+    (udhcpc -i "$iface" -n -q -s "$safe_dhcp_script" >/dev/null 2>&1) &
+    dhcp_pid=$!
+    sleep "$timeout"
+    kill "$dhcp_pid" 2>/dev/null
+    rm -f "$safe_dhcp_script"
+    return 0
+}

@@ -14,6 +14,8 @@ metadata:
 run:
     steps:
         - cd Runner
+        - $PWD/suites/Connectivity/Ethernet/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Connectivity/Ethernet/Ethernet.res || true
         - $PWD/suites/Kernel/FunctionalArea/baseport/adsp_remoteproc/run.sh || true
         - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/FunctionalArea/baseport/adsp_remoteproc/adsp_remoteproc.res || true
         - $PWD/suites/Kernel/FunctionalArea/baseport/cdsp_remoteproc/run.sh || true
@@ -36,6 +38,4 @@ run:
         - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/Audio/AudioRecord/AudioRecord.res || true
         - $PWD/suites/Connectivity/Bluetooth/run.sh || true
         - $PWD/utils/send-to-lava.sh $PWD/suites/Connectivity/Bluetooth/Bluetooth.res || true
-        - $PWD/suites/Connectivity/Ethernet/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Connectivity/Ethernet/Ethernet.res || true
         - $PWD/utils/result_parse.sh
