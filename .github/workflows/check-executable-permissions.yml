@@ -1,10 +1,14 @@
 name: Enforce Script Executable Permissions
 
 on:
-  pull_request:
+  pull_request_target:
+    branches: [ "main" ]
     paths:
       - '**/run.sh'
       - '**/*.sh'
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
 
 jobs:
   permissions:

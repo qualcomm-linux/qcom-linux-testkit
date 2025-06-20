@@ -1,6 +1,11 @@
 name: Shell Lint
 
-on: [pull_request, push]
+on:
+  pull_request_target:
+    branches: [ "main" ]
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
 
 jobs:
   shellcheck:
