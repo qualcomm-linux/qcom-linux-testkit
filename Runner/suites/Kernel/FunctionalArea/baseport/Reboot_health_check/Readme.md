@@ -1,139 +1,91 @@
-Overview
+# Reboot Health Check Test
 
-This script automates a full reboot validation and health check for any embedded Linux system.
-It ensures that after each reboot, the system:
+This test automates a full reboot validation and health check for an embedded Linux system. It ensures that after a reboot, the system:
 
-Boots correctly to shell
+- Boots into a stable shell
+- Key filesystems (`/proc`, `/sys`, `/tmp`, `/dev`) are accessible
+- Kernel version is accessible
+- Networking stack is functional
 
-Key directories (/proc, /sys, /tmp, /dev) are available
-
-Kernel version is accessible
-
-Networking stack is functional
-
-
-It supports auto-retry on failures, with configurable maximum retries.
-
-No dependency on cron, systemd, Yocto specifics — purely portable.
-
+This script is useful for validating device boot health as part of CI, flashing, or kernel testing workflows.
 
 ---
 
-Features
+## Overview
 
-Automatic setup of a temporary boot hook
+The test script performs the following functional checks:
 
-Reboot and post-boot health validations
+1. **Boot Validation**
+   - Ensures the system boots into a stable shell.
 
-Detailed logs with PASS/FAIL results
+2. **Filesystem Accessibility**
+   - Confirms that key filesystems (`/proc`, `/sys`, `/tmp`, `/dev`) are accessible.
 
-Auto-retry mechanism up to a configurable limit
+3. **Kernel Version Check**
+   - Verifies that the kernel version is accessible.
 
-Safe cleanup of temp files and hooks after success or failure
+4. **Networking Stack Verification**
+   - Checks that the networking stack is functional.
 
-Color-coded outputs for easy reading
+---
+## Files Used
 
-Lightweight and BusyBox compatible
-
-
+| File / Path                                      | Description                                                                 |
+|--------------------------------------------------|-----------------------------------------------------------------------------|
+| `run.sh`                                         | Main script to execute the reboot validation test                          |
+| `/var/reboot_health/`                            | Directory to store log and retry-related files                             |
+| `/var/reboot_health/reboot_test.log`             | Persistent log file for all test outputs                                   |
+| `/var/reboot_health/reboot_retry_count`          | File storing number of reboot retries (used internally)                    |
+| `/var/reboot_marker`                             | Temporary marker to differentiate pre- and post-reboot states              |
+| `/etc/systemd/system/reboot-health.service`      | systemd service file to autostart reboot health check after boot           |
+| `/var/common/reboot_health_check.sh`             | Actual reboot validation script that is called on system boot              |
 
 ---
 
-Usage
-
-Step 1: Copy the script to your device
-
-scp reboot_health_check_autoretry.sh root@<device_ip>:/tmp/
-
-Step 2: Make it executable
-
-chmod +x /tmp/reboot_health_check_autoretry.sh
-
-Step 3: Run the script
-
-/tmp/reboot_health_check_autoretry.sh
-
-The script will automatically:
-
-Create a flag and self-copy to survive reboot
-
-Setup a temporary /etc/init.d/ hook
-
-Force reboot
-
-On reboot, validate the system
-
-Retry if needed
-
-
 
 ---
-
-Log File
-
-All outputs are stored in /tmp/reboot_test.log
-
-Summarizes all individual tests and overall result
-
-
-
+## Service setup:
+1. Copy the `reboot-health.service` file to:
+Enable the service:
+systemctl`enable reboot-health.service`
 ---
 
-Configuration
+---
+## Manual Run Instructions:
 
-Modify these inside the script if needed:
+1. **make the script excuetable**
+    `chmod +x run.sh`
 
-
+2. **Run the test using:**
+   `./run-test.sh Reboot_health_check`
 ---
 
-Pass/Fail Criteria
-
-
 ---
+## Sample output:
+```text
+[2025-05-22 18:11:00] [START] Reboot Health Test Started
+[2025-05-22 18:11:00] [INFO] Reboot marker not found. Rebooting now...
+Rebooting...
 
-Limitations
+...system reboots...
 
-Requires basic /bin/sh shell (ash, bash, dash supported)
-
-Needs writable /tmp/ and /etc/init.d/
-
-Does not rely on systemd, cron, or external daemons
-
-
-
+[2025-05-22 18:11:10] [START] Reboot Health Test Started
+[2025-05-22 18:11:10] [PASS] System booted successfully and root shell obtained.
+[2025-05-22 18:11:10] [OVERALL PASS] Reboot + Health Check successful!
+```
 ---
-
-Cleanup
-
-Script automatically:
-
-Removes temporary boot hook
-
-Deletes self-copy after successful completion
-
-Cleans retry counters
-
-
-You don't need to manually intervene.
-
-
 ---
-
-Example Run Output
-
-2025-04-26 19:45:20 [START] Reboot Health Test Started
-2025-04-26 19:45:21 [STEP] Preparing system for reboot test...
-2025-04-26 19:45:23 [INFO] System will reboot now to perform validation.
-(reboots)
-
-2025-04-26 19:46:10 [STEP] Starting post-reboot validation...
-2025-04-26 19:46:11 [PASS] Boot flag detected. System reboot successful.
-2025-04-26 19:46:12 [PASS] Shell is responsive.
-2025-04-26 19:46:12 [PASS] Directory /proc exists.
-2025-04-26 19:46:12 [PASS] Directory /sys exists.
-2025-04-26 19:46:12 [PASS] Directory /tmp exists.
-2025-04-26 19:46:12 [PASS] Directory /dev exists.
-2025-04-26 19:46:12 [PASS] Kernel version: 6.6.65
-2025-04-26 19:46:13 [PASS] Network stack active (ping localhost successful).
-2025-04-26 19:46:13 [OVERALL PASS] Reboot + Health Check successful!
+## Notes:
+```text
+The device takes approximately 10 seconds to reach shell after reboot.
+Log file is persistent and accumulates output from all runs.
+You can manually clear logs using:
+ `rm -f /var/reboot_health/reboot_test.log`
+```
+---
+## License:
+```text
+SPDX-License-Identifier: BSD-3-Clause-Clear
+(C) Qualcomm Technologies, Inc. and/or its subsidiaries.
+```
 
