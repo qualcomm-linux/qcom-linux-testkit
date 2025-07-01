@@ -1,0 +1,59 @@
+metadata:
+    format: Lava-Test Test Definition 1.0
+    name: AUSanity
+    description: "Baseline AU Sanity test plan"
+    maintainer:
+        - vnarapar@qti.qualcomm.com
+    os:
+        - openembedded
+    scope:
+        - functional
+    devices:
+        - rb3gen2
+
+run:
+    steps:
+        - cd Runner
+        - $PWD/suites/Kernel/FunctionalArea/baseport/adsp_remoteproc/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/FunctionalArea/baseport/adsp_remoteproc/adsp_remoteproc.res || true
+        - $PWD/suites/Kernel/FunctionalArea/baseport/cdsp_remoteproc/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/FunctionalArea/baseport/cdsp_remoteproc/cdsp_remoteproc.res || true
+        - $PWD/suites/Kernel/FunctionalArea/baseport/CPUFreq_Validation/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/FunctionalArea/baseport/CPUFreq_Validation/CPUFreq_Validation.res || true
+        - $PWD/suites/Kernel/FunctionalArea/baseport/GIC/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/FunctionalArea/baseport/GIC/GIC.res || true
+        - $PWD/suites/Kernel/FunctionalArea/baseport/hotplug/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/FunctionalArea/baseport/hotplug/hotplug.res || true
+        - $PWD/suites/Kernel/FunctionalArea/baseport/Interrupts/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/FunctionalArea/baseport/Interrupts/Interrupts.res || true
+        - $PWD/suites/Kernel/FunctionalArea/baseport/irq/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/FunctionalArea/baseport/irq/irq.res || true
+        - $PWD/suites/Kernel/FunctionalArea/baseport/kaslr/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/FunctionalArea/baseport/kaslr/kaslr.res || true
+        - $PWD/suites/Kernel/FunctionalArea/baseport/MEMLAT/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/FunctionalArea/baseport/MEMLAT/MEMLAT.res || true
+        - $PWD/suites/Kernel/FunctionalArea/baseport/pinctrl/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/FunctionalArea/baseport/pinctrl/pinctrl.res || true
+        - $PWD/suites/Kernel/FunctionalArea/baseport/Reboot_health_check/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/FunctionalArea/baseport/Reboot_health_check/Reboot_health_check.res || true
+        - $PWD/suites/Kernel/FunctionalArea/baseport/remoteproc/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/FunctionalArea/baseport/remoteproc/remoteproc.res || true
+        - $PWD/suites/Kernel/FunctionalArea/baseport/RMNET/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/FunctionalArea/baseport/RMNET/RMNET.res || true
+        - $PWD/suites/Kernel/FunctionalArea/baseport/IPA/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/FunctionalArea/baseport/IPA/IPA.res || true
+        - $PWD/suites/Kernel/FunctionalArea/baseport/Probe_Failure_Check/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/FunctionalArea/baseport/Probe_Failure_Check/Probe_Failure_Check.res || true
+        - $PWD/suites/Kernel/FunctionalArea/baseport/rngtest/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/FunctionalArea/baseport/rngtest/rngtest.res || true
+        - $PWD/suites/Kernel/FunctionalArea/baseport/smmu/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/FunctionalArea/baseport/smmu/smmu.res || true
+        - $PWD/suites/Kernel/FunctionalArea/baseport/storage/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/FunctionalArea/baseport/storage/storage.res || true
+        - $PWD/suites/Kernel/FunctionalArea/baseport/wpss_remoteproc/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/FunctionalArea/baseport/wpss_remoteproc/wpss_remoteproc.res || true
+        - $PWD/suites/Kernel/FunctionalArea/DCVS/Freq_Scaling/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/FunctionalArea/DCVS/Freq_Scaling/Freq_Scaling.res || true
+        - $PWD/suites/Kernel/FunctionalArea/Scheduler/CPU_affinity/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/FunctionalArea/Scheduler/CPU_affinity/CPU_affinity.res || true
+        - $PWD/utils/result_parse.sh

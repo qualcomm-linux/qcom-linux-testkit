@@ -1,0 +1,46 @@
+name: Enforce Script Executable Permissions
+
+on:
+  pull_request_target:
+    branches: [ "main" ]
+    paths:
+      - '**/run.sh'
+      - '**/*.sh'
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  permissions:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Detect missing executable permissions on shell scripts
+        run: |
+          # Find all .sh and run.sh scripts without +x
+          BAD=$(find . -type f \( -name "*.sh" -o -name "run.sh" \) ! -perm -u=x)
+          if [ -n "$BAD" ]; then
+            echo "::error file=run.sh,line=1::❌ Some shell scripts are missing executable permissions. This can break CI and LAVA. Please fix before merging."
+            echo "::error file=run.sh,line=2::To fix, run: find . -name '*.sh' -o -name 'run.sh' | xargs chmod +x && git add . && git commit -m 'Fix: restore executable bits on scripts' && git push"
+            echo ""
+            echo "The following scripts need 'chmod +x':"
+            echo "$BAD"
+            # Output a PR annotation for each file
+            echo "$BAD" | while read -r file; do
+              echo "::error file=$file,line=1::$file is not executable. Please run: chmod +x $file && git add $file"
+            done
+            exit 1
+          else
+            echo "✅ All shell scripts have correct executable permissions."
+          fi
+
+      - name: Detect accidental executables on non-shell files (optional, warning only)
+        run: |
+          # (Advanced/optional) Warn if any non-.sh file has +x (customize as needed)
+          OTHER_EXEC=$(find . -type f ! -name '*.sh' ! -name 'run.sh' -perm -u=x)
+          if [ -n "$OTHER_EXEC" ]; then
+            echo "::warning file=run.sh,line=1::Warning: Non-shell files with executable permissions detected. Review if needed."
+            echo "$OTHER_EXEC"
+          fi

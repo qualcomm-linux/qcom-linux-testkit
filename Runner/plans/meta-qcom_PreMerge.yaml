@@ -1,0 +1,41 @@
+metadata:
+    format: Lava-Test Test Definition 1.0
+    name: meta_qcom
+    description: "Meta QCOM Premerge test plan"
+    maintainer:
+        - vnarapar@qti.qualcomm.com
+    os:
+        - openembedded
+    scope:
+        - functional
+    devices:
+        - rb3gen2
+
+run:
+    steps:
+        - cd Runner
+        - $PWD/suites/Kernel/FunctionalArea/baseport/adsp_remoteproc/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/FunctionalArea/baseport/adsp_remoteproc/adsp_remoteproc.res || true
+        - $PWD/suites/Kernel/FunctionalArea/baseport/cdsp_remoteproc/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/FunctionalArea/baseport/cdsp_remoteproc/cdsp_remoteproc.res || true
+        - $PWD/suites/Kernel/FunctionalArea/baseport/IPA/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/FunctionalArea/baseport/IPA/IPA.res || true
+        - $PWD/suites/Kernel/FunctionalArea/baseport/pinctrl/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/FunctionalArea/baseport/pinctrl/pinctrl.res || true
+        - $PWD/suites/Kernel/FunctionalArea/baseport/remoteproc/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/FunctionalArea/baseport/remoteproc/remoteproc.res || true
+        - $PWD/suites/Kernel/FunctionalArea/baseport/wpss_remoteproc/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/FunctionalArea/baseport/wpss_remoteproc/wpss_remoteproc.res || true
+        - $PWD/suites/Multimedia/Graphics/KMSCube/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/Graphics/KMSCube/KMSCube.res || true
+        - $PWD/suites/Multimedia/Graphics/weston-simple-egl/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/Graphics/weston-simple-egl/weston-simple-egl.res || true
+        - $PWD/suites/Multimedia/Audio/AudioPlayback/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/Audio/AudioPlayback/AudioPlayback.res || true
+        - $PWD/suites/Multimedia/Audio/AudioRecord/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/Audio/AudioRecord/AudioRecord.res || true
+        - $PWD/suites/Connectivity/Bluetooth/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Connectivity/Bluetooth/Bluetooth.res || true
+        - $PWD/suites/Connectivity/Ethernet/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Connectivity/Ethernet/Ethernet.res || true
+        - $PWD/utils/result_parse.sh

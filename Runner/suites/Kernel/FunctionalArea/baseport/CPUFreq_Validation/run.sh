@@ -1,131 +1,120 @@
+#!/bin/sh
+
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause-Clear
 
-#!/bin/bash
-
-# CPUFreq Validator: Parallel, Colorized
-/var/Runner/init_env
-TESTNAME="CPUFreq_Validation"
-
-#import test functions library
-source $TOOLS/functestlib.sh
-test_path=$(find_test_case_by_name "$TESTNAME")
-log_info "-----------------------------------------------------------------------------------------"
-log_info "-------------------Starting $TESTNAME Testcase----------------------------"
-log_info "=== CPUFreq Frequency Walker with Validation ==="
-
-# Color codes
-GREEN="\e[32m"
-RED="\e[31m"
-YELLOW="\e[33m"
-BLUE="\e[34m"
-NC="\e[0m" # No Color
-
-NUM_CPUS=$(nproc)
-echo -e "${YELLOW}Detected $NUM_CPUS CPU cores.${NC}"
-
-overall_pass=true
-declare -A core_status
-
-validate_cpu_core() {
-    local cpu=$1
-    local core_id=$2
-
-    echo -e "${BLUE}Processing $cpu...${NC}"
-
-    if [ ! -d "$cpu/cpufreq" ]; then
-        echo -e "${BLUE}[SKIP]${NC} $cpu does not support cpufreq."
-        core_status["$core_id"]="skip"
-        return
+# Robustly find and source init_env
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+INIT_ENV=""
+SEARCH="$SCRIPT_DIR"
+while [ "$SEARCH" != "/" ]; do
+    if [ -f "$SEARCH/init_env" ]; then
+        INIT_ENV="$SEARCH/init_env"
+        break
     fi
-
-    available_freqs=$(cat "$cpu/cpufreq/scaling_available_frequencies" 2>/dev/null)
-
-    if [ -z "$available_freqs" ]; then
-        echo -e "${YELLOW}[INFO]${NC} No available frequencies for $cpu. Skipping..."
-        core_status["$core_id"]="skip"
-        return
-    fi
-
-    # Set governor to userspace
-    if echo "userspace" | tee "$cpu/cpufreq/scaling_governor" > /dev/null; then
-        echo -e "${YELLOW}[INFO]${NC} Set governor to userspace."
-    else
-        echo -e "${RED}[ERROR]${NC} Cannot set userspace governor for $cpu."
-        core_status["$core_id"]="fail"
-        return
-    fi
-
-    core_status["$core_id"]="pass"  # Assume pass unless a failure happens
-
-    for freq in $available_freqs; do
-        log_info "Setting $cpu to frequency $freq kHz..."
-        if echo $freq | tee "$cpu/cpufreq/scaling_setspeed" > /dev/null; then
-            sleep 0.2
-            actual_freq=$(cat "$cpu/cpufreq/scaling_cur_freq")
-            if [ "$actual_freq" == "$freq" ]; then
-                echo -e "${GREEN}[PASS]${NC} $cpu set to $freq kHz."
-            else
-                echo -e "${RED}[FAIL]${NC} Tried to set $cpu to $freq kHz, but current is $actual_freq kHz."
-                core_status["$core_id"]="fail"
-            fi
-        else
-            echo -e "${RED}[ERROR]${NC} Failed to set $cpu to $freq kHz."
-            core_status["$core_id"]="fail"
-        fi
-    done
-
-    # Restore governor
-    echo "Restoring $cpu governor to 'ondemand'..."
-    echo "ondemand" | sudo tee "$cpu/cpufreq/scaling_governor" > /dev/null
-}
-
-# Launch validation per CPU in parallel
-cpu_index=0
-for cpu in /sys/devices/system/cpu/cpu[0-9]*; do
-    validate_cpu_core "$cpu" "$cpu_index" &
-    ((cpu_index++))
+    SEARCH=$(dirname "$SEARCH")
 done
 
-# Wait for all background jobs to finish
-wait
-
-# Summary
-log_info ""
-log_info "=== Per-Core Test Summary ==="
-for idx in "${!core_status[@]}"; do
-    status=${core_status[$idx]}
-    case "$status" in
-        pass)
-            echo -e "CPU$idx: ${GREEN}[PASS]${NC}"
-            ;;
-        fail)
-            echo -e "CPU$idx: ${RED}[FAIL]${NC}"
-            overall_pass=false
-            ;;
-        skip)
-            echo -e "CPU$idx: ${BLUE}[SKIPPED]${NC}"
-            ;;
-        *)
-            echo -e "CPU$idx: ${RED}[UNKNOWN STATUS]${NC}"
-            overall_pass=false
-            ;;
-    esac
-done
-
-# Overall result
-log_info ""
-log_info "=== Overall CPUFreq Validation Result ==="
-if $overall_pass; then
-    echo -e "${GREEN}[OVERALL PASS]${NC} All CPUs validated successfully."
-	log_pass "$TESTNAME : Test Passed"
-    echo "$TESTNAME : Test Passed" > $test_path/$TESTNAME.res
-    exit 0
-else
-    echo -e "${RED}[OVERALL FAIL]${NC} Some CPUs failed frequency validation."
-	log_fail "$TESTNAME : Test Failed"
-	echo "$TESTNAME : Test Failed" > $test_path/$TESTNAME.res
+if [ -z "$INIT_ENV" ]; then
+    echo "[ERROR] Could not find init_env (starting at $SCRIPT_DIR)" >&2
     exit 1
 fi
 
-log_info "-------------------Completed $TESTNAME Testcase----------------------------"
+if [ -z "$__INIT_ENV_LOADED" ]; then
+    # shellcheck disable=SC1090
+    . "$INIT_ENV"
+fi
+# shellcheck disable=SC1090,SC1091
+. "$TOOLS/functestlib.sh"
+
+TESTNAME="CPUFreq_Validation"
+test_path=$(find_test_case_by_name "$TESTNAME")
+cd "$test_path" || exit 1
+res_file="./$TESTNAME.res"
+
+log_info "------------------------------------------------------------"
+log_info "Starting $TESTNAME Testcase"
+
+overall_pass=0
+status_dir="/tmp/cpufreq_status.$$"
+mkdir -p "$status_dir"
+
+for policy_dir in /sys/devices/system/cpu/cpufreq/policy*; do
+    policy=$(basename "$policy_dir")
+
+    if [ ! -d "$policy_dir" ]; then
+        log_warn "Skipping $policy_dir, not a directory"
+        continue
+    fi
+
+    cpus=$(cat "$policy_dir/related_cpus" 2>/dev/null)
+    [ -z "$cpus" ] && {
+        log_warn "No related CPUs found for $policy_dir"
+        continue
+    }
+
+    available_freqs=$(cat "$policy_dir/scaling_available_frequencies" 2>/dev/null)
+    [ -z "$available_freqs" ] && {
+        log_warn "No available frequencies for $policy_dir"
+        continue
+    }
+
+    original_governor=$(cat "$policy_dir/scaling_governor" 2>/dev/null)
+    if ! echo "userspace" > "$policy_dir/scaling_governor"; then
+        log_fail "$policy_dir: Unable to set userspace governor"
+        echo "fail" > "$status_dir/$policy"
+        overall_pass=1
+        continue
+    fi
+
+    echo "pass" > "$status_dir/$policy"
+
+    for freq in $available_freqs; do
+        log_info "$policy: Trying frequency $freq"
+        echo "$freq" > "$policy_dir/scaling_min_freq" 2>/dev/null
+        echo "$freq" > "$policy_dir/scaling_max_freq" 2>/dev/null
+        if ! echo "$freq" > "$policy_dir/scaling_setspeed" 2>/dev/null; then
+            log_warn "$policy: Kernel rejected frequency $freq"
+            continue
+        fi
+
+        sleep 0.3
+        cur_freq=$(cat "$policy_dir/scaling_cur_freq" 2>/dev/null)
+
+        if [ "$cur_freq" = "$freq" ]; then
+            log_info "[PASS] $policy reached $freq kHz"
+        else
+            log_warn "Mismatch freq: tried $freq, got $cur_freq on $policy"
+            echo "fail" > "$status_dir/$policy"
+            overall_pass=1
+        fi
+    done
+
+    echo "$original_governor" > "$policy_dir/scaling_governor"
+done
+
+log_info ""
+log_info "=== Per-Policy CPU Group Summary ==="
+for f in "$status_dir"/*; do
+    policy=$(basename "$f")
+    result=$(cat "$f")
+    cpus=$(tr '\n' ' ' < "/sys/devices/system/cpu/cpufreq/$policy/related_cpus")
+    cpulist=$(echo "$cpus" | sed 's/ /,/g')
+    status_str=$(echo "$result" | tr '[:lower:]' '[:upper:]')
+    echo "CPU$cpulist [via $policy] = $status_str"
+done
+
+log_info ""
+log_info "=== Final Result ==="
+if [ "$overall_pass" -eq 0 ]; then
+    log_pass "$TESTNAME: All policies passed"
+    echo "$TESTNAME PASS" > "$res_file"
+    exit 0
+else
+    log_fail "$TESTNAME: One or more policies failed"
+    echo "$TESTNAME FAIL" > "$res_file"
+    exit 1
+fi
+
+rm -rf "$status_dir"
+exit "$overall_pass"

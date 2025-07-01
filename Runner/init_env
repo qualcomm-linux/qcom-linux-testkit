@@ -1,14 +1,40 @@
+#!/bin/sh
+
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause-Clear
 
-# Source this file to setup the test suite environment
-if [ -e '/var/Runner' ];then
-    export BASEDIR='/var/Runner'
-    export TOOLS='/var/Runner/utils'
-    export SUITES='/var/Runner/suites'
-    export CALIBRATION='/var/Runner/calib.txt'
-    export FTRACE_EVENTS='/var/Runner/ftrace_events'
-	export PATH=$PATH:'/bin'
-	export PATH=$PATH:'/sbin'
+# Idempotency guard: only initialize ONCE per shell session
+[ -n "$__INIT_ENV_LOADED" ] && return
+__INIT_ENV_LOADED=1
+
+# (Optional) Remove/comment log line below to keep CI logs clean:
+# echo "[INFO] init_env loaded."
+
+# --- Robust root detection ---
+if [ -z "$ROOT_DIR" ]; then
+    # Fast path: current working directory is root
+    if [ -d "./utils" ] && [ -d "./suites" ]; then
+        ROOT_DIR="$(pwd)"
+    else
+        # Fallback: walk up from this script's location
+        _script_dir="$(cd "$(dirname "$0")" && pwd)"
+        _search="$_script_dir"
+        while [ "$_search" != "/" ]; do
+            if [ -d "$_search/utils" ] && [ -d "$_search/suites" ]; then
+                ROOT_DIR="$_search"
+                break
+            fi
+            _search=$(dirname "$_search")
+        done
+    fi
 fi
 
+if [ ! -d "$ROOT_DIR/utils" ] || [ ! -f "$ROOT_DIR/utils/functestlib.sh" ]; then
+echo "[ERROR] Could not detect testkit root (missing utils/ or functestlib.sh)" >&2
+    exit 1
+fi
+
+export ROOT_DIR
+export TOOLS="$ROOT_DIR/utils"
+export __RUNNER_SUITES_DIR="$ROOT_DIR/suites"
+export __RUNNER_UTILS_BIN_DIR="$ROOT_DIR/common"
