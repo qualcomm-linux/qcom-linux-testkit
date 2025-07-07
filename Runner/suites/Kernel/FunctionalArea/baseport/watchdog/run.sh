@@ -39,15 +39,26 @@ log_info "----------------------------------------------------------------------
 log_info "-------------------Starting $TESTNAME Testcase----------------------------"
 log_info "=== Test Initialization ==="
 
+soc_id=$(getsocId)
+
+if [ $soc_id == 498 ]; then
+	log_skip "Testcase not applicable to this target"
+	echo "$TESTNAME SKIP" > "$res_file"
+    exit 0
+fi
+
 if [ -e /dev/watchdog ]; then
     log_pass "/dev/watchdog node is present."
+    CONFIGS="CONFIG_WATCHDOG CONFIG_WATCHDOG_HANDLE_BOOT_ENABLED"
+    check_kernel_config "$CONFIGS" || {
+        log_fail "$TESTNAME : Required kernel configs missing"
+		log_fail "$TESTNAME FAIL"
+        echo "$TESTNAME FAIL" > "$res_file"
+        exit 1
+    }
     log_pass "$TESTNAME : Test Passed"
     echo "$TESTNAME PASS" > "$res_file"
-    exit 0
-else
-    log_fail "/dev/watchdog node is not present."
-    log_fail "$TESTNAME : Test Failed"
-    echo "$TESTNAME FAIL" > "$res_file"
-    exit 1
+	exit 0
 fi
+echo "$TESTNAME FAIL" > "$res_file"
 log_info "-------------------Completed $TESTNAME Testcase---------------------------"
