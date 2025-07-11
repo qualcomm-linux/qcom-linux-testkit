@@ -40,31 +40,26 @@ log_info "------------ Starting $TESTNAME Test -------------"
 
 check_dependencies dd grep cut head tail udevadm
 
-# --- Kernel Config Checks ---
 MANDATORY_CONFIGS="CONFIG_MMC CONFIG_MMC_BLOCK"
 OPTIONAL_CONFIGS="CONFIG_MMC_SDHCI CONFIG_MMC_SDHCI_MSM CONFIG_MMC_BLOCK_MINORS"
 
-missing_optional=""
 log_info "Checking mandatory kernel configs for eMMC..."
 if ! check_kernel_config "$MANDATORY_CONFIGS" 2>/dev/null; then
-    log_skip "Missing one or more mandatory eMMC kernel configs: $MANDATORY_CONFIGS"
+    log_skip "Missing mandatory eMMC kernel configs: $MANDATORY_CONFIGS"
     echo "$TESTNAME SKIP" > "$res_file"
     exit 0
 fi
 
 log_info "Checking optional kernel configs for eMMC..."
+missing_optional=""
 for cfg in $OPTIONAL_CONFIGS; do
     if ! check_kernel_config "$cfg" 2>/dev/null; then
         log_info "[OPTIONAL] $cfg is not enabled"
         missing_optional="$missing_optional $cfg"
     fi
 done
+[ -n "$missing_optional" ] && log_info "Optional configs not present but continuing:$missing_optional"
 
-if [ -n "$missing_optional" ]; then
-    log_info "Optional configs not present but continuing:$missing_optional"
-fi
-
-# --- Device Tree and Block Device Check ---
 check_dt_nodes "/sys/bus/mmc/devices/*mmc*" || {
     echo "$TESTNAME SKIP" > "$res_file"
     exit 0
@@ -76,11 +71,8 @@ if [ -z "$block_dev" ]; then
     echo "$TESTNAME SKIP" > "$res_file"
     exit 0
 fi
-
 log_info "Detected eMMC block: $block_dev"
 
-# --- RootFS check fallback if findmnt is missing ---
-rootfs_dev="unknown"
 if command -v findmnt >/dev/null 2>&1; then
     rootfs_dev=$(findmnt -n -o SOURCE /)
 else
@@ -88,15 +80,17 @@ else
     rootfs_dev=$(awk '$2 == "/" { print $1 }' /proc/mounts)
 fi
 
-# --- Prevent direct read from rootfs ---
-if [ "$block_dev" = "$rootfs_dev" ]; then
-    log_warn "eMMC block $block_dev is mounted as rootfs. Skipping direct read test."
+resolved_block=$(readlink -f "$block_dev" 2>/dev/null)
+resolved_rootfs=$(readlink -f "$rootfs_dev" 2>/dev/null)
+
+if [ -n "$resolved_block" ] && [ -n "$resolved_rootfs" ] && [ "$resolved_block" = "$resolved_rootfs" ]; then
+    log_warn "Detected eMMC block ($resolved_block) is the root filesystem. Skipping read test."
 else
     log_info "Running basic read test on $block_dev (non-rootfs)..."
     if dd if="$block_dev" of=/dev/null bs=1M count=32 iflag=direct status=none 2>/dev/null; then
         log_pass "eMMC read test succeeded"
     else
-        log_warn "'iflag=direct' not supported by dd. Falling back to standard dd."
+        log_warn "'iflag=direct' not supported by dd. Trying fallback..."
         if dd if="$block_dev" of=/dev/null bs=1M count=32 status=none 2>/dev/null; then
             log_pass "eMMC read test succeeded (fallback)"
         else
@@ -107,13 +101,17 @@ else
     fi
 fi
 
-# --- I/O Stress Test ---
 log_info "Running I/O stress test (64MB read+write on tmpfile)..."
 tmpfile="$test_path/emmc_test.img"
 
 if dd if=/dev/zero of="$tmpfile" bs=1M count=64 conv=fsync status=none 2>/dev/null; then
     if dd if="$tmpfile" of=/dev/null bs=1M status=none 2>/dev/null; then
         log_pass "eMMC I/O stress test passed"
+        if command -v stat >/dev/null 2>&1; then
+            stat --format="[INFO] Size: %s bytes File: %n" "$tmpfile"
+        else
+            find "$tmpfile" -printf "[INFO] Size: %s bytes File: %p\n"
+        fi
         rm -f "$tmpfile"
     else
         log_fail "eMMC I/O stress test failed (read)"
@@ -122,10 +120,15 @@ if dd if=/dev/zero of="$tmpfile" bs=1M count=64 conv=fsync status=none 2>/dev/nu
         exit 1
     fi
 else
-    log_warn "'conv=fsync' not supported by dd. Using basic write fallback."
+    log_warn "'conv=fsync' not supported. Trying basic write fallback."
     if dd if=/dev/zero of="$tmpfile" bs=1M count=64 status=none 2>/dev/null &&
        dd if="$tmpfile" of=/dev/null bs=1M status=none 2>/dev/null; then
         log_pass "eMMC I/O stress test passed (fallback)"
+        if command -v stat >/dev/null 2>&1; then
+            stat --format="[INFO] Size: %s bytes File: %n" "$tmpfile"
+        else
+            find "$tmpfile" -printf "[INFO] Size: %s bytes File: %p\n"
+        fi
         rm -f "$tmpfile"
     else
         log_fail "eMMC I/O stress test failed (fallback)"
@@ -135,9 +138,8 @@ else
     fi
 fi
 
-# --- Dmesg Scan ---
 scan_dmesg_errors "mmc" "$test_path"
-
 log_pass "$TESTNAME completed successfully"
 echo "$TESTNAME PASS" > "$res_file"
 exit 0
+
