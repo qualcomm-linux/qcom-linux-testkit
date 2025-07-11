@@ -1439,20 +1439,36 @@ detect_ufs_partition_block() {
 
 # Check for dmesg I/O errors and log summary
 scan_dmesg_errors() {
-    label="$1"
-    output_dir="$2"
+    label="$1"                   # Example: "ufs", "emmc", "wifi"
+    output_dir="$2"              # Directory to store logs
+    extra_keywords="$3"          # (Optional) Space-separated keywords for this label
 
+    [ -z "$label" ] && return 1
     [ -z "$output_dir" ] && output_dir="."
+
     snapshot_file="$output_dir/${label}_dmesg_snapshot.log"
     error_file="$output_dir/${label}_dmesg_errors.log"
 
-    log_info "Scanning dmesg for recent I/O errors..."
+    log_info "Scanning dmesg for recent $label-related I/O errors..."
+
     dmesg | tail -n 300 > "$snapshot_file"
-    grep -iE "error|fail|timeout|reset|crc" "$snapshot_file" > "$error_file"
+
+    # Common error indicators
+    common_keywords="error fail timeout reset crc abort fault invalid fatal warn"
+
+    # Build keyword pattern (common + optional extra)
+    pattern="($common_keywords"
+    if [ -n "$extra_keywords" ]; then
+        pattern="$pattern|$extra_keywords"
+    fi
+    pattern="$pattern)"
+
+    # Filter: lines must match label and error pattern
+    grep -iE "$label" "$snapshot_file" | grep -iE "$pattern" > "$error_file"
 
     if [ -s "$error_file" ]; then
         log_warn "Detected potential $label-related errors in dmesg:"
-        while read -r line; do
+        while IFS= read -r line; do
             log_warn " dmesg: $line"
         done < "$error_file"
     else

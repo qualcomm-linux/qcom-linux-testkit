@@ -40,13 +40,12 @@ log_info "------------- Starting $TESTNAME Test ------------"
 
 check_dependencies dd grep cut head tail udevadm
 
-# --- Kernel Config Checks ---
 MANDATORY_CONFIGS="CONFIG_SCSI_UFSHCD CONFIG_SCSI_UFS_QCOM"
 OPTIONAL_CONFIGS="CONFIG_SCSI_UFSHCD_PLATFORM CONFIG_SCSI_UFSHCD_PCI CONFIG_SCSI_UFS_CDNS_PLATFORM CONFIG_SCSI_UFS_HISI CONFIG_SCSI_UFS_EXYNOS CONFIG_SCSI_UFS_ROCKCHIP CONFIG_SCSI_UFS_BSG"
 
 log_info "Checking mandatory kernel configs for UFS..."
 if ! check_kernel_config "$MANDATORY_CONFIGS" 2>/dev/null; then
-    log_skip "Missing one or more mandatory UFS kernel configs: $MANDATORY_CONFIGS"
+    log_skip "Missing mandatory UFS kernel configs: $MANDATORY_CONFIGS"
     echo "$TESTNAME SKIP" > "$res_file"
     exit 0
 fi
@@ -61,33 +60,9 @@ for cfg in $OPTIONAL_CONFIGS; do
 done
 [ -n "$missing_optional" ] && log_info "Optional configs not present but continuing:$missing_optional"
 
-# --- Device Tree Check ---
 check_dt_nodes "/sys/bus/platform/devices/*ufs*" || {
     echo "$TESTNAME SKIP" > "$res_file"
     exit 0
-}
-
-# --- UFS Block Detection ---
-detect_ufs_partition_block() {
-    if command -v lsblk >/dev/null 2>&1 && command -v udevadm >/dev/null 2>&1; then
-        for part in $(lsblk -lnpo NAME,TYPE | awk '$2 == "part" {print $1}'); do
-            if udevadm info --query=all --name="$part" 2>/dev/null | grep -qi "ufs"; then
-                echo "$part"
-                return 0
-            fi
-        done
-    fi
-
-    for part in /dev/sd[a-z][0-9]*; do
-        [ -e "$part" ] || continue
-        if command -v udevadm >/dev/null 2>&1 &&
-           udevadm info --query=all --name="$part" 2>/dev/null | grep -qi "ufs"; then
-            echo "$part"
-            return 0
-        fi
-    done
-
-    return 1
 }
 
 block_dev=$(detect_ufs_partition_block)
@@ -96,10 +71,8 @@ if [ -z "$block_dev" ]; then
     echo "$TESTNAME SKIP" > "$res_file"
     exit 0
 fi
-
 log_info "Detected UFS block: $block_dev"
 
-# --- RootFS Detection ---
 if command -v findmnt >/dev/null 2>&1; then
     rootfs_dev=$(findmnt -n -o SOURCE /)
 else
@@ -110,10 +83,13 @@ fi
 resolved_block=$(readlink -f "$block_dev" 2>/dev/null)
 resolved_rootfs=$(readlink -f "$rootfs_dev" 2>/dev/null)
 
-# --- Read Test (check if 'iflag=direct' supported) ---
-log_info "Running basic read test on $block_dev (non-rootfs)..."
+if [ -n "$resolved_block" ] && [ -n "$resolved_rootfs" ] && [ "$resolved_block" = "$resolved_rootfs" ]; then
+    log_warn "Detected block ($resolved_block) is the root filesystem. Skipping read test."
+    echo "$TESTNAME SKIP" > "$res_file"
+    exit 0
+fi
 
-# Test for iflag=direct support
+log_info "Running basic read test on $block_dev (non-rootfs)..."
 if echo | dd of=/dev/null iflag=direct 2>/dev/null; then
     DD_CMD="dd if=$block_dev of=/dev/null bs=1M count=32 iflag=direct"
 else
@@ -130,11 +106,9 @@ else
     exit 1
 fi
 
-# --- I/O Stress Test ---
 log_info "Running I/O stress test (64MB read+write on tmpfile)..."
 tmpfile="$test_path/ufs_test.img"
 
-# Prepare dd write command
 if echo | dd of=/dev/null conv=fsync 2>/dev/null; then
     DD_WRITE="dd if=/dev/zero of=$tmpfile bs=1M count=64 conv=fsync"
 else
@@ -142,22 +116,31 @@ else
     DD_WRITE="dd if=/dev/zero of=$tmpfile bs=1M count=64"
 fi
 
-# Use simplified dd read for BusyBox compatibility
 if $DD_WRITE >/dev/null 2>&1 &&
    dd if="$tmpfile" of=/dev/null bs=1M count=64 >/dev/null 2>&1; then
     log_pass "UFS I/O stress test passed"
+    if command -v stat >/dev/null 2>&1; then
+        stat --format="[INFO] Size: %s bytes File: %n" "$tmpfile"
+    else
+        find "$tmpfile" -printf "[INFO] Size: %s bytes File: %p\n"
+    fi
     rm -f "$tmpfile"
 else
     log_fail "UFS I/O stress test failed"
     df -h . | sed 's/^/[INFO] /'
-    ls -lh "$test_path"/ufs_test.img | sed 's/^/[INFO] /'
-    rm -f "$tmpfile"
+    if [ -f "$tmpfile" ]; then
+        if command -v stat >/dev/null 2>&1; then
+            stat --format="[INFO] Size: %s bytes File: %n" "$tmpfile"
+        else
+            find "$tmpfile" -printf "[INFO] Size: %s bytes File: %p\n"
+        fi
+        rm -f "$tmpfile"
+    fi
     echo "$TESTNAME FAIL" > "$res_file"
     exit 1
 fi
-# --- Dmesg Errors ---
-scan_dmesg_errors "ufs" "$test_path"
 
+scan_dmesg_errors "ufs" "$test_path"
 log_pass "$TESTNAME completed successfully"
 echo "$TESTNAME PASS" > "$res_file"
 exit 0
