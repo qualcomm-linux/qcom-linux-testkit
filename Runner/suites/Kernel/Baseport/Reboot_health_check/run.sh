@@ -2,7 +2,6 @@
 
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause-Clear
-
 # Robustly find and source init_env
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 INIT_ENV=""
@@ -30,57 +29,104 @@ fi
 . "$TOOLS/functestlib.sh"
 
 TESTNAME="Reboot_health_check"
-test_path=$(find_test_case_by_name "$TESTNAME")
-cd "$test_path" || exit 1
-# shellcheck disable=SC2034
-res_file="./$TESTNAME.res"
+cd "$SCRIPT_DIR" || exit 1
 
-log_info "-----------------------------------------------------------------------------------------"
-log_info "-------------------Starting $TESTNAME Testcase----------------------------"
-log_info "=== Test Initialization ==="
-
-# Directory for health check files
-HEALTH_DIR="/var/reboot_health"
-RETRY_FILE="$HEALTH_DIR/reboot_retry_count"
+LOG_FILE="$SCRIPT_DIR/reboot_test.log"
+RES_FILE="$SCRIPT_DIR/${TESTNAME}.res"
+MARKER="$SCRIPT_DIR/reboot_marker"
+RETRY_FILE="$SCRIPT_DIR/reboot_retry_count"
+SERVICE_FILE="/etc/systemd/system/reboot-health.service"
 MAX_RETRIES=3
 
-# Make sure health directory exists
-mkdir -p "$HEALTH_DIR"
+log_info "-------------------- Starting $TESTNAME Test ----------------------------"
+log_info "=== Test Initialization ==="
 
-# Initialize retry count if not exist
+# Initialize retry count
 if [ ! -f "$RETRY_FILE" ]; then
     echo "0" > "$RETRY_FILE"
 fi
-
-# Read current retry count
 RETRY_COUNT=$(cat "$RETRY_FILE")
 
-log_info "--------------------------------------------"
-log_info "Boot Health Check Started - $(date)" 
-log_info "Current Retry Count: $RETRY_COUNT"
+# Create systemd service on first run
+if [ ! -f "$MARKER" ]; then
+    log_info "Creating systemd service and Rebooting..."
 
-# Health Check: You can expand this check
-if [ "$(whoami)" = "root" ]; then
-    log_pass "System booted successfully and root shell obtained."
-    log_info "Test Completed Successfully after $RETRY_COUNT retries."
-    
-    # Optional: clean retry counter after success
-    echo "0" > "$RETRY_FILE"
-    
+    cat <<EOF > "$SERVICE_FILE"
+[Unit]
+Description=Reboot Health Check Service
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=$SCRIPT_DIR/run.sh
+StandardOutput=append:${LOG_FILE}
+StandardError=append:${LOG_FILE}
+RemainAfterExit=true
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl daemon-reexec
+    systemctl daemon-reload
+    systemctl enable reboot-health.service
+
+    touch "$MARKER"
+    log_info "System will reboot in 2 seconds..."
+    sleep 2
+    reboot
     exit 0
+fi
+
+log_info "Post-reboot validation"
+log_info "Retry Count: $RETRY_COUNT"
+
+pass=true
+
+if ! whoami | grep -q "root"; then
+    log_fail "Root shell not accessible"
+    pass=false
+fi
+
+for path in /proc /sys /dev /tmp; do
+    if [ ! -d "$path" ]; then
+        log_fail "Missing or inaccessible: $path"
+        pass=false
+    fi
+done
+
+if ! uname -a >/dev/null 2>&1; then
+    log_fail "Kernel version not available"
+    pass=false
+fi
+
+if ! ifconfig >/dev/null 2>&1 && ! ip a >/dev/null 2>&1; then
+    log_fail "Networking stack failed"
+    pass=false
+fi
+
+if $pass; then
+    log_pass "$TESTNAME PASS"
+    echo "$TESTNAME PASS" > "$RES_FILE"
+    echo "0" > "$RETRY_FILE"
 else
-    log_fail "Root shell not available!"
-    
+    log_fail "$TESTNAME FAIL"
+    echo "$TESTNAME FAIL" > "$RES_FILE"
     RETRY_COUNT=$((RETRY_COUNT + 1))
     echo "$RETRY_COUNT" > "$RETRY_FILE"
-    
+
     if [ "$RETRY_COUNT" -ge "$MAX_RETRIES" ]; then
-        log_error "[ERROR] Maximum retries ($MAX_RETRIES) reached. Stopping test."
+        log_error "Max retries ($MAX_RETRIES) reached. Stopping."
+        rm -f "$MARKER"
         exit 1
     else
-        log_info "Rebooting system for retry #$RETRY_COUNT..."
-        sync
+        log_info "Rebooting for retry #$RETRY_COUNT..."
         sleep 2
         reboot -f
+        exit 0
     fi
 fi
+
+rm -f "$MARKER"
+log_info "------------------- Completed $TESTNAME Test ----------------------------"
+exit 0
