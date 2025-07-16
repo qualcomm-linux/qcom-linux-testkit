@@ -42,13 +42,15 @@ rm -f "$RES_FILE"
 log_info "------------------------------------------------------------"
 log_info "Starting $TESTNAME Testcase"
 
-BT_NAME=""
-BT_MAC=""
-WHITELIST=""
+# Defaults
 PAIR_RETRIES="${PAIR_RETRIES:-3}"
 SCAN_ATTEMPTS="${SCAN_ATTEMPTS:-2}"
 
-# Parse arguments
+BT_NAME=""
+BT_MAC=""
+WHITELIST=""
+
+# Parse CLI args
 if [ -n "$1" ]; then
     if echo "$1" | grep -Eq '^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$'; then
         BT_MAC="$1"
@@ -56,7 +58,6 @@ if [ -n "$1" ]; then
         BT_NAME="$1"
     fi
 fi
-
 if [ -n "$2" ]; then
     WHITELIST="$2"
     if [ -z "$BT_MAC" ] && echo "$2" | grep -Eq '^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$'; then
@@ -64,10 +65,11 @@ if [ -n "$2" ]; then
     fi
 fi
 
-# Fallback to file
-if [ -z "$BT_NAME" ] && [ -z "$BT_MAC" ] && [ -f "./bt_device_list.txt" ]; then
-    BT_NAME=$(awk '!/^#/ && NF {print $2}' ./bt_device_list.txt | head -n1)
-    BT_MAC=$(awk '!/^#/ && NF {print $1}' ./bt_device_list.txt | head -n1)
+# Skip if no CLI input and no list file
+if [ -z "$BT_MAC" ] && [ -z "$BT_NAME" ] && [ ! -f "./bt_device_list.txt" ]; then
+    log_warn "No MAC/name or bt_device_list.txt found. Skipping test."
+    echo "$TESTNAME SKIP" > "$RES_FILE"
+    exit 0
 fi
 
 check_dependencies bluetoothctl rfkill expect hciconfig || {
@@ -90,91 +92,104 @@ retry_command_bt "hciconfig hci0 up" "Bring up hci0" || {
 
 bt_remove_all_paired_devices
 
-MATCH_FOUND=0
-
-for scan_try in $(seq 1 "$SCAN_ATTEMPTS"); do
-    log_info "Bluetooth scan attempt $scan_try..."
-    bt_scan_devices
-
-    LATEST_FOUND_LOG=$(find . -maxdepth 1 -name 'found_devices_*.log' -type f -print | sort -r | head -n1)
-    [ -z "$LATEST_FOUND_LOG" ] && continue
-
-    log_info "Devices found during scan:"
-    cat "$LATEST_FOUND_LOG"
-
-    if [ -z "$BT_NAME" ] && [ -z "$BT_MAC" ]; then
-        log_pass "No device specified. Scan-only mode."
+# Helper: l2ping link verification
+verify_link() {
+    mac="$1"
+    if bt_l2ping_check "$mac" "$RES_FILE"; then
+        log_pass "l2ping link check succeeded for $mac"
         echo "$TESTNAME PASS" > "$RES_FILE"
+        exit 0
+    else
+        log_warn "l2ping link check failed for $mac"
+    fi
+}
+
+# Direct pairing if CLI MAC provided
+if [ -n "$BT_MAC" ]; then
+    log_info "Direct pairing requested for $BT_MAC"
+    sleep 2
+    for attempt in $(seq 1 "$PAIR_RETRIES"); do
+        log_info "Pair attempt $attempt/$PAIR_RETRIES for $BT_MAC"
+        if bt_pair_with_mac "$BT_MAC"; then
+            log_info "Pair succeeded; connecting to $BT_MAC"
+            if bt_post_pair_connect "$BT_MAC"; then
+                log_pass "Post-pair connect succeeded for $BT_MAC"
+                verify_link "$BT_MAC"
+            else
+                log_warn "Connect failed; trying l2ping fallback for $BT_MAC"
+                verify_link "$BT_MAC"
+                bt_cleanup_paired_device "$BT_MAC"
+            fi
+        else
+            log_warn "Pair failed for $BT_MAC (attempt $attempt)"
+            bt_cleanup_paired_device "$BT_MAC"
+        fi
+    done
+    log_warn "Exhausted direct pairing attempts for $BT_MAC"
+    # If CLI arg was provided, do not fallback on empty .txt
+    if [ -n "$BT_NAME" ] || [ -n "$BT_MAC" ]; then
+        log_fail "Direct pairing failed for ${BT_MAC:-$BT_NAME}"
+        echo "$TESTNAME FAIL" > "$RES_FILE"
+        exit 1
+    fi
+fi
+
+# Fallback: only if no CLI input and list exists
+if [ -z "$BT_MAC" ] && [ -z "$BT_NAME" ] && [ -f "./bt_device_list.txt" ]; then
+    # Skip if list is empty or only comments
+    if ! grep -v -e '^[[:space:]]*#' -e '^[[:space:]]*$' bt_device_list.txt | grep -q .; then
+        log_warn "bt_device_list.txt is empty or only comments. Skipping test."
+        echo "$TESTNAME SKIP" > "$RES_FILE"
         exit 0
     fi
 
-    log_info "Matching against: BT_NAME='$BT_NAME', BT_MAC='$BT_MAC', WHITELIST='$WHITELIST'"
-    bt_remove_all_paired_devices
-    bluetoothctl --timeout 3 devices | awk '{print $2}' | while read -r addr; do
-        log_info "Forcing device removal: $addr"
-        bluetoothctl remove "$addr" >/dev/null 2>&1
-    done
+    log_info "Using fallback list in bt_device_list.txt"
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in ''|\#*) continue ;; esac
+        # split into MAC and NAME
+        IFS=' ' read -r MAC NAME <<EOF
+$line
+EOF
+        [ -z "$MAC" ] && continue
 
-    # Clean and prepare whitelist
-WHITELIST_CLEAN=$(echo "$WHITELIST" | tr -d '\r' | tr ',\n' ' ' | xargs)
-MATCH_FOUND=0
-
-while IFS= read -r line; do
-    mac=$(echo "$line" | awk '{print $1}')
-    name=$(echo "$line" | cut -d' ' -f2- | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-
-    log_info "Parsed: MAC='$mac' NAME='$name'"
-    log_info "Checking if MAC or NAME is in whitelist: '$WHITELIST_CLEAN'"
-
-    if [ -n "$BT_MAC" ] && [ "$mac" = "$BT_MAC" ]; then
-        log_info "MAC matched: $mac"
-        if [ -z "$WHITELIST_CLEAN" ] || echo "$WHITELIST_CLEAN" | grep -wq "$mac" || echo "$WHITELIST_CLEAN" | grep -wq "$name"; then
-            log_info "MAC allowed by whitelist: $mac ($name)"
-            MATCH_FOUND=1
-            break
-        else
-            log_info "MAC matched but not in whitelist: $name"
+        # Whitelist filter
+        if [ -n "$WHITELIST" ] && ! printf '%s' "$NAME" | grep -iq "$WHITELIST"; then
+            log_info "Skipping $MAC ($NAME): not in whitelist '$WHITELIST'"
+            continue
         fi
-    elif [ -n "$BT_NAME" ] && [ "$name" = "$BT_NAME" ]; then
-        log_info "Name matched: $name"
-        if [ -z "$WHITELIST_CLEAN" ] || echo "$WHITELIST_CLEAN" | grep -wq "$mac" || echo "$WHITELIST_CLEAN" | grep -wq "$name"; then
-            log_info "Name allowed by whitelist: $name ($mac)"
-            BT_MAC="$mac"
-            MATCH_FOUND=1
-            break
-        else
-            log_info "Name matched but not in whitelist: $name"
-        fi
-    fi
-done < "$LATEST_FOUND_LOG"
 
-    [ "$MATCH_FOUND" -eq 1 ] && break
-    sleep 2
-done
+        BT_MAC=$MAC
+        BT_NAME=$NAME
 
-if [ "$MATCH_FOUND" -ne 1 ]; then
-    log_fail "Expected device not found or not in whitelist"
+        log_info "===== Attempting $BT_MAC ($BT_NAME) ====="
+        bt_cleanup_paired_device "$BT_MAC"
+
+        for attempt in $(seq 1 "$PAIR_RETRIES"); do
+            log_info "Pair attempt $attempt/$PAIR_RETRIES for $BT_MAC"
+            if bt_pair_with_mac "$BT_MAC"; then
+                log_info "Pair succeeded; connecting to $BT_MAC"
+                if bt_post_pair_connect "$BT_MAC"; then
+                    log_pass "Post-pair connect succeeded for $BT_MAC"
+                    verify_link "$BT_MAC"
+                else
+                    log_warn "Connect failed; trying l2ping fallback for $BT_MAC"
+                    verify_link "$BT_MAC"
+                fi
+            else
+                log_warn "Pair failed for $BT_MAC (attempt $attempt)"
+            fi
+            bt_cleanup_paired_device "$BT_MAC"
+        done
+
+        log_warn "Exhausted $PAIR_RETRIES attempts for $BT_MAC; moving to next"
+    done < "./bt_device_list.txt"
+
+    log_fail "All fallback devices failed"
     echo "$TESTNAME FAIL" > "$RES_FILE"
     exit 1
 fi
 
-log_info "Attempting to pair with $BT_NAME ($BT_MAC)"
-if bt_pair_with_mac "$BT_MAC" "$PAIR_RETRIES"; then
-    log_info "Pairing successful. Attempting post-pair connection..."
-    if bt_post_pair_connect "$BT_MAC"; then
-        log_info "Post-pair connection successful, verifying with l2ping..."
-        if bt_l2ping_check "$BT_MAC" "$RES_FILE"; then
-            log_pass "Post-pair connection and l2ping verified"
-            echo "$TESTNAME PASS" > "$RES_FILE"
-            exit 0
-        else
-            log_warn "Post-pair successful but l2ping failed"
-            echo "$TESTNAME FAIL" > "$RES_FILE"
-            exit 1
-        fi
-    fi
-else
-    log_fail "Pairing failed after $PAIR_RETRIES retries"
-    echo "$TESTNAME FAIL" > "$RES_FILE"
-    exit 1
-fi
+# Should never reach here
+log_fail "No execution path matched; exiting"
+echo "$TESTNAME FAIL" > "$RES_FILE"
+exit 1
