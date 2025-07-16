@@ -1475,3 +1475,25 @@ scan_dmesg_errors() {
         log_info "No $label-related errors found in recent dmesg logs."
     fi
 }
+
+getsocId() {
+    for path in /sys/devices/soc0/soc_id /sys/devices/system/soc/soc0/id; do
+        if [ -r "$path" ]; then
+            read -r soc_id < "$path"
+            case "$soc_id" in
+                ''|*[!0-9]*) 
+                    log_error "Invalid soc_id" >&2
+                    return 1
+                    ;;
+                *)
+                    echo "$soc_id"
+                    return 0
+                    ;;
+            esac
+        fi
+    done
+
+    log_error "$soc_id path not found" >&2
+    return 1
+}
+
