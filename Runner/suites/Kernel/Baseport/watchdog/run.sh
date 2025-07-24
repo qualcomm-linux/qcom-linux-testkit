@@ -39,15 +39,37 @@ log_info "----------------------------------------------------------------------
 log_info "-------------------Starting $TESTNAME Testcase----------------------------"
 log_info "=== Test Initialization ==="
 
+soc_id=$(getsocId)
+
+if [ $? -eq 0 ]; then
+    log_info "SOC ID is: $soc_id"
+else
+    log_skip "Failed to retrieve SOC ID"
+	echo "$TESTNAME SKIP" > "$res_file"
+    exit 0
+fi
+
+
+if [ $soc_id = "498" ]; then
+	log_skip "Testcase not applicable to this target"
+	echo "$TESTNAME SKIP" > "$res_file"
+    exit 0
+fi
+
 if [ -e /dev/watchdog ]; then
     log_pass "/dev/watchdog node is present."
+    CONFIGS="CONFIG_WATCHDOG CONFIG_WATCHDOG_HANDLE_BOOT_ENABLED"
+	for cfg in $CONFIGS; do
+		log_info "Checking if $cfg is enabled"
+		if ! check_kernel_config "$cfg" 2>/dev/null; then
+			log_fail "$cfg is not enabled"
+			echo "$TESTNAME FAIL" > "$res_file"
+			exit 1
+		fi
+	done
     log_pass "$TESTNAME : Test Passed"
     echo "$TESTNAME PASS" > "$res_file"
-    exit 0
-else
-    log_fail "/dev/watchdog node is not present."
-    log_fail "$TESTNAME : Test Failed"
-    echo "$TESTNAME FAIL" > "$res_file"
-    exit 1
+	exit 0
 fi
+echo "$TESTNAME FAIL" > "$res_file"
 log_info "-------------------Completed $TESTNAME Testcase---------------------------"
