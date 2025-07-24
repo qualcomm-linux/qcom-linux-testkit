@@ -61,12 +61,13 @@ is_module_loaded() {
     /sbin/lsmod | awk '{print $1}' | grep -q "^${module_name}$"
 }
 
-# Insert a kernel module with optional parameters
+# load_kernel_module <path-to-ko> [params...]
+# 1) If already loaded, no-op
+# 2) Try insmod <ko> [params]
+# 3) If that fails, try modprobe <modname> [params]
 load_kernel_module() {
-    module_path="$1"
-    shift
+    module_path="$1"; shift
     params="$*"
-
     module_name=$(basename "$module_path" .ko)
 
     if is_module_loaded "$module_name"; then
@@ -76,15 +77,24 @@ load_kernel_module() {
 
     if [ ! -f "$module_path" ]; then
         log_error "Module file not found: $module_path"
-        return 1
+        # still try modprobe if it exists in modules directory
+    else
+        log_info "Loading module via insmod: $module_path $params"
+        if /sbin/insmod "$module_path" "$params" 2>insmod_err.log; then
+            log_info "Module $module_name loaded successfully via insmod"
+            return 0
+        else
+            log_warn "insmod failed: $(cat insmod_err.log)"
+        fi
     fi
 
-    log_info "Loading module: $module_path $params"
-    if /sbin/insmod "$module_path" "$params" 2>insmod_err.log; then
-        log_info "Module $module_name loaded successfully"
+    # fallback to modprobe
+    log_info "Falling back to modprobe $module_name $params"
+    if /sbin/modprobe "$module_name" "$params" 2>modprobe_err.log; then
+        log_info "Module $module_name loaded successfully via modprobe"
         return 0
     else
-        log_error "insmod failed: $(cat insmod_err.log)"
+        log_error "modprobe failed: $(cat modprobe_err.log)"
         return 1
     fi
 }
@@ -171,14 +181,25 @@ find_test_case_script_by_name() {
     find "$base_dir" -type d -iname "$test_name" -print -quit 2>/dev/null
 }
 
+# Check each given kernel config is set to y/m in /proc/config.gz, logs result, returns 0/1.
 check_kernel_config() {
-    configs="$1"
-    for config_key in $configs; do
-        if zcat /proc/config.gz | grep -qE "^$config_key=(y|m)"; then
-            log_pass "Kernel config $config_key is enabled"
+    cfgs=$1
+    for config_key in $cfgs; do
+        if command -v zgrep >/dev/null 2>&1; then
+            if zgrep -qE "^${config_key}=(y|m)" /proc/config.gz 2>/dev/null; then
+                log_pass "Kernel config $config_key is enabled"
+            else
+                log_fail "Kernel config $config_key is missing or not enabled"
+                return 1
+            fi
         else
-            log_fail "Kernel config $config_key is missing or not enabled"
-            return 1
+            # Fallback if zgrep is unavailable
+            if gzip -dc /proc/config.gz 2>/dev/null | grep -qE "^${config_key}=(y|m)"; then
+                log_pass "Kernel config $config_key is enabled"
+            else
+                log_fail "Kernel config $config_key is missing or not enabled"
+                return 1
+            fi
         fi
     done
     return 0
@@ -1353,41 +1374,71 @@ detect_ufs_partition_block() {
     return 1
 }
 
-# Check for dmesg I/O errors and log summary
+# scan_dmesg_check <label> [out_dir] [extra_err_kw] [ok_kw]
+# Returns:
+#   0 -> no errors; ok_kw matched (or not requested)
+#   1 -> error lines found
+#   2 -> no errors, but ok_kw (if given) NOT found
 scan_dmesg_errors() {
-    label="$1"                   # Example: "ufs", "emmc", "wifi"
-    output_dir="$2"              # Directory to store logs
-    extra_keywords="$3"          # (Optional) Space-separated keywords for this label
-
-    [ -z "$label" ] && return 1
-    [ -z "$output_dir" ] && output_dir="."
-
-    snapshot_file="$output_dir/${label}_dmesg_snapshot.log"
-    error_file="$output_dir/${label}_dmesg_errors.log"
-
-    log_info "Scanning dmesg for recent $label-related I/O errors..."
-
-    dmesg | tail -n 300 > "$snapshot_file"
-
-    # Common error indicators
-    common_keywords="error fail timeout reset crc abort fault invalid fatal warn"
-
-    # Build keyword pattern (common + optional extra)
-    pattern="($common_keywords"
-    if [ -n "$extra_keywords" ]; then
-        pattern="$pattern|$extra_keywords"
-    fi
-    pattern="$pattern)"
-
-    # Filter: lines must match label and error pattern
-    grep -iE "$label" "$snapshot_file" | grep -iE "$pattern" > "$error_file"
-
-    if [ -s "$error_file" ]; then
-        log_warn "Detected potential $label-related errors in dmesg:"
+    label="$1"
+    out_dir="${2:-.}"
+    extra_err="${3:-}"
+    ok_kw="${4:-}"
+ 
+    [ -z "$label" ] && return 3  # misuse
+ 
+    lines="${DMESG_LINES:-300}"
+    snap="$out_dir/${label}_dmesg_snapshot.log"
+    errf="$out_dir/${label}_dmesg_errors.log"
+    okf="$out_dir/${label}_dmesg_ok.log"
+ 
+    log_info "Scanning dmesg for ${label}: errors & success patterns"
+ 
+    dmesg | tail -n "$lines" >"$snap"
+ 
+    # Error keywords
+    common_err='error|fail|timeout|reset|crc|abort|fault|invalid|fatal|warn|oops|panic'
+    err_pat="$common_err"
+    [ -n "$extra_err" ] && err_pat="${err_pat}|${extra_err}"
+ 
+    # Find error lines (must match label AND error pattern)
+    grep -iE "$label" "$snap" | grep -iE "($err_pat)" >"$errf" 2>/dev/null
+ 
+    if [ -s "$errf" ]; then
+        log_warn "Detected potential ${label}-related errors:"
         while IFS= read -r line; do
             log_warn " dmesg: $line"
-        done < "$error_file"
-    else
-        log_info "No $label-related errors found in recent dmesg logs."
+        done <"$errf"
+        return 0
     fi
+ 
+    # Optionally look for OK messages
+    if [ -n "$ok_kw" ]; then
+        grep -iE "$ok_kw" "$snap" >"$okf" 2>/dev/null
+        if [ -s "$okf" ]; then
+            log_pass "Found success pattern for $label in dmesg"
+            while IFS= read -r line; do
+                log_info " ok: $line"
+            done <"$okf"
+            return 1
+        else
+            log_warn "No success pattern ('$ok_kw') found for $label"
+            return 2
+        fi
+    fi
+ 
+    log_info "No ${label}-related errors found (no OK pattern requested)"
+    return 1
+}
+
+# wait_for_path <path> [timeout_sec]
+wait_for_path() {
+    _p="$1"; _t="${2:-3}"
+    i=0
+    while [ "$i" -lt "$_t" ]; do
+        [ -e "$_p" ] && return 0
+        sleep 1
+        i=$((i+1))
+    done
+    return 1
 }
