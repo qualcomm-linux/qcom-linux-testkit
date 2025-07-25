@@ -927,54 +927,183 @@ bt_l2ping_check() {
         return 1
     fi
 }
-# Find remoteproc path by firmware substring
-get_remoteproc_path_by_firmware() {
-    name="$1"
-    idx=""
-    path=""
-    idx=$(cat /sys/class/remoteproc/remoteproc*/firmware 2>/dev/null | grep -n "$name" | cut -d: -f1 | head -n1)
-    [ -z "$idx" ] && return 1
-    idx=$((idx - 1))
-    path="/sys/class/remoteproc/remoteproc${idx}"
-    [ -d "$path" ] && echo "$path" && return 0
+
+###############################################################################
+# get_remoteproc_by_firmware <short-fw-name> [outfile] [all]
+# - If outfile is given: append *all* matches as "<path>|<state>|<firmware>|<name>"
+#   (one per line) and return 0 if at least one match.
+# - If no outfile: print the *first* match to stdout and return 0.
+# - Returns 1 if nothing matched, 3 if misuse (no fw argument).
+###############################################################################
+get_remoteproc_by_firmware() {
+    fw="$1"
+    out="$2"      # optional: filepath to append results
+    list_all="$3" # set to "all" to continue past first match 
+
+    [ -n "$fw" ] || return 3 # misuse if no firmware provided
+
+    found=0
+    for p in /sys/class/remoteproc/remoteproc*; do
+        [ -d "$p" ] || continue
+
+        # read name, firmware, state
+        name=""
+        [ -r "$p/name" ]     && IFS= read -r name     <"$p/name"
+        firmware=""
+        [ -r "$p/firmware" ] && IFS= read -r firmware <"$p/firmware"
+        state="unknown"
+        [ -r "$p/state" ]    && IFS= read -r state    <"$p/state"
+
+        case "$name $firmware" in
+            *"$fw"*)
+                line="${p}|${state}|${firmware}|${name}"
+                if [ -n "$out" ]; then
+                    printf '%s\n' "$line" >>"$out"
+                    found=1
+                    continue
+                fi
+
+                # print to stdout and possibly stop
+                printf '%s\n' "$line"
+                found=1
+                [ "$list_all" = "all" ] || return 0
+                ;;
+        esac
+    done
+
+    # if we appended to a file, success if found>=1
+    if [ "$found" -eq 1 ]; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+# ------------------------------------------------------------------------------
+# dt_has_remoteproc_fw <fw-short>
+#   Return:
+#     0 = DT describes this remoteproc firmware
+#     1 = DT does not describe it
+#     3 = misuse (no argument)
+# ------------------------------------------------------------------------------
+dt_has_remoteproc_fw() {
+    fw="$1"
+    [ -n "$fw" ] || return 3
+ 
+    base="/proc/device-tree"
+    [ -d "$base" ] || return 1
+ 
+    # lower-case match key
+    fw_lc=$(printf '%s\n' "$fw" | tr '[:upper:]' '[:lower:]')
+ 
+    # new fast-path (any smp2p-<fw>* or remoteproc-<fw>* directory)
+    found=0
+    for d in "$base"/smp2p-"$fw"* "$base"/remoteproc-"$fw"*; do
+        [ -d "$d" ] && found=1 && break
+    done
+    [ "$found" -eq 1 ] && return 0
+ 
+    # 2) Shallow find (<depth 2) for any node/prop name containing fw
+    if find "$base" -maxdepth 2 -iname "*$fw_lc*" -print -quit 2>/dev/null | grep -q .; then
+        return 0
+    fi
+ 
+    # 3) Grep soc@0 and aliases for a first match
+    if grep -Iq -m1 -F "$fw_lc" "$base/soc@0" "$base/aliases" 2>/dev/null; then
+        return 0
+    fi
+ 
+    # 4) Fallback: grep entire DT tree
+    if grep -Iq -m1 -F "$fw_lc" "$base" 2>/dev/null; then
+        return 0
+    fi
+ 
     return 1
 }
 
 # Get remoteproc state
 get_remoteproc_state() {
-    rproc_path="$1"
-    [ -f "$rproc_path/state" ] && cat "$rproc_path/state"
+    rp="$1"
+    [ -z "$rp" ] && { printf '\n'; return 1; }
+ 
+    case "$rp" in
+        /sys/*) rpath="$rp" ;;
+        *)      rpath="/sys/class/remoteproc/$rp" ;;
+    esac
+ 
+    state_file="$rpath/state"
+    if [ -r "$state_file" ]; then
+        IFS= read -r state < "$state_file" || state=""
+        printf '%s\n' "$state"
+        return 0
+    fi
+    printf '\n'
+    return 1
 }
 
-# Wait for a remoteproc to reach a specific state
+# wait_remoteproc_state <sysfs-path> <desired_state> <timeout_s> <poll_interval_s>
 wait_remoteproc_state() {
-    rproc_path="$1"
-    target="$2"
-    retries="${3:-6}"
-    i=0
-    while [ $i -lt "$retries" ]; do
-        state=$(get_remoteproc_state "$rproc_path")
-        [ "$state" = "$target" ] && return 0
-        sleep 1
-        i=$((i+1))
+    rp="$1"; want="$2"; to=${3:-10}; poll=${4:-1}
+ 
+    case "$rp" in
+        /sys/*) rpath="$rp" ;;
+        *)      rpath="/sys/class/remoteproc/$rp" ;;
+    esac
+ 
+    start_ts=$(date +%s)
+    while :; do
+        cur=$(get_remoteproc_state "$rpath")
+        [ "$cur" = "$want" ] && return 0
+ 
+        now_ts=$(date +%s)
+        [ $((now_ts - start_ts)) -ge "$to" ] && {
+            log_info "Waiting for state='$want' timed out (got='$cur')..."
+            return 1
+        }
+        sleep "$poll"
     done
-    return 1
 }
 
 # Stop remoteproc
 stop_remoteproc() {
     rproc_path="$1"
-    echo stop > "$rproc_path/state"
-    wait_remoteproc_state "$rproc_path" "offline" 6
+ 
+    # Resolve to a real sysfs dir if only a name was given
+    case "$rproc_path" in
+        /sys/*) path="$rproc_path" ;;
+        remoteproc*) path="/sys/class/remoteproc/$rproc_path" ;;
+        *) path="$rproc_path" ;;  # last resort, assume caller passed full path
+    esac
+ 
+    statef="$path/state"
+    if [ ! -w "$statef" ]; then
+        log_warn "stop_remoteproc: state file not found/writable: $statef"
+        return 1
+    fi
+ 
+    printf 'stop\n' >"$statef" 2>/dev/null || return 1
+    wait_remoteproc_state "$path" offline 6
 }
-
+ 
 # Start remoteproc
 start_remoteproc() {
     rproc_path="$1"
-    echo start > "$rproc_path/state"
-    wait_remoteproc_state "$rproc_path" "running" 6
+ 
+    case "$rproc_path" in
+        /sys/*) path="$rproc_path" ;;
+        remoteproc*) path="/sys/class/remoteproc/$rproc_path" ;;
+        *) path="$rproc_path" ;;
+    esac
+ 
+    statef="$path/state"
+    if [ ! -w "$statef" ]; then
+        log_warn "start_remoteproc: state file not found/writable: $statef"
+        return 1
+    fi
+ 
+    printf 'start\n' >"$statef" 2>/dev/null || return 1
+    wait_remoteproc_state "$path" running 6
 }
-
 # Validate remoteproc running state with retries and logging
 validate_remoteproc_running() {
     fw_name="$1"
@@ -1010,6 +1139,177 @@ validate_remoteproc_running() {
         echo "----------------------------------------"
     } >> "$log_file"
     return 1
+}
+
+# acquire_test_lock <testname>
+acquire_test_lock() {
+    lockfile="/var/lock/$1.lock"
+    exec 9>"$lockfile"
+    if ! flock -n 9; then
+        log_warn "Could not acquire lock on $lockfile → SKIP"
+        echo "$1 SKIP" > "./$1.res"
+        exit 0
+    fi
+    log_info "Acquired lock on $lockfile"
+}
+
+# release_test_lock
+release_test_lock() {
+    flock -u 9
+    log_info "Released lock"
+}
+
+# summary_report <testname> <mode> <stop_time_s> <start_time_s> <rpmsg_result>
+# Appends a machine‐readable summary line to the test log
+summary_report() {
+    test="$1"
+    mode="$2"
+    stop_t="$3"
+    start_t="$4"
+    rp="$5"
+    log_info "Summary for ${test}: mode=${mode} stop_time_s=${stop_t} start_time_s=${start_t} rpmsg=${rp}"
+}
+
+# dump_rproc_logs <sysfs-path> <label>
+# Captures debug trace + filtered dmesg into a timestamped log
+dump_rproc_logs() {
+    rpath="$1"; label="$2"
+    ts=$(date +%Y%m%d_%H%M%S)
+    base=$(basename "$rpath")
+    logfile="rproc_${base}_${label}_${ts}.log"
+    log_info "Dumping ${base} [${label}] → ${logfile}"
+    [ -r "$rpath/trace" ] && cat "$rpath/trace" >"$logfile"
+    dmesg --ctime | grep -i "$base" >>"$logfile" 2>/dev/null || :
+}
+
+# find_rpmsg_ctrl_for <short-name>
+# e.g. find_rpmsg_ctrl_for adsp
+find_rpmsg_ctrl_for() {
+    want="$1"  # e.g. "adsp"
+
+    for dev in /dev/rpmsg_ctrl*; do
+        [ -e "$dev" ] || continue
+
+        base=$(basename "$dev")
+        sysfs="/sys/class/rpmsg/${base}"
+
+        # resolve the rpmsg_ctrl node’s real path
+        target=$(readlink -f "$sysfs/device")
+        # climb up to the remoteprocX directory
+        remoteproc_dir=$(dirname "$(dirname "$(dirname "$target")")")
+
+        # Try the 'name' file
+        if [ -r "$remoteproc_dir/name" ]; then
+            rpname=$(cat "$remoteproc_dir/name")
+            if echo "$rpname" | grep -qi "^${want}"; then
+                printf '%s\n' "$dev"
+                return 0
+            fi
+        fi
+
+        # Fallback: try the 'firmware' file, strip extension
+        if [ -r "$remoteproc_dir/firmware" ]; then
+            fw=$(basename "$(cat "$remoteproc_dir/firmware")")   # adsp.mbn
+            short="${fw%%.*}"                                    # adsp
+            if echo "$short" | grep -qi "^${want}"; then
+                printf '%s\n' "$dev"
+                return 0
+            fi
+        fi
+    done
+
+    return 1
+}
+
+# Given a remoteproc *absolute* path (e.g. /sys/class/remoteproc/remoteproc2),
+# return the FIRST matching /sys/class/rpmsg/rpmsg_ctrlN path.
+find_rpmsg_ctrl_for_rproc() {
+    rproc_path="$1"
+    for c in /sys/class/rpmsg/rpmsg_ctrl*; do
+        [ -e "$c" ] || continue
+        # device symlink for ctrl points into ...remoteprocX/...rpmsg_ctrl...
+        devlink=$(readlink -f "$c/device" 2>/dev/null) || continue
+        case "$devlink" in
+            "$rproc_path"/*) printf '%s\n' "$c"; return 0 ;;
+        esac
+    done
+    return 1
+}
+
+# Ensure /dev node exists for a sysfs rpmsg item (ctrl or data). Echo /dev/… path.
+rpmsg_sys_to_dev() {
+    sys="$1"
+    dev="/dev/$(basename "$sys")"
+    if [ ! -e "$dev" ]; then
+        [ -r "$sys/dev" ] || return 1
+        IFS=: read -r maj min < "$sys/dev" || return 1
+        mknod "$dev" c "$maj" "$min" 2>/dev/null || return 1
+        chmod 600 "$dev" 2>/dev/null
+    fi
+    printf '%s\n' "$dev"
+}
+
+# Find existing rpmsg data endpoints that belong to this remoteproc path.
+# Echo all matching /dev/rpmsgN (one per line). Return 0 if any, 1 if none.
+find_rpmsg_data_for_rproc() {
+    rproc_path="$1"
+    found=0
+    for d in /sys/class/rpmsg/rpmsg[0-9]*; do
+        [ -e "$d" ] || continue
+        devlink=$(readlink -f "$d/device" 2>/dev/null) || continue
+        case "$devlink" in
+            "$rproc_path"/*)
+                if node=$(rpmsg_sys_to_dev "$d"); then
+                    printf '%s\n' "$node"
+                    found=1
+                fi
+                ;;
+        esac
+    done
+    [ "$found" -eq 1 ]
+}
+
+# Create a new endpoint via ctrl/create (no hardcoded name: we pick the first free)
+# If firmware doesn't expose ping service, this may still not respond; we just create.
+# Returns /dev/rpmsgN or empty on failure.
+rpmsg_create_ep_generic() {
+    ctrl_sys="$1"
+    name="${2:-gen-test}"   # generic endpoint name
+    src="${3:-0}"
+    dst="${4:-0}"
+ 
+    create_file="$(readlink -f "$ctrl_sys")/create"
+    [ -w "$create_file" ] || return 1
+ 
+    # Request endpoint creation
+    printf '%s %s %s\n' "$name" "$src" "$dst" >"$create_file" 2>/dev/null || return 1
+ 
+    # Pick the newest rpmsg* sysfs node without using 'ls -t' (SC2012)
+    new_sys=$(
+        find -L /sys/class/rpmsg -maxdepth 1 -type l -name 'rpmsg[0-9]*' \
+            -printf '%T@ %p\n' 2>/dev/null | sort -nr | awk 'NR==1{print $2}'
+    )
+ 
+    [ -n "$new_sys" ] || return 1
+ 
+    rpmsg_sys_to_dev "$new_sys"
+}
+
+# Try to exercise the channel by write-read loopback.
+# Without protocol knowledge, we can only do a heuristic:
+# write "PING\n", read back; if anything comes, treat as success.
+rpmsg_try_echo() {
+    node="$1"
+    # write
+    printf 'PING\n' >"$node" 2>/dev/null || return 1
+    # read (2s timeout if available)
+    if command -v timeout >/dev/null 2>&1; then
+        reply=$(timeout 2 cat "$node" 2>/dev/null)
+    else
+        reply=$(dd if="$node" bs=256 count=1 2>/dev/null)
+    fi
+    [ -n "$reply" ] || return 1
+    return 0
 }
 
 # Clean up WiFi test environment (reusable for other tests)

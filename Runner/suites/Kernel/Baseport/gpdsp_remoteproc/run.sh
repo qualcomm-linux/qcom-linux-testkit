@@ -2,6 +2,7 @@
 
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause-Clear
+#
 # Robustly find and source init_env
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 INIT_ENV=""
@@ -28,9 +29,9 @@ fi
 # shellcheck disable=SC1090,SC1091
 . "$TOOLS/functestlib.sh"
  
-TESTNAME="adsp_remoteproc"
+TESTNAME="gpdsp_remoteproc"
 RES_FILE="./$TESTNAME.res"
-FW="adsp"
+FW="gpdsp"
 
 test_path=$(find_test_case_by_name "$TESTNAME")
 cd "$test_path" || exit 1
@@ -55,11 +56,13 @@ else
     exit 0
 fi
 
-# Enumerate ADSP remoteproc entries
-# get_remoteproc_by_firmware prints: "path|state|firmware|name"
+# Enumerate GPDSP remoteproc entries
+# get_remoteproc_by_firmware prints lines like: "path|state|firmware|name"
 entries="$(get_remoteproc_by_firmware "$FW" "" all)" || entries=""
 if [ -z "$entries" ]; then
-    fail_and_exit "$FW present in DT but no /sys/class/remoteproc entry found"
+    log_fail "$FW present in DT but no /sys/class/remoteproc entry found"
+    echo "$TESTNAME FAIL" >"$RES_FILE"
+    exit 1
 fi
 
 count_instances=$(printf '%s\n' "$entries" | wc -l)

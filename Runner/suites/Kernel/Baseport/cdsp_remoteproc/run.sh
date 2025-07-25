@@ -2,6 +2,7 @@
 
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause-Clear
+
 # Robustly find and source init_env
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 INIT_ENV=""
@@ -29,9 +30,8 @@ fi
 . "$TOOLS/functestlib.sh"
  
 TESTNAME="cdsp_remoteproc"
-firmware_name="cdsp"
-res_file="./$TESTNAME.res"
-LOG_FILE="./$TESTNAME.log"
+RES_FILE="./$TESTNAME.res"
+FW="cdsp"
 
 test_path=$(find_test_case_by_name "$TESTNAME")
 cd "$test_path" || exit 1
@@ -39,34 +39,131 @@ cd "$test_path" || exit 1
 log_info "-----------------------------------------------------------------------------------------"
 log_info "------------------- Starting $TESTNAME Testcase ----------------------------"
 log_info "=== Test Initialization ==="
- 
-if ! validate_remoteproc_running "$firmware_name" "$LOG_FILE" 15 2; then
-    log_fail "$firmware_name remoteproc is not in running state after bootup"
-    echo "$TESTNAME FAIL" > "$res_file"
+
+# Timeouts (can be overridden via env)
+STOP_TO="${STOP_TO:-10}"
+START_TO="${START_TO:-10}"
+POLL_I="${POLL_I:-1}"
+
+log_info "DEBUG: STOP_TO=$STOP_TO START_TO=$START_TO POLL_I=$POLL_I"
+
+# --- Device Tree gate ----------------------------------------------------
+if dt_has_remoteproc_fw "$FW"; then
+    log_info "DT indicates $FW is present"
+else
+    log_skip "$TESTNAME SKIP – $FW not described in DT"
+    echo "${TESTNAME} SKIP" >"$RES_FILE"
+    exit 0
+fi
+
+# ---------- Discover all matching remoteproc entries ----------
+# get_remoteproc_by_firmware prints: "path|state|firmware|name"
+entries="$(get_remoteproc_by_firmware "$FW" "" all)" || entries=""
+if [ -z "$entries" ]; then
+    fail_and_exit "$FW present in DT but no /sys/class/remoteproc entry found"
+fi
+
+count_instances=$(printf '%s\n' "$entries" | wc -l)
+log_info "Found $count_instances $FW instance(s)"
+
+inst_fail=0
+RESULT_LINES=""
+
+# Avoid subshell var-scope issues: feed loop from a temp file
+tmp_list="$(mktemp)"
+printf '%s\n' "$entries" >"$tmp_list"
+
+while IFS='|' read -r rpath rstate rfirm rname; do
+    [ -n "$rpath" ] || continue # safety
+
+    inst_id="$(basename "$rpath")"
+    log_info "---- $inst_id: path=$rpath state=$rstate firmware=$rfirm name=$rname ----"
+
+    boot_res="PASS"
+    stop_res="NA"
+    start_res="NA"
+    ping_res="SKIPPED"
+
+    # Boot check
+    if [ "$rstate" = "running" ]; then
+        log_pass "$inst_id: boot check PASS"
+    else
+        log_fail "$inst_id: boot check FAIL (state=$rstate)"
+        boot_res="FAIL"
+        inst_fail=$((inst_fail + 1))
+        RESULT_LINES="$RESULT_LINES
+ $inst_id: boot=$boot_res, stop=$stop_res, start=$start_res, ping=$ping_res"
+        continue
+    fi
+
+    # Stop
+    dump_rproc_logs "$rpath" before-stop
+    t0=$(date +%s)
+    log_info "$inst_id: stopping"
+    if stop_remoteproc "$rpath" && wait_remoteproc_state "$rpath" offline "$STOP_TO" "$POLL_I"; then
+        t1=$(date +%s)
+        log_pass "$inst_id: stop PASS ($((t1 - t0))s)"
+        stop_res="PASS"
+    else
+        dump_rproc_logs "$rpath" after-stop-fail
+        log_fail "$inst_id: stop FAIL"
+        stop_res="FAIL"
+        inst_fail=$((inst_fail + 1))
+        RESULT_LINES="$RESULT_LINES
+ $inst_id: boot=$boot_res, stop=$stop_res, start=$start_res, ping=$ping_res"
+        continue
+    fi
+    dump_rproc_logs "$rpath" after-stop
+
+    # Start
+    dump_rproc_logs "$rpath" before-start
+    t2=$(date +%s)
+    log_info "$inst_id: starting"
+    if start_remoteproc "$rpath" && wait_remoteproc_state "$rpath" running "$START_TO" "$POLL_I"; then
+        t3=$(date +%s)
+        log_pass "$inst_id: start PASS ($((t3 - t2))s)"
+        start_res="PASS"
+    else
+        dump_rproc_logs "$rpath" after-start-fail
+        log_fail "$inst_id: start FAIL"
+        start_res="FAIL"
+        inst_fail=$((inst_fail + 1))
+        RESULT_LINES="$RESULT_LINES
+ $inst_id: boot=$boot_res, stop=$stop_res, start=$start_res, ping=$ping_res"
+        continue
+    fi
+    dump_rproc_logs "$rpath" after-start
+
+    # Optional RPMsg ping
+    if CTRL_DEV=$(find_rpmsg_ctrl_for "$FW"); then
+        log_info "$inst_id: RPMsg ctrl dev: $CTRL_DEV"
+        if rpmsg_ping_generic "$CTRL_DEV"; then
+            log_pass "$inst_id: rpmsg ping PASS"
+            ping_res="PASS"
+        else
+            log_warn "$inst_id: rpmsg ping FAIL"
+            ping_res="FAIL"
+            inst_fail=$((inst_fail + 1))
+        fi
+    else
+        log_info "$inst_id: no RPMsg channel, skipping ping"
+    fi
+
+    RESULT_LINES="$RESULT_LINES
+ $inst_id: boot=$boot_res, stop=$stop_res, start=$start_res, ping=$ping_res"
+
+done <"$tmp_list"
+rm -f "$tmp_list"
+
+# ---------- Summary ----------
+log_info "Instance results:$RESULT_LINES"
+
+if [ "$inst_fail" -gt 0 ]; then
+    log_fail "One or more $FW instance(s) failed ($inst_fail/$count_instances)"
+    echo "$TESTNAME FAIL" >"$RES_FILE"
     exit 1
 fi
- 
-log_pass "$firmware_name remoteproc validated as running"
- 
-rproc_path=$(get_remoteproc_path_by_firmware "$firmware_name")
- 
-stop_remoteproc "$rproc_path" || {
-    log_fail "$TESTNAME stop failed"
-    echo "$TESTNAME FAIL" > "$res_file"
-    exit 1
-}
-log_pass "$firmware_name stop successful"
- 
-log_info "Restarting $firmware_name"
-start_remoteproc "$rproc_path" || {
-    log_fail "$TESTNAME start failed"
-    echo "$TESTNAME FAIL" > "$res_file"
-    exit 1
-}
- 
-log_pass "$firmware_name PASS"
-echo "$TESTNAME PASS" > "$res_file"
- 
-log_info "------------------- Completed $TESTNAME Testcase ----------------------------"
+
+log_pass "All $count_instances $FW instance(s) passed"
+echo "$TESTNAME PASS" >"$RES_FILE"
 exit 0
- 
