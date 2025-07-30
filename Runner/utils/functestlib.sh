@@ -61,12 +61,13 @@ is_module_loaded() {
     /sbin/lsmod | awk '{print $1}' | grep -q "^${module_name}$"
 }
 
-# Insert a kernel module with optional parameters
+# load_kernel_module <path-to-ko> [params...]
+# 1) If already loaded, no-op
+# 2) Try insmod <ko> [params]
+# 3) If that fails, try modprobe <modname> [params]
 load_kernel_module() {
-    module_path="$1"
-    shift
+    module_path="$1"; shift
     params="$*"
-
     module_name=$(basename "$module_path" .ko)
 
     if is_module_loaded "$module_name"; then
@@ -76,15 +77,24 @@ load_kernel_module() {
 
     if [ ! -f "$module_path" ]; then
         log_error "Module file not found: $module_path"
-        return 1
+        # still try modprobe if it exists in modules directory
+    else
+        log_info "Loading module via insmod: $module_path $params"
+        if /sbin/insmod "$module_path" "$params" 2>insmod_err.log; then
+            log_info "Module $module_name loaded successfully via insmod"
+            return 0
+        else
+            log_warn "insmod failed: $(cat insmod_err.log)"
+        fi
     fi
 
-    log_info "Loading module: $module_path $params"
-    if /sbin/insmod "$module_path" "$params" 2>insmod_err.log; then
-        log_info "Module $module_name loaded successfully"
+    # fallback to modprobe
+    log_info "Falling back to modprobe $module_name $params"
+    if /sbin/modprobe "$module_name" "$params" 2>modprobe_err.log; then
+        log_info "Module $module_name loaded successfully via modprobe"
         return 0
     else
-        log_error "insmod failed: $(cat insmod_err.log)"
+        log_error "modprobe failed: $(cat modprobe_err.log)"
         return 1
     fi
 }
@@ -171,14 +181,25 @@ find_test_case_script_by_name() {
     find "$base_dir" -type d -iname "$test_name" -print -quit 2>/dev/null
 }
 
+# Check each given kernel config is set to y/m in /proc/config.gz, logs result, returns 0/1.
 check_kernel_config() {
-    configs="$1"
-    for config_key in $configs; do
-        if zcat /proc/config.gz | grep -qE "^$config_key=(y|m)"; then
-            log_pass "Kernel config $config_key is enabled"
+    cfgs=$1
+    for config_key in $cfgs; do
+        if command -v zgrep >/dev/null 2>&1; then
+            if zgrep -qE "^${config_key}=(y|m)" /proc/config.gz 2>/dev/null; then
+                log_pass "Kernel config $config_key is enabled"
+            else
+                log_fail "Kernel config $config_key is missing or not enabled"
+                return 1
+            fi
         else
-            log_fail "Kernel config $config_key is missing or not enabled"
-            return 1
+            # Fallback if zgrep is unavailable
+            if gzip -dc /proc/config.gz 2>/dev/null | grep -qE "^${config_key}=(y|m)"; then
+                log_pass "Kernel config $config_key is enabled"
+            else
+                log_fail "Kernel config $config_key is missing or not enabled"
+                return 1
+            fi
         fi
     done
     return 0
@@ -1653,41 +1674,318 @@ detect_ufs_partition_block() {
     return 1
 }
 
-# Check for dmesg I/O errors and log summary
+# wait_for_path <path> [timeout_sec]
+wait_for_path() {
+    _p="$1"; _t="${2:-3}"
+    i=0
+    while [ "$i" -lt "$_t" ]; do
+        [ -e "$_p" ] && return 0
+        sleep 1
+        i=$((i+1))
+    done
+    return 1
+}
+
+###############################################################################
+# scan_dmesg_errors
+#
+# Only scans *new* dmesg lines for true error patterns (since last test run).
+# Keeps a timestamped error log history for each run.
+# Handles dmesg with/without timestamps. Cleans up markers/logs if test dir is gone.
+# Usage: scan_dmesg_errors "$SCRIPT_DIR" [optional_extra_keywords...]
+###############################################################################
 scan_dmesg_errors() {
-    label="$1"                   # Example: "ufs", "emmc", "wifi"
-    output_dir="$2"              # Directory to store logs
-    extra_keywords="$3"          # (Optional) Space-separated keywords for this label
+    prefix="$1"
+    module_regex="$2"   # e.g. 'qcom_camss|camss|isp'
+    exclude_regex="${3:-"dummy regulator|supply [^ ]+ not found|using dummy regulator"}"
+    shift 3
 
-    [ -z "$label" ] && return 1
-    [ -z "$output_dir" ] && output_dir="."
+    mkdir -p "$prefix"
 
-    snapshot_file="$output_dir/${label}_dmesg_snapshot.log"
-    error_file="$output_dir/${label}_dmesg_errors.log"
+    DMESG_SNAPSHOT="$prefix/dmesg_snapshot.log"
+    DMESG_ERRORS="$prefix/dmesg_errors.log"
+    DATE_STAMP=$(date +%Y%m%d-%H%M%S)
+    DMESG_HISTORY="$prefix/dmesg_errors_$DATE_STAMP.log"
 
-    log_info "Scanning dmesg for recent $label-related I/O errors..."
+    # Error patterns (edit as needed for your test coverage)
+    err_patterns='Unknown symbol|probe failed|fail(ed)?|error|timed out|not found|invalid|corrupt|abort|panic|oops|unhandled|can.t (start|init|open|allocate|find|register)'
 
-    dmesg | tail -n 300 > "$snapshot_file"
+    rm -f "$DMESG_SNAPSHOT" "$DMESG_ERRORS"
+    dmesg > "$DMESG_SNAPSHOT" 2>/dev/null
 
-    # Common error indicators
-    common_keywords="error fail timeout reset crc abort fault invalid fatal warn"
+    # 1. Match lines with correct module and error pattern
+    # 2. Exclude lines with harmless patterns (using dummy regulator etc)
+    grep -iE "^\[[^]]+\][[:space:]]+($module_regex):.*($err_patterns)" "$DMESG_SNAPSHOT" \
+        | grep -vEi "$exclude_regex" > "$DMESG_ERRORS" || true
 
-    # Build keyword pattern (common + optional extra)
-    pattern="($common_keywords"
-    if [ -n "$extra_keywords" ]; then
-        pattern="$pattern|$extra_keywords"
+    cp "$DMESG_ERRORS" "$DMESG_HISTORY"
+
+    if [ -s "$DMESG_ERRORS" ]; then
+        log_info "dmesg scan: found non-benign module errors in $DMESG_ERRORS (history: $DMESG_HISTORY)"
+        return 0
     fi
-    pattern="$pattern)"
+    log_info "No relevant, non-benign errors for modules [$module_regex] in recent dmesg."
+    return 1
+}
 
-    # Filter: lines must match label and error pattern
-    grep -iE "$label" "$snapshot_file" | grep -iE "$pattern" > "$error_file"
+# Skip unwanted device tree node names during DT parsing (e.g., aliases, metadata).
+# Used to avoid traversing irrelevant or special nodes in recursive scans.
+dt_should_skip_node() {
+    case "$1" in
+        ''|__*|phandle|name|'#'*|aliases|chosen|reserved-memory|interrupt-controller|thermal-zones)
+            return 0 ;;
+    esac
+    return 1
+}
 
-    if [ -s "$error_file" ]; then
-        log_warn "Detected potential $label-related errors in dmesg:"
-        while IFS= read -r line; do
-            log_warn " dmesg: $line"
-        done < "$error_file"
-    else
-        log_info "No $label-related errors found in recent dmesg logs."
+# Recursively yield all directories (nodes) under a DT root path.
+# Terminates early if a match result is found in the provided file.
+dt_yield_node_paths() {
+    _root="$1"
+    _matchresult="$2"
+    # If we've already matched, stop recursion immediately!
+    [ -s "$_matchresult" ] && return
+    for entry in "$_root"/*; do
+        [ -d "$entry" ] || continue
+        [ -s "$_matchresult" ] && return
+        echo "$entry"
+        dt_yield_node_paths "$entry" "$_matchresult"
+    done
+}
+
+# Recursively search for files named "compatible" in DT paths.
+# Terminates early if a match result is already present.
+dt_yield_compatible_files() {
+    _root="$1"
+    _matchresult="$2"
+    [ -s "$_matchresult" ] && return
+    for entry in "$_root"/*; do
+        [ -e "$entry" ] || continue
+        [ -s "$_matchresult" ] && return
+        if [ -f "$entry" ] && [ "$(basename "$entry")" = "compatible" ]; then
+            echo "$entry"
+        elif [ -d "$entry" ]; then
+            dt_yield_compatible_files "$entry" "$_matchresult"
+        fi
+    done
+}
+
+# Searches /proc/device-tree for nodes or compatible strings matching input patterns.
+# Returns success and matched path if any pattern is found; used in pre-test validation.
+dt_confirm_node_or_compatible() {
+    root="/proc/device-tree"
+    matchflag=$(mktemp) || exit 1
+    matchresult=$(mktemp) || { rm -f "$matchflag"; exit 1; }
+
+    for pattern in "$@"; do
+        # Node search: strict prefix (e.g., "isp" only matches "isp@...")
+        for entry in $(dt_yield_node_paths "$root" "$matchresult"); do
+            [ -s "$matchresult" ] && break
+            node=$(basename "$entry")
+            dt_should_skip_node "$node" && continue
+            printf '%s' "$node" | grep -iEq "^${pattern}(@|$)" || continue
+            log_info "[DTFIND] Node name strict prefix match: $entry (pattern: $pattern)"
+            if [ ! -s "$matchresult" ]; then
+                echo "${pattern}:${entry}" > "$matchresult"
+            fi
+            touch "$matchflag"
+        done
+        [ -s "$matchresult" ] && break
+
+        # Compatible property search: strict (prefix or whole word)
+        for file in $(dt_yield_compatible_files "$root" "$matchresult"); do
+            [ -s "$matchresult" ] && break
+            compdir=$(dirname "$file")
+            node=$(basename "$compdir")
+            dt_should_skip_node "$node" && continue
+            compval=$(tr '\0' ' ' < "$file")
+            printf '%s' "$compval" | grep -iEq "(^|[ ,])${pattern}([ ,]|$)" || continue
+            log_info "[DTFIND] Compatible strict match: $file (${compval}) (pattern: $pattern)"
+            if [ ! -s "$matchresult" ]; then
+                echo "${pattern}:${file}" > "$matchresult"
+            fi
+            touch "$matchflag"
+        done
+        [ -s "$matchresult" ] && break
+    done
+
+    if [ -f "$matchflag" ] && [ -s "$matchresult" ]; then
+        cat "$matchresult"
+        rm -f "$matchflag" "$matchresult"
+        return 0
+    fi
+    rm -f "$matchflag" "$matchresult"
+    return 1
+}
+
+# Detects and returns the first available media node (e.g., /dev/media0).
+# Returns failure if no media nodes are present.
+detect_media_node() {
+    for node in /dev/media*; do
+        if [ -e "$node" ]; then
+            printf '%s\n' "$node"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Runs the Python pipeline parser with a topology file to emit camera blocks.
+# Returns structured per-pipeline output for further processing.
+run_camera_pipeline_parser() {
+    # Input: path to topo file (e.g., /tmp/cam_topo.txt)
+    # Output: emits parse output to stdout
+    TOPO_FILE="$1"
+
+    if [ ! -f "$TOPO_FILE" ]; then
+        log_error "Topology file $TOPO_FILE not found"
+        return 1
+    fi
+
+PYTHON_SCRIPT="$TOOLS/camera/parse_media_topology.py"
+    if [ ! -x "$PYTHON_SCRIPT" ]; then
+        log_error "Camera pipeline parser script not found at $PYTHON_SCRIPT"
+        return 1
+    fi
+
+    log_info "Invoking camera pipeline parser with $TOPO_FILE"
+    python3 "$PYTHON_SCRIPT" "$TOPO_FILE"
+}
+
+# Shortcut to detect a media node, dump topology, and run the parser on it.
+# Intended for quick standalone camera pipeline detection.
+get_camera_pipeline_blocks() {
+    TOPO_FILE="/tmp/parse_topo.$$"
+    MEDIA_NODE=$(detect_media_node)
+    if [ -z "$MEDIA_NODE" ]; then
+        echo "[ERROR] Failed to detect media node" >&2
+        return 1
+    fi
+    media-ctl -p -d "$MEDIA_NODE" >"$TOPO_FILE" 2>/dev/null
+    PARSE_SCRIPT="${TOOLS}/camera/parse_media_topology.py"
+    if [ ! -f "$PARSE_SCRIPT" ]; then
+        echo "[ERROR] Python script $PARSE_SCRIPT not found" >&2
+        rm -f "$TOPO_FILE"
+        return 1
+    fi
+    python3 "$PARSE_SCRIPT" "$TOPO_FILE"
+    ret=$?
+    rm -f "$TOPO_FILE"
+    return "$ret"
+}
+
+# Parses a single pipeline block file into shell variables and lists.
+# Each key-value line sets up variables for media-ctl or yavta operations.
+parse_pipeline_block() {
+    block_file="$1"
+
+    # Unset and export all variables that will be assigned
+    unset SENSOR VIDEO FMT YAVTA_DEV YAVTA_FMT YAVTA_W YAVTA_H
+    unset MEDIA_CTL_V_LIST MEDIA_CTL_L_LIST
+    unset YAVTA_CTRL_PRE_LIST YAVTA_CTRL_LIST YAVTA_CTRL_POST_LIST
+
+    export SENSOR VIDEO FMT YAVTA_DEV YAVTA_FMT YAVTA_W YAVTA_H
+    export MEDIA_CTL_V_LIST MEDIA_CTL_L_LIST
+    export YAVTA_CTRL_PRE_LIST YAVTA_CTRL_LIST YAVTA_CTRL_POST_LIST
+
+    while IFS= read -r bline || [ -n "$bline" ]; do
+        key=$(printf "%s" "$bline" | awk -F':' '{print $1}')
+        val=$(printf "%s" "$bline" | sed 's/^[^:]*://')
+        case "$key" in
+            SENSOR) SENSOR=$val ;;
+            VIDEO) VIDEO=$val ;;
+            YAVTA_DEV) YAVTA_DEV=$val ;;
+            YAVTA_W) YAVTA_W=$val ;;
+            YAVTA_H) YAVTA_H=$val ;;
+            YAVTA_FMT) YAVTA_FMT=$val ;;
+            MEDIA_CTL_V) MEDIA_CTL_V_LIST="$MEDIA_CTL_V_LIST
+$val" ;;
+            MEDIA_CTL_L) MEDIA_CTL_L_LIST="$MEDIA_CTL_L_LIST
+$val" ;;
+            YAVTA_CTRL_PRE) YAVTA_CTRL_PRE_LIST="$YAVTA_CTRL_PRE_LIST
+$val" ;;
+            YAVTA_CTRL) YAVTA_CTRL_LIST="$YAVTA_CTRL_LIST
+$val" ;;
+            YAVTA_CTRL_POST) YAVTA_CTRL_POST_LIST="$YAVTA_CTRL_POST_LIST
+$val" ;;
+        esac
+    done < "$block_file"
+
+    # Fallback: if VIDEO is not emitted, use YAVTA_DEV
+    if [ -z "$VIDEO" ] && [ -n "$YAVTA_DEV" ]; then
+        VIDEO="$YAVTA_DEV"
     fi
 }
+
+# Applies media configuration (format and links) using media-ctl from parsed pipeline block.
+# Resets media graph first and applies user-specified format override if needed.
+configure_pipeline_block() {
+    MEDIA_NODE="$1" USER_FORMAT="$2"
+
+    media-ctl -d "$MEDIA_NODE" --reset >/dev/null 2>&1
+
+    # Apply MEDIA_CTL_V (override format if USER_FORMAT set)
+    printf "%s\n" "$MEDIA_CTL_V_LIST" | while IFS= read -r vline || [ -n "$vline" ]; do
+        [ -z "$vline" ] && continue
+        vline_new="$vline"
+        if [ -n "$USER_FORMAT" ]; then
+            vline_new=$(printf "%s" "$vline_new" | sed -E "s/fmt:[^/]+\/([0-9]+x[0-9]+)/fmt:${USER_FORMAT}\/\1/g")
+        fi
+        media-ctl -d "$MEDIA_NODE" -V "$vline_new" >/dev/null 2>&1
+    done
+
+    # Apply MEDIA_CTL_L
+    printf "%s\n" "$MEDIA_CTL_L_LIST" | while IFS= read -r lline || [ -n "$lline" ]; do
+        [ -z "$lline" ] && continue
+        media-ctl -d "$MEDIA_NODE" -l "$lline" >/dev/null 2>&1
+    done
+}
+
+# Executes yavta pipeline controls and captures frames from a video node.
+# Handles pre-capture and post-capture register writes, with detailed result code
+execute_capture_block() {
+    FRAMES="$1" FORMAT="$2"
+
+    # Pre-stream controls
+    printf "%s\n" "$YAVTA_CTRL_PRE_LIST" | while IFS= read -r ctrl; do
+        [ -z "$ctrl" ] && continue
+        dev=$(echo "$ctrl" | awk '{print $1}')
+        reg=$(echo "$ctrl" | awk '{print $2}')
+        val=$(echo "$ctrl" | awk '{print $3}')
+        yavta --no-query -w "$reg $val" "$dev" >/dev/null 2>&1
+    done
+
+    # Stream-on controls
+    printf "%s\n" "$YAVTA_CTRL_LIST" | while IFS= read -r ctrl; do
+        [ -z "$ctrl" ] && continue
+        dev=$(echo "$ctrl" | awk '{print $1}')
+        reg=$(echo "$ctrl" | awk '{print $2}')
+        val=$(echo "$ctrl" | awk '{print $3}')
+        yavta --no-query -w "$reg $val" "$dev" >/dev/null 2>&1
+    done
+
+    # Capture
+    if [ -n "$YAVTA_DEV" ] && [ -n "$FORMAT" ] && [ -n "$YAVTA_W" ] && [ -n "$YAVTA_H" ]; then
+        OUT=$(yavta -B capture-mplane -c -I -n "$FRAMES" -f "$FORMAT" -s "${YAVTA_W}x${YAVTA_H}" -F "$YAVTA_DEV" --capture="$FRAMES" --file="frame-#.bin" 2>&1)
+        RET=$?
+        if echo "$OUT" | grep -qi "Unsupported video format"; then
+            return 2
+        elif [ $RET -eq 0 ] && echo "$OUT" | grep -q "Captured [1-9][0-9]* frames"; then
+            return 0
+        else
+            return 1
+        fi
+    else
+        return 3
+    fi
+
+    # Post-stream controls
+    printf "%s\n" "$YAVTA_CTRL_POST_LIST" | while IFS= read -r ctrl; do
+        [ -z "$ctrl" ] && continue
+        dev=$(echo "$ctrl" | awk '{print $1}')
+        reg=$(echo "$ctrl" | awk '{print $2}')
+        val=$(echo "$ctrl" | awk '{print $3}')
+        yavta --no-query -w "$reg $val" "$dev" >/dev/null 2>&1
+    done
+}
+

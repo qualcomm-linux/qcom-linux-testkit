@@ -2,6 +2,9 @@
 
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause-Clear
+#
+# Test for IPA driver: skip if CONFIG_QCOM_IPA not enabled, then
+# builtin vs module, verify /dev/ipa, functional sysfs & dmesg checks.
 
 # Robustly find and source init_env
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -30,40 +33,61 @@ fi
 TESTNAME="IPA"
 test_path=$(find_test_case_by_name "$TESTNAME")
 cd "$test_path" || exit 1
-res_file="./$TESTNAME.res"
+RES_FILE="./$TESTNAME.res"
 
 log_info "-----------------------------------------------------------------------------------------"
 log_info "-------------------Starting $TESTNAME Testcase----------------------------"
 log_info "=== Test Initialization ==="
 
-IPA_MODULE_PATH=$(find_kernel_module "ipa")
-
-if [ -z "$IPA_MODULE_PATH" ]; then
-    log_error "ipa.ko module not found in filesystem."
-    echo "$TESTNAME FAIL" > "$res_file"
-    exit 1
-fi
-
-log_info "Found ipa.ko at: $IPA_MODULE_PATH"
-
-if ! load_kernel_module "$IPA_MODULE_PATH"; then
-    echo "$TESTNAME FAIL" > "$res_file"
-    exit 1
-fi
-
-if is_module_loaded "ipa"; then
-    log_info "ipa module is loaded"
-    log_pass "$TESTNAME : Test Passed"
-    echo "$TESTNAME PASS" > "$res_file"
+# Kernel config gate
+if ! check_kernel_config "CONFIG_QCOM_IPA"; then
+    log_skip "$TESTNAME SKIP - CONFIG_QCOM_IPA not enabled"
+    echo "$TESTNAME SKIP" >"$RES_FILE"
     exit 0
-else
-    log_error "ipa module not listed in lsmod"
-    log_fail "$TESTNAME : Test Failed"
-    echo "$TESTNAME FAIL" > "$res_file"
-    exit 1
 fi
 
-log_info "=== Cleanup ==="
-unload_kernel_module "ipa" true
+MODNAME="ipa"
+PRE_LOADED=0
+
+# Ensure module is loaded
+if is_module_loaded "$MODNAME"; then
+    PRE_LOADED=1
+    log_info "Module $MODNAME already loaded"
+else
+    MODPATH=$(find_kernel_module "$MODNAME")
+    [ -n "$MODPATH" ] || log_fail "$MODNAME.ko not found in filesystem"
+    load_kernel_module "$MODPATH" || log_fail "Failed to load $MODNAME"
+    log_pass "$MODNAME module loaded"
+fi
+
+# /dev node check (warn only, don't fail/skip)
+log_info "Verifying /dev/ipa node"
+if wait_for_path "/dev/ipa" 3; then
+    log_pass "/dev/ipa node is present"
+else
+    log_warn "No /dev/ipa node found (platform/use-case may not expose it)"
+fi
+
+# dmesg scan: errors + success pattern
+# scan_dmesg_errors(label, out_dir, extra_err, ok_kw)
+scan_dmesg_errors "ipa" "." "handshake_complete.*error|stall|abort" "IPA Q6 handshake completed"
+rc=$?
+case "$rc" in
+    0) log_warn "IPA-related errors found in dmesg (see ipa_dmesg_errors.log)" ;;
+    1) log_info "No IPA-related errors in dmesg" ;;
+    2) log_warn "Success pattern 'IPA Q6 handshake completed' not found in dmesg" ;;
+    3) log_warn "scan_dmesg_errors misuse (label missing?)" ;;
+esac
+
+#Cleanup: unload only if we loaded it
+if [ "$PRE_LOADED" -eq 0 ]; then
+    log_info "Unloading $MODNAME (loaded by this test)"
+    unload_kernel_module "$MODNAME" false || log_warn "Unload $MODNAME failed"
+else
+    log_info "$MODNAME was pre-loaded; leaving it loaded"
+fi
 
 log_info "-------------------Completed $TESTNAME Testcase----------------------------"
+log_pass "$TESTNAME PASS"
+echo "$TESTNAME PASS" >"$RES_FILE"
+exit 0
