@@ -29,26 +29,43 @@ fi
 # ---------------------------------------------------------------
 
 TESTNAME="AudioPlayback"
-TESTBINARY="paplay"
 TAR_URL="https://github.com/qualcomm-linux/qcom-linux-testkit/releases/download/Pulse-Audio-Files-v1.0/AudioClips.tar.gz"
 PLAYBACK_CLIP="AudioClips/yesterday_48KHz.wav"
 AUDIO_DEVICE="low-latency0"
 LOGDIR="results/audioplayback"
 RESULT_FILE="$TESTNAME.res"
 
+# Determine backend and binary
+AUDIO_BACKEND="${AUDIO_BACKEND:-pulseaudio}"  # Default to pulseaudio if not set
+
+case "$AUDIO_BACKEND" in
+    pulseaudio)
+        TESTBINARY="paplay"
+        PLAY_CMD="paplay \"$PLAYBACK_CLIP\" -d \"$AUDIO_DEVICE\""
+        ;;
+    pipewire)
+        TESTBINARY="pw-play"
+        PLAY_CMD="pw-play \"$PLAYBACK_CLIP\""
+        ;;
+    *)
+        log_fail "Invalid AUDIO_BACKEND specified: $AUDIO_BACKEND. Use 'pulseaudio' or 'pipewire'."
+        echo "$TESTNAME FAIL" > "$RESULT_FILE"
+        exit 1
+        ;;
+esac
+
 test_path=$(find_test_case_by_name "$TESTNAME")
 cd "$test_path" || exit 1
-
 # Prepare logdir
 mkdir -p "$LOGDIR"
 chmod -R 777 "$LOGDIR"
 
 log_info "------------------------------------------------------------"
 log_info "------------------- Starting $TESTNAME Testcase ------------"
+log_info "Using audio backend: $AUDIO_BACKEND"
 
 log_info "Checking if dependency binary is available"
 check_dependencies "$TESTBINARY" pgrep grep timeout
-
 # Download/extract audio if not present
 if [ ! -f "$PLAYBACK_CLIP" ]; then
     log_info "Audio clip not found, downloading..."
@@ -66,18 +83,15 @@ if [ ! -f "$PLAYBACK_CLIP" ]; then
 fi
 
 log_info "Playback clip present: $PLAYBACK_CLIP"
-
 # --- Capture logs BEFORE playback (for debugging) ---
 dmesg > "$LOGDIR/dmesg_before.log"
-
 # --- Start the Playback, capture output ---
-timeout 15s paplay "$PLAYBACK_CLIP" -d "$AUDIO_DEVICE" > "$LOGDIR/playback_stdout.log" 2>&1
+eval "timeout 15s $PLAY_CMD" > "$LOGDIR/playback_stdout.log" 2>&1
 ret=$?
-
 # --- Capture logs AFTER playback (for debugging) ---
 dmesg > "$LOGDIR/dmesg_after.log"
 
-if [ "$ret" -eq 0 ] || [ "$ret" -eq 124 ] ; then
+if [ "$ret" -eq 0 ] || [ "$ret" -eq 124 ]; then
     log_pass "Playback completed or timed out (ret=$ret) as expected."
     log_pass "$TESTNAME : Test Passed"
     echo "$TESTNAME PASS" > "$RESULT_FILE"
@@ -89,6 +103,6 @@ else
     exit 1
 fi
 
-log_info "See $LOGDIR/playback_stdout.log, dmesg_before/after.log, syslog_before/after.log for debug details"
+log_info "See $LOGDIR/playback_stdout.log, dmesg_before/after.log for debug details"
 log_info "------------------- Completed $TESTNAME Testcase -------------"
 exit 0
