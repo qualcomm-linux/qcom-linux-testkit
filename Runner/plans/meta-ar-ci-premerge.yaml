@@ -14,9 +14,13 @@ metadata:
 run:
     steps:
         - cd Runner
-        - $PWD/suites/Multimedia/Audio/AudioPlayback/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/Audio/AudioPlayback/AudioPlayback.res || true  
-        - $PWD/suites/Multimedia/Audio/AudioRecord/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/Audio/AudioRecord/AudioRecord.res || true
+        - AUDIO_BACKEND=pulseaudio $PWD/suites/Multimedia/Audio/AudioPlayback/run.sh || true
+        - AUDIO_BACKEND=pulseaudio $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/Audio/AudioPlayback/AudioPlayback.res || true
+        - AUDIO_BACKEND=pipewire $PWD/suites/Multimedia/Audio/AudioPlayback/run.sh || true
+        - AUDIO_BACKEND=pipewire $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/Audio/AudioPlayback/AudioPlayback.res || true
+        - AUDIO_BACKEND=pulseaudio $PWD/suites/Multimedia/Audio/AudioRecord/run.sh || true
+        - AUDIO_BACKEND=pulseaudio $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/Audio/AudioRecord/AudioRecord.res || true
+        - AUDIO_BACKEND=pipewire $PWD/suites/Multimedia/Audio/AudioRecord/run.sh || true
+        - AUDIO_BACKEND=pipewire $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/Audio/AudioRecord/AudioRecord.res || true
         - $PWD/utils/result_parse.sh
 
