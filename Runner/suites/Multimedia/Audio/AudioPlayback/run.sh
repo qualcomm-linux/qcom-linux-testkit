@@ -38,14 +38,28 @@ RESULT_FILE="$TESTNAME.res"
 # Determine backend and binary
 AUDIO_BACKEND="${AUDIO_BACKEND:-pulseaudio}"  # Default to pulseaudio if not set
 
+# PLAYBACK_VOLUME: 0-65536 for paplay, 0.0-1.0 for pw-play
+# PLAYBACK_TIMEOUT: seconds (default: 15)
+# PLAYBACK_LOOPS: number of times to repeat playback
+PLAYBACK_TIMEOUT="${PLAYBACK_TIMEOUT:-15s}"
+PLAYBACK_LOOPS="${PLAYBACK_LOOPS:-1}"														  
+# Set default volume based on backend
+# paplay volume range: 0–65536
+# pw-play volume range: 0.0–1.0
+if [ "$AUDIO_BACKEND" = "pulseaudio" ]; then
+    PLAYBACK_VOLUME="${PLAYBACK_VOLUME:-65536}"
+elif [ "$AUDIO_BACKEND" = "pipewire" ]; then
+    PLAYBACK_VOLUME="${PLAYBACK_VOLUME:-1.0}"
+fi
+										  
 case "$AUDIO_BACKEND" in
     pulseaudio)
         TESTBINARY="paplay"
-        PLAY_CMD="paplay \"$PLAYBACK_CLIP\" -d \"$AUDIO_DEVICE\""
+        PLAY_CMD="paplay --volume=$PLAYBACK_VOLUME  \"$PLAYBACK_CLIP\" -d \"$AUDIO_DEVICE\""
         ;;
     pipewire)
         TESTBINARY="pw-play"
-        PLAY_CMD="pw-play \"$PLAYBACK_CLIP\""
+        PLAY_CMD="pw-play --volume=$PLAYBACK_VOLUME  \"$PLAYBACK_CLIP\""
         ;;
     *)
         log_fail "Invalid AUDIO_BACKEND specified: $AUDIO_BACKEND. Use 'pulseaudio' or 'pipewire'."
@@ -64,6 +78,15 @@ log_info "------------------------------------------------------------"
 log_info "------------------- Starting $TESTNAME Testcase ------------"
 log_info "Using audio backend: $AUDIO_BACKEND"
 
+# Daemon check
+if [ "$AUDIO_BACKEND" = "pulseaudio" ]; then
+  if ! pgrep pulseaudio > /dev/null && ! pgrep pipewire-pulse > /dev/null; then
+    log_skip_exit "$TESTNAME" "Neither PulseAudio nor pipewire-pulse daemon is running"
+  fi
+elif [ "$AUDIO_BACKEND" = "pipewire" ]; then
+  pgrep pipewire > /dev/null || log_skip_exit "$TESTNAME" "PipeWire daemon not running"
+fi
+	  
 log_info "Checking if dependency binary is available"
 check_dependencies "$TESTBINARY" pgrep grep timeout
 # Download/extract audio if not present
@@ -83,13 +106,19 @@ if [ ! -f "$PLAYBACK_CLIP" ]; then
 fi
 
 log_info "Playback clip present: $PLAYBACK_CLIP"
+
 # --- Capture logs BEFORE playback (for debugging) ---
-dmesg > "$LOGDIR/dmesg_before.log"
+get_kernel_log > "$LOGDIR/dmesg_before.log"
+
 # --- Start the Playback, capture output ---
-eval "timeout 15s $PLAY_CMD" > "$LOGDIR/playback_stdout.log" 2>&1
+for i in $(seq 1 "$PLAYBACK_LOOPS"); do
+   timeout "$PLAYBACK_TIMEOUT" sh -c "$PLAY_CMD" >> "$LOGDIR/playback_stdout.log" 2>&1
+done
 ret=$?
+
 # --- Capture logs AFTER playback (for debugging) ---
-dmesg > "$LOGDIR/dmesg_after.log"
+get_kernel_log > "$LOGDIR/dmesg_after.log"
+scan_dmesg_errors "audio" "$LOGDIR"
 
 if [ "$ret" -eq 0 ] || [ "$ret" -eq 124 ]; then
     log_pass "Playback completed or timed out (ret=$ret) as expected."

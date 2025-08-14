@@ -34,7 +34,24 @@ AUDIO_DEVICE="regular0"
 LOGDIR="results/audiorecord"
 RESULT_FILE="$TESTNAME.res"
 
-AUDIO_BACKEND="${AUDIO_BACKEND:-pulseaudio}"  # Default to pulseaudio
+# Determine backend and binary
+AUDIO_BACKEND="${AUDIO_BACKEND:-pulseaudio}"  # Default to pulseaudio if not set
+
+# RECORD_TIMEOUT: seconds (default: 12s)
+# RECORD_LOOPS: number of times to repeat recording
+RECORD_TIMEOUT="${RECORD_TIMEOUT:-12s}"
+RECORD_LOOPS="${RECORD_LOOPS:-1}"
+
+# Set test binary and command
+if [ "$AUDIO_BACKEND" = "pulseaudio" ]; then
+    TESTBINARY="parec"
+elif [ "$AUDIO_BACKEND" = "pipewire" ]; then
+    TESTBINARY="pw-record"
+else
+    log_fail "Invalid AUDIO_BACKEND specified: $AUDIO_BACKEND. Use 'pulseaudio' or 'pipewire'."
+    echo "$TESTNAME FAIL" > "$RESULT_FILE"
+    exit 1
+fi
 
 test_path=$(find_test_case_by_name "$TESTNAME")
 cd "$test_path" || exit 1
@@ -45,12 +62,21 @@ log_info "------------------------------------------------------------"
 log_info "------------------- Starting $TESTNAME Testcase ------------"
 log_info "Using audio backend: $AUDIO_BACKEND"
 
+# Daemon check
 if [ "$AUDIO_BACKEND" = "pulseaudio" ]; then
-    TESTBINARY="parec"
-    RECORD_CMD="$TESTBINARY --rate=48000 --format=s16le --channels=1 --file-format=wav \"$RECORD_FILE\" -d \"$AUDIO_DEVICE\""
+  if ! pgrep pulseaudio > /dev/null && ! pgrep pipewire-pulse > /dev/null; then
+    log_skip_exit "$TESTNAME" "Neither PulseAudio nor pipewire-pulse daemon is running"
+  fi
+elif [ "$AUDIO_BACKEND" = "pipewire" ]; then
+  pgrep pipewire > /dev/null || log_skip_exit "$TESTNAME" "PipeWire daemon not running"
+fi
+
+log_info "Checking if dependency binary is available"
+if [ "$AUDIO_BACKEND" = "pulseaudio" ]; then
     check_dependencies "$TESTBINARY" pgrep timeout
+    RECORD_CMD="$TESTBINARY --rate=48000 --format=s16le --channels=1 --file-format=wav \"$RECORD_FILE\" -d \"$AUDIO_DEVICE\""
 else
-    TESTBINARY="pw-record"
+						  
     check_dependencies "$TESTBINARY" wpctl grep sed timeout
 
     # Extract source ID using sed
@@ -66,13 +92,19 @@ else
     RECORD_CMD="$TESTBINARY \"$RECORD_FILE\" -v"
 fi
 
-dmesg > "$LOGDIR/dmesg_before.log"
+# --- Capture logs BEFORE recording (for debugging) ---
+get_kernel_log > "$LOGDIR/dmesg_before.log"
 rm -f "$RECORD_FILE"
 
-eval "timeout 12s $RECORD_CMD" > "$LOGDIR/${TESTBINARY}_stdout.log" 2>&1
+# --- Start the Recording, capture output ---
+for i in $(seq 1 "$RECORD_LOOPS"); do
+   timeout "$RECORD_TIMEOUT" sh -c "$RECORD_CMD" >> "$LOGDIR/${TESTBINARY}_stdout.log" 2>&1
+done
 ret=$?
 
-dmesg > "$LOGDIR/dmesg_after.log"
+# --- Capture logs AFTER recording (for debugging) ---
+get_kernel_log > "$LOGDIR/dmesg_after.log"
+scan_dmesg_errors "audio" "$LOGDIR"
 
 if ([ "$ret" -eq 0 ] || [ "$ret" -eq 124 ]) && [ -s "$RECORD_FILE" ]; then
     log_pass "Recording completed or timed out (ret=$ret) as expected and output file exists."
@@ -86,6 +118,6 @@ else
     exit 1
 fi
 
-log_info "See $LOGDIR/${TESTBINARY}_stdout.log, dmesg_before/after.log, syslog_before/after.log for debug details"
+log_info "See $LOGDIR/${TESTBINARY}_stdout.log, dmesg_before/after.log for debug details"
 log_info "------------------- Completed $TESTNAME Testcase -------------"
 exit 0

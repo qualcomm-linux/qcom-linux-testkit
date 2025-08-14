@@ -9,6 +9,10 @@ This script automates the validation of audio recording capabilities on the Qual
 - Records PCM audio to '/tmp/rec1.wav' using either `parec` or `pw-record`
 - Automatically detects and sets PipeWire source ID if PipeWire is used
 - Uses `AUDIO_BACKEND` environment variable to select backend (default: pulseaudio)
+- Captures kernel logs before and after recording
+- Scans dmesg logs for audio-related errors
+- Supports configurable timeout and loop count for recording
+- Validates presence of required daemons and binaries												 
 - Compatible with Yocto-based root filesystem
 
 ## Prerequisites
@@ -16,7 +20,9 @@ This script automates the validation of audio recording capabilities on the Qual
 Ensure the following components are present in the target Yocto build:
 
 - `parec` binary (for PulseAudio)
-- `pw-record`, `wpctl`, `grep`, `sed` (for PipeWire)
+- `pw-record`, `wpctl`, `grep`, `sed`, `timeout`, `pgrep` (for PipeWire)
+- `pulseaudio` or `pipewire` daemon must be running depending on backend
+								
 
 ## Directory Structure
 
@@ -54,20 +60,28 @@ cd <Path in device>Runner
 AUDIO_BACKEND=pulseaudio ./run-test.sh AudioRecord
 **Run with PipeWire**
 AUDIO_BACKEND=pipewire ./run-test.sh AudioRecord
+
+Environment Variables:
+You can customize recording behavior using the following environment variables:
+AUDIO_BACKEND: Selects the audio backend (pulseaudio or pipewire). Default is pulseaudio.
+RECORD_TIMEOUT: Timeout duration for recording (e.g., 12s). Default is 12s.
+RECORD_LOOPS: Number of times to repeat recording. Default is 1.
 ```
 
 Sample Output:
 ```
-[Executing test case: AudioRecord] 2025-05-28 19:03:33 -
-[INFO] 2025-05-28 19:03:33 - ------------------------------------------------------------
-[INFO] 2025-05-28 19:03:33 - ------------------- Starting AudioRecord Testcase ------------
-[INFO] 2025-05-28 19:03:33 - Using audio backend: pulseaudio
-[INFO] 2025-05-28 19:03:33 - Checking if dependency binary is available
-[PASS] 2025-05-28 19:03:45 - Recording completed or timed out (ret=124) as expected and output file exists.
-[PASS] 2025-05-28 19:03:45 - AudioRecord : Test Passed
-[INFO] 2025-05-28 19:03:45 - See results/audiorecord/parec_stdout.log or pw-record_stdout.log, dmesg_before/after.log, syslog_before/after.log for debug details
-[INFO] 2025-05-28 19:03:45 - ------------------- Completed AudioRecord Testcase -------------
-[PASS] 2025-05-28 19:03:45 - AudioRecord passed
+sh-5.2# AUDIO_BACKEND=pipewire ./run-test.sh AudioRecord
+[Executing test case: AudioRecord] 2025-08-14 10:35:43 -
+[INFO] 2025-08-14 10:35:43 - ------------------------------------------------------------
+[INFO] 2025-08-14 10:35:43 - ------------------- Starting AudioRecord Testcase ------------
+[INFO] 2025-08-14 10:35:43 - Using audio backend: pipewire
+[INFO] 2025-08-14 10:35:43 - Checking if dependency binary is available
+[INFO] 2025-08-14 10:35:43 - Detected PipeWire source ID: 50
+[INFO] 2025-08-14 10:35:55 - Scanning dmesg for audio: errors & success patterns
+[INFO] 2025-08-14 10:35:55 - No audio-related errors found (no OK pattern requested)
+[PASS] 2025-08-14 10:35:55 - Recording completed or timed out (ret=124) as expected and output file exists.
+[PASS] 2025-08-14 10:35:55 - AudioRecord : Test Passed
+[PASS] 2025-08-14 10:35:55 - AudioRecord passed
 ```
 
 3. Results will be available in the `Runner/suites/Multimedia/Audio/AudioRecord/AudioRecord.res` directory.
