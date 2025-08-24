@@ -29,7 +29,7 @@ fi
 # shellcheck disable=SC1090,SC1091
 . "$TOOLS/functestlib.sh"
 
-TESTNAME="iris_v4l2_video_decode"
+TESTNAME="Video_V4L2_H265_Encode"
 test_path=$(find_test_case_by_name "$TESTNAME")
 cd "$test_path" || exit 1
 # shellcheck disable=SC2034
@@ -45,9 +45,9 @@ check_dependencies iris_v4l2_test
 extract_tar_from_url "$TAR_URL"
 
 # Run the first test
-iris_v4l2_test --config "${test_path}/h264Decoder.json" --loglevel 15 >> "${test_path}/video_dec.txt"
+iris_v4l2_test --config "${test_path}/h264Encoder.json" --loglevel 15 >> "${test_path}/video_enc.txt"
 
-if grep -q "SUCCESS" "${test_path}/video_dec.txt"; then
+if grep -q "SUCCESS" "${test_path}/video_enc.txt"; then
     log_pass "$TESTNAME : Test Passed"
     echo "$TESTNAME PASS" > "$test_path/$TESTNAME.res"
     exit 0

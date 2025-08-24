@@ -1,0 +1,22 @@
+{
+    "ExecutionMode": "Sequential",
+    "TestCases": [
+        {
+            "Name": "H265 Decoder Testcase",
+            "TestConfigs": {
+                "Domain": "Decoder",
+                "InputPath": "./Simple_HEVC_4096x2160_60fps.h265",
+                "NumFrames": 50,
+                "CodecName": "HEVC",
+                "PixelFormat": "NV12",
+                "Width": 4096,
+                "Height": 2160,
+                "Outputpath": "./output_Simple_HEVC_4096x2160_60fps.yuv",
+                "InputBufferCount": 16,
+                "OutputBufferCount": 16,
+                "UseMinBufferCtrl": false,
+                "MemoryType": "MMAP"
+            }
+        }
+    ]
+}

@@ -1,0 +1,126 @@
+{
+    "ExecutionMode": "Sequential",
+    "TestCases": [
+        {
+            "Name": "H265 Encoder Testcase",
+            "TestConfigs": {
+                "Domain": "Encoder",
+                "InputPath": "./simple_ubwc_hevc.yuv",
+                "NumFrames": 300,
+                "CodecName": "HEVC",
+                "PixelFormat": "QC08C",
+                "Width": 352,
+                "Height": 288,
+                "Outputpath": "./output_simple_ubwc_hevc.265",
+                "UseMinBufferCtrl": false,
+                "InputBufferCount": 32,
+                "OutputBufferCount": 32,
+                "OperatingRate": 30,
+                "FrameRate": 30,
+                "StaticControls": [
+                    {
+                        "Id": "Profile",
+                        "Vtype": "String",
+                        "Value": "MAIN"
+                    },
+                    {
+                        "Id": "Level",
+                        "Vtype": "String",
+                        "Value": "5.0"
+                    },
+                    {
+                        "Id": "FrameRC",
+                        "Vtype": "Int",
+                        "Value": 1
+                    },
+                    {
+                        "Id": "BitRate",
+                        "Vtype": "Int",
+                        "Value": 358400
+                    },
+                    {
+                        "Id": "BitRateMode",
+                        "Vtype": "String",
+                        "Value": "CBR"
+                    },
+                    {
+                        "Id": "PrefixHeaderMode",
+                        "Vtype": "String",
+                        "Value": "JOINED"
+                    },
+                    {
+                        "Id": "Tier",
+                        "Vtype": "String",
+                        "Value": "HIGH"
+                    },
+                    {
+                        "Id": "GOPSize",
+                        "Vtype": "Int",
+                        "Value": 447
+                    },
+                    {
+                        "Id": "HierarchicalCodingType",
+                        "Vtype": "String",
+                        "Value": "HierP"
+                    },
+                    {
+                        "Id": "HierarchicalLayerCount",
+                        "Vtype": "Int",
+                        "Value": 2
+                    },
+                    {
+                        "Id": "HierCodingL0BR",
+                        "Vtype": "Int",
+                        "Value": 136192
+                    },
+                    {
+                        "Id": "HierCodingL1BR",
+                        "Vtype": "Int",
+                        "Value": 93184
+                    },
+                    {
+                        "Id": "HierCodingL2BR",
+                        "Vtype": "Int",
+                        "Value": 129024
+                    },
+                    {
+                        "Id": "MultiSliceMode",
+                        "Vtype": "String",
+                        "Value": "SINGLE"
+                    },
+                    {
+                        "Id": "MinIQP",
+                        "Vtype": "Int",
+                        "Value": 1
+                    },
+                    {
+                        "Id": "MinPQP",
+                        "Vtype": "Int",
+                        "Value": 1
+                    },
+                    {
+                        "Id": "MinBQP",
+                        "Vtype": "Int",
+                        "Value": 1
+                    },
+                    {
+                        "Id": "MaxIQP",
+                        "Vtype": "Int",
+                        "Value": 51
+                    },
+                    {
+                        "Id": "MaxPQP",
+                        "Vtype": "Int",
+                        "Value": 51
+                    },
+                    {
+                        "Id": "MaxBQP",
+                        "Vtype": "Int",
+                        "Value": 51
+                    }
+                ],
+                "DynamicControls": []
+            }
+        }
+    ]
+}
