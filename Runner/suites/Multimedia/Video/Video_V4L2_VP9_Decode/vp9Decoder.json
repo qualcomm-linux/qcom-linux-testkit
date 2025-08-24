@@ -1,0 +1,22 @@
+{
+    "ExecutionMode": "Sequential",
+    "TestCases": [
+        {
+            "Name": "H265 Decoder Testcase",
+            "TestConfigs": {
+                "Domain": "Decoder",
+                "InputPath": "./Simple_VP9_4K_UHD.ivf",
+                "NumFrames": 50,
+                "CodecName": "VP9",
+                "PixelFormat": "NV12",
+                "Width": 3840,
+                "Height": 2160,
+                "Outputpath": "./output_Simple_VP9_4K_UHD.yuv",
+                "InputBufferCount": 16,
+                "OutputBufferCount": 16,
+                "UseMinBufferCtrl": false,
+                "MemoryType": "MMAP"
+            }
+        }
+    ]
+}

@@ -29,7 +29,7 @@ fi
 # shellcheck disable=SC1090,SC1091
 . "$TOOLS/functestlib.sh"
 
-TESTNAME="iris_v4l2_video_encode"
+TESTNAME="Video_V4L2_H264_Encode"
 test_path=$(find_test_case_by_name "$TESTNAME")
 cd "$test_path" || exit 1
 # shellcheck disable=SC2034
