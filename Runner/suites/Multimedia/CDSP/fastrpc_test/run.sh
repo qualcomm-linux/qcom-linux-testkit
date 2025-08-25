@@ -33,7 +33,6 @@ RESULT_FILE="$TESTNAME.res"
 # Defaults
 REPEAT=1
 TIMEOUT=""
-ARCH=""
 BIN_DIR="" # optional: where fastrpc_test lives
 ASSETS_DIR="" # optional: parent containing linux/ etc
 VERBOSE=0
@@ -43,7 +42,6 @@ usage() {
 Usage: $0 [OPTIONS]
 
 Options:
-  --arch <name> Architecture (auto-detected if omitted)
   --bin-dir <path> Directory containing 'fastrpc_test' binary
   --assets-dir <path> Directory that CONTAINS 'linux/' (run from here if present)
   --repeat <N> Number of test repetitions (default: 1)
@@ -61,7 +59,6 @@ EOF
 # Parse arguments
 while [ $# -gt 0 ]; do
     case "$1" in
-        --arch) ARCH="$2"; shift 2 ;;
         --bin-dir) BIN_DIR="$2"; shift 2 ;;
         --assets-dir) ASSETS_DIR="$2"; shift 2 ;;
         --repeat) REPEAT="$2"; shift 2 ;;
@@ -104,17 +101,6 @@ else
 fi
 BINDIR="$(dirname "$FASTBIN")"
 log_info "Binary: $FASTBIN"
-
-# ---------- Arch detection if needed ----------
-if [ -z "$ARCH" ]; then
-    soc="$(cat /sys/devices/soc0/soc_id 2>/dev/null || echo "unknown")"
-    case "$soc" in
-        498) ARCH="v68" ;;
-        676|534) ARCH="v73" ;;
-        606) ARCH="v75" ;;
-        *) log_warn "Unknown SoC ID: $soc; defaulting to 'v68'"; ARCH="v68" ;;
-    esac
-fi
 
 # ---------- Buffering tool availability ----------
 HAVE_STDBUF=0; command -v stdbuf >/dev/null 2>&1 && HAVE_STDBUF=1
@@ -198,7 +184,7 @@ LOG_ROOT="./logs_${TESTNAME}_${TS}"
 mkdir -p "$LOG_ROOT" || { log_error "Cannot create $LOG_ROOT"; echo "$TESTNAME : FAIL" >"$RESULT_FILE"; exit 1; }
 
 tmo_label="none"; [ -n "$TIMEOUT" ] && tmo_label="${TIMEOUT}s"
-log_info "Arch: $ARCH | Repeats: $REPEAT | Timeout: $tmo_label | Buffering: $buf_label"
+log_info "Repeats: $REPEAT | Timeout: $tmo_label | Buffering: $buf_label"
 log_debug "Run dir: $RESOLVED_RUN_DIR | PATH=$PATH"
 
 # ---------- Run loop ----------
@@ -216,23 +202,23 @@ while [ "$i" -le "$REPEAT" ]; do
     if [ $HAVE_STDBUF -eq 1 ]; then
         (
             cd "$RESOLVED_RUN_DIR" || exit 127
-            run_with_timeout "$TIMEOUT" -- stdbuf -oL -eL "$FASTBIN" -d 3 -U 1 -t linux -a "$ARCH"
+            run_with_timeout "$TIMEOUT" -- stdbuf -oL -eL "$FASTBIN" -d 3 -U 1 -t linux 
         ) >"$iter_log" 2>&1
         rc=$?
     elif [ $HAVE_SCRIPT -eq 1 ]; then
         (
             cd "$RESOLVED_RUN_DIR" || exit 127
             if [ -n "$TIMEOUT" ] && [ $HAVE_TIMEOUT -eq 1 ]; then
-                script -q -c "timeout $TIMEOUT \"$FASTBIN\" -d 3 -U 1 -t linux -a \"$ARCH\"" /dev/null
+                script -q -c "timeout $TIMEOUT \"$FASTBIN\" -d 3 -U 1 -t linux " /dev/null
             else
-                script -q -c "\"$FASTBIN\" -d 3 -U 1 -t linux -a \"$ARCH\"" /dev/null
+                script -q -c "\"$FASTBIN\" -d 3 -U 1 -t linux " /dev/null
             fi
         ) >"$iter_log" 2>&1
         rc=$?
     else
         (
             cd "$RESOLVED_RUN_DIR" || exit 127
-            run_with_timeout "$TIMEOUT" -- "$FASTBIN" -d 3 -U 1 -t linux -a "$ARCH"
+            run_with_timeout "$TIMEOUT" -- "$FASTBIN" -d 3 -U 1 -t linux 
         ) >"$iter_log" 2>&1
         rc=$?
     fi
