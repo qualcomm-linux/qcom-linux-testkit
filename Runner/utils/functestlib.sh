@@ -2000,3 +2000,124 @@ execute_capture_block() {
     done
 }
 
+# Return online CPU list string (e.g., "0-3,5")
+cpu_get_online_list_str() {
+    if [ -r /sys/devices/system/cpu/online ]; then
+        cat /sys/devices/system/cpu/online 2>/dev/null
+        return
+    fi
+    # Fallback from /proc/stat
+    awk '/^cpu[0-9]+/ {sub(/^cpu/,"",$1); print $1}' /proc/stat 2>/dev/null \
+        | tr '\n' ',' | sed 's/,$//'
+}
+
+# Expand "0-3,5" -> newline-separated CPU IDs
+cpu_expand_list() {
+    in="$1"; out=""; oldifs=$IFS; IFS=,
+    for part in $in; do
+        part=$(printf "%s" "$part" | tr -d ' ')
+        case "$part" in
+            *-*)
+                s=$(echo "$part" | cut -d- -f1)
+                e=$(echo "$part" | cut -d- -f2)
+                i="$s"
+                while [ "$i" -le "$e" ] 2>/dev/null; do out="$out $i"; i=$((i+1)); done
+                ;;
+            '') ;;  # empty segments are ignored
+            *)
+                out="$out $part"
+                ;;
+        esac
+    done
+    IFS=$oldifs
+    for x in $out; do printf "%s\n" "$x"; done
+}
+
+# Snapshot /proc/stat CPU lines to a file
+cpu_snapshot_stat() {
+    f="$1"
+    grep '^cpu[0-9]\+' /proc/stat > "$f"
+}
+
+# Active ticks for cpu N from a snapshot file
+cpu_get_active_ticks() {
+    cpu="$1"; file="$2"
+    awk -v c="cpu$cpu" '
+        $1==c {
+            user=$2+0; nice=$3+0; sys=$4+0; irq=$7+0; sirq=$8+0; steal=$9+0;
+            print (user + nice + sys + irq + sirq + steal);
+        }' "$file"
+}
+
+# Percent of MemTotal -> "<N>K" (per-worker), capped to ~1GiB
+mem_bytes_from_percent() {
+    pct="$1"
+    mt_kb=$(awk '/MemTotal:/ {print $2+0}' /proc/meminfo 2>/dev/null)
+    [ -z "$mt_kb" ] && mt_kb=262144
+    kb=$(( mt_kb * pct / 100 ))
+    [ "$kb" -gt 1048576 ] && kb=1048576
+    echo "${kb}K"
+}
+
+# Percent of free disk at $path -> "<N>K" (per-worker), capped to ~512MiB
+disk_bytes_from_percent_free() {
+    pct="$1"; path="$2"
+    free_kb="$(df -P "$path" 2>/dev/null | awk 'NR==2 {print $4}')"
+    [ -z "$free_kb" ] && free_kb=1048576
+    kb=$(( free_kb * pct / 100 ))
+    [ "$kb" -gt 524288 ] && kb=524288
+    echo "${kb}K"
+}
+
+# Wait for PIDs; return count of non-zero exits
+proc_wait_pids() {
+    err=0
+    for p in $1; do
+        if wait "$p"; then :; else err=$((err+1)); fi
+    done
+    echo "$err"
+}
+
+# Best-effort IP for default route; fall back to 127.0.0.1
+# Prefer existing get_ip_address <iface>,  this is a fallback.
+net_get_default_ip() {
+    if command -v ip >/dev/null 2>&1; then
+ip -o route get 1.1.1.1 2>/dev/null \
+          | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}'
+        return
+    fi
+echo "127.0.0.1"
+}
+
+# File pattern check (case-insensitive). Returns 0 if pattern found.
+file_has_pattern() {
+    f="$1"; pat="$2"
+    [ -s "$f" ] || return 1
+    grep -Eiq -- "$pat" "$f"
+}
+
+# Unified PASS/FAIL/SKIP finalizer (writes .res and exits)
+test_finalize_result() {
+    status="$1"   # PASS | FAIL | SKIP
+    name="$2"     # TESTNAME
+    res="$3"      # result file path
+    logs="$4"     # optional logs dir
+
+    case "$status" in
+        PASS)
+            log_pass "$name PASS${logs:+ (logs in $logs)}"
+            echo "$name PASS" >"$res"
+            exit 0
+            ;;
+        SKIP)
+            log_skip "$name SKIP"
+            echo "$name SKIP" >"$res"
+            exit 0
+            ;;
+        FAIL|*)
+            log_fail "$name FAIL${logs:+ (see $logs)}"
+            echo "$name FAIL" >"$res"
+            exit 1
+            ;;
+    esac
+}
