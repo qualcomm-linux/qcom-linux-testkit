@@ -1,0 +1,21 @@
+{
+    "ExecutionMode": "Sequential",
+    "TestCases": [
+        {
+            "Name": "VP9 Decode TestCase",
+            "TestConfigs": {
+                "Domain": "Decoder",
+                "InputPath": "./720x1280_vp9.ivf",
+                "NumFrames": -1,
+                "CodecName": "VP9",
+                "PixelFormat": "NV12",
+                "Width": 1280,
+                "Height": 720,
+                "Outputpath": "./720x1280_vp9.yuv",
+                "InputBufferCount": 16,
+                "OutputBufferCount": 16,
+                "UseMinBufferCtrl": false
+            }
+        }
+    ]
+}
