@@ -1,0 +1,19 @@
+metadata:
+    format: Lava-Test Test Definition 1.0
+    name: resource-tuner
+    description: "Run only resource-tuner tests from qcom-linux-testkit"
+    maintainer:
+        - smuppand@qti.qualcomm.com
+    os:
+        - yocto open embedded
+    scope:
+        - Unit Test
+    devices:
+        - rb3gen2
+
+run:
+    steps:
+        - cd Runner
+        - $PWD/suites/Performance/resource-tuner/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Performance/resource-tuner/resource-tuner.res || true
+        - $PWD/utils/result_parse.sh

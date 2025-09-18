@@ -37,14 +37,64 @@ resolve_clip() {
   esac
 }
 
-ensure_playback_clip() {
-  clip="$1"
-  [ -f "$clip" ] && return 0
-  if [ -n "$AUDIO_TAR_URL" ]; then
-    log_info "Audio clip missing, extracting from $AUDIO_TAR_URL"
-    extract_tar_from_url "$AUDIO_TAR_URL" || return 1
-  fi
-  [ -f "$clip" ]
+# audio_download_with_any <url> <outfile>
+audio_download_with_any() {
+    url="$1"; out="$2"
+    if command -v wget >/dev/null 2>&1; then
+        wget -O "$out" "$url"
+    elif command -v curl >/dev/null 2>&1; then
+        curl -L --fail -o "$out" "$url"
+    else
+        log_error "No downloader (wget/curl) available to fetch $url"
+        return 1
+    fi
+}
+# audio_fetch_assets_from_url <url>
+# Prefer functestlib's extract_tar_from_url; otherwise download + extract.
+audio_fetch_assets_from_url() {
+    url="$1"
+    if command -v extract_tar_from_url >/dev/null 2>&1; then
+        extract_tar_from_url "$url"
+        return $?
+    fi
+    fname="$(basename "$url")"
+    log_info "Fetching assets: $url"
+    if ! audio_download_with_any "$url" "$fname"; then
+        log_warn "Download failed: $url"
+        return 1
+    fi
+    tar -xzf "$fname" >/dev/null 2>&1 || tar -xf "$fname" >/dev/null 2>&1 || {
+        log_warn "Extraction failed: $fname"
+        return 1
+    }
+    return 0
+}
+# audio_ensure_clip_ready <clip-path> [tarball-url]
+# Return codes:
+#   0 = clip exists/ready
+#   2 = network unavailable after attempts (caller should SKIP)
+#   1 = fetch/extract/downloader error (caller will also SKIP per your policy)
+audio_ensure_clip_ready() {
+    clip="$1"
+    url="${2:-${AUDIO_TAR_URL:-}}"
+    [ -f "$clip" ] && return 0
+    # Try once without forcing network (tarball may already be present)
+    if [ -n "$url" ]; then
+        audio_fetch_assets_from_url "$url" >/dev/null 2>&1 || true
+        [ -f "$clip" ] && return 0
+    fi
+    # Bring network up and retry once
+    if ! ensure_network_online; then
+        log_warn "Network unavailable; cannot fetch audio assets for $clip"
+        return 2
+    fi
+    if [ -n "$url" ]; then
+        if audio_fetch_assets_from_url "$url" >/dev/null 2>&1; then
+            [ -f "$clip" ] && return 0
+        fi
+    fi
+    log_warn "Clip fetch/extract failed for $clip"
+    return 1
 }
 
 # ---------- dmesg + mixer dumps ----------
@@ -212,7 +262,11 @@ pa_default_source() {
   printf '%s\n' "$s"
 }
 
-pa_set_default_source() { [ -n "$1" ] && pactl set-default-source "$1" >/dev/null 2>&1 || true; }
+pa_set_default_source() {
+  if [ -n "$1" ]; then
+    pactl set-default-source "$1" >/dev/null 2>&1 || true
+  fi
+}
 
 pa_source_name() {
   id="$1"; [ -n "$id" ] || return 1
@@ -546,4 +600,64 @@ audio_exec_with_timeout() {
   # no timeout
   "$@"
 }
- 
+
+# --------------------------------------------------------------------
+# Backend chain + minimal ALSA capture picker (for fallback in run.sh)
+# --------------------------------------------------------------------
+
+# Prefer: currently selected (or detected) backend, then pipewire, pulseaudio, alsa.
+# We keep it simple: we don't filter by daemon state here; the caller tries each.
+build_backend_chain() {
+  preferred="${AUDIO_BACKEND:-$(detect_audio_backend)}"
+  chain=""
+  add_unique() {
+    case " $chain " in
+      *" $1 "*) : ;;
+      *) chain="${chain:+$chain }$1" ;;
+    esac
+  }
+  [ -n "$preferred" ] && add_unique "$preferred"
+  for b in pipewire pulseaudio alsa; do
+    add_unique "$b"
+  done
+  printf '%s\n' "$chain"
+}
+
+# Pick a plausible ALSA capture device.
+# Returns something like hw:0,0 if available, else "default".
+alsa_pick_capture() {
+  line="$(arecord -l 2>/dev/null | sed -n 's/^card \([0-9][0-9]*\):.*device \([0-9][0-9]*\):.*/\1 \2/p' | head -n1)"
+  if [ -n "$line" ]; then
+    set -- "$line"
+    printf 'hw:%s,%s\n' "$1" "$2"
+    return 0
+  fi
+  printf '%s\n' "default"
+  return 0
+}
+
+alsa_pick_capture() {
+  command -v arecord >/dev/null 2>&1 || return 1
+  # Prefer the first real capture device from `arecord -l`
+  arecord -l 2>/dev/null | awk '
+    /card [0-9]+: .*device [0-9]+:/ {
+      if (match($0, /card ([0-9]+):/, c) && match($0, /device ([0-9]+):/, d)) {
+        printf("hw:%s,%s\n", c[1], d[1]);
+        exit 0;
+      }
+    }
+  '
+}
+
+# Prefer virtual capture PCMs (PipeWire/Pulse) over raw hw: when a sound server is present
+alsa_pick_virtual_pcm() {
+  command -v arecord >/dev/null 2>&1 || return 1
+  pcs="$(arecord -L 2>/dev/null | sed -n 's/^[[:space:]]*\([[:alnum:]_]\+\)[[:space:]]*$/\1/p')"
+  for pcm in pipewire pulse default; do
+    if printf '%s\n' "$pcs" | grep -m1 -x "$pcm" >/dev/null 2>&1; then
+      printf '%s\n' "$pcm"
+      return 0
+    fi
+  done
+  return 1
+}

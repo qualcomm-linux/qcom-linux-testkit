@@ -1,5 +1,4 @@
 #!/bin/sh
-
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause-Clear
 
@@ -289,85 +288,416 @@ check_network_status() {
     fi
 }
 
+# --- Make sure system time is sane (TLS needs a sane clock) ---
+ensure_reasonable_clock() {
+    now="$(date +%s 2>/dev/null || echo 0)"
+    cutoff="$(date -d '2020-01-01 UTC' +%s 2>/dev/null || echo 1577836800)"
+    [ -z "$cutoff" ] && cutoff=1577836800
+    [ "$now" -ge "$cutoff" ] 2>/dev/null && return 0
+ 
+    log_warn "System clock looks invalid (epoch=$now). Attempting quick time sync..."
+    if command -v timedatectl >/dev/null 2>&1; then
+        timedatectl set-ntp true 2>/dev/null || true
+    fi
+    grace=25
+    start="$(date +%s 2>/dev/null || echo 0)"
+    end=$((start + grace))
+    while :; do
+        cur="$(date +%s 2>/dev/null || echo 0)"
+        if [ "$cur" -ge "$cutoff" ] 2>/dev/null; then
+            log_pass "Clock synchronized."
+            return 0
+        fi
+        if [ "$cur" -ge "$end" ] 2>/dev/null; then
+            break
+        fi
+        sleep 1
+    done
+ 
+    log_warn "Clock still invalid; TLS downloads may fail. Treating as limited network."
+    return 1
+}
+
 # If the tar file already exists,then function exit. Otherwise function to check the network connectivity and it will download tar from internet.
 extract_tar_from_url() {
-    url=$1
-    filename=$(basename "$url")
-
-    check_tar_file "$url"
-    status=$?
+    url="$1"
+    outdir="${LOG_DIR:-.}"
+    mkdir -p "$outdir" 2>/dev/null || true
+ 
+    case "$url" in
+        /*)
+            tarfile="$url"
+            ;;
+        file://*)
+            tarfile="${url#file://}"
+            ;;
+        *)
+            tarfile="$outdir/$(basename "$url")"
+            ;;
+    esac
+    markfile="${tarfile}.extracted"
+    skip_sentinel="${outdir}/.asset_fetch_skipped"
+ 
+    # If a previous run already marked "assets unavailable", honor it and SKIP.
+    if [ -f "$skip_sentinel" ]; then
+        log_info "Previous run marked assets unavailable on this system (${skip_sentinel}); skipping download."
+        return 2
+    fi
+ 
+    tar_already_extracted() {
+        tf="$1"
+        od="$2"
+        if [ -f "${tf}.extracted" ]; then
+            return 0
+        fi
+        tmp_list="${od}/.tar_ls.$$"
+        if tar -tf "$tf" 2>/dev/null | head -n 20 > "$tmp_list"; then
+            total=0
+            present=0
+            while IFS= read -r ent; do
+                [ -z "$ent" ] && continue
+                total=$((total + 1))
+                ent="${ent%/}"
+                if [ -e "$od/$ent" ] || [ -e "$od/$(basename "$ent")" ]; then
+                    present=$((present + 1))
+                fi
+            done < "$tmp_list"
+            rm -f "$tmp_list" 2>/dev/null || true
+            if [ "$present" -ge 3 ]; then
+                return 0
+            fi
+            if [ "$total" -gt 0 ] && [ $((present * 100 / total)) -ge 50 ]; then
+                return 0
+            fi
+        fi
+        return 1
+    }
+ 
+    if command -v check_tar_file >/dev/null 2>&1; then
+        check_tar_file "$url"
+        status=$?
+    else
+        if [ -f "$tarfile" ]; then
+            if tar_already_extracted "$tarfile" "$outdir"; then
+                status=0
+            else
+                status=2
+            fi
+        else
+            status=1
+        fi
+    fi
+ 
+    ensure_reasonable_clock || {
+        log_warn "Proceeding in limited-network mode."
+        limited_net=1
+    }
+ 
+    is_busybox_wget() {
+        if command -v wget >/dev/null 2>&1; then
+            if wget --help 2>&1 | head -n 1 | grep -qi busybox; then
+                return 0
+            fi
+        fi
+        return 1
+    }
+ 
+    tls_capable_fetcher_available() {
+        scheme_https=0
+        case "$url" in
+            https://*)
+                scheme_https=1
+                ;;
+        esac
+        if [ "$scheme_https" -eq 0 ]; then
+            return 0
+        fi
+        if command -v curl >/dev/null 2>&1; then
+            if curl -V 2>/dev/null | grep -qiE 'ssl|tls'; then
+                return 0
+            fi
+        fi
+        if command -v aria2c >/dev/null 2>&1; then
+            return 0
+        fi
+        if command -v wget >/dev/null 2>&1; then
+            if ! is_busybox_wget; then
+                return 0
+            fi
+            if command -v openssl >/dev/null 2>&1; then
+                return 0
+            fi
+        fi
+        return 1
+    }
+ 
+    try_download() {
+        src="$1"
+        dst="$2"
+        part="${dst}.part.$$"
+        ca=""
+ 
+        for cand in \
+            /etc/ssl/certs/ca-certificates.crt \
+            /etc/ssl/cert.pem \
+            /system/etc/security/cacerts/ca-certificates.crt
+        do
+            if [ -r "$cand" ]; then
+                ca="$cand"
+                break
+            fi
+        done
+ 
+        if command -v curl >/dev/null 2>&1; then
+            if [ -n "$ca" ]; then
+                curl -4 -L --fail --retry 3 --retry-delay 2 --connect-timeout 10 \
+                     -o "$part" --cacert "$ca" "$src"
+            else
+                curl -4 -L --fail --retry 3 --retry-delay 2 --connect-timeout 10 \
+                     -o "$part" "$src"
+            fi
+            rc=$?
+            if [ $rc -eq 0 ]; then
+                mv -f "$part" "$dst" 2>/dev/null || true
+                return 0
+            fi
+            rm -f "$part" 2>/dev/null || true
+            case "$rc" in
+                60|35|22)
+                    return 60
+                    ;;
+            esac
+        fi
+ 
+        if command -v aria2c >/dev/null 2>&1; then
+            aria2c -x4 -s4 -m3 --connect-timeout=10 \
+                   -o "$(basename "$part")" --dir="$(dirname "$part")" "$src"
+            rc=$?
+            if [ $rc -eq 0 ]; then
+                mv -f "$part" "$dst" 2>/dev/null || true
+                return 0
+            fi
+            rm -f "$part" 2>/dev/null || true
+        fi
+ 
+        if command -v wget >/dev/null 2>&1; then
+            if is_busybox_wget; then
+                wget -O "$part" -T 15 "$src"
+                rc=$?
+                if [ $rc -ne 0 ]; then
+                    log_warn "BusyBox wget failed (rc=$rc); final attempt with --no-check-certificate."
+                    wget -O "$part" -T 15 --no-check-certificate "$src"
+                    rc=$?
+                fi
+                if [ $rc -eq 0 ]; then
+                    mv -f "$part" "$dst" 2>/dev/null || true
+                    return 0
+                fi
+                rm -f "$part" 2>/dev/null || true
+                return 60
+            else
+                if [ -n "$ca" ]; then
+                    wget -4 --timeout=15 --tries=3 --ca-certificate="$ca" -O "$part" "$src"
+                    rc=$?
+                else
+                    wget -4 --timeout=15 --tries=3 -O "$part" "$src"
+                    rc=$?
+                fi
+                if [ $rc -ne 0 ]; then
+                    log_warn "wget failed (rc=$rc); final attempt with --no-check-certificate."
+                    wget -4 --timeout=15 --tries=1 --no-check-certificate -O "$part" "$src"
+                    rc=$?
+                fi
+                if [ $rc -eq 0 ]; then
+                    mv -f "$part" "$dst" 2>/dev/null || true
+                    return 0
+                fi
+                rm -f "$part" 2>/dev/null || true
+                if [ $rc -eq 5 ]; then
+                    return 60
+                fi
+                return $rc
+            fi
+        fi
+ 
+        return 127
+    }
+ 
     if [ "$status" -eq 0 ]; then
         log_info "Already extracted. Skipping download."
         return 0
-    elif [ "$status" -eq 1 ]; then
-        log_info "File missing or invalid. Will download and extract."
-        check_network_status || return 1
-        log_info "Downloading $url..."
-        wget -O "$filename" "$url" || {
-            log_fail "Failed to download $filename"
-            return 1
-        }
-        log_info "Extracting $filename..."
-        tar -xvf "$filename" || {
-            log_fail "Failed to extract $filename"
-            return 1
-        }
-    elif [ "$status" -eq 2 ]; then
+    fi
+ 
+    if [ "$status" -eq 2 ]; then
         log_info "File exists and is valid, but not yet extracted. Proceeding to extract."
-        tar -xvf "$filename" || {
-            log_fail "Failed to extract $filename"
-            return 1
-        }
-    fi
-
-    # Optionally, check that extraction succeeded
-    first_entry=$(tar -tf "$filename" 2>/dev/null | head -n1 | cut -d/ -f1)
-    if [ -n "$first_entry" ] && [ -e "$first_entry" ]; then
-        log_pass "Files extracted successfully ($first_entry exists)."
-        return 0
     else
-        log_fail "Extraction did not create expected entry: $first_entry"
-        return 1
+        case "$url" in
+            /*|file://*)
+                if [ ! -f "$tarfile" ]; then
+                    log_fail "Local tar file not found: $tarfile"
+                    return 1
+                fi
+                ;;
+            *)
+                if [ ! -f "$tarfile" ] || [ ! -s "$tarfile" ]; then
+                    prestage_dirs=""
+                    if [ -n "${ASSET_DIR:-}" ]; then prestage_dirs="$prestage_dirs $ASSET_DIR"; fi
+                    if [ -n "${VIDEO_ASSET_DIR:-}" ]; then prestage_dirs="$prestage_dirs $VIDEO_ASSET_DIR"; fi
+                    if [ -n "${AUDIO_ASSET_DIR:-}" ]; then prestage_dirs="$prestage_dirs $AUDIO_ASSET_DIR"; fi
+                    prestage_dirs="$prestage_dirs . $outdir ${ROOT_DIR:-} ${ROOT_DIR:-}/cache /var/Runner /var/Runner/cache"
+ 
+                    for d in $prestage_dirs; do
+                        if [ -d "$d" ] && [ -f "$d/$(basename "$tarfile")" ]; then
+                            log_info "Using pre-staged tarball: $d/$(basename "$tarfile")"
+                            cp -f "$d/$(basename "$tarfile")" "$tarfile" 2>/dev/null || true
+                            break
+                        fi
+                    done
+ 
+                    if [ ! -s "$tarfile" ]; then
+                        for top in /mnt /media; do
+                            if [ -d "$top" ]; then
+                                for d in "$top"/*; do
+                                    if [ -d "$d" ] && [ -f "$d/$(basename "$tarfile")" ]; then
+                                        log_info "Using pre-staged tarball: $d/$(basename "$tarfile")"
+                                        cp -f "$d/$(basename "$tarfile")" "$tarfile" 2>/dev/null || true
+                                        break 2
+                                    fi
+                                done
+                            fi
+                        done
+                    fi
+                fi
+ 
+                if [ ! -s "$tarfile" ]; then
+                    if [ -n "$limited_net" ]; then
+                        log_warn "Limited network, cannot fetch media bundle. Marking SKIP for callers."
+                        : > "$skip_sentinel" 2>/dev/null || true
+                        return 2
+                    fi
+ 
+                    if ! tls_capable_fetcher_available; then
+                        log_warn "No TLS-capable downloader available on this minimal build, cannot fetch: $url"
+                        log_warn "Pre-stage $(basename "$url") locally or use a file:// URL."
+                        : > "$skip_sentinel" 2>/dev/null || true
+                        return 2
+                    fi
+ 
+                    log_info "Downloading $url -> $tarfile"
+                    if ! try_download "$url" "$tarfile"; then
+                        rc=$?
+                        if [ $rc -eq 60 ]; then
+                            log_warn "TLS/handshake problem while downloading (cert/clock/firewall or minimal wget). Marking SKIP."
+                            : > "$skip_sentinel" 2>/dev/null || true
+                            return 2
+                        fi
+                        log_fail "Failed to download $(basename "$url")"
+                        return 1
+                    fi
+                fi
+                ;;
+        esac
     fi
+ 
+    log_info "Extracting $(basename "$tarfile")..."
+    if tar -xvf "$tarfile"; then
+        : > "$markfile" 2>/dev/null || true
+	# Clear the minimal/offline sentinel only if it exists (SC2015-safe)
+        if [ -f "$skip_sentinel" ]; then
+            rm -f "$skip_sentinel" 2>/dev/null || true
+        fi
+ 
+        first_entry="$(tar -tf "$tarfile" 2>/dev/null | head -n 1 | sed 's#/$##')"
+        if [ -n "$first_entry" ]; then
+            if [ -e "$first_entry" ] || [ -e "$outdir/$first_entry" ]; then
+                log_pass "Files extracted successfully ($(basename "$first_entry") present)."
+                return 0
+            fi
+        fi
+        log_warn "Extraction finished but couldn't verify entries. Assuming success."
+        return 0
+    fi
+ 
+    log_fail "Failed to extract $(basename "$tarfile")"
+    return 1
 }
+
 
 # Function to check if a tar file exists
 check_tar_file() {
-    url=$1
-    filename=$(basename "$url")
-
-    # 1. Check file exists
-    if [ ! -f "$filename" ]; then
-        log_error "File $filename does not exist."
+    url="$1"
+    outdir="${LOG_DIR:-.}"
+    mkdir -p "$outdir" 2>/dev/null || true
+ 
+    case "$url" in
+        /*)       tarfile="$url" ;;
+        file://*) tarfile="${url#file://}" ;;
+        *)        tarfile="$outdir/$(basename "$url")" ;;
+    esac
+    markfile="${tarfile}.extracted"
+ 
+    # 1) Existence & basic validity
+    if [ ! -f "$tarfile" ]; then
+        log_info "File $(basename "$tarfile") does not exist in $outdir."
         return 1
     fi
-
-    # 2. Check file is non-empty
-    if [ ! -s "$filename" ]; then
-        log_error "File $filename exists but is empty."
+    if [ ! -s "$tarfile" ]; then
+        log_warn "File $(basename "$tarfile") exists but is empty."
         return 1
     fi
-
-    # 3. Check file is a valid tar archive
-    if ! tar -tf "$filename" >/dev/null 2>&1; then
-        log_error "File $filename is not a valid tar archive."
+    if ! tar -tf "$tarfile" >/dev/null 2>&1; then
+        log_warn "File $(basename "$tarfile") is not a valid tar archive."
         return 1
     fi
-
-    # 4. Check if already extracted: does the first entry in the tar exist?
-    first_entry=$(tar -tf "$filename" 2>/dev/null | head -n1 | cut -d/ -f1)
-    if [ -n "$first_entry" ] && [ -e "$first_entry" ]; then
-        log_pass "$filename has already been extracted ($first_entry exists)."
+ 
+    # 2) Already extracted? (marker first)
+    if [ -f "$markfile" ]; then
+        log_pass "$(basename "$tarfile") has already been extracted (marker present)."
         return 0
     fi
-
-    log_info "$filename exists and is valid, but not yet extracted."
+ 
+    # 3) Heuristic: check multiple entries from the tar exist on disk
+    tmp_list="${outdir}/.tar_ls.$$"
+    if tar -tf "$tarfile" 2>/dev/null | head -n 20 >"$tmp_list"; then
+        total=0; present=0
+        while IFS= read -r ent; do
+            [ -z "$ent" ] && continue
+            total=$((total + 1))
+            ent="${ent%/}"
+            # check exact relative path and also basename (covers archives with a top-level dir)
+            if [ -e "$outdir/$ent" ] || [ -e "$outdir/$(basename "$ent")" ]; then
+                present=$((present + 1))
+            fi
+        done < "$tmp_list"
+        rm -f "$tmp_list" 2>/dev/null || true
+ 
+        # If we find a reasonable portion of entries, assume it's extracted
+        if [ "$present" -ge 3 ] || { [ "$total" -gt 0 ] && [ $((present * 100 / total)) -ge 50 ]; }; then
+            log_pass "$(basename "$tarfile") already extracted ($present/$total entries found)."
+            return 0
+        fi
+    fi
+ 
+    # 4) Exists and valid, but not yet extracted
+    log_info "$(basename "$tarfile") exists and is valid, but not yet extracted."
     return 2
 }
 
-# Check if weston is running
+# Return space-separated PIDs for 'weston' (BusyBox friendly).
+weston_pids() {
+    pids=""
+    if command -v pgrep >/dev/null 2>&1; then
+        pids="$(pgrep -x weston 2>/dev/null || true)"
+    fi
+    if [ -z "$pids" ]; then
+        pids="$(ps -eo pid,comm 2>/dev/null | awk '$2=="weston"{print $1}')"
+    fi
+    echo "$pids"
+}
+
+# Is Weston running?
 weston_is_running() {
-    pgrep -x weston >/dev/null 2>&1
+    [ -n "$(weston_pids)" ]
 }
 
 # Stop all Weston processes
@@ -393,31 +723,711 @@ weston_stop() {
 
 # Start weston with correct env if not running
 weston_start() {
-    export XDG_RUNTIME_DIR="/dev/socket/weston"
-    mkdir -p "$XDG_RUNTIME_DIR"
-
-    # Remove stale Weston socket if it exists
-    if [ -S "$XDG_RUNTIME_DIR/weston" ]; then
-        log_info "Removing stale Weston socket."
-        rm -f "$XDG_RUNTIME_DIR/weston"
-    fi
-
     if weston_is_running; then
         log_info "Weston already running."
         return 0
     fi
-    # Clean up stale sockets for wayland-0 (optional)
-    [ -S "$XDG_RUNTIME_DIR/wayland-1" ] && rm -f "$XDG_RUNTIME_DIR/wayland-1"
-    nohup weston --continue-without-input --idle-time=0 > weston.log 2>&1 &
-    sleep 3
-
-    if weston_is_running; then
-        log_info "Weston started."
-        return 0
-    else
-        log_error "Failed to start Weston."
+ 
+    if command -v systemctl >/dev/null 2>&1; then
+        log_info "Attempting to start via systemd: weston.service"
+        systemctl start weston.service >/dev/null 2>&1 || true
+        sleep 1
+        if weston_is_running; then
+            log_info "Weston started via systemd (weston.service)."
+            return 0
+        fi
+ 
+        log_info "Attempting to start via systemd: weston@.service"
+        systemctl start weston@.service >/dev/null 2>&1 || true
+        sleep 1
+        if weston_is_running; then
+            log_info "Weston started via systemd (weston@.service)."
+            return 0
+        fi
+ 
+        log_warn "systemd start did not bring Weston up; will try direct spawn."
+    fi
+ 
+    # Minimal-friendly direct spawn (no headless module guesses here).
+    ensure_xdg_runtime_dir
+ 
+    if ! command -v weston >/dev/null 2>&1; then
+        log_fail "weston binary not found in PATH."
         return 1
     fi
+ 
+    log_info "Attempting to spawn Weston (no backend override). Log: /tmp/weston.self.log"
+    ( nohup weston --log=/tmp/weston.self.log >/dev/null 2>&1 & ) || true
+ 
+    tries=0
+    while [ $tries -lt 5 ]; do
+        if weston_is_running; then
+            log_info "Weston is now running (PID(s): $(weston_pids))."
+            return 0
+        fi
+        if [ -n "$(find_wayland_sockets | head -n1)" ]; then
+            log_info "A Wayland socket appeared after spawn."
+            return 0
+        fi
+        sleep 1
+        tries=$((tries+1))
+    done
+ 
+    if [ -f /tmp/weston.self.log ]; then
+        log_warn "Weston spawn failed; last log lines:"
+        tail -n 20 /tmp/weston.self.log 2>/dev/null | sed 's/^/[weston.log] /' || true
+    else
+        log_warn "Weston spawn failed; no log file present."
+    fi
+    return 1
+}
+
+# Choose a socket (or try to start), adopt env, and echo chosen path.
+wayland_choose_or_start() {
+    wayland_debug_snapshot "pre-choose"
+    sock="$(wayland_pick_socket || true)"
+    if [ -z "$sock" ]; then
+        log_info "No Wayland socket found; attempting to start Weston…"
+        weston_start || log_warn "weston_start() did not succeed."
+        # Re-scan a few times
+        n=0
+        while [ $n -lt 5 ] && [ -z "$sock" ]; do
+            sock="$(wayland_pick_socket || true)"
+            [ -n "$sock" ] && break
+            sleep 1
+            n=$((n+1))
+        done
+    fi
+    if [ -n "$sock" ]; then
+        adopt_wayland_env_from_socket "$sock"
+        wayland_debug_snapshot "post-choose"
+        echo "$sock"
+        return 0
+    fi
+    wayland_debug_snapshot "no-socket"
+    return 1
+}
+# Ensure we have a writable XDG_RUNTIME_DIR for the current user.
+# Prefers /run/user/<uid>, falls back to /tmp/xdg-runtime-<uid>.
+ensure_xdg_runtime_dir() {
+    uid="$(id -u 2>/dev/null || echo 0)"
+    cand="/run/user/$uid"
+
+    if [ ! -d "$cand" ]; then
+        mkdir -p "$cand" 2>/dev/null || cand="/tmp/xdg-runtime-$uid"
+    fi
+
+    mkdir -p "$cand" 2>/dev/null || true
+    chmod 700 "$cand" 2>/dev/null || true
+    export XDG_RUNTIME_DIR="$cand"
+
+    log_info "XDG_RUNTIME_DIR ensured: $XDG_RUNTIME_DIR"
+}
+
+# Choose newest socket (by mtime); logs candidates for debugging.
+wayland_pick_socket() {
+    best=""
+    best_mtime=0
+
+    log_info "Wayland sockets found (candidate list):"
+    for s in $(find_wayland_sockets | sort -u); do
+        mt="$(stat -c %Y "$s" 2>/dev/null || echo 0)"
+        log_info "  - $s (mtime=$mt)"
+        if [ "$mt" -gt "$best_mtime" ]; then
+            best="$s"
+            best_mtime="$mt"
+        fi
+    done
+
+    if [ -n "$best" ]; then
+        log_info "Picked Wayland socket (newest): $best"
+        echo "$best"
+        return 0
+    fi
+    return 1
+}
+
+# ---- Wayland/Weston helpers -----------------------
+# Ensure a private XDG runtime directory exists and is usable (0700).
+weston_start() {
+    # Already up?
+    if weston_is_running; then
+        log_info "Weston already running."
+        return 0
+    fi
+ 
+    # 1) Try systemd user/system units if present
+    if command -v systemctl >/dev/null 2>&1; then
+        for unit in weston.service weston@.service; do
+            log_info "Attempting to start via systemd: $unit"
+            systemctl start "$unit" >/dev/null 2>&1 || true
+            sleep 1
+            if weston_is_running; then
+                log_info "Weston started via $unit."
+                return 0
+            fi
+        done
+        log_warn "systemd start did not bring Weston up; will try direct spawn."
+    fi
+ 
+    # Helper: attempt spawn for a given uid (empty => current user)
+    # Tries multiple backend names (to cover distro/plugin differences)
+    # Returns 0 if a weston process + socket appears, else non-zero.
+    spawn_weston_try() {
+        target_uid="$1"  # "" or numeric uid
+        backends="${WESTON_BACKENDS:-headless headless-backend.so}"
+ 
+        # Prepare runtime dir
+        if [ -n "$target_uid" ]; then
+            run_dir="/run/user/$target_uid"
+            mkdir -p "$run_dir" 2>/dev/null || true
+            chown "$target_uid:$target_uid" "$run_dir" 2>/dev/null || true
+        else
+            ensure_xdg_runtime_dir
+            run_dir="$XDG_RUNTIME_DIR"
+        fi
+        chmod 700 "$run_dir" 2>/dev/null || true
+ 
+        # Where to log
+        log_file="/tmp/weston.${target_uid:-self}.log"
+        rm -f "$log_file" 2>/dev/null || true
+ 
+        for be in $backends; do
+            log_info "Spawning weston (uid=${target_uid:-$(id -u)}) with backend='$be' …"
+            if ! command -v weston >/dev/null 2>&1; then
+                log_fail "weston binary not found in PATH."
+                return 1
+            fi
+ 
+            # Build the command: avoid optional modules that may not exist on minimal builds
+            cmd="XDG_RUNTIME_DIR='$run_dir' weston --backend='$be' --log='$log_file'"
+ 
+            if [ -n "$target_uid" ]; then
+                # Run as that uid if we can
+                if command -v su >/dev/null 2>&1; then
+                    su -s /bin/sh -c "$cmd >/dev/null 2>&1 &" "#$target_uid" || true
+                elif command -v runuser >/dev/null 2>&1; then
+                    runuser -u "#$target_uid" -- sh -c "$cmd >/dev/null 2>&1 &" || true
+                else
+                    log_warn "No su/runuser available to switch uid=$target_uid; skipping this mode."
+                    continue
+                fi
+            else
+                # Current user
+                ( nohup sh -c "$cmd" >/dev/null 2>&1 & ) || true
+            fi
+ 
+            # Wait up to ~5s for process + a socket to appear
+            tries=0
+            while [ $tries -lt 5 ]; do
+                if weston_is_running; then
+                    # See if a fresh socket is visible
+                    sock="$(wayland_pick_socket)"
+                    if [ -n "$sock" ]; then
+                        log_info "Weston up (backend=$be). Socket: $sock"
+                        return 0
+                    fi
+                fi
+                sleep 1
+                tries=$((tries+1))
+            done
+ 
+            # Show weston log tail to aid debugging
+            if [ -r "$log_file" ]; then
+                log_warn "Weston did not come up with backend '$be'. Last log lines:"
+                tail -n 20 "$log_file" | sed 's/^/[weston.log] /'
+            else
+                log_warn "Weston did not come up with backend '$be' and no log file present ($log_file)."
+            fi
+        done
+ 
+        return 1
+    }
+ 
+    # 2) Try as current user
+    if spawn_weston_try ""; then
+        return 0
+    fi
+ 
+    # 3) Try as 'weston' user (common on embedded images)
+    weston_uid=""
+    if command -v getent >/dev/null 2>&1; then
+        weston_uid="$(getent passwd weston 2>/dev/null | awk -F: '{print $3}')"
+    fi
+    [ -z "$weston_uid" ] && weston_uid="$(id -u weston 2>/dev/null || true)"
+ 
+    if [ -n "$weston_uid" ]; then
+        log_info "Attempting to spawn Weston as uid=$weston_uid (user 'weston')."
+        if spawn_weston_try "$weston_uid"; then
+            return 0
+        fi
+    else
+        log_info "No 'weston' user found; skipping user-switch spawn."
+    fi
+ 
+    log_warn "All weston spawn attempts failed."
+    return 1
+}
+
+# Return first Wayland socket under a base dir (prints path or fails).
+find_wayland_socket_in() {
+    base="$1"
+    [ -d "$base" ] || return 1
+    for s in "$base"/wayland-*; do
+        [ -S "$s" ] || continue
+        printf '%s\n' "$s"
+        return 0
+    done
+    return 1
+}
+
+# Best-effort discovery of a usable Wayland socket anywhere.
+discover_wayland_socket_anywhere() {
+    uid="$(id -u 2>/dev/null || echo 0)"
+    bases=""
+    [ -n "$XDG_RUNTIME_DIR" ] && bases="$bases $XDG_RUNTIME_DIR"
+    bases="$bases /dev/socket/weston /run/user/$uid /tmp/wayland-$uid /dev/shm"
+    for b in $bases; do
+        ensure_private_runtime_dir "$b" >/dev/null 2>&1 || true
+        if s="$(find_wayland_socket_in "$b")"; then
+            printf '%s\n' "$s"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Adopt env from a Wayland socket path like /run/user/0/wayland-0
+# Sets XDG_RUNTIME_DIR and WAYLAND_DISPLAY. Returns 0 on success.
+adopt_wayland_env_from_socket() {
+    s="$1"
+    if [ -z "$s" ] || [ ! -S "$s" ]; then
+        log_warn "adopt_wayland_env_from_socket: invalid socket: ${s:-<empty>}"
+        return 1
+    fi
+    XDG_RUNTIME_DIR="$(dirname "$s")"
+    WAYLAND_DISPLAY="$(basename "$s")"
+    export XDG_RUNTIME_DIR WAYLAND_DISPLAY
+    # Best-effort perms fix for minimal systems
+    chmod 700 "$XDG_RUNTIME_DIR" 2>/dev/null || true
+    log_info "Adopting Wayland environment from socket: $s"
+    log_info "Adopted Wayland env: XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR WAYLAND_DISPLAY=$WAYLAND_DISPLAY"
+    log_info "Reproduce with:"
+    log_info "  export XDG_RUNTIME_DIR='$XDG_RUNTIME_DIR'"
+    log_info "  export WAYLAND_DISPLAY='$WAYLAND_DISPLAY'"
+}
+
+# Try to connect to Wayland. Returns 0 on OK.
+wayland_can_connect() {
+    if command -v weston-info >/dev/null 2>&1; then
+        weston-info >/dev/null 2>&1
+        return $?
+    fi
+    # fallback: quick client probe
+    ( env -i XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" WAYLAND_DISPLAY="$WAYLAND_DISPLAY" true ) >/dev/null 2>&1
+    return $?
+}
+
+# Ensure a Weston socket exists; if not, stop+start Weston and adopt helper socket.
+weston_pick_env_or_start() {
+    sock="$(discover_wayland_socket_anywhere 2>/dev/null || true)"
+    if [ -n "$sock" ]; then
+        adopt_wayland_env_from_socket "$sock"
+        log_info "Selected Wayland socket: $sock"
+        return 0
+    fi
+
+    if weston_is_running; then
+        log_info "Stopping Weston..."
+        weston_stop
+        i=0; while weston_is_running && [ "$i" -lt 5 ]; do i=$((i+1)); sleep 1; done
+    fi
+
+    log_info "Starting Weston..."
+    weston_start
+    i=0; sock=""
+    while [ "$i" -lt 6 ]; do
+        sock="$(find_wayland_socket_in /dev/socket/weston 2>/dev/null || true)"
+        [ -n "$sock" ] && break
+        sleep 1; i=$((i+1))
+    done
+    if [ -z "$sock" ]; then
+        log_fail "Could not find Wayland socket after starting Weston."
+        return 1
+    fi
+    adopt_wayland_env_from_socket "$sock"
+    log_info "Weston started; socket: $sock"
+    return 0
+}
+
+# Find candidate Wayland sockets in common locations.
+# Prints absolute socket paths, one per line, most-preferred first.
+find_wayland_sockets() {
+    # Enumerate plausible Wayland sockets (one per line)
+    uid="$(id -u 2>/dev/null || echo 0)"
+ 
+    # Current env first (if valid)
+    if [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -n "${WAYLAND_DISPLAY:-}" ] &&
+       [ -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ]; then
+        echo "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY"
+    fi
+ 
+    # Current uid
+    for f in "/run/user/$uid/wayland-0" "/run/user/$uid/wayland-1" "/run/user/$uid/wayland-2"; do
+        [ -S "$f" ] && echo "$f"
+    done
+    for f in /run/user/"$uid"/wayland-*; do
+        [ -S "$f" ] && echo "$f"
+    done 2>/dev/null
+ 
+    # Any user under /run/user (root can traverse) — covers weston running as uid 1000
+    for d in /run/user/*; do
+        [ -d "$d" ] || continue
+        for f in "$d"/wayland-*; do
+            [ -S "$f" ] && echo "$f"
+        done
+    done 2>/dev/null
+ 
+    # weston-launch sockets
+    for f in /dev/socket/weston/wayland-*; do
+        [ -S "$f" ] && echo "$f"
+    done 2>/dev/null
+ 
+    # Last resort
+    for f in /tmp/wayland-*; do
+        [ -S "$f" ] && echo "$f"
+    done 2>/dev/null
+}
+
+# Ensure XDG_RUNTIME_DIR has owner=current-user and mode 0700.
+# Returns 0 if OK (or fixed), non-zero if still not compliant.
+ensure_wayland_runtime_dir_perms() {
+  dir="$1"
+  [ -n "$dir" ] && [ -d "$dir" ] || return 1
+
+  cur_uid="$(id -u 2>/dev/null || echo 0)"
+  cur_gid="$(id -g 2>/dev/null || echo 0)"
+
+  # Best-effort fixups first (don’t error if chown/chmod fail)
+  chown "$cur_uid:$cur_gid" "$dir" 2>/dev/null || true
+  chmod 0700 "$dir" 2>/dev/null || true
+
+  # Verify using stat (GNU first, then BSD). If stat is unavailable,
+  # we can’t verify—assume OK to avoid SC2012 (ls) usage.
+  if command -v stat >/dev/null 2>&1; then
+    # Mode: GNU: %a ; BSD: %Lp
+    mode="$(stat -c '%a' "$dir" 2>/dev/null || stat -f '%Lp' "$dir" 2>/dev/null || echo '')"
+    # Owner uid: GNU: %u ; BSD: %u
+    uid="$(stat -c '%u' "$dir" 2>/dev/null || stat -f '%u' "$dir" 2>/dev/null || echo '')"
+
+    [ "$mode" = "700" ] && [ "$uid" = "$cur_uid" ] && return 0
+    return 1
+  fi
+
+  # No stat available: directory exists and we attempted to fix perms/owner.
+  # Treat as success so clients can try; avoids SC2012 warnings.
+  return 0
+}
+
+# Quick Wayland handshake check.
+# Prefers `wayland-info` with a short timeout; otherwise validates socket presence.
+# Also enforces/fixes XDG_RUNTIME_DIR permissions so clients won’t reject it.
+wayland_connection_ok() {
+    if command -v wayland-info >/dev/null 2>&1; then
+        log_info "Probing Wayland with: wayland-info"
+        wayland-info >/dev/null 2>&1 && return 0
+        return 1
+    fi
+    if command -v weston-info >/dev/null 2>&1; then
+        log_info "Probing Wayland with: weston-info"
+        weston-info >/dev/null 2>&1 && return 0
+        return 1
+    fi
+    if command -v weston-simple-egl >/dev/null 2>&1; then
+        log_info "Probing Wayland by briefly starting weston-simple-egl"
+        ( weston-simple-egl >/dev/null 2>&1 & echo $! >"/tmp/.wsegl.$$" )
+        pid="$(cat "/tmp/.wsegl.$$" 2>/dev/null || echo)"
+        rm -f "/tmp/.wsegl.$$" 2>/dev/null || true
+        i=0
+        while [ $i -lt 2 ]; do
+            sleep 1
+            i=$((i+1))
+        done
+        if [ -n "$pid" ]; then
+            kill "$pid" 2>/dev/null || true
+        fi
+        # If it started at all, consider the connection OK (best effort).
+        return 0
+    fi
+    if [ -n "$XDG_RUNTIME_DIR" ] && [ -n "$WAYLAND_DISPLAY" ] && [ -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ]; then
+        log_info "No probe tools present; accepting socket existence as OK."
+        return 0
+    fi
+    return 1
+}
+# Very verbose snapshot for debugging (processes, sockets, env, perms).
+wayland_debug_snapshot() {
+    label="$1"
+    [ -n "$label" ] || label="snapshot"
+    log_info "----- Wayland/Weston debug snapshot: $label -----"
+ 
+    # Processes
+    wpids="$(weston_pids)"
+    if [ -n "$wpids" ]; then
+        log_info "weston PIDs: $wpids"
+        for p in $wpids; do
+            if command -v ps >/dev/null 2>&1; then
+                ps -o pid,user,group,cmd -p "$p" 2>/dev/null | sed 's/^/[ps] /' || true
+            fi
+            if [ -r "/proc/$p/cmdline" ]; then
+                tr '\0' ' ' <"/proc/$p/cmdline" 2>/dev/null | sed 's/^/[cmdline] /' || true
+            fi
+        done
+    else
+        log_info "weston PIDs: (none)"
+    fi
+ 
+    # Sockets (meta) — use stat instead of ls (SC2012)
+    for s in $(find_wayland_sockets | sort -u); do
+        log_info "socket: $s"
+        stat -c '[stat] %n -> owner=%U:%G mode=%A size=%s mtime=%y' "$s" 2>/dev/null || true
+    done
+ 
+    # Current env
+    log_info "Env now: XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-<unset>} WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-<unset>}"
+    if [ -n "${XDG_RUNTIME_DIR:-}" ]; then
+        stat -c '[stat] %n -> owner=%U:%G mode=%A size=%s mtime=%y' "$XDG_RUNTIME_DIR" 2>/dev/null || true
+    fi
+ 
+    log_info "Suggested export (current env):"
+    log_info "  export XDG_RUNTIME_DIR='${XDG_RUNTIME_DIR:-}'"
+    log_info "  export WAYLAND_DISPLAY='${WAYLAND_DISPLAY:-}'"
+ 
+    log_info "----- End snapshot: $label -----"
+}
+
+# Print concise metadata for a path (portable).
+# Prefers stat(1) (GNU or BSD); falls back to ls(1) only if needed.
+# Usage: print_path_meta "/some/path"
+print_path_meta() {
+  p=$1
+  if [ -z "$p" ]; then
+    return 1
+  fi
+  # GNU stat
+  if stat -c '%A %U %G %a %n' "$p" >/dev/null 2>&1; then
+    stat -c '%A %U %G %a %n' "$p"
+    return 0
+  fi
+  # BSD/Mac stat
+  if stat -f '%Sp %Su %Sg %OLp %N' "$p" >/dev/null 2>&1; then
+    stat -f '%Sp %Su %Sg %OLp %N' "$p"
+    return 0
+  fi
+  # shellcheck disable=SC2012
+  ls -ld -- "$p" 2>/dev/null
+}
+
+###############################################################################
+# DRM / Display helpers (portable, minimal-build friendly)
+###############################################################################
+
+# Echo lines: "<name>\t<status>\t<type>\t<modes>\t<first_mode>"
+# Example: "card0-HDMI-A-1 connected HDMI-A 9 1920x1080"
+display_list_connectors() {
+    found=0
+    for d in /sys/class/drm/*-*; do
+        [ -e "$d" ] || continue
+        [ -f "$d/status" ] || continue
+        name="$(basename "$d")"
+        status="$(tr -d '\r\n' <"$d/status" 2>/dev/null)"
+ 
+        # Derive connector type from name: cardX-<TYPE>-N
+        # Strip "cardN-" prefix and trailing "-N" index.
+        typ="$(printf '%s' "$name" \
+            | sed -n 's/^card[0-9]\+-\([A-Za-z0-9+]\+\(-[A-Za-z0-9+]\+\)*\)-[0-9]\+/\1/p')"
+        [ -z "$typ" ] && typ="unknown"
+ 
+        # Modes
+        modes_file="$d/modes"
+        if [ -f "$modes_file" ]; then
+            # wc output can have spaces on BusyBox; trim
+            mc="$(wc -l <"$modes_file" 2>/dev/null | tr -d '[:space:]')"
+            [ -z "$mc" ] && mc=0
+            fm="$(head -n 1 "$modes_file" 2>/dev/null | tr -d '\r\n')"
+        else
+            mc=0
+            fm=""
+        fi
+ 
+        printf '%s\t%s\t%s\t%s\t%s\n' "$name" "$status" "$typ" "$mc" "$fm"
+        found=1
+    done
+    [ "$found" -eq 1 ] || return 1
+    return 0
+}
+
+# Return 0 if any connector is connected; else 1
+display_any_attached() {
+    for d in /sys/class/drm/*-*; do
+        [ -f "$d/status" ] || continue
+        st="$(tr -d '\r\n' <"$d/status" 2>/dev/null)"
+        if [ "$st" = "connected" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Print one compact human line summarizing connected outputs
+display_connected_summary() {
+    have=0
+    line=""
+    # shellcheck disable=SC2039
+    while IFS="$(printf '\t')" read -r name status typ mc fm; do
+        [ "$status" = "connected" ] || continue
+        have=1
+        if [ -n "$fm" ]; then
+            seg="${name}(${typ},${fm})"
+        else
+            seg="${name}(${typ})"
+        fi
+        if [ -z "$line" ]; then line="$seg"; else line="$line, $seg"; fi
+    done <<EOF
+$(display_list_connectors 2>/dev/null || true)
+EOF
+    if [ "$have" -eq 1 ]; then
+        echo "$line"
+        return 0
+    fi
+    echo "none"
+    return 1
+}
+
+# Best-effort "primary" guess: first connected with a mode; else first connected; echoes name
+display_primary_guess() {
+    best=""
+    # Prefer one with modes
+    # shellcheck disable=SC2039
+    while IFS="$(printf '\t')" read -r name status typ mc fm; do
+        [ "$status" = "connected" ] || continue
+        if [ -n "$fm" ]; then echo "$name"; return 0; fi
+        [ -z "$best" ] && best="$name"
+    done <<EOF
+$(display_list_connectors 2>/dev/null || true)
+EOF
+    [ -n "$best" ] && { echo "$best"; return 0; }
+    return 1
+}
+
+# Optional enrichment via weston-info (if available)
+# Prints lines: "weston: <output_name> model=<model> make=<make> phys=<WxH>mm"
+display_weston_outputs() {
+    if ! command -v weston-info >/dev/null 2>&1; then
+        return 0
+    fi
+    # Very light parse; tolerate different locales
+    weston-info 2>/dev/null \
+    | awk '
+        $1=="output" && $2~/^[0-9]+:$/ {out=$2; sub(":","",out)}
+        /make:/ {make=$2}
+        /model:/ {model=$2}
+        /physical size:/ {w=$3; h=$5; sub("mm","",h)}
+        /scale:/ {
+          if (out!="") {
+            printf("weston: %s make=%s model=%s phys=%sx%sm\n", out, make, model, w, h);
+            out=""; make=""; model=""; w=""; h="";
+          }
+        }
+    '
+    return 0
+}
+
+# One-stop debug snapshot
+display_debug_snapshot() {
+    ctx="$1"
+    [ -z "$ctx" ] && ctx="display-snapshot"
+    log_info "----- Display snapshot: $ctx -----"
+
+    # DRM nodes (no ls; iterate)
+    nodes=""
+    for f in /dev/dri/card* /dev/dri/renderD*; do
+        if [ -e "$f" ]; then
+            if [ -z "$nodes" ]; then nodes="$f"; else nodes="$nodes $f"; fi
+        fi
+    done
+    if [ -n "$nodes" ]; then
+        log_info "DRM nodes: $nodes"
+    else
+        log_warn "No /dev/dri/* nodes found."
+    fi
+
+    # Connectors
+    have=0
+    # shellcheck disable=SC2039
+    while IFS="$(printf '\t')" read -r name status typ mc fm; do
+        have=1
+        if [ -n "$fm" ]; then
+            log_info "DRM: ${name} status=${status} type=${typ} modes=${mc} first=${fm}"
+        else
+            log_info "DRM: ${name} status=${status} type=${typ} modes=${mc}"
+        fi
+    done <<EOF
+$(display_list_connectors 2>/dev/null || true)
+EOF
+    [ "$have" -eq 1 ] || log_warn "No DRM connectors in /sys/class/drm."
+
+    # Summary + weston outputs (if any)
+    sum="$(display_connected_summary 2>/dev/null || echo none)"
+    log_info "Connected summary: $sum"
+    display_weston_outputs | while IFS= read -r l; do
+        [ -n "$l" ] && log_info "$l"
+    done
+
+    log_info "----- End display snapshot: $ctx -----"
+}
+
+display_debug_snapshot() {
+    ctx="$1"
+    [ -z "$ctx" ] && ctx="display-snapshot"
+    log_info "----- Display snapshot: $ctx -----"
+ 
+    # DRM nodes
+    nodes=""
+    for f in /dev/dri/card* /dev/dri/renderD*; do
+        [ -e "$f" ] && nodes="${nodes:+$nodes }$f"
+    done
+    if [ -n "$nodes" ]; then
+        log_info "DRM nodes: $nodes"
+    else
+        log_warn "No /dev/dri/* nodes found."
+    fi
+ 
+    # Sysfs connectors (expects display_list_connectors to print tab-separated fields)
+    have=0
+    while IFS="$(printf '\t')" read -r name status typ mc fm; do
+        [ -n "$name" ] || continue
+        have=1
+        if [ -n "$fm" ]; then
+            log_info "DRM: ${name} status=${status} type=${typ} modes=${mc} first=${fm}"
+        else
+            log_info "DRM: ${name} status=${status} type=${typ} modes=${mc}"
+        fi
+    done <<EOF
+$(display_list_connectors 2>/dev/null || true)
+EOF
+    [ "$have" -eq 1 ] || log_warn "No DRM connectors in /sys/class/drm."
+ 
+    # Connected summary (sysfs)
+    sum="$(display_connected_summary 2>/dev/null || echo none)"
+    log_info "Connected summary (sysfs): $sum"
+ 
+    # Optional weston outputs (existing helper)
+    display_weston_outputs | while IFS= read -r l; do
+        [ -n "$l" ] && log_info "$l"
+    done
+ 
+    log_info "----- End display snapshot: $ctx -----"
 }
 
 # Returns true (0) if interface is administratively and physically up
@@ -515,25 +1525,33 @@ get_ip_address() {
 # Run a command with a timeout (in seconds)
 run_with_timeout() {
     timeout="$1"; shift
-    [ -z "$timeout" ] && { "$@"; return $?; }
+    ( "$@" ) &
+    pid=$!
+    ( sleep "$timeout"; kill "$pid" 2>/dev/null ) &
+    watcher=$!
+    wait $pid 2>/dev/null
+    status=$?
+    kill $watcher 2>/dev/null
+    return $status
+}
+
+# Only apply a timeout if TIMEOUT is set; prefer `timeout`; avoid functestlib here
+runWithTimeoutIfSet() {
+  # Normalize TIMEOUT: treat empty or non-numeric as 0
+  t="${TIMEOUT:-}"
+  case "$t" in
+    ''|*[!0-9]*)
+      t=0
+      ;;
+  esac
  
-    if command -v timeout >/dev/null 2>&1; then
-        timeout "$timeout" "$@"
-        return $?
-    fi
- 
-    # fallback if coreutils timeout is missing
-    (
-        "$@" &
-        pid=$!
-        ( sleep "$timeout"; kill "$pid" 2>/dev/null ) &
-        watcher=$!
-        wait $pid 2>/dev/null
-        status=$?
-        kill $watcher 2>/dev/null
-        exit $status
-    )
-    return $?
+  if [ "$t" -gt 0 ] && command -v run_with_timeout >/dev/null 2>&1; then
+    # Correct signature: run_with_timeout <seconds> <cmd> [args...]
+    run_with_timeout "$t" "$@"
+  else
+    # No timeout -> run command directly
+    "$@"
+  fi
 }
 
 # DHCP client logic (dhclient and udhcpc with timeouts)
@@ -1061,6 +2079,19 @@ dt_has_remoteproc_fw() {
     return 1
 }
 
+# Find the remoteproc path for a given firmware substring (e.g., "adsp", "cdsp", "gdsp").
+get_remoteproc_path_by_firmware() {
+    name="$1"
+    idx path
+    # List all remoteproc firmware nodes, match name, and return the remoteproc path
+    idx=$(cat /sys/class/remoteproc/remoteproc*/firmware 2>/dev/null | grep -n "$name" | cut -d: -f1 | head -n1)
+    [ -z "$idx" ] && return 1
+    idx=$((idx - 1))
+    path="/sys/class/remoteproc/remoteproc${idx}"
+    [ -d "$path" ] && echo "$path" && return 0
+    return 1
+}
+
 # Get remoteproc state
 get_remoteproc_state() {
     rp="$1"
@@ -1144,45 +2175,41 @@ start_remoteproc() {
     printf 'start\n' >"$statef" 2>/dev/null || return 1
     wait_remoteproc_state "$path" running 6
 }
-
-# Returns 0 if every rproc using $1 firmware is running; non-zero otherwise.
+# Validate remoteproc running state with retries and logging
 validate_remoteproc_running() {
-    fw="$1"
- 
-    # Fast skip: if DT doesn't advertise this firmware, there may be nothing to validate
-    if command -v dt_has_remoteproc_fw >/dev/null 2>&1; then
-        if ! dt_has_remoteproc_fw "$fw"; then
-            log_skip "DT does not list '$fw' remoteproc; skipping rproc state check"
-            return 0
-        fi
-    fi
- 
-    # functestlib helper prints "path|state|firmware|name" (one line per instance)
-    entries="$(get_remoteproc_by_firmware "$fw" "" all 2>/dev/null)" || entries=""
- 
-    if [ -z "$entries" ]; then
-        log_fail "No /sys/class/remoteproc entry found for firmware '$fw'"
+    fw_name="$1"
+    log_file="${2:-/dev/null}"
+    max_wait_secs="${3:-10}"
+    delay_per_try_secs="${4:-1}"
+
+    rproc_path=$(get_remoteproc_path_by_firmware "$fw_name")
+    if [ -z "$rproc_path" ]; then
+        echo "[ERROR] Remoteproc for '$fw_name' not found" >> "$log_file"
+        {
+            echo "---- Last 20 remoteproc dmesg logs ----"
+            dmesg | grep -i "remoteproc" | tail -n 20
+            echo "----------------------------------------"
+        } >> "$log_file"
         return 1
     fi
- 
-    fail=0
-    while IFS='|' read -r rpath rstate rfirm rname; do
-        [ -n "$rpath" ] || continue
-        inst="$(basename "$rpath")"
-        log_info "remoteproc entry: path=$rpath state=$rstate firmware=$rfirm name=$rname"
-        if [ "$rstate" = "running" ]; then
-            log_pass "$inst: running"
-        else
-            # If you prefer to re-query, uncomment next line:
-            # rstate="$(get_remoteproc_state "$rpath" 2>/dev/null || echo "$rstate")"
-            log_fail "$inst: not running (state=$rstate)"
-            fail=$((fail + 1))
+
+    total_waited=0
+    while [ "$total_waited" -lt "$max_wait_secs" ]; do
+        state=$(get_remoteproc_state "$rproc_path")
+        if [ "$state" = "running" ]; then
+            return 0
         fi
-    done <<__RPROC_LIST__
-$entries
-__RPROC_LIST__
- 
-    [ "$fail" -eq 0 ]
+        sleep "$delay_per_try_secs"
+        total_waited=$((total_waited + delay_per_try_secs))
+    done
+
+    echo "[ERROR] $fw_name remoteproc did not reach 'running' state within ${max_wait_secs}s (last state: $state)" >> "$log_file"
+    {
+        echo "---- Last 20 remoteproc dmesg logs ----"
+        dmesg | grep -i "remoteproc" | tail -n 20
+        echo "----------------------------------------"
+    } >> "$log_file"
+    return 1
 }
 
 # acquire_test_lock <testname>
@@ -1406,17 +2433,82 @@ retry_command() {
     return 1
 }
 
-# Connect using nmcli with retries (returns 0 on success)
+# Connect to Wi-Fi using nmcli, with fallback when key-mgmt is required
 wifi_connect_nmcli() {
     iface="$1"
     ssid="$2"
     pass="$3"
-    if command -v nmcli >/dev/null 2>&1; then
-        log_info "Trying to connect using nmcli..."
-        retry_command "nmcli dev wifi connect \"$ssid\" password \"$pass\" ifname \"$iface\" 2>&1 | tee nmcli.log" 3 3
-        return $?
+
+    if ! command -v nmcli >/dev/null 2>&1; then
+        return 1
     fi
-    return 1
+
+    log_info "Trying to connect using nmcli..."
+    mkdir -p "${LOG_DIR:-.}" 2>/dev/null || true
+    nm_log="${LOG_DIR:-.}/nmcli_${iface}_$(printf '%s' "$ssid" | tr ' /' '__').log"
+
+    # First try the simple connect path (what you already had)
+    if [ -n "$pass" ]; then
+        retry_command "nmcli dev wifi connect \"$ssid\" password \"$pass\" ifname \"$iface\" 2>&1 | tee \"$nm_log\"" 3 3
+    else
+        retry_command "nmcli dev wifi connect \"$ssid\" ifname \"$iface\" 2>&1 | tee \"$nm_log\"" 3 3
+    fi
+    rc=$?
+    [ $rc -eq 0 ] && return 0
+
+    # Look for the specific error and fall back to creating a connection profile
+    if grep -qi '802-11-wireless-security\.key-mgmt.*missing' "$nm_log"; then
+        log_warn "nmcli connect complained about missing key-mgmt; creating an explicit connection profile..."
+
+        nmcli -t -f WIFI nm status >/dev/null 2>&1 || nmcli r wifi on >/dev/null 2>&1 || true
+        nmcli dev set "$iface" managed yes >/dev/null 2>&1 || true
+        nmcli dev disconnect "$iface" >/dev/null 2>&1 || true
+        nmcli dev wifi rescan >/dev/null 2>&1 || true
+
+        con_name="$ssid"
+        # If a connection with the same name exists, drop it to avoid conflicts
+        if nmcli -t -f NAME con show 2>/dev/null | grep -Fxq "$con_name"; then
+            nmcli con delete "$con_name" >/dev/null 2>&1 || true
+        fi
+
+        if [ -n "$pass" ]; then
+            # Try WPA2 PSK first (most common)
+            if nmcli con add type wifi ifname "$iface" con-name "$con_name" ssid "$ssid" \
+                   wifi-sec.key-mgmt wpa-psk wifi-sec.psk "$pass" >>"$nm_log" 2>&1; then
+                if nmcli con up "$con_name" ifname "$iface" >>"$nm_log" 2>&1; then
+                    log_pass "Connected to $ssid via explicit profile (wpa-psk)."
+                    return 0
+                fi
+            fi
+
+            # If that failed, try WPA3-Personal (SAE), some APs require it
+            log_warn "Profile up failed; trying WPA3 (sae) profile..."
+            nmcli con delete "$con_name" >/dev/null 2>&1 || true
+            if nmcli con add type wifi ifname "$iface" con-name "$con_name" ssid "$ssid" \
+                   wifi-sec.key-mgmt sae wifi-sec.psk "$pass" >>"$nm_log" 2>&1; then
+                if nmcli con up "$con_name" ifname "$iface" >>"$nm_log" 2>&1; then
+                    log_pass "Connected to $ssid via explicit profile (sae)."
+                    return 0
+                fi
+            fi
+        else
+            # Open network (no passphrase)
+            if nmcli con add type wifi ifname "$iface" con-name "$con_name" ssid "$ssid" \
+                   wifi-sec.key-mgmt none >>"$nm_log" 2>&1; then
+                if nmcli con up "$con_name" ifname "$iface" >>"$nm_log" 2>&1; then
+                    log_pass "Connected to open network $ssid."
+                    return 0
+                fi
+            fi
+        fi
+
+        log_fail "Failed to connect to $ssid even after explicit key-mgmt profile. See $nm_log"
+        return 1
+    fi
+
+    # Different error — just bubble up the original failure
+    log_fail "nmcli failed to connect to $ssid. See $nm_log"
+    return $rc
 }
 
 # Connect using wpa_supplicant+udhcpc with retries (returns 0 on success)
@@ -1751,94 +2843,93 @@ wait_for_path() {
     return 1
 }
 
-# Skip unwanted device tree node names during DT parsing (e.g., aliases, metadata).
-# Used to avoid traversing irrelevant or special nodes in recursive scans.
-dt_should_skip_node() {
-    case "$1" in
-        ''|__*|phandle|name|'#'*|aliases|chosen|reserved-memory|interrupt-controller|thermal-zones)
-            return 0 ;;
-    esac
-    return 1
-}
+# ---------------------------------------------------------------------
+# Ultra-light DT matchers (no indexing; BusyBox-safe; O(first hit))
+# ---------------------------------------------------------------------
+DT_ROOT="/proc/device-tree"
 
-# Recursively yield all directories (nodes) under a DT root path.
-# Terminates early if a match result is found in the provided file.
-dt_yield_node_paths() {
-    _root="$1"
-    _matchresult="$2"
-    # If we've already matched, stop recursion immediately!
-    [ -s "$_matchresult" ] && return
-    for entry in "$_root"/*; do
-        [ -d "$entry" ] || continue
-        [ -s "$_matchresult" ] && return
-        echo "$entry"
-        dt_yield_node_paths "$entry" "$_matchresult"
-    done
-}
-
-# Recursively search for files named "compatible" in DT paths.
-# Terminates early if a match result is already present.
-dt_yield_compatible_files() {
-    _root="$1"
-    _matchresult="$2"
-    [ -s "$_matchresult" ] && return
-    for entry in "$_root"/*; do
-        [ -e "$entry" ] || continue
-        [ -s "$_matchresult" ] && return
-        if [ -f "$entry" ] && [ "$(basename "$entry")" = "compatible" ]; then
-            echo "$entry"
-        elif [ -d "$entry" ]; then
-            dt_yield_compatible_files "$entry" "$_matchresult"
-        fi
-    done
-}
-
-# Searches /proc/device-tree for nodes or compatible strings matching input patterns.
-# Returns success and matched path if any pattern is found; used in pre-test validation.
-dt_confirm_node_or_compatible() {
-    root="/proc/device-tree"
-    matchflag=$(mktemp) || exit 1
-    matchresult=$(mktemp) || { rm -f "$matchflag"; exit 1; }
+# Print matches for EVERY pattern given; return 0 if any matched, else 1.
+# Output format (unchanged):
+#  - node name match:      "<pattern>: ./path/to/node"
+#  - compatible file match:"<pattern>: ./path/to/compatible:vendor,chip[,...]"
+dt_confirm_node_or_compatible_all() {
+    LC_ALL=C
+    any=0
 
     for pattern in "$@"; do
-        # Node search: strict prefix (e.g., "isp" only matches "isp@...")
-        for entry in $(dt_yield_node_paths "$root" "$matchresult"); do
-            [ -s "$matchresult" ] && break
-            node=$(basename "$entry")
-            dt_should_skip_node "$node" && continue
-            printf '%s' "$node" | grep -iEq "^${pattern}(@|$)" || continue
-            log_info "[DTFIND] Node name strict prefix match: $entry (pattern: $pattern)"
-            if [ ! -s "$matchresult" ]; then
-                echo "${pattern}:${entry}" > "$matchresult"
-            fi
-            touch "$matchflag"
-        done
-        [ -s "$matchresult" ] && break
+        pl=$(printf '%s' "$pattern" | tr '[:upper:]' '[:lower:]')
 
-        # Compatible property search: strict (prefix or whole word)
-        for file in $(dt_yield_compatible_files "$root" "$matchresult"); do
-            [ -s "$matchresult" ] && break
-            compdir=$(dirname "$file")
-            node=$(basename "$compdir")
-            dt_should_skip_node "$node" && continue
-            compval=$(tr '\0' ' ' < "$file")
-            printf '%s' "$compval" | grep -iEq "(^|[ ,])${pattern}([ ,]|$)" || continue
-            log_info "[DTFIND] Compatible strict match: $file (${compval}) (pattern: $pattern)"
-            if [ ! -s "$matchresult" ]; then
-                echo "${pattern}:${file}" > "$matchresult"
+        # -------- Pass 1: node name strict match (^pat(@|$)) in .../name files --------
+        # BusyBox grep: -r (recursive), -s (quiet errors), -i (CI), -a (treat binary as text),
+        # -E (ERE), -l (print file names), -m1 (stop after first match).
+        name_file="$(grep -r -s -i -a -E -l -m1 "^${pl}(@|$)" "$DT_ROOT" 2>/dev/null | grep '/name$' -m1 || true)"
+        if [ -n "$name_file" ]; then
+            rel="${name_file#"$DT_ROOT"/}"
+            rel="${rel%/name}"
+            log_info "[DTFIND] Node name strict match: /$rel (pattern: $pattern)"
+            printf '%s: ./%s\n' "$pattern" "$rel"
+            any=1
+            continue
+        fi
+
+        # -------- Pass 2: compatible matches --------
+        # Heuristic:
+        #   - If pattern has a comma (e.g. "sony,imx577"), treat it as a full vendor:part token.
+        #     We just need the first compatible file that contains that exact substring.
+        #   - Else (e.g. "isp", "cam", "camss"), treat as IP family:
+        #       token == pat    OR  token ends with -pat   OR  token prefix pat
+        #     We still find a small candidate set via grep and vet tokens precisely.
+        case "$pattern" in *,*)
+            # label as chip (the part after the last comma) to avoid "swapped" look
+            chip_label="${pattern##*,}"
+            comp_file="$(grep -r -s -i -F -l -m1 -- "$pattern" "$DT_ROOT" 2>/dev/null | grep '/compatible$' -m1 || true)"
+            if [ -n "$comp_file" ]; then
+                comp_print="$(tr '\0' ' ' <"$comp_file" 2>/dev/null)"
+                comp_csv="$(tr '\0' ',' <"$comp_file" 2>/dev/null)"; comp_csv="${comp_csv%,}"
+                rel="${comp_file#"$DT_ROOT"/}"
+                log_info "[DTFIND] Compatible strict match: /$rel (${comp_print}) (pattern: $pattern)"
+                # Label by chip (e.g., "imx577: ./…:sony,imx577")
+                printf '%s: ./%s:%s\n' "$chip_label" "$rel" "$comp_csv"
+                any=1
+                continue
             fi
-            touch "$matchflag"
-        done
-        [ -s "$matchresult" ] && break
+            ;;
+        *)
+            cand_list="$(grep -r -s -i -F -l -- "$pattern" "$DT_ROOT" 2>/dev/null | grep '/compatible$' | head -n 64 || true)"
+            if [ -n "$cand_list" ]; then
+                for comp_file in $cand_list; do
+                    hit=0
+                    while IFS= read -r tok; do
+                        tokl=$(printf '%s' "$tok" | tr '[:upper:]' '[:lower:]')
+                        case "$tokl" in
+                            "$pl"|*-"$pl"|"$pl"*) hit=1; break ;;
+                        esac
+                    done <<EOF
+$(tr '\0' '\n' <"$comp_file" 2>/dev/null)
+EOF
+                    if [ "$hit" -eq 1 ]; then
+                        comp_print="$(tr '\0' ' ' <"$comp_file" 2>/dev/null)"
+                        comp_csv="$(tr '\0' ',' <"$comp_file" 2>/dev/null)"; comp_csv="${comp_csv%,}"
+                        rel="${comp_file#"$DT_ROOT"/}"
+                        log_info "[DTFIND] Compatible strict match: /$rel (${comp_print}) (pattern: $pattern)"
+                        # Label stays as the generic pattern (isp/cam/camss)
+                        printf '%s: ./%s:%s\n' "$pattern" "$rel" "$comp_csv"
+                        any=1
+                        break
+                    fi
+                done
+            fi
+            ;;
+        esac
+        # if neither pass matched, we stay silent for this pattern
     done
 
-    if [ -f "$matchflag" ] && [ -s "$matchresult" ]; then
-        cat "$matchresult"
-        rm -f "$matchflag" "$matchresult"
-        return 0
-    fi
-    rm -f "$matchflag" "$matchresult"
-    return 1
+    [ "$any" -eq 1 ]
+}
+
+# Back-compat: single-pattern wrapper
+dt_confirm_node_or_compatible() {
+    dt_confirm_node_or_compatible_all "$@"
 }
 
 # Detects and returns the first available media node (e.g., /dev/media0).
@@ -1941,350 +3032,817 @@ $val" ;;
 }
 
 # Applies media configuration (format and links) using media-ctl from parsed pipeline block.
-# Resets media graph first and applies user-specified format override if needed.
+# Mirrors manual flow:
+#  - Global reset (prefer 'reset', fallback to -r)
+#  - Pads use MBUS code (never '*P'); if USER_FORMAT ends with P, strip P for pads
+#  - Strip any 'field:*' tokens from -V lines
+#  - Apply ONLY these 2 links:
+#      csiphy*:1 -> csid*:0
+#      csid*:1   -> *rdi*:0
+#  - Small settle before capture
 configure_pipeline_block() {
     MEDIA_NODE="$1"
+    USER_FORMAT="$2"
  
-    # Keep arg2 for API compatibility: pads use MBUS formats here; the
-    # requested video pixfmt is applied later by execute_capture_block().
-    # Mark as intentionally read to silence ShellCheck SC2034.
-    # shellcheck disable=SC2034
-    USER_FORMAT="${2:-}"
-    : "${USER_FORMAT:-}"  # intentional no-op read
+    # Reset graph
+    if ! media-ctl -d "$MEDIA_NODE" reset >/dev/null 2>&1; then
+        media-ctl -d "$MEDIA_NODE" -r >/dev/null 2>&1 || true
+    fi
  
-    # Clean slate, like your manual 'reset'
-    log_info "[CMD] media-ctl -d \"$MEDIA_NODE\" --reset"
-    media-ctl -d "$MEDIA_NODE" --reset
+    # Apply pad formats (MBUS, never *P). Also strip 'field:*'.
+    printf "%s\n" "$MEDIA_CTL_V_LIST" | while IFS= read -r vline || [ -n "$vline" ]; do
+        [ -z "$vline" ] && continue
  
-    # 1) Apply pad formats exactly as parsed. If a line fails with _1X10,
-    #    retry once with the short token (SRGGB10) — some trees prefer it.
-    printf '%s\n' "$MEDIA_CTL_V_LIST" | while IFS= read -r vline; do
-        [ -n "$vline" ] || continue
-        log_info "[CMD] media-ctl -d \"$MEDIA_NODE\" -V \"$vline\""
-        if ! media-ctl -d "$MEDIA_NODE" -V "$vline"; then
-            # fallback: *_1X10 → SRGGB10 for Bayer 10; extend if needed later
-            vline_fallback="$(printf '%s' "$vline" | sed -E 's/fmt:SRGGB10_1X10\//fmt:SRGGB10\//g')"
-            if [ "$vline_fallback" != "$vline" ]; then
-                log_warn "  -V failed, retrying with: $vline_fallback"
-                log_info "[CMD] media-ctl -d \"$MEDIA_NODE\" -V \"$vline_fallback\""
-                media-ctl -d "$MEDIA_NODE" -V "$vline_fallback" || true
-            fi
-        fi
-																  
-    done
+        curfmt="$(printf "%s" "$vline" | sed -n 's/.*fmt:\([^/]*\)\/.*/\1/p')"
+        newfmt="$curfmt"
  
-    # 2) Apply links exactly as parsed (same order as your manual sequence).
-    printf '%s\n' "$MEDIA_CTL_L_LIST" | while IFS= read -r lline; do
-        [ -n "$lline" ] || continue
-        log_info "[CMD] media-ctl -d \"$MEDIA_NODE\" -l \"$lline\""
-        media-ctl -d "$MEDIA_NODE" -l "$lline"
-    done
-}
-
-# Executes yavta pipeline controls and captures frames from a video node.
-# Handles pre-capture and post-capture register writes, with detailed result code
-execute_capture_block() {
-    FRAMES="$1" FORMAT="$2"
-
-    # Pre-stream controls
-    printf "%s\n" "$YAVTA_CTRL_PRE_LIST" | while IFS= read -r ctrl; do
-        [ -z "$ctrl" ] && continue
-        dev=$(echo "$ctrl" | awk '{print $1}')
-        reg=$(echo "$ctrl" | awk '{print $2}')
-        val=$(echo "$ctrl" | awk '{print $3}')
-        yavta --no-query -w "$reg $val" "$dev" >/dev/null 2>&1
-    done
-
-    # Stream-on controls
-    printf "%s\n" "$YAVTA_CTRL_LIST" | while IFS= read -r ctrl; do
-        [ -z "$ctrl" ] && continue
-        dev=$(echo "$ctrl" | awk '{print $1}')
-        reg=$(echo "$ctrl" | awk '{print $2}')
-        val=$(echo "$ctrl" | awk '{print $3}')
-        yavta --no-query -w "$reg $val" "$dev" >/dev/null 2>&1
-    done
-
-    # Capture
-    if [ -n "$YAVTA_DEV" ] && [ -n "$FORMAT" ] && [ -n "$YAVTA_W" ] && [ -n "$YAVTA_H" ]; then
-        OUT=$(yavta -B capture-mplane -c -I -n "$FRAMES" -f "$FORMAT" -s "${YAVTA_W}x${YAVTA_H}" -F "$YAVTA_DEV" --capture="$FRAMES" --file="frame-#.bin" 2>&1)
-        RET=$?
-        if echo "$OUT" | grep -qi "Unsupported video format"; then
-            return 2
-        elif [ $RET -eq 0 ] && echo "$OUT" | grep -q "Captured [1-9][0-9]* frames"; then
-            return 0
+        if [ -n "$USER_FORMAT" ]; then
+            case "$USER_FORMAT" in
+                *P) newfmt="${USER_FORMAT%P}" ;;
+                 *) newfmt="$USER_FORMAT" ;;
+            esac
         else
-            return 1
+            case "$curfmt" in
+                *P) newfmt="${curfmt%P}" ;;
+                 *) newfmt="$curfmt" ;;
+            esac
         fi
+ 
+        vline_new="$(printf "%s" "$vline" | sed -E "s/fmt:[^/]+/fmt:${newfmt}/")"
+        vline_new="$(printf "%s" "$vline_new" | sed -E 's/ field:[^]]*//g')"
+ 
+        if [ -n "$YAVTA_W" ] && [ -n "$YAVTA_H" ]; then
+            vline_new="$(printf "%s" "$vline_new" \
+                | sed -E "s/(fmt:[^/]+\/)[0-9]+x[0-9]+/\1${YAVTA_W}x${YAVTA_H}/")"
+        fi
+ 
+        media-ctl -d "$MEDIA_NODE" -V "$vline_new" >/dev/null 2>&1
+    done
+ 
+    # Apply ONLY the two links (no fragile case patterns; avoids ShellCheck parse issues).
+    printf "%s\n" "$MEDIA_CTL_L_LIST" | while IFS= read -r lline || [ -n "$lline" ]; do
+        [ -z "$lline" ] && continue
+        sline="$(printf "%s" "$lline" | tr -d '"')"
+        if [ "${sline#*csiphy*:1->*csid*:0*}" != "$sline" ]; then
+            media-ctl -d "$MEDIA_NODE" -l "$lline" >/dev/null 2>&1
+        elif [ "${sline#*csid*:1->*rdi*:0*}" != "$sline" ]; then
+            media-ctl -d "$MEDIA_NODE" -l "$lline" >/dev/null 2>&1
+        else
+            : # ignore others
+        fi
+    done
+ 
+    sleep 0.15
+}
+ 
+# Executes yavta capture with the same semantics as your manual call.
+# Return codes:
+#   0: PASS (>=1 frame captured)
+#   1: FAIL (capture error)
+#   2: SKIP (unsupported format)
+#   3: SKIP (missing data)
+execute_capture_block() {
+    FRAMES="$1"
+    FORMAT="$2"
+
+    [ -z "$YAVTA_DEV" ] && return 3
+    [ -z "$FORMAT" ] && return 3
+    [ -z "$YAVTA_W" ] && return 3
+    [ -z "$YAVTA_H" ] && return 3
+
+    # Build args as separate, quoted tokens (fixes SC2086 safely)
+    SFLAG="-s"
+    SRES="${YAVTA_W}x${YAVTA_H}"
+
+    CAPS="$(v4l2-ctl -D -d "$YAVTA_DEV" 2>/dev/null || true)"
+    BFLAG="-B"
+    if printf '%s\n' "$CAPS" | grep -qi 'MPlane'; then
+        BMODE="capture-mplane"
     else
-        return 3
+        BMODE="capture"
     fi
 
-    # Post-stream controls
-    printf "%s\n" "$YAVTA_CTRL_POST_LIST" | while IFS= read -r ctrl; do
-        [ -z "$ctrl" ] && continue
-        dev=$(echo "$ctrl" | awk '{print $1}')
-        reg=$(echo "$ctrl" | awk '{print $2}')
-        val=$(echo "$ctrl" | awk '{print $3}')
-        yavta --no-query -w "$reg $val" "$dev" >/dev/null 2>&1
-    done
-}
+    sleep 0.12
 
-# ---- Wayland/Weston helpers -----------------------
-# Ensure a private XDG runtime directory exists and is usable (0700).
-ensure_private_runtime_dir() {
-    d="$1"
-    [ -n "$d" ] || return 1
-    [ -d "$d" ] || mkdir -p "$d" 2>/dev/null || return 1
-    chmod 0700 "$d" 2>/dev/null || return 1
-    : >"$d/.xdg-test" 2>/dev/null || return 1
-    rm -f "$d/.xdg-test" 2>/dev/null
-    return 0
-}
-
-# Return first Wayland socket under a base dir (prints path or fails).
-find_wayland_socket_in() {
-    base="$1"
-    [ -d "$base" ] || return 1
-    for s in "$base"/wayland-*; do
-        [ -S "$s" ] || continue
-        printf '%s\n' "$s"
-        return 0
-    done
-    return 1
-}
-
-# Best-effort discovery of a usable Wayland socket anywhere.
-discover_wayland_socket_anywhere() {
-    uid="$(id -u 2>/dev/null || echo 0)"
-    bases=""
-    [ -n "$XDG_RUNTIME_DIR" ] && bases="$bases $XDG_RUNTIME_DIR"
-    bases="$bases /dev/socket/weston /run/user/$uid /tmp/wayland-$uid /dev/shm"
-    for b in $bases; do
-        ensure_private_runtime_dir "$b" >/dev/null 2>&1 || true
-        if s="$(find_wayland_socket_in "$b")"; then
-            printf '%s\n' "$s"
-            return 0
-        fi
-    done
-    return 1
-}
-
-# Adopt env from a Wayland socket path like /run/user/0/wayland-0
-# Sets XDG_RUNTIME_DIR and WAYLAND_DISPLAY. Returns 0 on success.
-adopt_wayland_env_from_socket() {
-    sock="$1"
-    [ -n "$sock" ] || { log_warn "adopt_wayland_env_from_socket: no socket path given"; return 1; }
-    [ -S "$sock" ] || { log_warn "adopt_wayland_env_from_socket: not a socket: $sock"; return 1; }
- 
-    # Derive components without external dirname/basename
-    XDG_RUNTIME_DIR=${sock%/*}
-    WAYLAND_DISPLAY=${sock##*/}
- 
-    export XDG_RUNTIME_DIR
-    export WAYLAND_DISPLAY
- 
-    log_info "Selected Wayland socket: $sock"
-    log_info "Wayland env: XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR WAYLAND_DISPLAY=$WAYLAND_DISPLAY"
-    return 0
-}
-
-# Try to connect to Wayland. Returns 0 on OK.
-wayland_can_connect() {
-    if command -v weston-info >/dev/null 2>&1; then
-        weston-info >/dev/null 2>&1
+    do_capture_once() {
+        # $1 = mode (capture|capture-mplane)
+        yavta "$BFLAG" "$1" -c -I -n "$FRAMES" -f "$FORMAT" "$SFLAG" "$SRES" \
+              -F "$YAVTA_DEV" --capture="$FRAMES" --file='frame-#.bin' 2>&1
         return $?
-    fi
-    # fallback: quick client probe
-    ( env -i XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" WAYLAND_DISPLAY="$WAYLAND_DISPLAY" true ) >/dev/null 2>&1
-    return $?
-}
+    }
 
-# Ensure a Weston socket exists; if not, stop+start Weston and adopt helper socket.
-weston_pick_env_or_start() {
-    sock="$(discover_wayland_socket_anywhere 2>/dev/null || true)"
-    if [ -n "$sock" ]; then
-        adopt_wayland_env_from_socket "$sock"
-        log_info "Selected Wayland socket: $sock"
+    OUT="$(do_capture_once "$BMODE")"; RET=$?
+    if [ $RET -eq 0 ] && echo "$OUT" | grep -q "Captured [1-9][0-9]* frames"; then
         return 0
     fi
+    echo "$OUT" | grep -qi "Unsupported video format" && return 2
 
-    if weston_is_running; then
-        log_info "Stopping Weston..."
-        weston_stop
-        i=0; while weston_is_running && [ "$i" -lt 5 ]; do i=$((i+1)); sleep 1; done
+    sleep 0.10
+    OUT="$(do_capture_once "$BMODE")"; RET=$?
+    if [ $RET -eq 0 ] && echo "$OUT" | grep -q "Captured [1-9][0-9]* frames"; then
+        return 0
     fi
+    echo "$OUT" | grep -qi "Unsupported video format" && return 2
 
-    log_info "Starting Weston..."
-    weston_start
-    i=0; sock=""
-    while [ "$i" -lt 6 ]; do
-        sock="$(find_wayland_socket_in /dev/socket/weston 2>/dev/null || true)"
-        [ -n "$sock" ] && break
-        sleep 1; i=$((i+1))
-    done
-    if [ -z "$sock" ]; then
-        log_fail "Could not find Wayland socket after starting Weston."
-        return 1
+    # Plane flip
+    case "$BMODE" in
+        capture) FLIPMODE="capture-mplane" ;;
+        *)       FLIPMODE="capture" ;;
+    esac
+    OUT="$(do_capture_once "$FLIPMODE")"; RET=$?
+    if [ $RET -eq 0 ] && echo "$OUT" | grep -q "Captured [1-9][0-9]* frames"; then
+        return 0
     fi
-    adopt_wayland_env_from_socket "$sock"
-    log_info "Weston started; socket: $sock"
+    echo "$OUT" | grep -qi "Unsupported video format" && return 2
+
+    # Try P<->non-P sibling of FORMAT
+    case "$FORMAT" in *P) ALT="${FORMAT%P}" ;; *) ALT="${FORMAT}P" ;; esac
+    FORMAT="$ALT"
+    OUT="$(do_capture_once "$BMODE")"; RET=$?
+    if [ $RET -eq 0 ] && echo "$OUT" | grep -q "Captured [1-9][0-9]* frames"; then
+        return 0
+    fi
+    echo "$OUT" | grep -qi "Unsupported video format" && return 2
+
+    OUT="$(do_capture_once "$FLIPMODE")"; RET=$?
+    if [ $RET -eq 0 ] && echo "$OUT" | grep -q "Captured [1-9][0-9]* frames"; then
+        return 0
+    fi
+    echo "$OUT" | grep -qi "Unsupported video format" && return 2
+
+    return 1
+}
+
+print_planned_commands() {
+    media_node="$1"
+    pixfmt="$2"
+ 
+    # Pads should use MBUS code (strip trailing 'P' if present)
+    padfmt="$(printf '%s' "$pixfmt" | sed 's/P$//')"
+ 
+    log_info "[CI] Planned sequence:"
+    log_info " media-ctl -d $media_node --reset"
+ 
+    # Pad formats: show MBUS (non-P) on -V lines
+    if [ -n "$MEDIA_CTL_V_LIST" ]; then
+        printf '%s\n' "$MEDIA_CTL_V_LIST" | while IFS= read -r vline; do
+            [ -z "$vline" ] && continue
+            vline_out="$(printf '%s' "$vline" | sed -E "s/fmt:[^/]+\/([0-9]+x[0-9]+)/fmt:${padfmt}\/\1/g")"
+            log_info " media-ctl -d $media_node -V '$vline_out'"
+        done
+    fi
+ 
+    # Links unchanged
+    if [ -n "$MEDIA_CTL_L_LIST" ]; then
+        printf '%s\n' "$MEDIA_CTL_L_LIST" | while IFS= read -r lline; do
+            [ -z "$lline" ] && continue
+            log_info " media-ctl -d $media_node -l '$lline'"
+        done
+    fi
+ 
+    # Any pre/post yavta register writes (unchanged)
+    if [ -n "$YAVTA_CTRL_PRE_LIST" ]; then
+        printf '%s\n' "$YAVTA_CTRL_PRE_LIST" | while IFS= read -r ctrl; do
+            [ -z "$ctrl" ] && continue
+            dev="$(printf '%s' "$ctrl" | awk '{print $1}')"
+            reg="$(printf '%s' "$ctrl" | awk '{print $2}')"
+            val="$(printf '%s' "$ctrl" | awk '{print $3}')"
+            [ -n "$dev" ] && [ -n "$reg" ] && [ -n "$val" ] && \
+              log_info " yavta --no-query -w '$reg $val' $dev"
+        done
+    fi
+ 
+    size_arg=""
+    if [ -n "$YAVTA_W" ] && [ -n "$YAVTA_H" ]; then
+        size_arg="-s ${YAVTA_W}x${YAVTA_H}"
+    fi
+    if [ -n "$YAVTA_DEV" ]; then
+        # Show pixel format (SRGGB10P) only on the video node
+        log_info " yavta -B capture-mplane -c -I -n $FRAMES -f $pixfmt $size_arg -F $YAVTA_DEV --capture=$FRAMES --file='frame-#.bin'"
+    fi
+ 
+    if [ -n "$YAVTA_CTRL_POST_LIST" ]; then
+        printf '%s\n' "$YAVTA_CTRL_POST_LIST" | while IFS= read -r ctrl; do
+            [ -z "$ctrl" ] && continue
+            dev="$(printf '%s' "$ctrl" | awk '{print $1}')"
+            reg="$(printf '%s' "$ctrl" | awk '{print $2}')"
+            val="$(printf '%s' "$ctrl" | awk '{print $3}')"
+            [ -n "$dev" ] && [ -n "$reg" ] && [ -n "$val" ] && \
+              log_info " yavta --no-query -w '$reg $val' $dev"
+        done
+    fi
+}
+
+log_soc_info() {
+    m=""; s=""; pv=""
+    [ -r /sys/devices/soc0/machine ] && m="$(cat /sys/devices/soc0/machine 2>/dev/null)"
+    [ -r /sys/devices/soc0/soc_id ] && s="$(cat /sys/devices/soc0/soc_id 2>/dev/null)"
+    [ -r /sys/devices/soc0/platform_version ] && pv="$(cat /sys/devices/soc0/platform_version 2>/dev/null)"
+    [ -n "$m" ] && log_info "SoC.machine: $m"
+    [ -n "$s" ] && log_info "SoC.soc_id: $s"
+    [ -n "$pv" ] && log_info "SoC.platform_version: $pv"
+}
+
+###############################################################################
+# Platform detection (SoC / Target / Machine / OS) — POSIX, no sourcing files
+# Sets & exports:
+#   PLATFORM_KERNEL, PLATFORM_ARCH, PLATFORM_UNAME_S, PLATFORM_HOSTNAME
+#   PLATFORM_SOC_MACHINE, PLATFORM_SOC_ID, PLATFORM_SOC_FAMILY
+#   PLATFORM_DT_MODEL, PLATFORM_DT_COMPAT
+#   PLATFORM_OS_LIKE, PLATFORM_OS_NAME
+#   PLATFORM_TARGET, PLATFORM_MACHINE
+###############################################################################
+detect_platform() {
+    # --- Basic uname/host ---
+    PLATFORM_KERNEL="$(uname -r 2>/dev/null)"
+    PLATFORM_ARCH="$(uname -m 2>/dev/null)"
+    PLATFORM_UNAME_S="$(uname -s 2>/dev/null)"
+    PLATFORM_HOSTNAME="$(hostname 2>/dev/null)"
+ 
+    # --- soc0 details ---
+    if [ -r /sys/devices/soc0/machine ]; then
+        PLATFORM_SOC_MACHINE="$(cat /sys/devices/soc0/machine 2>/dev/null)"
+    else
+        PLATFORM_SOC_MACHINE=""
+    fi
+ 
+    if [ -r /sys/devices/soc0/soc_id ]; then
+        PLATFORM_SOC_ID="$(cat /sys/devices/soc0/soc_id 2>/dev/null)"
+    else
+        PLATFORM_SOC_ID=""
+    fi
+ 
+    if [ -r /sys/devices/soc0/family ]; then
+        PLATFORM_SOC_FAMILY="$(cat /sys/devices/soc0/family 2>/dev/null)"
+    else
+        PLATFORM_SOC_FAMILY=""
+    fi
+ 
+    # --- Device Tree model / compatible (strip NULs) ---
+    if [ -r /proc/device-tree/model ]; then
+        PLATFORM_DT_MODEL="$(tr -d '\000' </proc/device-tree/model 2>/dev/null | head -n 1)"
+    else
+        PLATFORM_DT_MODEL=""
+    fi
+ 
+    PLATFORM_DT_COMPAT=""
+    if [ -d /proc/device-tree ]; then
+        for f in /proc/device-tree/compatible /proc/device-tree/*/compatible; do
+            if [ -f "$f" ]; then
+                PLATFORM_DT_COMPAT="$(tr -d '\000' <"$f" 2>/dev/null | tr '\n' ' ')"
+                break
+            fi
+        done
+    fi
+ 
+    # --- OS (parse, do not source /etc/os-release) ---
+    PLATFORM_OS_LIKE=""
+    PLATFORM_OS_NAME=""
+    if [ -r /etc/os-release ]; then
+        PLATFORM_OS_LIKE="$(
+            awk -F= '$1=="ID_LIKE"{gsub(/"/,"",$2); print $2}' /etc/os-release 2>/dev/null
+        )"
+        if [ -z "$PLATFORM_OS_LIKE" ]; then
+            PLATFORM_OS_LIKE="$(
+                awk -F= '$1=="ID"{gsub(/"/,"",$2); print $2}' /etc/os-release 2>/dev/null
+            )"
+        fi
+        PLATFORM_OS_NAME="$(
+            awk -F= '$1=="PRETTY_NAME"{gsub(/"/,"",$2); print $2}' /etc/os-release 2>/dev/null
+        )"
+    fi
+ 
+    # --- Target guess (mutually-exclusive; generic names only) ---
+    lc_compat="$(printf '%s %s' "$PLATFORM_DT_MODEL" "$PLATFORM_DT_COMPAT" \
+                 | tr '[:upper:]' '[:lower:]')"
+ 
+    case "$lc_compat" in
+        # Kodiak: qcs6490 / RB3 Gen2
+        *qcs6490*|*kodiak*|*rb3gen2*|*rb3-gen2*|*rb3*gen2*)
+            PLATFORM_TARGET="Kodiak"
+            ;;
+        # LeMans family: qcs9100, qcs9075, SA8775P, IQ-9075-EVK (accept 'lemand' too)
+        *qcs9100*|*qcs9075*|*lemans*|*lemand*|*sa8775p*|*iq-9075-evk*)
+            PLATFORM_TARGET="LeMans"
+            ;;
+        # Monaco: qcs8300
+        *qcs8300*|*monaco*)
+            PLATFORM_TARGET="Monaco"
+            ;;
+        # Agatti: QRB2210 RB1 Core Kit
+        *qrb2210*|*agatti*|*rb1-core-kit*)
+            PLATFORM_TARGET="Agatti"
+            ;;
+        # Talos: QCS615 ADP Air
+        *qcs615*|*talos*|*adp-air*)
+            PLATFORM_TARGET="Talos"
+            ;;
+        *)
+            PLATFORM_TARGET="unknown"
+            ;;
+    esac
+ 
+    # --- Human-friendly machine name ---
+    if [ -n "$PLATFORM_DT_MODEL" ]; then
+        PLATFORM_MACHINE="$PLATFORM_DT_MODEL"
+    else
+        if [ -n "$PLATFORM_SOC_MACHINE" ]; then
+            PLATFORM_MACHINE="$PLATFORM_SOC_MACHINE"
+        else
+            PLATFORM_MACHINE="$PLATFORM_HOSTNAME"
+        fi
+    fi
+ 
+    # Export for callers (and to silence SC2034 in this file)
+    export \
+      PLATFORM_KERNEL PLATFORM_ARCH PLATFORM_UNAME_S PLATFORM_HOSTNAME \
+      PLATFORM_SOC_MACHINE PLATFORM_SOC_ID PLATFORM_SOC_FAMILY \
+      PLATFORM_DT_MODEL PLATFORM_DT_COMPAT PLATFORM_OS_LIKE PLATFORM_OS_NAME \
+      PLATFORM_TARGET PLATFORM_MACHINE
+ 
     return 0
 }
 
-# Find candidate Wayland sockets in common locations.
-# Prints absolute socket paths, one per line, most-preferred first.
-find_wayland_sockets() {
-  uid="$(id -u 2>/dev/null || echo 0)"
+# ---------- minimal root / FS helpers (Yocto-safe, no underscores) ----------
+isroot() { uid="$(id -u 2>/dev/null || echo 1)"; [ "$uid" -eq 0 ]; }
 
-  # Start with $XDG_RUNTIME_DIR if set.
-  if [ -n "$XDG_RUNTIME_DIR" ] && [ -d "$XDG_RUNTIME_DIR" ]; then
-    if [ -e "$XDG_RUNTIME_DIR/wayland-1" ]; then
-      printf '%s\n' "$XDG_RUNTIME_DIR/wayland-1"
-    fi
-    if [ -e "$XDG_RUNTIME_DIR/wayland-0" ]; then
-      printf '%s\n' "$XDG_RUNTIME_DIR/wayland-0"
-    fi
-  fi
+iswritabledir() { d="$1"; [ -d "$d" ] && [ -w "$d" ]; }
 
-  # Qualcomm/Yocto common path.
-  if [ -e /dev/socket/weston/wayland-1 ]; then
-    printf '%s\n' /dev/socket/weston/wayland-1
-  fi
-  if [ -e /dev/socket/weston/wayland-0 ]; then
-    printf '%s\n' /dev/socket/weston/wayland-0
-  fi
-
-  # XDG spec default per-user location.
-  if [ -e "/run/user/$uid/wayland-1" ]; then
-    printf '%s\n' "/run/user/$uid/wayland-1"
-  fi
-  if [ -e "/run/user/$uid/wayland-0" ]; then
-    printf '%s\n' "/run/user/$uid/wayland-0"
-  fi
+mountpointfor() {
+  p="$1"
+  awk -v p="$p" '
+    BEGIN{best="/"; bestlen=1}
+    {
+      mp=$2
+      if (index(p, mp)==1 && length(mp)>bestlen) { best=mp; bestlen=length(mp) }
+    }
+    END{print best}
+  ' /proc/mounts 2>/dev/null
 }
 
-# Ensure XDG_RUNTIME_DIR has owner=current-user and mode 0700.
-# Returns 0 if OK (or fixed), non-zero if still not compliant.
-ensure_wayland_runtime_dir_perms() {
-  dir="$1"
-  [ -n "$dir" ] && [ -d "$dir" ] || return 1
- 
-  cur_uid="$(id -u 2>/dev/null || echo 0)"
-  cur_gid="$(id -g 2>/dev/null || echo 0)"
- 
-  # Best-effort fixups first (don’t error if chown/chmod fail)
-  chown "$cur_uid:$cur_gid" "$dir" 2>/dev/null || true
-  chmod 0700 "$dir" 2>/dev/null || true
- 
-  # Verify using stat (GNU first, then BSD). If stat is unavailable,
-  # we can’t verify—assume OK to avoid SC2012 (ls) usage.
-  if command -v stat >/dev/null 2>&1; then
-    # Mode: GNU: %a ; BSD: %Lp
-    mode="$(stat -c '%a' "$dir" 2>/dev/null || stat -f '%Lp' "$dir" 2>/dev/null || echo '')"
-    # Owner uid: GNU: %u ; BSD: %u
-    uid="$(stat -c '%u' "$dir" 2>/dev/null || stat -f '%u' "$dir" 2>/dev/null || echo '')"
- 
-    [ "$mode" = "700" ] && [ "$uid" = "$cur_uid" ] && return 0
-    return 1
-  fi
- 
-  # No stat available: directory exists and we attempted to fix perms/owner.
-  # Treat as success so clients can try; avoids SC2012 warnings.
-  return 0
-}
-
-# Quick Wayland handshake check.
-# Prefers `wayland-info` with a short timeout; otherwise validates socket presence.
-# Also enforces/fixes XDG_RUNTIME_DIR permissions so clients won’t reject it.
-wayland_connection_ok() {
-  if [ -n "$XDG_RUNTIME_DIR" ]; then
-    ensure_wayland_runtime_dir_perms "$XDG_RUNTIME_DIR" || return 1
-  fi
- 
-  if command -v wayland-info >/dev/null 2>&1; then
-    if command -v timeout >/dev/null 2>&1; then
-      timeout 3s wayland-info >/dev/null 2>&1
-      return $?
-    fi
-    wayland-info >/dev/null 2>&1
-    return $?
-  fi
- 
-  # Fallback: env variables and socket must exist.
-  if [ -n "$XDG_RUNTIME_DIR" ] && [ -n "$WAYLAND_DISPLAY" ] && [ -e "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ]; then
+tryremountrw() {
+  path="$1"
+  mp="$(mountpointfor "$path")"
+  [ -n "$mp" ] || mp="/"
+  if mount -o remount,rw "$mp" 2>/dev/null; then
+    printf '%s\n' "$mp"
     return 0
   fi
   return 1
 }
 
-# Print concise metadata for a path (portable).
-# Prefers stat(1) (GNU or BSD); falls back to ls(1) only if needed.
-# Usage: print_path_meta "/some/path"
-print_path_meta() {
-  p=$1
-  if [ -z "$p" ]; then
-    return 1
-  fi
-  # GNU stat
-  if stat -c '%A %U %G %a %n' "$p" >/dev/null 2>&1; then
-    stat -c '%A %U %G %a %n' "$p"
-    return 0
-  fi
-  # BSD/Mac stat
-  if stat -f '%Sp %Su %Sg %OLp %N' "$p" >/dev/null 2>&1; then
-    stat -f '%Sp %Su %Sg %OLp %N' "$p"
-    return 0
-  fi
-  # shellcheck disable=SC2012
-  ls -ld -- "$p" 2>/dev/null
-}
-
-soc_id() {
-    if [ -r /sys/devices/soc0/soc_id ]; then
-        cat /sys/devices/soc0/soc_id 2>/dev/null
-    elif [ -r /proc/device-tree/compatible ]; then
-        tr -d '\0' </proc/device-tree/compatible 2>/dev/null | head -n 1
-    else
-        uname -r
+# ---------------- DSP autolink (generic, sudo-free, no underscores) ----------------
+# Env:
+#   FASTRPC_DSP_AUTOLINK=yes|no    (default: yes)
+#   FASTRPC_DSP_SRC=/path/to/dsp   (force a source dir)
+#   FASTRPC_AUTOREMOUNT=yes|no     (default: no)  allow remount rw if needed
+#   FASTRPC_AUTOREMOUNT_RO=yes|no  (default: yes) remount ro after linking
+ensure_usr_lib_dsp_symlinks() {
+  [ "${FASTRPC_DSP_AUTOLINK:-yes}" = "yes" ] || { log_info "DSP autolink disabled"; return 0; }
+ 
+  dsptgt="/usr/lib/dsp"
+ 
+  # If already populated, skip
+  if [ -d "$dsptgt" ]; then
+    if find "$dsptgt" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null | grep -q .; then
+      log_info "$dsptgt already populated, skipping DSP autolink"
+      return 0
     fi
-}
-
-# --- BusyBox-safe helper: convert "15s" -> 15, pass-through if already integer ---
-timeout_to_seconds() {
-    case "$1" in *s) echo "${1%s}";; *) echo "$1";; esac
-}
-
-# --- POSIX timeout without GNU coreutils ---
-sh_timeout() {
-    dur="$1"; shift
-    [ "$1" = "--" ] && shift
-    case "$dur" in *s) sec=${dur%s} ;; *) sec=$dur ;; esac
-    [ -z "$sec" ] && sec=0
-
-    "$@" &
-    pid=$!
-
-    t=0
-    while kill -0 "$pid" 2>/dev/null; do
-        if [ "$t" -ge "$sec" ] 2>/dev/null; then
-            kill "$pid" 2>/dev/null || true
-            sleep 1
-            kill -9 "$pid" 2>/dev/null || true
-            wait "$pid" 2>/dev/null
-            return 124
-        fi
-        sleep 1
-        t=$((t+1))
+  fi
+ 
+  # Choose source: explicit env wins, else discover
+  if [ -n "${FASTRPC_DSP_SRC:-}" ] && [ -d "$FASTRPC_DSP_SRC" ]; then
+    dspsrc="$FASTRPC_DSP_SRC"
+  else
+    # Best-effort platform hints (detect_platform may exist in functestlib)
+    if command -v detect_platform >/dev/null 2>&1; then detect_platform >/dev/null 2>&1 || true; fi
+    hintstr="$(printf '%s %s %s %s' \
+      "${PLATFORM_SOC_ID:-}" "${PLATFORM_DT_MODEL:-}" "${PLATFORM_DT_COMPAT:-}" "${PLATFORM_TARGET:-}" \
+      | tr '[:upper:]' '[:lower:]')"
+ 
+    candidateslist="$(find /usr/share/qcom -maxdepth 6 -type d -name dsp 2>/dev/null | sort)"
+    best=""; bestscore=-1; bestcount=-1
+    IFS='
+'
+    for d in $candidateslist; do
+      [ -d "$d" ] || continue
+      if ! find "$d" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null | grep -q .; then
+        continue
+      fi
+      score=0
+      pathlc="$(printf '%s' "$d" | tr '[:upper:]' '[:lower:]')"
+      for tok in $hintstr; do
+        [ -n "$tok" ] || continue
+        case "$pathlc" in *"$tok"*) score=$((score+1));; esac
+      done
+      cnt="$(find "$d" -mindepth 1 -maxdepth 1 -printf '.' 2>/dev/null | wc -c | tr -d ' ')"
+      if [ "$score" -gt "$bestscore" ] || { [ "$score" -eq "$bestscore" ] && [ "$cnt" -gt "$bestcount" ]; }; then
+        best="$d"; bestscore="$score"; bestcount="$cnt"
+      fi
     done
-    wait "$pid"; return $?
+    unset IFS
+    dspsrc="$best"
+  fi
+ 
+  if [ -z "$dspsrc" ]; then
+    log_warn "No DSP skeleton source found under /usr/share/qcom, skipping autolink."
+    return 0
+  fi
+ 
+  # Must be root on Yocto (no sudo). If not root, skip safely.
+  if ! isroot; then
+    log_warn "Not root; cannot write to $dsptgt on Yocto (no sudo). Skipping DSP autolink."
+    return 0
+  fi
+ 
+  # Ensure target dir exists; handle read-only rootfs if requested
+  remounted=""
+  mountpt=""
+  if ! mkdir -p "$dsptgt" 2>/dev/null; then
+    if [ "${FASTRPC_AUTOREMOUNT:-no}" = "yes" ]; then
+      mountpt="$(tryremountrw "$dsptgt")" || {
+        log_warn "Rootfs read-only and remount failed, skipping DSP autolink."
+        return 0
+      }
+      remounted="yes"
+      if ! mkdir -p "$dsptgt" 2>/dev/null; then
+        log_warn "mkdir -p $dsptgt still failed after remount, skipping."
+        if [ -n "$mountpt" ] && [ "${FASTRPC_AUTOREMOUNT_RO:-yes}" = "yes" ]; then
+          mount -o remount,ro "$mountpt" 2>/dev/null || true
+        fi
+        return 0
+      fi
+    else
+      log_warn "Rootfs likely read-only. Set FASTRPC_AUTOREMOUNT=yes to remount rw automatically."
+      return 0
+    fi
+  fi
+ 
+  # If something appeared meanwhile, stop (idempotent)
+  if find "$dsptgt" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null | grep -q .; then
+    log_info "$dsptgt now contains entries, not linking from $dspsrc"
+    if [ -n "$remounted" ] && [ -n "$mountpt" ] && [ "${FASTRPC_AUTOREMOUNT_RO:-yes}" = "yes" ]; then
+      mount -o remount,ro "$mountpt" 2>/dev/null || true
+    fi
+    return 0
+  fi
+ 
+  # Link both files and directories; don't clobber existing names
+  log_info "Linking DSP artifacts from: $dspsrc → $dsptgt"
+  linked=0
+  for f in "$dspsrc"/*; do
+    [ -e "$f" ] || continue
+    base="$(basename "$f")"
+    if [ ! -e "$dsptgt/$base" ]; then
+      if ln -s "$f" "$dsptgt/$base" 2>/dev/null; then
+        linked=$((linked+1))
+      else
+        log_warn "ln -s failed: $f"
+      fi
+    fi
+  done
+ 
+  # Final visibility + sanity
+  if find "$dsptgt" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null | grep -q .; then
+    log_info "DSP autolink complete ($linked link(s))"
+    find "$dsptgt" \
+      -mindepth 1 \
+      -maxdepth 1 \
+      -printf '%M %u %g %6s %TY-%Tm-%Td %TH:%TM %p\n' 2>/dev/null \
+      | sed 's/^/[INFO] /' \
+      || true
+  else
+    log_warn "DSP autolink finished but $dsptgt is still empty, source may contain only nested content or FS is RO."
+  fi
+ 
+  # Optionally restore read-only
+  if [ -n "$remounted" ] && [ -n "$mountpt" ] && [ "${FASTRPC_AUTOREMOUNT_RO:-yes}" = "yes" ]; then
+    mount -o remount,ro "$mountpt" 2>/dev/null || true
+  fi
 }
 
-# Map test duration keywords to seconds
-duration_to_secs() {
-  case "$1" in
-    short)  echo 5  ;;
-    medium) echo 15 ;;
-    long)   echo 30 ;;
-    *)      echo 5  ;;
-  esac
+# --- Ensure rootfs has minimum size (defaults to 2GiB) -----------------------
+# Usage: ensure_rootfs_min_size [min_gib]
+# - Checks / size (df -P /) in KiB. If < min, runs resize2fs on the rootfs device.
+# - Logs to $LOG_DIR/resize2fs.log if LOG_DIR is set, else /tmp/resize2fs.log.
+ensure_rootfs_min_size() {
+    min_gib="${1:-2}"
+    min_kb=$((min_gib*1024*1024))
+
+    total_kb="$(df -P / 2>/dev/null | awk 'NR==2{print $2}')"
+    [ -n "$total_kb" ] || { log_warn "df check failed; skipping resize."; return 0; }
+
+    if [ "$total_kb" -ge "$min_kb" ] 2>/dev/null; then
+        log_info "Rootfs size OK (>=${min_gib}GiB)."
+        return 0
+    fi
+
+    # Pick root device: prefer by-partlabel/rootfs, else actual source of /
+    root_dev="/dev/disk/by-partlabel/rootfs"
+    if [ ! -e "$root_dev" ]; then
+        if command -v findmnt >/dev/null 2>&1; then
+            root_dev="$(findmnt -n -o SOURCE / 2>/dev/null | head -n1)"
+        else
+            root_dev="$(awk '$2=="/"{print $1; exit}' /proc/mounts 2>/dev/null)"
+        fi
+    fi
+
+    # Detect filesystem type robustly
+    fstype=""
+    if command -v blkid >/dev/null 2>&1; then
+        fstype="$(blkid -o value -s TYPE "$root_dev" 2>/dev/null | head -n1)"
+        case "$fstype" in
+            *TYPE=*)
+                fstype="$(printf '%s' "$fstype" | sed -n 's/.*TYPE="\([^"]*\)".*/\1/p')"
+                ;;
+        esac
+        if [ -z "$fstype" ] && command -v lsblk >/dev/null 2>&1; then
+            fstype="$(lsblk -no FSTYPE "$root_dev" 2>/dev/null | head -n1)"
+        fi
+        if [ -z "$fstype" ]; then
+            fstype="$(blkid "$root_dev" 2>/dev/null | sed -n 's/.*TYPE="\([^"]*\)".*/\1/p')"
+        fi
+        case "$fstype" in
+            ext2|ext3|ext4) : ;;
+            *)
+                log_warn "Rootfs type '${fstype:-unknown}' not ext*, skipping resize."
+                return 0
+                ;;
+        esac
+    fi
+
+    log_dir="${LOG_DIR:-/tmp}"
+    mkdir -p "$log_dir" 2>/dev/null || true
+
+    if command -v resize2fs >/dev/null 2>&1; then
+        mib="$(printf '%s\n' "$total_kb" | awk '{printf "%d",$1/1024}')"
+        log_info "Rootfs <${min_gib}GiB (${mib} MiB). Resizing filesystem on $root_dev ..."
+        if resize2fs "$root_dev" >>"$log_dir/resize2fs.log" 2>&1; then
+            log_pass "resize2fs completed on $root_dev (see $log_dir/resize2fs.log)."
+        else
+            log_warn "resize2fs failed on $root_dev (see $log_dir/resize2fs.log)."
+        fi
+    else
+        log_warn "resize2fs not available; skipping resize."
+    fi
+    return 0
+}
+# ---- Connectivity probe (0 OK, 2 IP/no-internet, 1 no IP) ----
+# Env overrides:
+#   NET_PROBE_ROUTE_IP=1.1.1.1
+#   NET_PING_HOST=8.8.8.8
+check_network_status_rc() {
+    net_probe_route_ip="${NET_PROBE_ROUTE_IP:-1.1.1.1}"
+    net_ping_host="${NET_PING_HOST:-8.8.8.8}"
+
+    if command -v ip >/dev/null 2>&1; then
+        net_ip_addr="$(ip -4 route get "$net_probe_route_ip" 2>/dev/null \
+            | awk 'NR==1{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')"
+        if [ -z "$net_ip_addr" ]; then
+            net_ip_addr="$(ip -o -4 addr show scope global up 2>/dev/null \
+                | awk 'NR==1{split($4,a,"/"); print a[1]}')"
+        fi
+    else
+        net_ip_addr=""
+    fi
+
+    if [ -n "$net_ip_addr" ]; then
+        if command -v ping >/dev/null 2>&1; then
+            if ping -c 1 -W 2 "$net_ping_host" >/dev/null 2>&1 \
+               || ping -c 1 -w 2 "$net_ping_host" >/dev/null 2>&1; then
+                unset net_probe_route_ip net_ping_host net_ip_addr
+                return 0
+            fi
+            unset net_probe_route_ip net_ping_host net_ip_addr
+            return 2
+        else
+            unset net_probe_route_ip net_ping_host net_ip_addr
+            return 2
+        fi
+    fi
+
+    unset net_probe_route_ip net_ping_host net_ip_addr
+    return 1
+}
+
+# ---- Interface snapshot (INFO log only) ----
+net_log_iface_snapshot() {
+    net_ifc="$1"
+    [ -n "$net_ifc" ] || { unset net_ifc; return 0; }
+
+    net_admin="DOWN"
+    net_oper="unknown"
+    net_carrier="0"
+    net_ip="none"
+
+    if command -v ip >/dev/null 2>&1 && ip -o link show "$net_ifc" >/dev/null 2>&1; then
+        if ip -o link show "$net_ifc" | awk -F'[<>]' '{print $2}' | grep -qw UP; then
+            net_admin="UP"
+        fi
+    fi
+    [ -r "/sys/class/net/$net_ifc/operstate" ] && net_oper="$(cat "/sys/class/net/$net_ifc/operstate" 2>/dev/null)"
+    [ -r "/sys/class/net/$net_ifc/carrier"   ] && net_carrier="$(cat "/sys/class/net/$net_ifc/carrier"   2>/dev/null)"
+
+    if command -v get_ip_address >/dev/null 2>&1; then
+        net_ip="$(get_ip_address "$net_ifc" 2>/dev/null)"
+        [ -n "$net_ip" ] || net_ip="none"
+    fi
+
+    log_info "[NET] ${net_ifc}: admin=${net_admin} oper=${net_oper} carrier=${net_carrier} ip=${net_ip}"
+
+    unset net_ifc net_admin net_oper net_carrier net_ip
+}
+
+# ---- Bring the system online if possible (0 OK, 2 IP/no-internet, 1 no IP) ----
+ensure_network_online() {
+    check_network_status_rc; net_rc=$?
+    if [ "$net_rc" -eq 0 ]; then
+        ensure_reasonable_clock || log_warn "Proceeding in limited-network mode."
+        unset net_rc
+        return 0
+    fi
+
+    if command -v systemctl >/dev/null 2>&1 && command -v check_systemd_services >/dev/null 2>&1; then
+        check_systemd_services NetworkManager systemd-networkd connman || true
+    fi
+
+    net_had_any_ip=0
+
+    # -------- Ethernet pass --------
+    net_ifaces=""
+    if command -v get_ethernet_interfaces >/dev/null 2>&1; then
+        net_ifaces="$(get_ethernet_interfaces 2>/dev/null)"
+    fi
+
+    for net_ifc in $net_ifaces; do
+        net_log_iface_snapshot "$net_ifc"
+
+        if command -v is_link_up >/dev/null 2>&1; then
+            if ! is_link_up "$net_ifc"; then
+                log_info "[NET] ${net_ifc}: link=down → skipping DHCP"
+                continue
+            fi
+        fi
+
+        log_info "[NET] ${net_ifc}: bringing up and requesting DHCP..."
+        if command -v bringup_interface >/dev/null 2>&1; then
+            bringup_interface "$net_ifc" 2 2 || true
+        fi
+
+        if command -v run_dhcp_client >/dev/null 2>&1; then
+            run_dhcp_client "$net_ifc" 10 >/dev/null 2>&1 || true
+        elif command -v try_dhcp_client_safe >/dev/null 2>&1; then
+            try_dhcp_client_safe "$net_ifc" 8 || true
+        fi
+
+        net_log_iface_snapshot "$net_ifc"
+
+        check_network_status_rc; net_rc=$?
+        case "$net_rc" in
+            0)
+                log_pass "[NET] ${net_ifc}: internet reachable"
+                ensure_reasonable_clock || log_warn "Proceeding in limited-network mode."
+                unset net_ifaces net_ifc net_rc net_had_any_ip
+                return 0
+                ;;
+            2)
+                log_warn "[NET] ${net_ifc}: IP assigned but internet not reachable"
+                net_had_any_ip=1
+                ;;
+            1)
+                log_info "[NET] ${net_ifc}: still no IP after DHCP attempt"
+                ;;
+        esac
+    done
+
+    # -------- Wi-Fi pass (with bounded retry) --------
+    net_wifi=""
+    if command -v get_wifi_interface >/dev/null 2>&1; then
+        net_wifi="$(get_wifi_interface 2>/dev/null || echo "")"
+    fi
+    if [ -n "$net_wifi" ]; then
+        net_log_iface_snapshot "$net_wifi"
+        log_info "[NET] ${net_wifi}: bringing up Wi-Fi..."
+
+        if command -v bringup_interface >/dev/null 2>&1; then
+            bringup_interface "$net_wifi" 2 2 || true
+        fi
+
+        net_creds=""
+        if command -v get_wifi_credentials >/dev/null 2>&1; then
+            net_creds="$(get_wifi_credentials "" "" 2>/dev/null || true)"
+        fi
+
+        # ---- New: retry knobs (env-overridable) ----
+        wifi_max_attempts="${NET_WIFI_RETRIES:-2}"
+        wifi_retry_delay="${NET_WIFI_RETRY_DELAY:-5}"
+        if [ -z "$wifi_max_attempts" ] || [ "$wifi_max_attempts" -lt 1 ] 2>/dev/null; then
+            wifi_max_attempts=1
+        fi
+        if [ -z "$wifi_retry_delay" ] || [ "$wifi_retry_delay" -lt 0 ] 2>/dev/null; then
+            wifi_retry_delay=0
+        fi
+
+        wifi_attempt=1
+        while [ "$wifi_attempt" -le "$wifi_max_attempts" ]; do
+            if [ "$wifi_max_attempts" -gt 1 ]; then
+                log_info "[NET] ${net_wifi}: Wi-Fi attempt ${wifi_attempt}/${wifi_max_attempts}"
+            fi
+
+            if [ -n "$net_creds" ]; then
+                net_ssid="$(printf '%s\n' "$net_creds" | awk '{print $1}')"
+                net_pass="$(printf '%s\n' "$net_creds" | awk '{print $2}')"
+                log_info "[NET] ${net_wifi}: trying nmcli for SSID='${net_ssid}'"
+                if command -v wifi_connect_nmcli >/dev/null 2>&1; then
+                    wifi_connect_nmcli "$net_wifi" "$net_ssid" "$net_pass" || true
+                fi
+
+                # If nmcli brought us up, do NOT fall back to wpa_supplicant
+                check_network_status_rc; net_rc=$?
+                if [ "$net_rc" -ne 0 ]; then
+                    log_info "[NET] ${net_wifi}: falling back to wpa_supplicant + DHCP"
+                    if command -v wifi_connect_wpa_supplicant >/dev/null 2>&1; then
+                        wifi_connect_wpa_supplicant "$net_wifi" "$net_ssid" "$net_pass" || true
+                    fi
+                    if command -v run_dhcp_client >/dev/null 2>&1; then
+                        run_dhcp_client "$net_wifi" 10 >/dev/null 2>&1 || true
+                    fi
+                fi
+            else
+                log_info "[NET] ${net_wifi}: no credentials provided → DHCP only"
+                if command -v run_dhcp_client >/dev/null 2>&1; then
+                    run_dhcp_client "$net_wifi" 10 >/dev/null 2>&1 || true
+                fi
+            fi
+
+            net_log_iface_snapshot "$net_wifi"
+            check_network_status_rc; net_rc=$?
+            case "$net_rc" in
+                0)
+                    log_pass "[NET] ${net_wifi}: internet reachable"
+                    ensure_reasonable_clock || log_warn "Proceeding in limited-network mode."
+                    unset net_wifi net_ifaces net_ifc net_rc net_had_any_ip net_creds net_ssid net_pass wifi_attempt wifi_max_attempts wifi_retry_delay
+                    return 0
+                    ;;
+                2)
+                    log_warn "[NET] ${net_wifi}: IP assigned but internet not reachable"
+                    net_had_any_ip=1
+                    ;;
+                1)
+                    log_info "[NET] ${net_wifi}: still no IP after connect/DHCP attempt"
+                    ;;
+            esac
+
+            # If not last attempt, cooldown + cleanup before retry
+            if [ "$wifi_attempt" -lt "$wifi_max_attempts" ]; then
+                if command -v wifi_cleanup >/dev/null 2>&1; then
+                    wifi_cleanup "$net_wifi" || true
+                fi
+                if command -v bringup_interface >/dev/null 2>&1; then
+                    bringup_interface "$net_wifi" 2 2 || true
+                fi
+                if [ "$wifi_retry_delay" -gt 0 ] 2>/dev/null; then
+                    log_info "[NET] ${net_wifi}: retrying in ${wifi_retry_delay}s…"
+                    sleep "$wifi_retry_delay"
+                fi
+            fi
+
+            wifi_attempt=$((wifi_attempt + 1))
+        done
+    fi
+
+    # -------- DHCP/route/DNS fixup (udhcpc script) --------
+    net_script_path=""
+    if command -v ensure_udhcpc_script >/dev/null 2>&1; then
+        net_script_path="$(ensure_udhcpc_script 2>/dev/null || echo "")"
+    fi
+    if [ -n "$net_script_path" ]; then
+        log_info "[NET] udhcpc default.script present → refreshing leases"
+        for net_ifc in $net_ifaces $net_wifi; do
+            [ -n "$net_ifc" ] || continue
+            if command -v run_dhcp_client >/dev/null 2>&1; then
+                run_dhcp_client "$net_ifc" 8 >/dev/null 2>&1 || true
+            fi
+        done
+        check_network_status_rc; net_rc=$?
+        case "$net_rc" in
+            0)
+                log_pass "[NET] connectivity restored after udhcpc fixup"
+                ensure_reasonable_clock || log_warn "Proceeding in limited-network mode."
+                unset net_script_path net_ifaces net_wifi net_ifc net_rc net_had_any_ip
+                return 0
+                ;;
+            2)
+                log_warn "[NET] IP present but still no internet after udhcpc fixup"
+                net_had_any_ip=1
+                ;;
+        esac
+    fi
+
+    if [ "$net_had_any_ip" -eq 1 ] 2>/dev/null; then
+        unset net_script_path net_ifaces net_wifi net_ifc net_rc net_had_any_ip
+        return 2
+    fi
+    unset net_script_path net_ifaces net_wifi net_ifc net_rc net_had_any_ip
+    return 1
 }

@@ -63,19 +63,26 @@ ssh user@target_device_ip
 
 **Using Unified Runner**
 cd <Path in device>Runner
+
 # Run Audiorecord using PipeWire (auto-detects backend if not specified)
 ./run-test.sh Audiorecord
+
 # Force PulseAudio backend
 AUDIO_BACKEND=pulseaudio ./run-test.sh Audiorecord
+
 # Custom options via environment variables
 AUDIO_BACKEND=pipewire RECORD_TIMEOUT=20s RECORD_LOOPS=2 RECORD_VOLUME=0.5 ./run-test.sh Audiorecord
 
+
 **Directly from Test Directory**
 cd Runner/suites/Multimedia/Audio/Audiorecord
+
 # Show usage/help
 ./run.sh --help
+
 # Run with PipeWire, 3 loops, 10s timeout, mic source
 ./run.sh --backend pipewire --source mic --loops 3 --timeout 10s
+
 # Run with PulseAudio, null source, strict mode, verbose
 ./run.sh --backend pulseaudio --source null --strict --verbose
 
@@ -92,6 +99,7 @@ STRICT	          Enable strict mode (fail on any error)	       0
 DMESG_SCAN	      Scan dmesg for errors after recording	           1
 VERBOSE	          Enable verbose logging	                       0
 JUNIT_OUT	      Path to write JUnit XML output	               unset
+
 
 CLI Options:
 Option	          Description

@@ -1,0 +1,67 @@
+{
+    "ExecutionMode": "Sequential",
+    "TestCases": [
+        {
+            "Name": "HEVC Encode TestCase",
+            "TestConfigs": {
+                "VideoDevice": "/dev/video1",
+                "Domain": "Encoder",
+                "InputPath": "./60frames_yuv.yuv",
+                "NumFrames": 60,
+                "CodecName": "HEVC",
+                "PixelFormat": "NV12",
+                "Width": 1280,
+                "Height": 720,
+                "Outputpath": "./Enc_HEVC__Main_1280_720.265",
+                "UseMinBufferCtrl": false,
+                "InputBufferCount": 32,
+                "OutputBufferCount": 32,
+                "OperatingRate": 30,
+                "FrameRate": 30,
+                "StaticControls": [
+                    {
+                        "Id": "Profile",
+                        "Vtype": "String",
+                        "Value": "MAIN"
+                    },
+                    {
+                        "Id": "Level",
+                        "Vtype": "String",
+                        "Value": "5.0"
+                    },
+                    {
+                        "Id": "FrameRC",
+                        "Vtype": "Int",
+                        "Value": 1
+                    },
+                    {
+                        "Id": "BitRate",
+                        "Vtype": "Int",
+                        "Value": 3662400
+                    },
+                    {
+                        "Id": "BitRateMode",
+                        "Vtype": "String",
+                        "Value": "VBR"
+                    },
+                    {
+                        "Id": "PrefixHeaderMode",
+                        "Vtype": "String",
+                        "Value": "JOINED"
+                    },
+                    {
+                        "Id": "Tier",
+                        "Vtype": "String",
+                        "Value": "HIGH"
+                    },
+                    {
+                        "Id": "GOPSize",
+                        "Vtype": "Int",
+                        "Value": 59
+                    }
+                ],
+                "DynamicControls": []
+            }
+        }
+    ]
+}

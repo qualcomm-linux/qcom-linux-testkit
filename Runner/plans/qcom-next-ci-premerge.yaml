@@ -46,8 +46,8 @@ run:
         - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/rngtest/rngtest.res || true
         - $PWD/suites/Kernel/Baseport/smmu/run.sh || true
         - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/smmu/smmu.res || true
-        - $PWD/suites/Kernel/Baseport/storage/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/storage/storage.res || true
+        - $PWD/suites/Kernel/Baseport/Storage/UFS_Validation/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/Storage/UFS_Validation/UFS_Validation.res || true
         - $PWD/suites/Kernel/Baseport/wpss_remoteproc/run.sh || true
         - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/wpss_remoteproc/wpss_remoteproc.res || true
         - $PWD/suites/Kernel/DCVS/Freq_Scaling/run.sh || true

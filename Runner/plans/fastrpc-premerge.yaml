@@ -14,6 +14,6 @@ metadata:
 run:
     steps:
         - cd Runner
-        - $PWD/suites/Multimedia/CDSP/fastrpc_test/run.sh --bin-dir /usr/local/bin || true
+        - $PWD/suites/Multimedia/CDSP/fastrpc_test/run.sh || true
         - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/CDSP/fastrpc_test/fastrpc_test.res || true
         - $PWD/utils/result_parse.sh

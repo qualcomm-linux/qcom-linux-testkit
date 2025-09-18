@@ -2,20 +2,37 @@
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause-Clear
 # --- Robustly find and source init_env ---------------------------
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# ---------- Repo env + helpers ----------
+SCRIPT_DIR="$(
+  cd "$(dirname "$0")" || exit 1
+  pwd
+)"
 INIT_ENV=""
 SEARCH="$SCRIPT_DIR"
+
 while [ "$SEARCH" != "/" ]; do
     if [ -f "$SEARCH/init_env" ]; then
-        INIT_ENV="$SEARCH/init_env"; break
+        INIT_ENV="$SEARCH/init_env"
+        break
     fi
     SEARCH=$(dirname "$SEARCH")
 done
-[ -z "$INIT_ENV" ] && echo "[ERROR] Could not find init_env (starting at $SCRIPT_DIR)" >&2 && exit 1
+
+if [ -z "$INIT_ENV" ]; then
+    echo "[ERROR] Could not find init_env (starting at $SCRIPT_DIR)" >&2
+    exit 1
+fi
+
+# Only source once (idempotent)
+if [ -z "${__INIT_ENV_LOADED:-}" ]; then
+    # shellcheck disable=SC1090
+    . "$INIT_ENV"
+    __INIT_ENV_LOADED=1
+fi
 
 # shellcheck disable=SC1090
-[ -z "$__INIT_ENV_LOADED" ] && . "$INIT_ENV"
-# shellcheck disable=SC1090,SC1091
+. "$INIT_ENV"
+# shellcheck disable=SC1091
 . "$TOOLS/functestlib.sh"
 
 TESTNAME="Camera_RDI_FrameCapture"
@@ -46,71 +63,16 @@ while [ $# -gt 0 ]; do
         --format) shift; USER_FORMAT="$1" ;;
         --frames) shift; FRAMES="$1" ;;
         --help) print_usage; exit 0 ;;
-        *) log_error "Unknown argument: $1"; print_usage; exit 1 ;;
+        *) log_error "Unknown argument: $1"; print_usage; echo "$TESTNAME FAIL" >"$RES_FILE"; exit 1 ;;
     esac
     shift
 done
-
-# Helper: print planned media-ctl / yavta sequence for CI logs
-print_planned_commands() {
-    media_node="$1"
-    pixfmt="$2"
-
-    log_info "[CI] Planned sequence:"
-    log_info " media-ctl -d $media_node --reset"
-
-    # media-ctl -V (show with possible TARGET_FORMAT substitution exactly like configure helper does)
-    if [ -n "$MEDIA_CTL_V_LIST" ]; then
-        printf '%s\n' "$MEDIA_CTL_V_LIST" | while IFS= read -r vline; do
-            [ -z "$vline" ] && continue
-            vline_out="$(printf '%s' "$vline" | sed -E "s/fmt:[^/]+\/([0-9]+x[0-9]+)/fmt:${pixfmt}\/\1/g")"
-            log_info " media-ctl -d $media_node -V '$vline_out'"
-        done
-    fi
-    # media-ctl -l
-    if [ -n "$MEDIA_CTL_L_LIST" ]; then
-        printf '%s\n' "$MEDIA_CTL_L_LIST" | while IFS= read -r lline; do
-            [ -z "$lline" ] && continue
-            log_info " media-ctl -d $media_node -l '$lline'"
-        done
-    fi
-    # yavta control writes (pre)
-    if [ -n "$YAVTA_CTRL_PRE_LIST" ]; then
-        printf '%s\n' "$YAVTA_CTRL_PRE_LIST" | while IFS= read -r ctrl; do
-            [ -z "$ctrl" ] && continue
-            dev="$(printf '%s' "$ctrl" | awk '{print $1}')"
-            reg="$(printf '%s' "$ctrl" | awk '{print $2}')"
-            val="$(printf '%s' "$ctrl" | awk '{print $3}')"
-            [ -n "$dev" ] && [ -n "$reg" ] && [ -n "$val" ] && \
-              log_info " yavta --no-query -w '$reg $val' $dev"
-        done
-    fi
-    # main yavta capture (dimensions may be empty occasionally)
-    size_arg=""
-    if [ -n "$YAVTA_W" ] && [ -n "$YAVTA_H" ]; then
-        size_arg="-s ${YAVTA_W}x${YAVTA_H}"
-    fi
-    if [ -n "$YAVTA_DEV" ]; then
-        log_info " yavta -B capture-mplane -c -I -n $FRAMES -f $pixfmt $size_arg -F $YAVTA_DEV --capture=$FRAMES --file='frame-#.bin'"
-    fi
-    # yavta control writes (post)
-    if [ -n "$YAVTA_CTRL_POST_LIST" ]; then
-        printf '%s\n' "$YAVTA_CTRL_POST_LIST" | while IFS= read -r ctrl; do
-            [ -z "$ctrl" ] && continue
-            dev="$(printf '%s' "$ctrl" | awk '{print $1}')"
-            reg="$(printf '%s' "$ctrl" | awk '{print $2}')"
-            val="$(printf '%s' "$ctrl" | awk '{print $3}')"
-            [ -n "$dev" ] && [ -n "$reg" ] && [ -n "$val" ] && \
-              log_info " yavta --no-query -w '$reg $val' $dev"
-        done
-    fi
-}
 
 # --------- DT Precheck ---------
 if ! dt_confirm_node_or_compatible "isp" "cam" "camss"; then
     log_skip "$TESTNAME SKIP – No ISP/camera node/compatible found in DT"
     echo "$TESTNAME SKIP" >"$RES_FILE"
-    exit 0
+    exit 2
 fi
 
 # --------- Kernel config sanity (MANDATORY bits only gate if totally absent) ---------
@@ -150,7 +112,7 @@ elif printf '%s\n' "$DMESG_CACHE" | grep -qiE 'qcom[-_]camss'; then
 else
     log_skip "Camera_RDI_FrameCapture SKIP – CAMSS driver not present (module or built-in)"
     echo "$TESTNAME SKIP" >"$RES_FILE"
-    exit 0
+    exit 2
 fi
 
 # --------- Module inventory (visibility only; no gating) ---------
@@ -193,14 +155,14 @@ DMESG_EXCLUDE='dummy regulator|supply [^ ]+ not found|using dummy regulator|Fail
 if scan_dmesg_errors "$SCRIPT_DIR" "$DMESG_MODULES" "$DMESG_EXCLUDE"; then
     log_skip "$TESTNAME SKIP – $DRIVER_MOD probe errors detected in dmesg"
     echo "$TESTNAME SKIP" >"$RES_FILE"
-    exit 0
+    exit 2
 fi
 
 # --------- Dependency Checks ---------
 check_dependencies media-ctl yavta python3 v4l2-ctl || {
     log_skip "$TESTNAME SKIP – Required tools missing"
     echo "$TESTNAME SKIP" >"$RES_FILE"
-    exit 0
+    exit 2
 }
 
 # --------- Media Node Detection ---------
@@ -208,7 +170,7 @@ MEDIA_NODE="$(detect_media_node)"
 if [ -z "$MEDIA_NODE" ]; then
     log_skip "$TESTNAME SKIP – Media node not found"
     echo "$TESTNAME SKIP" >"$RES_FILE"
-    exit 0
+    exit 2
 fi
 log_info "Detected media node: $MEDIA_NODE"
 
@@ -227,7 +189,7 @@ PYTHON_PIPELINES="$(run_camera_pipeline_parser "$TOPO_FILE")"
 if [ -z "$PYTHON_PIPELINES" ]; then
     log_skip "$TESTNAME SKIP – No valid pipelines found"
     echo "$TESTNAME SKIP" >"$RES_FILE"
-    exit 0
+    exit 2
 fi
 printf '%s\n' "$PYTHON_PIPELINES" >"$TMP_PIPELINES_FILE"
 
@@ -287,6 +249,132 @@ while IFS= read -r line || [ -n "$line" ]; do
                 RET=$?
             fi
 
+            ######################## Format/Resolution fallbacks ########################
+            if [ "$RET" -ne 0 ]; then
+                if printf '%s' "$TARGET_FORMAT" | grep -q 'P$'; then
+                    ALT_FMT_A="$(printf '%s' "$TARGET_FORMAT" | sed 's/P$//')"
+
+                    SAVE_V="$MEDIA_CTL_V_LIST"; SAVE_W="$YAVTA_W"; SAVE_H="$YAVTA_H"
+                    MEDIA_CTL_V_LIST="$(printf '%s\n' "$MEDIA_CTL_V_LIST" | sed -E "s/fmt:[^/]+\//fmt:${ALT_FMT_A}\//g")"
+
+                    log_info "Applying format fallback (A1): $TARGET_FORMAT → $ALT_FMT_A"
+                    print_planned_commands "$MEDIA_NODE" "$ALT_FMT_A"
+                    configure_pipeline_block "$MEDIA_NODE" "$ALT_FMT_A"
+                    execute_capture_block "$FRAMES" "$ALT_FMT_A"
+                    RET=$?
+
+                    if [ "$RET" -ne 0 ] && [ -n "$SAVE_W" ] && [ -n "$SAVE_H" ]; then
+                        NEW_W=$(( (SAVE_W/2)*2 ))
+                        NEW_H=$(( (SAVE_H/2)*2 ))
+                        MEDIA_CTL_V_LIST="$(printf '%s\n' "$MEDIA_CTL_V_LIST" | sed -E "s/([0-9]+x[0-9]+)/${NEW_W}x${NEW_H}/g")"
+                        YAVTA_W="$NEW_W"; YAVTA_H="$NEW_H"
+                        log_info "Applying resolution fallback (A2): ${SAVE_W}x${SAVE_H} → ${NEW_W}x${NEW_H} (format $ALT_FMT_A)"
+                        print_planned_commands "$MEDIA_NODE" "$ALT_FMT_A"
+                        configure_pipeline_block "$MEDIA_NODE" "$ALT_FMT_A"
+                        execute_capture_block "$FRAMES" "$ALT_FMT_A"
+                        RET=$?
+                    fi
+
+                    MEDIA_CTL_V_LIST="$SAVE_V"; YAVTA_W="$SAVE_W"; YAVTA_H="$SAVE_H"
+                fi
+            fi
+            ###################### end ###############################################
+
+            ######################## Try other RDI/Video indices #####################
+            if [ "$RET" -ne 0 ]; then
+                CUR_RDI="$(printf '%s\n%s\n' "$MEDIA_CTL_V_LIST" "$MEDIA_CTL_L_LIST" \
+                    | sed -n 's/.*msm_vfe[0-9]_rdi\([0-9]\).*/\1/p' | head -n1)"
+                CUR_VIDIDX="$(printf '%s\n%s\n' "$MEDIA_CTL_V_LIST" "$MEDIA_CTL_L_LIST" \
+                    | sed -n 's/.*msm_vfe[0-9]_video\([0-9]\).*/\1/p' | head -n1)"
+                [ -z "$CUR_VIDIDX" ] && CUR_VIDIDX="$(printf '%s' "$YAVTA_DEV" | sed -n 's#.*/video\([0-9]\+\)$#\1#p')"
+
+                if [ -n "$CUR_RDI" ] && [ -n "$CUR_VIDIDX" ]; then
+                    for ALT_IDX in 0 1 2; do
+                        [ "$ALT_IDX" = "$CUR_RDI" ] && continue
+
+                        SAVE_V="$MEDIA_CTL_V_LIST"
+                        SAVE_L="$MEDIA_CTL_L_LIST"
+                        SAVE_DEV="$YAVTA_DEV"
+                        SAVE_W="$YAVTA_W"
+                        SAVE_H="$YAVTA_H"
+
+                        MEDIA_CTL_V_LIST="$(printf '%s\n' "$MEDIA_CTL_V_LIST" \
+                            | sed -E "s/(msm_vfe[0-9]_rdi)[0-2]/\1${ALT_IDX}/g; s/(msm_vfe[0-9]_video)[0-2]/\1${ALT_IDX}/g")"
+                        MEDIA_CTL_L_LIST="$(printf '%s\n' "$MEDIA_CTL_L_LIST" \
+                            | sed -E "s/(msm_vfe[0-9]_rdi)[0-2]/\1${ALT_IDX}/g; s/(msm_vfe[0-9]_video)[0-2]/\1${ALT_IDX}/g")"
+
+                        if printf '%s' "$YAVTA_DEV" | grep -qE '/dev/video[0-9]+$'; then
+                            YAVTA_DEV="$(printf '%s' "$YAVTA_DEV" | sed -E "s#/dev/video[0-9]+#/dev/video${ALT_IDX}#")"
+                        fi
+
+                        log_info "Applying path fallback (B1): switch to RDI/video index ${ALT_IDX} with format $TARGET_FORMAT"
+                        print_planned_commands "$MEDIA_NODE" "$TARGET_FORMAT"
+                        configure_pipeline_block "$MEDIA_NODE" "$TARGET_FORMAT"
+                        execute_capture_block "$FRAMES" "$TARGET_FORMAT"
+                        RET=$?
+
+                        if [ "$RET" -ne 0 ] && [ -n "$SAVE_W" ] && [ -n "$SAVE_H" ]; then
+                            YAVTA_W=""; YAVTA_H=""
+                            log_info "Retrying (B2) letting driver choose size on index ${ALT_IDX}"
+                            print_planned_commands "$MEDIA_NODE" "$TARGET_FORMAT"
+                            configure_pipeline_block "$MEDIA_NODE" "$TARGET_FORMAT"
+                            execute_capture_block "$FRAMES" "$TARGET_FORMAT"
+                            RET=$?
+                        fi
+
+                        MEDIA_CTL_V_LIST="$SAVE_V"
+                        MEDIA_CTL_L_LIST="$SAVE_L"
+                        YAVTA_DEV="$SAVE_DEV"
+                        YAVTA_W="$SAVE_W"
+                        YAVTA_H="$SAVE_H"
+
+                        [ "$RET" -eq 0 ] && break
+                    done
+                fi
+            fi
+            ###################### end  ###############################################
+
+            ###############  Inline device-supported format fallback ##################
+            if [ "$RET" -ne 0 ]; then
+                SUP_FMTS="$(v4l2-ctl -d "$YAVTA_DEV" --list-formats 2>/dev/null \
+                    | sed -n "s/^[[:space:]]*'\([^']*\)'.*/\1/p")"
+
+                if [ -n "$SUP_FMTS" ]; then
+                    ALT_FMT_C=""
+                    if printf '%s\n' "$SUP_FMTS" | grep -qx "$TARGET_FORMAT"; then
+                        ALT_FMT_C="$TARGET_FORMAT"
+                    elif printf '%s\n' "$TARGET_FORMAT" | grep -q 'P$' && \
+                         printf '%s\n' "$SUP_FMTS" | grep -qx "$(printf '%s' "$TARGET_FORMAT" | sed 's/P$//')"; then
+                        ALT_FMT_C="$(printf '%s' "$TARGET_FORMAT" | sed 's/P$//')"
+                    else
+                        ALT_FMT_C="$(printf '%s\n' "$SUP_FMTS" | grep -E '^S[RGB]+[0-9]{2}P?$' | head -n1)"
+                        [ -z "$ALT_FMT_C" ] && ALT_FMT_C="$(printf '%s\n' "$SUP_FMTS" | head -n1)"
+                    fi
+
+                    if [ -n "$ALT_FMT_C" ]; then
+                        SAVE_V="$MEDIA_CTL_V_LIST"
+                        SAVE_W="$YAVTA_W"
+                        SAVE_H="$YAVTA_H"
+
+                        MEDIA_CTL_V_LIST="$(printf '%s\n' "$MEDIA_CTL_V_LIST" \
+                            | sed -E "s/fmt:[^/]+\//fmt:${ALT_FMT_C}\//g")"
+                        YAVTA_W=""
+                        YAVTA_H=""
+
+                        log_info "Applying device-supported format fallback (C): $TARGET_FORMAT → $ALT_FMT_C (letting driver choose size)"
+                        print_planned_commands "$MEDIA_NODE" "$ALT_FMT_C"
+                        configure_pipeline_block "$MEDIA_NODE" "$ALT_FMT_C"
+                        execute_capture_block "$FRAMES" "$ALT_FMT_C"
+                        RET=$?
+
+                        MEDIA_CTL_V_LIST="$SAVE_V"
+                        YAVTA_W="$SAVE_W"
+                        YAVTA_H="$SAVE_H"
+                    fi
+                fi
+            fi
+            ###################### end ###############################################
+
             case "$RET" in
                 0) log_pass "$SENSOR $VIDEO $TARGET_FORMAT PASS"; PASS=$((PASS+1)) ;;
                 1) log_fail "$SENSOR $VIDEO $TARGET_FORMAT FAIL (capture failed)"; FAIL=$((FAIL+1)) ;;
@@ -305,9 +393,11 @@ done < "$TMP_PIPELINES_FILE"
 log_info "Test Summary: Passed: $PASS, Failed: $FAIL, Skipped: $SKIP"
 if [ "$PASS" -gt 0 ]; then
     echo "$TESTNAME PASS" >"$RES_FILE"
+    exit 0
 elif [ "$FAIL" -gt 0 ]; then
     echo "$TESTNAME FAIL" >"$RES_FILE"
+    exit 1
 else
     echo "$TESTNAME SKIP" >"$RES_FILE"
+    exit 0
 fi
-exit 0

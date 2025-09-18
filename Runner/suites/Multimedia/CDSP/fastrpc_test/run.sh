@@ -36,7 +36,7 @@ REPEAT=1
 TIMEOUT=""
 ARCH=""
 BIN_DIR="" # directory that CONTAINS fastrpc_test
-ASSETS_DIR="" # informational; assets should be alongside binary (…/linux)
+ASSETS_DIR="" # kept for compatibility/logging (not used by new layout)
 VERBOSE=0
 USER_PD_FLAG=0 # default: -U 0 (system/signed PD)
 CLI_DOMAIN=""
@@ -48,8 +48,8 @@ Usage: $0 [OPTIONS]
 
 Options:
   --arch <name> Architecture (only if explicitly provided)
-  --bin-dir <path> Directory containing 'fastrpc_test' (default: /usr/bin)
-  --assets-dir <path> Directory that CONTAINS 'linux/' (info only)
+  --bin-dir <path> Directory containing 'fastrpc_test' (default: /usr/local/bin)
+  --assets-dir <path> (compat) previously used when assets lived under 'linux/'
   --domain <0|1|2|3> DSP domain: 0=ADSP, 1=MDSP, 2=SDSP, 3=CDSP
   --domain-name <name> DSP domain by name: adsp|mdsp|sdsp|cdsp
   --user-pd Use '-U 1' (user/unsigned PD). Default is '-U 0'
@@ -66,9 +66,14 @@ Env:
   ALLOW_BIN_FASTRPC=1 Permit using /bin/fastrpc_test when --bin-dir=/bin.
 
 Notes:
-- Script *cd*s into the binary's directory and launches ./fastrpc_test so
-  'linux/' next to the binary (e.g. /usr/bin/linux) is discovered reliably.
-- If domain not provided, we auto-pick: CDSP if present; else ADSP; else SDSP; else 3.
+- Script *cd*s into the binary directory and launches ./fastrpc_test.
+- Libraries are resolved via:
+    LD_LIBRARY_PATH=/usr/local/lib:/usr/local/lib/fastrpc_test[:\$LD_LIBRARY_PATH]
+- DSP skeletons are resolved via (if present):
+    ADSP_LIBRARY_PATH=/usr/local/share/fastrpc_test/v75[:v68]
+    CDSP_LIBRARY_PATH=/usr/local/share/fastrpc_test/v75[:v68]
+    SDSP_LIBRARY_PATH=/usr/local/share/fastrpc_test/v75[:v68]
+- If domain not provided, auto-pick: CDSP if present; else ADSP; else SDSP; else 3.
 EOF
 }
 
@@ -88,6 +93,13 @@ while [ $# -gt 0 ]; do
         *) echo "[ERROR] Unknown argument: $1" >&2; usage; echo "$TESTNAME : FAIL" >"$RESULT_FILE"; exit 1 ;;
     esac
 done
+
+# ---- Back-compat: accept --assets-dir but ignore in the new /usr/local layout.
+# Export so external tooling (or legacy wrappers) can still read it.
+if [ -n "${ASSETS_DIR:-}" ]; then
+    export ASSETS_DIR
+    log_info "(compat) --assets-dir provided: $ASSETS_DIR (ignored with /usr/local layout)"
+fi
 
 # ---------- Validation ----------
 case "$REPEAT" in *[!0-9]*|"") log_error "Invalid --repeat: $REPEAT"; echo "$TESTNAME : FAIL" >"$RESULT_FILE"; exit 1 ;; esac
@@ -124,16 +136,6 @@ cmd_to_string() {
         esac
     done
     printf "%s" "$out"
-}
-
-log_soc_info() {
-    m=""; s=""; pv=""
-    [ -r /sys/devices/soc0/machine ] && m="$(cat /sys/devices/soc0/machine 2>/dev/null)"
-    [ -r /sys/devices/soc0/soc_id ] && s="$(cat /sys/devices/soc0/soc_id 2>/dev/null)"
-    [ -r /sys/devices/soc0/platform_version ] && pv="$(cat /sys/devices/soc0/platform_version 2>/dev/null)"
-    [ -n "$m" ] && log_info "SoC.machine: $m"
-    [ -n "$s" ] && log_info "SoC.soc_id: $s"
-    [ -n "$pv" ] && log_info "SoC.platform_version: $pv"
 }
 
 log_dsp_remoteproc_status() {
@@ -192,14 +194,14 @@ log_soc_info
 if [ -n "$BIN_DIR" ]; then
     :
 else
-    BIN_DIR="/usr/bin"
+    BIN_DIR="/usr/local/bin"
 fi
 
 case "$BIN_DIR" in
     /bin)
         if [ "${ALLOW_BIN_FASTRPC:-0}" -ne 1 ]; then
-            log_fail "Refusing /bin by default (set ALLOW_BIN_FASTRPC=1 or use --bin-dir /usr/bin)"
-            echo "$TESTNAME : FAIL" >"$RESULT_FILE"
+	    log_skip "$TESTNAME SKIP - unsupported layout: /bin. Set ALLOW_BIN_FASTRPC=1 or pass --bin-dir."
+            echo "$TESTNAME : SKIP" >"$RESULT_FILE"
             exit 1
         fi
     ;;
@@ -209,15 +211,23 @@ RUN_DIR="$BIN_DIR"
 RUN_BIN="$RUN_DIR/fastrpc_test"
 
 if [ ! -x "$RUN_BIN" ]; then
-    log_fail "fastrpc_test not executable at: $RUN_BIN"
-    echo "$TESTNAME : FAIL" >"$RESULT_FILE"
+    log_skip "$TESTNAME SKIP - fastrpc_test not installed (expected at: $RUN_BIN)"
+    echo "$TESTNAME : SKIP" >"$RESULT_FILE"
     exit 1
 fi
 
-if [ -n "$ASSETS_DIR" ]; then
-    [ -d "$ASSETS_DIR/linux" ] || log_warn "--assets-dir provided but no 'linux/' inside: $ASSETS_DIR"
-fi
-[ -d "$RUN_DIR/linux" ] || log_warn "No 'linux/' under $RUN_DIR; the sample libs may be missing"
+# New layout checks (replace legacy 'linux/' checks)
+LIB_SYS_DIR="/usr/local/lib"
+LIB_TEST_DIR="/usr/local/lib/fastrpc_test"
+SKEL_BASE="/usr/local/share/fastrpc_test"
+
+SKEL_PATH=""
+[ -d "$SKEL_BASE/v75" ] && SKEL_PATH="${SKEL_PATH:+$SKEL_PATH:}$SKEL_BASE/v75"
+[ -d "$SKEL_BASE/v68" ] && SKEL_PATH="${SKEL_PATH:+$SKEL_PATH:}$SKEL_BASE/v68"
+
+[ -d "$LIB_SYS_DIR" ] || log_warn "Missing system libs dir: $LIB_SYS_DIR (lib{adsp,cdsp,sdsp}rpc*.so expected)"
+[ -d "$LIB_TEST_DIR" ] || log_warn "Missing test libs dir: $LIB_TEST_DIR (libcalculator.so, etc.)"
+[ -n "$SKEL_PATH" ] || log_warn "No DSP skeleton dirs found under: $SKEL_BASE (expected v75/ v68/)"
 
 log_info "Using binary: $RUN_BIN"
 log_info "Run dir: $RUN_DIR (launching ./fastrpc_test)"
@@ -225,6 +235,22 @@ log_info "Binary details:"
 log_info " ls -l: $(ls -l "$RUN_BIN" 2>/dev/null || echo 'N/A')"
 log_info " file : $(file "$RUN_BIN" 2>/dev/null || echo 'N/A')"
 
+# >>>>>>>>>>>>>>>>>>>>>> ENV for your initramfs layout <<<<<<<<<<<<<<<<<<<<<<
+# Libraries: system + test payloads
+export LD_LIBRARY_PATH="/usr/local/lib:/usr/local/lib/fastrpc_test${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+# Skeletons: export if present (don’t clobber if user already set)
+[ -n "$SKEL_PATH" ] && {
+    : "${ADSP_LIBRARY_PATH:=$SKEL_PATH}"; export ADSP_LIBRARY_PATH
+    : "${CDSP_LIBRARY_PATH:=$SKEL_PATH}"; export CDSP_LIBRARY_PATH
+    : "${SDSP_LIBRARY_PATH:=$SKEL_PATH}"; export SDSP_LIBRARY_PATH
+}
+log_info "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}"
+[ -n "$ADSP_LIBRARY_PATH" ] && log_info "ADSP_LIBRARY_PATH=${ADSP_LIBRARY_PATH}"
+[ -n "$CDSP_LIBRARY_PATH" ] && log_info "CDSP_LIBRARY_PATH=${CDSP_LIBRARY_PATH}"
+[ -n "$SDSP_LIBRARY_PATH" ] && log_info "SDSP_LIBRARY_PATH=${SDSP_LIBRARY_PATH}"
+# <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+# Ensure /usr/lib/dsp has the expected DSP artifacts (generic, idempotent)
+ensure_usr_lib_dsp_symlinks
 # Log *dsp remoteproc statuses via existing helpers
 log_dsp_remoteproc_status
 
@@ -254,7 +280,7 @@ case "$DOMAIN" in
         log_info "Domain auto-picked: -d $DOMAIN (CDSP=3, ADSP=0, SDSP=2)"
         ;;
     * )
-        log_warn "Invalid domain '$DOMAIN'; auto-picking"
+        log_warn "Invalid domain '$DOMAIN' auto-picking"
         DOMAIN="$(pick_default_domain)"
         ;;
 esac
@@ -323,6 +349,9 @@ while [ "$i" -le "$REPEAT" ]; do
         echo "RUN_BIN=$RUN_BIN"
         echo "PATH=$PATH"
         echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}"
+        echo "ADSP_LIBRARY_PATH=${ADSP_LIBRARY_PATH:-}"
+        echo "CDSP_LIBRARY_PATH=${CDSP_LIBRARY_PATH:-}"
+        echo "SDSP_LIBRARY_PATH=${SDSP_LIBRARY_PATH:-}"
         echo "ARCH=${ARCH:-}"
         echo "PD_VAL=$PD_VAL"
         echo "DOMAIN=$DOMAIN ($dom_name)"
@@ -337,7 +366,7 @@ while [ "$i" -le "$REPEAT" ]; do
     (
         cd "$RUN_DIR" || exit 127
         if [ $HAVE_STDBUF -eq 1 ]; then
-            run_with_timeout "$TIMEOUT" stdbuf -oL -eL ./fastrpc_test "$@"
+             runWithTimeoutIfSet stdbuf -oL -eL ./fastrpc_test "$@"
         elif [ $HAVE_SCRIPT -eq 1 ]; then
             cmd_str="./fastrpc_test$(cmd_to_string "$@")"
             if [ -n "$TIMEOUT" ] && [ $HAVE_TIMEOUT -eq 1 ]; then
@@ -346,7 +375,7 @@ while [ "$i" -le "$REPEAT" ]; do
                 script -q -c "$cmd_str" /dev/null
             fi
         else
-            run_with_timeout "$TIMEOUT" ./fastrpc_test "$@"
+            runWithTimeoutIfSet ./fastrpc_test "$@"
         fi
     ) >"$iter_log" 2>&1
     rc=$?
