@@ -1,0 +1,20 @@
+{
+    "ExecutionMode": "Sequential",
+    "TestCases": [
+        {
+            "Name" : "H264 Decoder Testcase",
+            "TestConfigs" : {
+                "Domain": "Decoder",
+                "InputPath": "./720p_AVC.h264",
+                "NumFrames": -1,
+                "CodecName": "AVC",
+                "PixelFormat": "NV12",
+                "Width": 1280,
+                "Height": 720,
+                "Outputpath": "./720p_AVC.yuv",
+                "InputBufferCount": 16,
+                "OutputBufferCount": 16
+            }
+        }
+    ]
+}
