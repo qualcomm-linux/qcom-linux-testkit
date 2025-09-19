@@ -37,14 +37,64 @@ resolve_clip() {
   esac
 }
 
-ensure_playback_clip() {
-  clip="$1"
-  [ -f "$clip" ] && return 0
-  if [ -n "$AUDIO_TAR_URL" ]; then
-    log_info "Audio clip missing, extracting from $AUDIO_TAR_URL"
-    extract_tar_from_url "$AUDIO_TAR_URL" || return 1
-  fi
-  [ -f "$clip" ]
+# audio_download_with_any <url> <outfile>
+audio_download_with_any() {
+    url="$1"; out="$2"
+    if command -v wget >/dev/null 2>&1; then
+        wget -O "$out" "$url"
+    elif command -v curl >/dev/null 2>&1; then
+        curl -L --fail -o "$out" "$url"
+    else
+        log_error "No downloader (wget/curl) available to fetch $url"
+        return 1
+    fi
+}
+# audio_fetch_assets_from_url <url>
+# Prefer functestlib's extract_tar_from_url; otherwise download + extract.
+audio_fetch_assets_from_url() {
+    url="$1"
+    if command -v extract_tar_from_url >/dev/null 2>&1; then
+        extract_tar_from_url "$url"
+        return $?
+    fi
+    fname="$(basename "$url")"
+    log_info "Fetching assets: $url"
+    if ! audio_download_with_any "$url" "$fname"; then
+        log_warn "Download failed: $url"
+        return 1
+    fi
+    tar -xzf "$fname" >/dev/null 2>&1 || tar -xf "$fname" >/dev/null 2>&1 || {
+        log_warn "Extraction failed: $fname"
+        return 1
+    }
+    return 0
+}
+# audio_ensure_clip_ready <clip-path> [tarball-url]
+# Return codes:
+#   0 = clip exists/ready
+#   2 = network unavailable after attempts (caller should SKIP)
+#   1 = fetch/extract/downloader error (caller will also SKIP per your policy)
+audio_ensure_clip_ready() {
+    clip="$1"
+    url="${2:-${AUDIO_TAR_URL:-}}"
+    [ -f "$clip" ] && return 0
+    # Try once without forcing network (tarball may already be present)
+    if [ -n "$url" ]; then
+        audio_fetch_assets_from_url "$url" >/dev/null 2>&1 || true
+        [ -f "$clip" ] && return 0
+    fi
+    # Bring network up and retry once
+    if ! ensure_network_online; then
+        log_warn "Network unavailable; cannot fetch audio assets for $clip"
+        return 2
+    fi
+    if [ -n "$url" ]; then
+        if audio_fetch_assets_from_url "$url" >/dev/null 2>&1; then
+            [ -f "$clip" ] && return 0
+        fi
+    fi
+    log_warn "Clip fetch/extract failed for $clip"
+    return 1
 }
 
 # ---------- dmesg + mixer dumps ----------
