@@ -175,11 +175,15 @@ for fmt in $FORMATS; do
     fi
 
     if [ "${EXTRACT_AUDIO_ASSETS:-true}" = "true" ]; then
-      ensure_playback_clip "$clip" || {
-        log_warn "[$case_name] Clip missing and could not be fetched: $clip"
-        echo "$case_name SKIP (clip missing)" >> "$LOGDIR/summary.txt"
-        append_junit "$case_name" "0" "SKIP" "$logf"; skip=$((skip + 1)); continue
-      }
+      audio_ensure_clip_ready "$clip" "$AUDIO_TAR_URL"
+	  rc=$?
+	  if [ "$rc" -eq 2 ] || [ "$rc" -eq 1 ]; then
+		log_skip "[$case_name] SKIP: Required clip missing and network unavailable or fetch failed."
+		echo "$case_name SKIP (clip missing)" >> "$LOGDIR/summary.txt"
+		append_junit "$case_name" "0" "SKIP" "$logf"
+		skip=$((skip + 1))
+		continue
+	  fi
     fi
 
     i=1; ok_runs=0; last_elapsed=0
@@ -274,7 +278,9 @@ if [ -n "$JUNIT_OUT" ]; then
   log_info "Wrote JUnit: $JUNIT_OUT"
 fi
 
-if [ "$suite_rc" -eq 0 ]; then
+if [ "$pass" -eq 0 ] && [ "$fail" -eq 0 ] && [ "$skip" -gt 0 ]; then
+  log_skip "$TESTNAME SKIP"; echo "$TESTNAME SKIP" > "$RES_FILE"
+elif [ "$suite_rc" -eq 0 ]; then
   log_pass "$TESTNAME PASS"; echo "$TESTNAME PASS" > "$RES_FILE"
 else
   log_fail "$TESTNAME FAIL"; echo "$TESTNAME FAIL" > "$RES_FILE"
