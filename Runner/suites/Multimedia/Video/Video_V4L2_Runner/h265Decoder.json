@@ -2,18 +2,19 @@
     "ExecutionMode": "Sequential",
     "TestCases": [
         {
-            "Name" : "Decoder Testcase",
-            "TestConfigs" : {
+            "Name": "HEVC Decoder TestCase",
+            "TestConfigs": {
                 "Domain": "Decoder",
-                "InputPath": "./simple_AVC_720p_10fps_90frames.264",
+                "InputPath": "./720x1280_hevc.h265",
                 "NumFrames": -1,
-                "CodecName": "AVC",
+                "CodecName": "HEVC",
                 "PixelFormat": "NV12",
                 "Width": 1280,
                 "Height": 720,
-                "Outputpath": "./output_simple_nv12_720p_90frms.yuv",
+                "Outputpath": "./720x1280_hevc.yuv",
                 "InputBufferCount": 16,
-                "OutputBufferCount": 16
+                "OutputBufferCount": 16,
+                "UseMinBufferCtrl": false
             }
         }
     ]
