@@ -54,6 +54,13 @@ else
 	fi
 fi
 
+#kill weston 
+echo "killing Weston before running core_auth"
+pkill weston
+sleep 5 
+echo "-----------------------------------------------------------------------------------------"
+
+
 # Run the core_auth test and log the output to a file (using relative path for log)
 $CORE_AUTH_CMD 2>&1 | tee $test_path/core_auth_log.txt
 
