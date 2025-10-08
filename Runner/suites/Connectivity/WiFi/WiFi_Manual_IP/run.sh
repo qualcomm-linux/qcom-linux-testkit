@@ -29,32 +29,65 @@ fi
 . "$TOOLS/functestlib.sh"
 
 TESTNAME="WiFi_Manual_IP"
-test_path=$(find_test_case_by_name "$TESTNAME")
+test_path="$(find_test_case_by_name "$TESTNAME")"
 cd "$test_path" || exit 1
 
 log_info "--------------------------------------------------------------------------"
 log_info "-------------------Starting $TESTNAME Testcase----------------------------"
 log_info "=== Test Initialization ==="
 
+# ---------------- CLI (SSID/PASSWORD) ----------------
+SSID=""
+PASSWORD=""
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --ssid)
+            shift
+            if [ -n "${1:-}" ]; then
+                SSID="$1"
+            fi
+            ;;
+        --password)
+            shift
+            if [ -n "${1:-}" ]; then
+                PASSWORD="$1"
+            fi
+            ;;
+        --help|-h)
+            echo "Usage: $0 [--ssid SSID] [--password PASS]"
+            exit 0
+            ;;
+        *)
+            log_warn "Unknown argument: $1"
+            ;;
+    esac
+    shift
+done
+
 # Trap to always restore udhcpc script
 trap 'restore_udhcpc_script' EXIT
 
-# Credential extraction (from arguments, env, or ssid_list.txt)
-if ! CRED=$(get_wifi_credentials "$1" "$2") || [ -z "$CRED" ]; then
+# Credential extraction (from CLI, env, or ssid_list.txt via helper)
+if ! CRED="$(get_wifi_credentials "$SSID" "$PASSWORD")" || [ -z "$CRED" ]; then
     log_skip_exit "$TESTNAME" "WiFi: SSID and/or password missing. Skipping test."
 fi
 
-SSID=$(echo "$CRED" | awk '{print $1}')
-PASSWORD=$(echo "$CRED" | awk '{print $2}')
+SSID="$(echo "$CRED" | awk '{print $1}')"
+PASSWORD="$(echo "$CRED" | awk '{print $2}')"
 log_info "Using SSID='$SSID' and PASSWORD='[hidden]'"
 
 check_dependencies iw wpa_supplicant udhcpc ip
 
-WIFI_IF=$(get_wifi_interface)
-[ -z "$WIFI_IF" ] && log_fail_exit "$TESTNAME" "No WiFi interface detected."
+WIFI_IF="$(get_wifi_interface)"
+if [ -z "$WIFI_IF" ]; then
+    log_fail_exit "$TESTNAME" "No WiFi interface detected."
+fi
 
-UDHCPC_SCRIPT=$(ensure_udhcpc_script)
-[ ! -x "$UDHCPC_SCRIPT" ] && log_fail_exit "$TESTNAME" "Failed to create udhcpc script."
+UDHCPC_SCRIPT="$(ensure_udhcpc_script)"
+if [ ! -x "$UDHCPC_SCRIPT" ]; then
+    log_fail_exit "$TESTNAME" "Failed to create udhcpc script."
+fi
 
 wifi_cleanup() {
     killall -q wpa_supplicant 2>/dev/null
@@ -76,7 +109,7 @@ sleep 4
 udhcpc -i "$WIFI_IF" -s "$UDHCPC_SCRIPT" -n -q &
 sleep 8
 
-IP=$(ip addr show "$WIFI_IF" | awk '/inet / {print $2}' | cut -d/ -f1)
+IP="$(ip addr show "$WIFI_IF" | awk '/inet / {print $2}' | cut -d/ -f1)"
 if [ -n "$IP" ]; then
     log_info "WiFi got IP: $IP (manual DHCP via udhcpc)"
     if ping -I "$WIFI_IF" -c 3 -W 2 8.8.8.8 >/dev/null 2>&1; then
