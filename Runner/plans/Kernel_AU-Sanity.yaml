@@ -76,8 +76,6 @@ run:
         - $PWD/utils/send-to-lava.sh $PWD/suites/Connectivity/Bluetooth/BT_ON_FF/BT_ON_FF.res || true
         - $PWD/suites/Connectivity/Bluetooth/BT_SCAN_PAIR/run.sh || true
         - $PWD/utils/send-to-lava.sh $PWD/suites/Connectivity/Bluetooth/BT_SCAN_PAIR/BT_SCAN_PAIR.res || true
-        - $PWD/suites/Multimedia/Video/iris_v4l2_video_decode/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/Video/iris_v4l2_video_decode/iris_v4l2_video_decode.res || true
-        - $PWD/suites/Multimedia/Video/iris_v4l2_video_encode/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/Video/iris_v4l2_video_encode/iris_v4l2_video_encode.res || true
+        - $PWD/suites/Multimedia/Video/Video_V4L2_Runner/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/Video/Video_V4L2_Runner/Video_V4L2_Runner.res || true
         - $PWD/utils/result_parse.sh
