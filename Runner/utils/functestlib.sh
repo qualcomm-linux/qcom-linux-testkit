@@ -602,7 +602,7 @@ extract_tar_from_url() {
     log_info "Extracting $(basename "$tarfile")..."
     if tar -xvf "$tarfile"; then
         : > "$markfile" 2>/dev/null || true
-	# Clear the minimal/offline sentinel only if it exists (SC2015-safe)
+    # Clear the minimal/offline sentinel only if it exists (SC2015-safe)
         if [ -f "$skip_sentinel" ]; then
             rm -f "$skip_sentinel" 2>/dev/null || true
         fi
@@ -706,7 +706,7 @@ weston_stop() {
         log_info "Stopping Weston..."
         pkill -x weston
         for i in $(seq 1 10); do
-			log_info "Waiting for Weston to stop with $i attempt "
+            log_info "Waiting for Weston to stop with $i attempt "
             if ! weston_is_running; then
                 log_info "Weston stopped successfully"
                 return 0
@@ -3683,4 +3683,144 @@ ensure_network_online() {
     fi
     unset net_script_path net_ifaces net_wifi net_ifc net_rc net_had_any_ip
     return 1
+}
+
+kill_process() {
+    TERM_GRACE="${KILL_TERM_GRACE:-3}"
+    KILL_GRACE="${KILL_KILL_GRACE:-2}"
+    pid_alive() {
+        p="$1"
+        [ -d "/proc/$p" ] || return 1
+        st="$(awk '{print $3}' "/proc/$p/stat" 2>/dev/null)"
+        [ "$st" = "Z" ] && return 1
+        return 0
+    }
+    list_children() {
+        p="$1"
+        if [ -r "/proc/$p/task/$p/children" ]; then
+            tr '\n' ' ' <"/proc/$p/task/$p/children" 2>/dev/null
+            return
+        fi
+        if command -v ps >/dev/null 2>&1; then
+            ps -o pid= --ppid "$p" 2>/dev/null | tr '\n' ' '
+        fi
+    }
+    list_descendants() {
+        root="$1"
+        out=""
+        seen=" "
+        queue="$root"
+        while [ -n "$queue" ]; do
+            next=""
+            for p in $queue; do
+                case "$seen" in *" $p "*) continue ;; esac
+                seen="$seen$p "
+                kids="$(list_children "$p")"
+                for c in $kids; do
+                    case "$seen" in *" $c "*) : ;; *)
+                        out="$out $c"
+                        next="$next $c"
+                    esac
+                done
+            done
+            queue="$next"
+        done
+        printf '%s\n' "$out" | awk 'NF' | tr '\n' ' '
+    }
+    collect_pids_from_pattern() {
+        pat="$1"
+        out=""
+        if command -v pgrep >/dev/null 2>&1; then
+            out="$(pgrep -f -- "$pat" 2>/dev/null | tr '\n' ' ')"
+        else
+            for d in /proc/[0-9]*; do
+                [ -d "$d" ] || continue
+                p="$(basename "$d")"
+                [ "$p" -eq "$$" ] && continue
+                cmd="$(tr '\0' ' ' < "$d/cmdline" 2>/dev/null)"
+                [ -n "$cmd" ] || continue
+                printf '%s' "$cmd" | grep -F -- "$pat" >/dev/null 2>&1 && out="$out $p"
+            done
+        fi
+        for x in $out; do [ "$x" -ne "$$" ] && printf '%s\n' "$x"; done \
+            | awk '!seen[$0]++' | tr '\n' ' '
+    }
+    kill_tree() {
+        sig="$1"; p="$2"
+        [ -n "$p" ] || return 0
+        [ "$p" -eq 1 ] && return 0
+        [ "$p" -eq "$$" ] && return 0
+        pid_alive "$p" || return 0
+        # Try process group (uses pgrp from /proc if available)
+        pgrp="$(awk '{print $5}' "/proc/$p/stat" 2>/dev/null)"
+        [ -n "$pgrp" ] && kill "-$sig" "-$pgrp" 2>/dev/null || true
+        all="$p $(list_descendants "$p")"
+        for t in $all; do
+            [ "$t" -eq 1 ] && continue
+            [ "$t" -eq "$$" ] && continue
+            kill "-$sig" "$t" 2>/dev/null || true
+        done
+    }
+    wait_gone() {
+        p="$1"; timeout="$2"; waited=0
+        while [ "$waited" -lt "$timeout" ]; do
+            pid_alive "$p" || return 0
+            sleep 1
+            waited=$((waited+1))
+        done
+        return 1
+    }
+    # -------- Build target set --------
+    targets=""
+    if [ "$#" -gt 0 ]; then
+        for a in "$@"; do
+            case "$a" in
+                '' ) continue ;;
+                *[!0-9]* ) pids="$(collect_pids_from_pattern "$a")"; [ -n "$pids" ] && targets="$targets $pids" ;;
+                * ) targets="$targets $a" ;;
+            esac
+        done
+    elif [ -n "${PID:-}" ]; then
+        targets="$PID"
+    fi
+    if [ -z "$targets" ]; then
+        log_warn "kill_process: no targets (neither args nor \$PID set)."
+        return 0
+    fi
+    # Normalize / de-dup / filter
+    uniq=""
+    for t in $targets; do
+        printf '%s\n' "$t"
+    done | awk '!seen[$0]++' | while IFS= read -r t; do
+        printf '%s' "$t" | grep -Eq '^[0-9]+$' || continue
+        [ "$t" -eq 1 ] && continue
+        [ "$t" -eq "$$" ] && continue
+        if pid_alive "$t"; then
+            uniq="$uniq $t"
+        fi
+    done
+    targets="$uniq"
+    [ -n "$targets" ] || { log_info "kill_process: nothing running."; return 0; }
+    log_info "Killing process tree(s):$targets"
+    rc=0
+    for pid in $targets; do
+        kill_tree TERM "$pid"
+        if wait_gone "$pid" "$TERM_GRACE"; then
+            log_info "PID $pid terminated with SIGTERM."
+            continue
+        fi
+        log_warn "PID $pid still alive after ${TERM_GRACE}s; escalating to SIGKILL."
+        kill_tree KILL "$pid"
+        if wait_gone "$pid" "$KILL_GRACE"; then
+            log_info "PID $pid killed with SIGKILL."
+            continue
+        fi
+        if ! pid_alive "$pid"; then
+            log_info "PID $pid no longer running (exited/zombie reaped)."
+            continue
+        fi
+        log_error "PID $pid could not be terminated."
+        rc=1
+    done
+    return "$rc"
 }
