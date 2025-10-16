@@ -22,6 +22,7 @@ This script automates the validation of authentication mechanisms within the IGT
 
 Ensure the following components are present in the target environment:
 
+- Core authentication binary (core_auth) - must be executable
 - Required authentication libraries and dependencies
 - Write access to the filesystem (for environment setup and logging)
 
@@ -44,23 +45,38 @@ Runner/
 chmod +x run.sh
 ```
 
-2. Run the script:
+2. Run the script with the path to the core_auth binary:
 
 ```bash
-./run.sh
+./run.sh <core_auth_bin_path>
 ```
 
-3. Logs and test results will be available in the `results/igt_core_auth` directory.
+Example:
+```bash
+./run.sh /usr/libexec/igt-gpu-tools/core_auth
+```
+
+3. Logs and test results will be available in the current directory:
+   - `core_auth_log.txt` - Detailed test execution log
+   - `core_auth.res` - Test result (PASS/FAIL/SKIP)
 
 ## Output
 
-- **Validation Result**: Printed to console and saved in a results file with PASS/FAIL status.
+- **Console Output**: Real-time display of test execution and results
+- **Log File**: `core_auth_log.txt` - Contains detailed output from the core_auth binary
+- **Result File**: `core_auth.res` - Contains final test status (PASS/FAIL/SKIP)
+- **Test Status Determination**:
+  - PASS: Return code 0 or log contains "SUCCESS"
+  - SKIP: Log contains "SKIP"
+  - FAIL: Any other condition
 
 ## Notes
 
-- The script does not take any arguments.
-- It validates the presence of required libraries before executing tests.
-- If any critical tool is missing, the script exits with an error message.
+- The script requires one argument: the path to the core_auth binary.
+- It validates that the core_auth binary exists and is executable before running tests.
+- Weston compositor will be automatically stopped if running, with a 10-second timeout.
+- If the core_auth binary is missing or not executable, the script exits with an error.
+- Test results are determined by both return codes and log content analysis.
 
 ## Maintenance
 
@@ -82,5 +98,10 @@ cd <Path in device>/Runner
 
 - **Run Core_auth testcase**
 ```bash
-./run-test.sh core_auth
+./run-test.sh core_auth <core_auth_bin_path>
+```
+
+Example:
+```bash
+./run-test.sh core_auth /usr/libexec/igt-gpu-tools/core_auth
 ```
