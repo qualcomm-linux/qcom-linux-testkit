@@ -45,6 +45,8 @@ check_dependencies adsprpcd
 adsprpcd &
 PID=$!
 
+sleep 5
+
 if [ -z "$PID" ]; then
   echo "Failed to start the binary"
   exit 1
@@ -60,20 +62,17 @@ check_stack_trace() {
         return 1
     fi
 }
+
 # Print overall test result
 if check_stack_trace "$PID"; then
     log_pass "$TESTNAME : Test Passed"
     echo "$TESTNAME PASS" > "$res_file"
+    kill_process
     exit 0
 else
     log_fail "$TESTNAME : Test Failed"
     echo "$TESTNAME FAIL" > "$res_file"
+    kill_process
     exit 1
-fi
-
-log_info "Kill the process"
-if kill -0 "$PID" 2>/dev/null; then
-	kill -9 "$PID"
-	wait "$PID"
 fi
 log_info "-------------------Completed $TESTNAME Testcase----------------------------"
