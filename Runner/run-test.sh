@@ -9,6 +9,10 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # Set TOOLS path to utils under the script directory
 TOOLS="$SCRIPT_DIR/utils"
 
+# Disable wrapper-level capture; each test will capture in its own folder
+export RUN_STDOUT_ENABLE=0
+unset RUN_STDOUT_TAG RUN_STDOUT_FILE
+
 # Safely source init_env from the same directory as this script
 if [ -f "$SCRIPT_DIR/init_env" ]; then
     # shellcheck source=/dev/null
@@ -46,7 +50,11 @@ execute_test_case() {
         run_script="$test_path/run.sh"
         if [ -f "$run_script" ]; then
             log "Executing test case: $test_name"
-            (cd "$test_path" && sh "./run.sh" "$@")
+            (
+              cd "$test_path" || exit 2
+              # Enable per-test capture in the test folder with a clear tag
+              RUN_STDOUT_ENABLE=1 RUN_STDOUT_TAG="$test_name" sh "./run.sh" "$@"
+            )
             res_file="$test_path/$test_name.res"
             if [ -f "$res_file" ]; then
                 if grep -q "SKIP" "$res_file"; then
@@ -131,7 +139,8 @@ Usage:
 Notes:
   - Extra args are forwarded only when a single <testcase_name> is specified.
   - 'all' runs every test and does not accept additional args.
-  - Use -h or --help to display this message.
+  - Each test captures stdout/stderr next to its .res file as:
+      <testname>_stdout_<timestamp>.log
 EOF
 }
 
