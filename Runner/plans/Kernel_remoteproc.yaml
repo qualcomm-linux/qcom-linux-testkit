@@ -1,7 +1,7 @@
 metadata:
     format: Lava-Test Test Definition 1.0
-    name: fastrpc-only
-    description: "Run only FastRPC tests from qcom-linux-testkit"
+    name: remoteproc-only
+    description: "Run only REMOTEPROC test from qcom-linux-testkit"
     maintainer:
         - shomkuma@qti.qualcomm.com
     os:
