@@ -1,0 +1,19 @@
+metadata:
+    format: Lava-Test Test Definition 1.0
+    name: fastrpc-only
+    description: "Run only FastRPC tests from qcom-linux-testkit"
+    maintainer:
+        - shomkuma@qti.qualcomm.com
+    os:
+        - yocto open embedded
+    scope:
+        - functional
+    devices:
+        - rb3gen2
+
+run:
+    steps:
+        - cd Runner
+        - $PWD/suites/Kernel/Baseport/remoteproc/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/remoteproc/remoteproc.res || true
+        - $PWD/utils/result_parse.sh
