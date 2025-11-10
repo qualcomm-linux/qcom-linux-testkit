@@ -42,14 +42,23 @@ log_info "=== Test Initialization ==="
 log_info "Checking if dependency binary is available"
 check_dependencies adsprpcd
 
-adsprpcd &
-PID=$!
+if is_process_running  "adsprpcd"; then
+    log_info "adsprpcd is running"
+    PID=$(get_pid "adsprpcd")
+else
+    log_info "adsprpcd is not running"
+    log_info "Manually starting adsprpcd daemon"
+    adsprpcd &
+    PID=$!
+fi
+log_info "PID is $PID"
+sleep 5
 
 if [ -z "$PID" ]; then
-  echo "Failed to start the binary"
-  exit 1
+    log_info "Failed to start the binary"
+    exit 1
 else
-  echo "Binary is running successfully"
+    log_info "Binary is running successfully"
 fi
 
 check_stack_trace() {
@@ -60,20 +69,17 @@ check_stack_trace() {
         return 1
     fi
 }
+
 # Print overall test result
 if check_stack_trace "$PID"; then
     log_pass "$TESTNAME : Test Passed"
     echo "$TESTNAME PASS" > "$res_file"
+    kill_process "$PID"
     exit 0
 else
     log_fail "$TESTNAME : Test Failed"
     echo "$TESTNAME FAIL" > "$res_file"
+    kill_process "$PID"
     exit 1
-fi
-
-log_info "Kill the process"
-if kill -0 "$PID" 2>/dev/null; then
-	kill -9 "$PID"
-	wait "$PID"
 fi
 log_info "-------------------Completed $TESTNAME Testcase----------------------------"

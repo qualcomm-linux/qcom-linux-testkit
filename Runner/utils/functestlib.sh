@@ -602,7 +602,7 @@ extract_tar_from_url() {
     log_info "Extracting $(basename "$tarfile")..."
     if tar -xvf "$tarfile"; then
         : > "$markfile" 2>/dev/null || true
-	# Clear the minimal/offline sentinel only if it exists (SC2015-safe)
+    # Clear the minimal/offline sentinel only if it exists (SC2015-safe)
         if [ -f "$skip_sentinel" ]; then
             rm -f "$skip_sentinel" 2>/dev/null || true
         fi
@@ -706,7 +706,7 @@ weston_stop() {
         log_info "Stopping Weston..."
         pkill -x weston
         for i in $(seq 1 10); do
-			log_info "Waiting for Weston to stop with $i attempt "
+            log_info "Waiting for Weston to stop with $i attempt "
             if ! weston_is_running; then
                 log_info "Weston stopped successfully"
                 return 0
@@ -3845,4 +3845,96 @@ ensure_network_online() {
     fi
     unset net_script_path net_ifaces net_wifi net_ifc net_rc net_had_any_ip
     return 1
+}
+
+kill_process() {
+    PID="$1"
+    KILL_TERM_GRACE="${KILL_TERM_GRACE:-5}"
+    KILL_KILL_GRACE="${KILL_KILL_GRACE:-5}"
+    SELF_PID="$$"
+
+    # Safety checks
+    if [ "$PID" -eq 1 ] || [ "$PID" -eq "$SELF_PID" ]; then
+        log_warn "Refusing to kill PID $PID (init or self)"
+        return 1
+    fi
+
+    # Check if process exists
+    if ! kill -0 "$PID" 2>/dev/null; then
+        log_info "Process $PID not running"
+        return 0
+    fi
+
+    log_info "Sending SIGTERM to PID $PID"
+    kill -TERM "$PID" 2>/dev/null
+    sleep "$KILL_TERM_GRACE"
+
+    if kill -0 "$PID" 2>/dev/null; then
+        log_info "Sending SIGKILL to PID $PID"
+        kill -KILL "$PID" 2>/dev/null
+        sleep "$KILL_KILL_GRACE"
+    fi
+
+    # Final check
+    if kill -0 "$PID" 2>/dev/null; then
+        log_warn "Failed to kill process $PID"
+        return 1
+    else
+        log_info "Process $PID terminated successfully"
+        return 0
+    fi
+}
+
+is_process_running() {
+    if [ -z "$1" ]; then
+        log_info "Usage: is_running <process_name_or_pid>"
+        return 1
+    fi
+    input="$1"
+    case "$input" in
+    ''|*[!0-9]*)
+        # Non-numeric input: treat as process name
+        if ps -e | grep -w "$input" >/dev/null 2>&1 ||
+            ps -A | grep -w "$input" >/dev/null 2>&1; then
+            log_info "Process '$input' is running."
+            return 0
+        else
+            log_info "Process '$input' is not running."
+            return 1
+        fi
+        ;;
+    *)
+        # Numeric input: treat as PID
+        if kill -0 "$input" 2>/dev/null; then
+            log_info "Process with PID $input is running."
+            return 0
+        else
+            log_info "Process with PID $input is not running."
+            return 1
+        fi
+        ;;
+    esac
+}
+
+get_pid() {
+    if [ -z "$1" ]; then
+        log_info "Usage: get_pid <process_name>"
+        return 1
+    fi
+    
+    process_name="$1"
+    
+    # Try multiple ps variants for compatibility
+    pid=$(ps -e | awk -v name="$process_name" '$NF == name { print $1 }')
+    [ -z "$pid" ] && pid=$(ps -A | awk -v name="$process_name" '$NF == name { print $1 }')
+    [ -z "$pid" ] && pid=$(ps -aux | awk -v name="$process_name" '$11 == name { print $2 }')
+    [ -z "$pid" ] && pid=$(ps -ef | awk -v name="$process_name" '$NF == name { print $2 }')
+    
+    if [ -n "$pid" ]; then
+        echo "$pid"
+        return 0
+    else
+        log_info "Process '$process_name' not found."
+        return 1
+    fi
 }
