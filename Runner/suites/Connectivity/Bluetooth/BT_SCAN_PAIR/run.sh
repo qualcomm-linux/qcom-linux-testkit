@@ -1,8 +1,6 @@
 #!/bin/sh
-
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause-Clear
-
 # Robustly find and source init_env
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 INIT_ENV=""
@@ -42,28 +40,169 @@ rm -f "$RES_FILE"
 log_info "------------------------------------------------------------"
 log_info "Starting $TESTNAME Testcase"
 
+# ------------------- Minimal long-option support (multi-line) -------------------
+# Env defaults are honored; long options update variables; positional fallback remains.
+
 # Defaults
 PAIR_RETRIES="${PAIR_RETRIES:-3}"
 SCAN_ATTEMPTS="${SCAN_ATTEMPTS:-2}"
 
-BT_NAME=""
-BT_MAC=""
-WHITELIST=""
+# Accept env overrides for identity too (optional)
+BT_NAME="${BT_NAME:-}"
+BT_MAC="${BT_MAC:-}"
+WHITELIST="${WHITELIST:-}"
 
-# Parse CLI args
-if [ -n "$1" ]; then
+# Params from LAVA (lowercase -> our uppercase) – only if not already set
+if [ -z "${BT_MAC:-}" ] && [ -n "${bt_mac:-}" ]; then
+    BT_MAC="$bt_mac"
+fi
+
+if [ -z "${BT_NAME:-}" ] && [ -n "${bt_name:-}" ]; then
+    BT_NAME="$bt_name"
+fi
+
+if [ -z "${WHITELIST:-}" ] && [ -n "${whitelist:-}" ]; then
+    WHITELIST="$whitelist"
+fi
+
+# Numeric knobs (pair/scan) – use if provided and numeric (multi-line)
+case "${pair_retries:-}" in
+    ''|*[!0-9]*)
+        :
+        ;;
+    *)
+        PAIR_RETRIES="$pair_retries"
+        ;;
+esac
+
+case "${scan_attempts:-}" in
+    ''|*[!0-9]*)
+        :
+        ;;
+    *)
+        SCAN_ATTEMPTS="$scan_attempts"
+        ;;
+esac
+
+usage_bt() {
+    cat <<EOF
+Usage: $0 [OPTIONS] [MAC-or-NAME] [WHITELIST]
+
+Options (long):
+  --mac=AA:BB:CC:DD:EE:FF Set target MAC (overrides positional)
+  --name=DeviceName Set target device name (overrides positional)
+  --whitelist=/path/list.txt Set whitelist file
+  --pair-retries=N Default: ${PAIR_RETRIES}
+  --scan-attempts=N Default: ${SCAN_ATTEMPTS}
+  -h, --help Show this help
+
+Positional fallback (kept exactly as before):
+  1) MAC-or-NAME 2) WHITELIST
+EOF
+}
+
+# Tiny parser for --key and --key=value (POSIX, no getopts)
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --mac)
+            shift
+            [ -n "${1-}" ] && BT_MAC="$1"
+            shift
+            continue
+            ;;
+        --mac=*)
+            BT_MAC="${1#*=}"
+            shift
+            continue
+            ;;
+        --name)
+            shift
+            [ -n "${1-}" ] && BT_NAME="$1"
+            shift
+            continue
+            ;;
+        --name=*)
+            BT_NAME="${1#*=}"
+            shift
+            continue
+            ;;
+        --whitelist)
+            shift
+            [ -n "${1-}" ] && WHITELIST="$1"
+            shift
+            continue
+            ;;
+        --whitelist=*)
+            WHITELIST="${1#*=}"
+            shift
+            continue
+            ;;
+        --pair-retries)
+            shift
+            [ -n "${1-}" ] && PAIR_RETRIES="$1"
+            shift
+            continue
+            ;;
+        --pair-retries=*)
+            PAIR_RETRIES="${1#*=}"
+            shift
+            continue
+            ;;
+        --scan-attempts)
+            shift
+            [ -n "${1-}" ] && SCAN_ATTEMPTS="$1"
+            shift
+            continue
+            ;;
+        --scan-attempts=*)
+            SCAN_ATTEMPTS="${1#*=}"
+            shift
+            continue
+            ;;
+        -h|--help)
+            usage_bt
+            exit 0
+            ;;
+        --) # stop option parsing; leave remaining for legacy positional handling
+            shift
+            break
+            ;;
+        -*)
+            log_warn "Unknown option: $1"
+            shift
+            continue
+            ;;
+        *)
+            # leave for legacy positional block below
+            break
+            ;;
+    esac
+done
+# ----------------- end of minimal long-option support --------------------------
+
+# Legacy positional parsing (unchanged behavior)
+if [ -n "${1-}" ]; then
     if echo "$1" | grep -Eq '^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$'; then
-        BT_MAC="$1"
+        BT_MAC="${BT_MAC:-$1}"
     else
-        BT_NAME="$1"
+        BT_NAME="${BT_NAME:-$1}"
     fi
 fi
-if [ -n "$2" ]; then
-    WHITELIST="$2"
+if [ -n "${2-}" ]; then
+    WHITELIST="${WHITELIST:-$2}"
     if [ -z "$BT_MAC" ] && echo "$2" | grep -Eq '^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$'; then
         BT_MAC="$2"
     fi
 fi
+
+# Multi-line config echo (for debugging in LAVA logs)
+log_info "BT args:
+  MAC=${BT_MAC-}
+  NAME=${BT_NAME-}
+  WHITELIST=${WHITELIST-}
+  PAIR_RETRIES=${PAIR_RETRIES}
+  SCAN_ATTEMPTS=${SCAN_ATTEMPTS}
+"
 
 # Skip if no CLI input and no list file
 if [ -z "$BT_MAC" ] && [ -z "$BT_NAME" ] && [ ! -f "./bt_device_list.txt" ]; then
