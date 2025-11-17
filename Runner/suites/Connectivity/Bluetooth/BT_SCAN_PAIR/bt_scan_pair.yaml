@@ -1,0 +1,24 @@
+metadata:
+  name: bt-scan-pair
+  format: "Lava-Test Test Definition 1.0"
+  description: "Pair/connect to a BT device using qcom-linux-testkit BT_SCAN_PAIR"
+  os:
+    - Yocto
+    - Ubuntu
+    - Debina
+  scope:
+    - functional
+
+params:
+  bt_mac: ""
+  bt_name: ""
+  whitelist: ""
+  pair_retries: "3"
+  scan_attempts: "2"
+
+run:
+  steps:
+    - cd qcom-linux-testkit/Runner/suites/Connectivity/Bluetooth/BT_SCAN_PAIR
+    - ./run.sh
+    - ../../../../utils/send-to-lava.sh ./BT_SCAN_PAIR.res || true
+    - ../../../../utils/result_parse.sh || true
