@@ -1,0 +1,21 @@
+metadata:
+    format: Lava-Test Test Definition 1.0
+    name: RNGTest
+    description: "This test performs checks on random data to check for randomness"
+    maintainer:
+        - vnarapar@qti.qualcomm.com
+    os:
+        - openembedded
+    scope:
+        - functional
+    devices:
+        - rb3gen2
+        - ridesx
+        - lemans evk
+        - monaco evk
+
+run:
+    steps:
+        - cd Runner
+        - $PWD/suites/Kernel/Baseport/rngtest/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/rngtest/rngtest.res || true

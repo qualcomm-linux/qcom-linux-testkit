@@ -1,0 +1,24 @@
+metadata:
+    format: Lava-Test Test Definition 1.0
+    name: WPSS remoteproc test
+    description: "This test performs the start/stop operations for wpss remoteproc"
+    maintainer:
+        - vnarapar@qti.qualcomm.com
+    os:
+        - openembedded
+    scope:
+        - functional
+    devices:
+        - rb3gen2
+        - ridesx
+        - lemans evk
+        - monaco evk
+
+run:
+    steps:
+        - export STOP_TO=20
+        - export START_TO=30
+        - export POLL_I=2
+        - cd Runner
+        - $PWD/suites/Kernel/Baseport/wpss_remoteproc/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/wpss_remoteproc/wpss_remoteproc.res || true

@@ -1,0 +1,21 @@
+metadata:
+    format: Lava-Test Test Definition 1.0
+    name: CDSP remoteproc test
+    description: "This test performs the start/stop operations for cdsp remoteproc"
+    maintainer:
+        - vnarapar@qti.qualcomm.com
+    os:
+        - openembedded
+    scope:
+        - functional
+    devices:
+        - rb3gen2
+        - ridesx
+        - lemans evk
+        - monaco evk
+
+run:
+    steps:
+        - cd Runner
+        - $PWD/suites/Kernel/Baseport/cdsp_remoteproc/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/cdsp_remoteproc/cdsp_remoteproc.res || true

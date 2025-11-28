@@ -1,0 +1,21 @@
+metadata:
+    format: Lava-Test Test Definition 1.0
+    name: Probe Failure Check
+    description: "This test verifies that no device driver probe errors occurred during the most recent system boot."
+    maintainer:
+        - vnarapar@qti.qualcomm.com
+    os:
+        - openembedded
+    scope:
+        - functional
+    devices:
+        - rb3gen2
+        - ridesx
+        - lemans evk
+        - monaco evk
+
+run:
+    steps:
+        - cd Runner
+        - $PWD/suites/Kernel/Baseport/Probe_Failure_Check/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/Probe_Failure_Check/Probe_Failure_Check.res || true

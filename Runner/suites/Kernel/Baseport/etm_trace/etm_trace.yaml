@@ -1,0 +1,21 @@
+metadata:
+    format: Lava-Test Test Definition 1.0
+    name: ETM Test
+    description: "This test case validates the CoreSight Embedded Trace Macrocell (ETM) trace capture functionality"
+    maintainer:
+        - vnarapar@qti.qualcomm.com
+    os:
+        - openembedded
+    scope:
+        - functional
+    devices:
+        - rb3gen2
+        - ridesx
+        - lemans evk
+        - monaco evk
+
+run:
+    steps:
+        - cd Runner
+        - $PWD/suites/Kernel/Baseport/etm_trace/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/etm_trace/etm_trace.res || true
