@@ -1,0 +1,30 @@
+metadata:
+  name: opencv
+  format: "Lava-Test Test Definition 1.0"
+  description: "Basic OpenCV test"
+  os:
+    - linux
+  scope:
+    - functional
+
+params:
+  BIN_PATH: "" # --bin <path|name>
+  BUILD_DIR: "." # --build-dir
+  CWD: "." # --cwd
+  TESTDATA_PATH: "" # --testdata
+  EXTRA_ARGS: "" # --args "..."
+  TIMEOUT_SECS: "" # --timeout N
+  SUITE: "all" # --suite accuracy|performance|all
+  LIST_ONLY: 0 # --list
+  REPEAT: "" # --repeat N
+  SHUFFLE: 0 # --shuffle
+  SEED: "" # --seed N
+  PERF_ARGS: "" # --perf-args "<common perf args>"
+  PERF_TO_TESTS: 0 # --perf-to-tests (apply PERF_ARGS to opencv_test_* too)
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Multimedia/OpenCV
+    - ./run.sh --bin "${BIN_PATH}" --build-dir "${BUILD_DIR}" --cwd "${CWD}" --testdata "${TESTDATA_PATH}" --args "${EXTRA_ARGS}" --timeout "${TIMEOUT_SEC}" --suite "${SUITE}" --list "${LIST_ONLY}" --repeat "${REPEAT}" --shuffle "${SHUFFLE}" --seed "{SEED}" --perf-args "${PERF_ARGS}" --perf-to-test "${PERF_TO_TEST}" || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh OpenCV.res || true

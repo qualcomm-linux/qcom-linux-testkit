@@ -1,0 +1,18 @@
+metadata:
+  name: bt-on-off
+  format: "Lava-Test Test Definition 1.0"
+  description: "Toggle Bluetooth on/off using qcom-linux-testkit BT_ON_FF"
+  os:
+    - linux
+  scope:
+    - functional
+
+params:
+  BT_ADAPTER: ""
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Connectivity/Bluetooth/BT_ON_OFF
+    - ./run.sh --adapter "${BT_ADAPTER}" || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh BT_ON_OFF.res

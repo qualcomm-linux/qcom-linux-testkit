@@ -1,0 +1,15 @@
+metadata:
+  name: kmscube
+  format: "Lava-Test Test Definition 1.0"
+  description: "Graphics scripts automates the validation of Graphics OpenGL ES 2.0 capabilities on the Qualcomm RB3 Gen2 platform running a Yocto-based Linux system. It utilizes kmscube test app which is publicly available at https://gitlab.freedesktop.org/mesa/kmscube"
+  os:
+    - linux
+  scope:
+    - functional
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Multimedia/Graphics/KMSCube
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh KMSCube.res || true

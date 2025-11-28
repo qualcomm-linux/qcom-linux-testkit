@@ -1,0 +1,16 @@
+metadata:
+  name: ufs-validation
+  format: "Lava-Test Test Definition 1.0"
+  description: "Test basic UFS features"
+  os:
+    - linux
+  scope:
+    - functional
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/Storage/UFS_Validation
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh UFS_Validation.res || true
+

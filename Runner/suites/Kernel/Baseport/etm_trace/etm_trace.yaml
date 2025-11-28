@@ -1,0 +1,16 @@
+metadata:
+  name: etm-trace
+  format: "Lava-Test Test Definition 1.0"
+  description: "This test case validates the CoreSight Embedded Trace Macrocell (ETM) trace capture functionality on the target device. It ensures that the ETM source and TMC sink are properly enabled and that trace data can be successfully captured and validated."
+  os:
+    - linux
+  scope:
+    - functional
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/etm_trace
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh etm_trace.res
+

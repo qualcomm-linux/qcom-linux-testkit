@@ -1,0 +1,16 @@
+metadata:
+  name: smmu
+  format: "Lava-Test Test Definition 1.0"
+  description: "This basic smmu features"
+  os:
+    - linux
+  scope:
+    - functional
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/smmu
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh smmu.res || true
+

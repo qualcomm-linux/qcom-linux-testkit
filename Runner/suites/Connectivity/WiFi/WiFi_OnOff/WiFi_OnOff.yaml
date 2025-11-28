@@ -1,0 +1,16 @@
+metadata:
+  name: wifi-onoff
+  format: "Lava-Test Test Definition 1.0"
+  description: "This test validates WiFi can be turned ON and OFF"
+  os:
+    - linux
+  scope:
+    - functional
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Connectivity/WiFi/WiFi_OnOff
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh WiFi_OnOff.res
+

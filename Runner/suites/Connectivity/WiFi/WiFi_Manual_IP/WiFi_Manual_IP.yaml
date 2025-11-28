@@ -1,0 +1,23 @@
+metadata:
+  name: wifi-manual-ip
+  format: "Lava-Test Test Definition 1.0"
+  description: "This test validates WiFi functionality by:
+
+  - Connecting to an access point (AP) using `wpa_supplicant`.
+  - Verifying IP acquisition via DHCP."
+  os:
+    - linux
+  scope:
+    - functional
+
+params:
+  SSID: ""
+  PASSWORD: ""
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Connectivity/WiFi/WiFi_Manual_IP
+    - ./run.sh --ssid "${SSID}" --password "${PASSWORD}" || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh WiFi_Manual_IP.res
+

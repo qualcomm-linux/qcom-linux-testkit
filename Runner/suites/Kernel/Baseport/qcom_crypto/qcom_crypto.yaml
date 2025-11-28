@@ -1,0 +1,16 @@
+metadata:
+  name: qcom-crypto
+  format: "Lava-Test Test Definition 1.0"
+  description: "The qcom_crypto test script validates the basic functionality of cryptographic operations using the kcapi tool. It ensures that encryption, decryption, and HMAC-SHA256 operations are correctly executed and verified against expected outputs."
+  os:
+    - linux
+  scope:
+    - functional
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/qcom_crypto
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh qcom_crypto.res || true
+

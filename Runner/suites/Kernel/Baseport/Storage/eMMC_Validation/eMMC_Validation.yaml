@@ -1,0 +1,16 @@
+metadata:
+  name: emmc-validation
+  format: "Lava-Test Test Definition 1.0"
+  description: "Test basic eMMC features"
+  os:
+    - linux
+  scope:
+    - functional
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/Storage/eMMC_Validation
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh eMMC_Validation.res || true
+

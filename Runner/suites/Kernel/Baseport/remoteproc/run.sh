@@ -34,6 +34,10 @@ test_path=$(find_test_case_by_name "$TESTNAME")
 cd "$test_path" || exit 1
 # shellcheck disable=SC2034
 res_file="./$TESTNAME.res"
+set -x
+pwd
+ls -l
+set +x
 
 log_info "-----------------------------------------------------------------------------------------"
 log_info "-------------------Starting $TESTNAME Testcase----------------------------"

@@ -1,0 +1,15 @@
+metadata:
+  name: memlat
+  format: "Lava-Test Test Definition 1.0"
+  description: "Test memory latency"
+  os:
+    - linux
+  scope:
+    - functional
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/MEMLAT
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh MEMLAT.res || true

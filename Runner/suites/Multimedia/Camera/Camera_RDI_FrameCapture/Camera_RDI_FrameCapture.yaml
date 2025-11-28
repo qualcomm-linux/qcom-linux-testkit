@@ -1,0 +1,24 @@
+metadata:
+  name: camera-rdi-frame-capture
+  format: "Lava-Test Test Definition 1.0"
+  description: "This test validates functional camera RDI (Raw Dump Interface) pipelines by:
+
+  - Dynamically detecting all camera pipelines using `media-ctl`
+  - Parsing valid RDI pipelines with a Python helper script
+  - Streaming frames using `yavta` from detected working pipelines
+  - Supporting manual override of video format and frame count"
+  os:
+    - linux
+  scope:
+    - functional
+
+params:
+  FORMAT: ""
+  FRAMES: "10"
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Multimedia/Camera/Camera_RDI_FrameCapture
+    - ./run.sh --format "${FORMAT}" --frames "${FRAMES}" || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh Camera_RDI_FrameCapture.res || true
