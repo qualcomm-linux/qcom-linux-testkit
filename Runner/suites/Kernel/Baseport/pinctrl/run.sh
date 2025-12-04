@@ -47,10 +47,12 @@ output=$(ls /sys/kernel/debug/pinctrl)
 # Print overall test result
 if [ -z "$output" ]; then
     log_fail "$TESTNAME : Test Failed"
+    log_info "Writing to file $res_file"
     echo "$TESTNAME FAIL" > "$res_file"
     exit 1
 else
     log_pass "$TESTNAME : Test Passed"
+    log_info "Writing to file $res_file"
     echo "$TESTNAME PASS" > "$res_file"
     exit 0
 fi

@@ -45,10 +45,12 @@ OUTPUT=$(dmesg | grep iommu)
 # Check if the output is null
 if [ -z "$OUTPUT" ]; then
     log_fail "$TESTNAME : Test Failed"
+    log_info "Writing to $res_file"
     echo "$TESTNAME FAIL" > "$res_file"
     exit 1
 else
     log_pass "$TESTNAME : Test Passed"
+    log_info "Writing to $res_file"
     echo "$TESTNAME PASS" > "$res_file"
     exit 0
 fi

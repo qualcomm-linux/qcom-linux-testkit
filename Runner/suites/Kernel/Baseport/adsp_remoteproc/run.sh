@@ -159,6 +159,7 @@ discover_audio_stack_and_snapshot
 # --- Check DT presence for ADSP -----------------------------------------------
 if ! dt_has_remoteproc_fw "$FW"; then
     log_skip "$TESTNAME SKIP – $FW not described in DT"
+    log_info "Writing to file $RES_FILE"
     echo "$TESTNAME SKIP" >"$RES_FILE"
     exit 0
 fi
@@ -168,6 +169,7 @@ log_info "DT indicates $FW is present"
 entries="$(get_remoteproc_by_firmware "$FW" "" all 2>/dev/null)" || entries=""
 if [ -z "$entries" ]; then
     log_fail "$FW present in DT but no /sys/class/remoteproc entry found"
+    log_info "Writing to file $RES_FILE"
     echo "$TESTNAME FAIL" >"$RES_FILE"
     exit 1
 fi
@@ -208,6 +210,7 @@ while IFS='|' read -r rpath rstate rfirm rname; do
     if [ "$FATAL_ON_UNSUSPENDED" -eq 1 ]; then
         if [ "$(audio_pm_snapshot_ok)" -ne 1 ]; then
             log_fail "Audio not in suspended/unsupported state after ${PRE_STOP_DELAY}s (FATAL_ON_UNSUSPENDED=1); aborting before stop"
+            log_info "Writing to file $RES_FILE"
             echo "$TESTNAME FAIL" >"$RES_FILE"
             exit 1
         fi
@@ -283,10 +286,12 @@ log_info "Instance results:$RESULT_LINES"
 
 if [ "$inst_fail" -gt 0 ]; then
     log_fail "One or more $FW instance(s) failed ($inst_fail/$count_instances)"
+    log_info "Writing to file $RES_FILE"
     echo "$TESTNAME FAIL" >"$RES_FILE"
     exit 1
 fi
 
 log_pass "All $count_instances $FW instance(s) passed"
+log_info "Writing to file $RES_FILE"
 echo "$TESTNAME PASS" >"$RES_FILE"
 exit 0
