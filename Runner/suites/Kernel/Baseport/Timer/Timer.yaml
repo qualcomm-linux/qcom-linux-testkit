@@ -1,0 +1,19 @@
+metadata:
+  name: timer
+  format: "Lava-Test Test Definition 1.0"
+  description: "Test basic Timers features"
+  os:
+    - linux
+  scope:
+    - functional
+
+params:
+  BINARY_PATH: ""
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/Timer
+    - ./run.sh --binary-path="${BINARY_PATH}" || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh Timer.res || true
+

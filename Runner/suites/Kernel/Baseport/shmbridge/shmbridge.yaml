@@ -1,0 +1,20 @@
+metadata:
+  name: shmbridge
+  format: "Lava-Test Test Definition 1.0"
+  description: "This test case validates the encryption and access functionality of the `shmbridge` partition by:
+  - Formatting the partition with ext4 and encryption options
+  - Mounting it with `inlinecrypt`
+  - Adding an encryption key using `fscryptctl`
+  - Setting and verifying an encryption policy
+  - Writing and reading a test file to confirm data integrity"
+  os:
+    - linux
+  scope:
+    - functional
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/shmbridge
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh shmbridge.res || true

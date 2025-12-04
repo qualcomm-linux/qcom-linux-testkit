@@ -1,0 +1,26 @@
+metadata:
+  name: wifi-dynamic-ip
+  format: "Lava-Test Test Definition 1.0"
+  description: "This test validates WiFi functionality by:
+
+  - Connecting to an access point (AP) using either `nmcli` or `wpa_supplicant`.
+  - Verifying IP acquisition via DHCP.
+  - Checking internet connectivity with a `ping` test.
+  - Handling systemd network service status.
+  - Supporting flexible SSID/password input via arguments, environment, or file."
+  os:
+    - linux
+  scope:
+    - functional
+
+params:
+  SSID: ""
+  PASSWORD: ""
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Connectivity/WiFi/WiFi_Dynamic_IP
+    - ./run.sh --ssid "${SSID}" --password "${PASSWORD}" || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh WiFi_Dynamic_IP.res
+

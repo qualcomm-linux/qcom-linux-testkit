@@ -1,0 +1,19 @@
+metadata:
+    format: Lava-Test Test Definition 1.0
+    name: hotplug
+    description: "Test basic CPU hotplug features"
+    maintainer:
+        - vnarapar@qti.qualcomm.com
+    os:
+        - openembedded
+    scope:
+        - functional
+    devices:
+        - rb3gen2
+
+run:
+    steps:
+        - cd Runner
+        - $PWD/suites/Kernel/Baseport/hotplug/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/hotplug/hotplug.res || true
+

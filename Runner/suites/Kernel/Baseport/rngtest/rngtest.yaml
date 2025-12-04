@@ -1,0 +1,16 @@
+metadata:
+  name: rngtest
+  format: "Lava-Test Test Definition 1.0"
+  description: "Test basic random number generator features"
+  os:
+    - linux
+  scope:
+    - functional
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/rngtest
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh rngtest.res || true
+

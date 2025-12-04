@@ -1,0 +1,16 @@
+metadata:
+  name: qcom-hwrng
+  format: "Lava-Test Test Definition 1.0"
+  description: "The qcom_hwrng test script validates Qualcomm Hardware Random Number Generator (HWRNG) basic functionality. This test ensures that the HWRNG kernel driver is correctly integrated and functional."
+  os:
+    - linux
+  scope:
+    - functional
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/qcom_hwrng
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh qcom_hwrng.res || true
+

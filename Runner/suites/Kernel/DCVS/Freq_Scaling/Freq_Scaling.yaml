@@ -1,0 +1,16 @@
+metadata:
+  name: freq-scaling
+  format: "Lava-Test Test Definition 1.0"
+  description: "This test validates the DCVS support and runtime status on Qualcomm platforms with Yocto builds."
+  os:
+    - linux
+  scope:
+    - functional
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/DCVS/Freq_Scaling
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh Freq_Scaling.res || true
+

@@ -1,0 +1,22 @@
+metadata:
+  name: ethernet
+  format: "Lava-Test Test Definition 1.0"
+  description: "This test case validates the basic functionality of the Ethernet interface (`eth0`) on the device. It checks for:
+  - Interface presence
+  - Interface status (UP/DOWN)
+  - Basic connectivity via ping to `8.8.8.8`"
+  os:
+    - linux
+  scope:
+    - functional
+
+params:
+  INTERFACE: "eth0"
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Connectivity/Ethernet/
+    - ./run.sh "${INTERFACE}" || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh Ethernet.res
+

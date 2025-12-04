@@ -1,0 +1,16 @@
+metadata:
+  name: watchdog
+  format: "Lava-Test Test Definition 1.0"
+  description: "Test basic watchdog features"
+  os:
+    - linux
+  scope:
+    - functional
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/watchdog
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh watchdog.res || true
+

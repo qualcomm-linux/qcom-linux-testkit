@@ -1,0 +1,31 @@
+metadata:
+  name: audio-playback
+  format: "Lava-Test Test Definition 1.0"
+  description: "This suite automates the validation of audio playback capabilities on Qualcomm Linux-based platforms running a Yocto-based Linux system. It supports both PipeWire and PulseAudio backends, with robust evidence-based PASS/FAIL logic, asset management, and diagnostic logging."
+  os:
+    - linux
+  scope:
+    - functional
+
+params:
+  AUDIO_BACKEND: ""	 # Selects backend: pipewire or pulseaudio, default: auto-detect
+  SINK_CHOICE: "speakers"  # Playback sink: speakers or null, default: speakers
+  FORMATS: "wav"  # Audio formats: e.g. wav, default: wav
+  DURATIONS: "short"  # Playback durations: short, medium, long, default: short
+  LOOPS: 1  # Number of playback loops, default: 1
+  TIMEOUT: 0  # Playback timeout per loop (e.g., 15s, 0=none), default: 0
+  STRICT: 0  # Enable strict mode (fail on any error), default: 0
+  DMESG_SCAN: 1  # Scan dmesg for errors after playback, default: 1
+  VERBOSE: 0  # Enable verbose logging, default: 0
+  EXTRACT_AUDIO_ASSETS: true  # Download/extract audio assets if missing, default: true
+  SSID: ""  # Wi-Fi SSID for network connection, default: unset
+  PASSWORD: ""  # Wi-Fi password for network connection, default: unset
+  NET_PROBE_ROUTE_IP: "1.1.1.1"  # IP used for route probing, default: 1.1.1.1
+  NET_PING_HOST: "8.8.8.8"  # Host used for ping reachability check, default: 8.8.8.8
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Multimedia/Audio/AudioPlayback/
+    - ./run.sh --backend "${AUDIO_BACKEND}" --sink "${SINK_CHOICE}" --format "${FORMAT}" --durations "${DURATIONS}" --loops "${LOOPS}" --timeout "${TIMEOUT}" --strict "${STRICT}" --ssid "${SSID}" --password "${PASSWORD}" || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh AudioPlayback.res || true

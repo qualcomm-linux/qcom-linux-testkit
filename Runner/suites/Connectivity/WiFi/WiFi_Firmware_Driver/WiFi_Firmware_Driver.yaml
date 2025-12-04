@@ -1,0 +1,16 @@
+metadata:
+  name: wifi-firmware-driver
+  format: "Lava-Test Test Definition 1.0"
+  description: "This test validates WiFi firmware"
+  os:
+    - linux
+  scope:
+    - functional
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Connectivity/WiFi/WiFi_Firmware_Driver
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh WiFi_Firmware_Driver.res
+

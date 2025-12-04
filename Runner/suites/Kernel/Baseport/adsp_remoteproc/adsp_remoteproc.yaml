@@ -1,0 +1,23 @@
+metadata:
+  name: adsp-remoteproc
+  format: "Lava-Test Test Definition 1.0"
+  description: "Test basic ADSP features"
+  os:
+    - linux
+  scope:
+    - functional
+
+params:
+  STOP_TO: 10  # remoteproc stop timeout (s)
+  START_TO: 10 # remoteproc start timeout (s)
+  POLL_I: 1 # state poll interval (s)
+  PRE_STOP_DELAY: 30 # FIXED delay before stopping ADSP (seconds)
+  FATAL_ON_UNSUSPENDED: 0 # 1 = abort if audio not suspended/unsupported after delay
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/adsp_remoteproc
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh adsp_remoteproc.res || true
+
