@@ -42,6 +42,7 @@ log_info "=== Test Initialization ==="
 # Kernel config gate
 if ! check_kernel_config "CONFIG_QCOM_IPA"; then
     log_skip "$TESTNAME SKIP - CONFIG_QCOM_IPA not enabled"
+    log_info "Writing to file $RES_FILE"
     echo "$TESTNAME SKIP" >"$RES_FILE"
     exit 0
 fi
@@ -55,8 +56,8 @@ if is_module_loaded "$MODNAME"; then
     log_info "Module $MODNAME already loaded"
 else
     MODPATH=$(find_kernel_module "$MODNAME")
-    [ -n "$MODPATH" ] || log_fail "$MODNAME.ko not found in filesystem"
-    load_kernel_module "$MODPATH" || log_fail "Failed to load $MODNAME"
+    [ -n "$MODPATH" ] || (log_fail "$MODNAME.ko not found in filesystem"; echo "$TESTNAME FAIL" >"$RES_FILE")
+    load_kernel_module "$MODPATH" || (log_fail "Failed to load $MODNAME"; echo "$TESTNAME FAIL" >"$RES_FILE")
     log_pass "$MODNAME module loaded"
 fi
 
@@ -89,5 +90,6 @@ fi
 
 log_info "-------------------Completed $TESTNAME Testcase----------------------------"
 log_pass "$TESTNAME PASS"
+log_info "Writing to file $RES_FILE"
 echo "$TESTNAME PASS" >"$RES_FILE"
 exit 0
