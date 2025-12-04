@@ -77,6 +77,7 @@ log_info "Running kmscube with --count=${FRAME_COUNT} ..."
 if kmscube --count="${FRAME_COUNT}" >"$LOG_FILE" 2>&1; then :; else
     rc=$?
     log_fail "$TESTNAME : Execution failed (rc=$rc) — see $LOG_FILE"
+    cat "$LOG_FILE"
     echo "$TESTNAME FAIL" >"$RES_FILE"
     if [ "$weston_was_running" -eq 1 ]; then
         log_info "Restarting Weston after failure"
