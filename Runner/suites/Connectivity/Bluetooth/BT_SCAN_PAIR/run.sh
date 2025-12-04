@@ -28,6 +28,8 @@ fi
 
 # shellcheck disable=SC1090,SC1091
 . "$TOOLS/functestlib.sh"
+# shellcheck disable=SC1090,SC1091
+. "$TOOLS/lib_bluetooth.sh"
 
 TESTNAME="BT_SCAN_PAIR"
 test_path=$(find_test_case_by_name "$TESTNAME") || {
