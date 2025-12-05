@@ -48,6 +48,16 @@ run:
         - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/smmu/smmu.res || true
         - $PWD/suites/Kernel/Baseport/Storage/UFS_Validation/run.sh || true
         - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/Storage/UFS_Validation/UFS_Validation.res || true
+        - $PWD/suites/Kernel/Baseport/Storage/ufs_gear_lane/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/Storage/ufs_gear_lane/ufs_gear_lane.res || true
+        - $PWD/suites/Kernel/Baseport/Storage/ufs_hibern8/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/Storage/ufs_hibern8/ufs_hibern8.res || true
+        - $PWD/suites/Kernel/Baseport/Storage/ufs_read_writes/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/Storage/ufs_read_writes/ufs_read_writes.res || true
+        - $PWD/suites/Kernel/Baseport/Storage/ufs_runtime_suspend_resume/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/Storage/ufs_runtime_suspend_resume/ufs_runtime_suspend_resume.res || true
+        - $PWD/suites/Kernel/Baseport/Storage/ufs_write_booster/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/Storage/ufs_write_booster/ufs_write_booster.res || true
         - $PWD/suites/Kernel/Baseport/wpss_remoteproc/run.sh || true
         - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/wpss_remoteproc/wpss_remoteproc.res || true
         - $PWD/suites/Kernel/DCVS/Freq_Scaling/run.sh || true
