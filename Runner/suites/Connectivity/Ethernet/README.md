@@ -7,9 +7,15 @@ SPDX-License-Identifier: BSD-3-Clause-Clear
 
 This test case validates the basic functionality of the Ethernet interface (`eth0`) on the device. It checks for:
 
-- Interface presence
+- Interface detection (auto or user-specified)
 - Interface status (UP/DOWN)
 - Basic connectivity via ping to `8.8.8.8`
+- Optional: forcing Ethernet link speed using ethtool
+
+By default, the script:
+
+Auto-detects available Ethernet interfaces if none is specified
+Forces the link speed to 1000 Mbps, full duplex, autoneg off (using ethtool) unless a different speed is provided
 
 ## Usage
 
@@ -29,7 +35,7 @@ scp -r common Runner user@target_device_ip:<Path in device>
 ssh user@target_device_ip
 cd <Path in device>/Runner && ./run-test.sh Ethernet
 # Optional: specify preferred interface (e.g., eth1)
-./run.sh [preferred-interface]
+./run.sh [--interface <preferred-interface>] [--speed <mbps>]
 ```
 
 ## Prerequisites
