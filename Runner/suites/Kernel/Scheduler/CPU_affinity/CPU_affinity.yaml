@@ -1,0 +1,16 @@
+metadata:
+  name: cpu-affinity
+  format: "Lava-Test Test Definition 1.0"
+  description: "This test validates the Scheduler support and runtime status on Qualcomm platforms with Yocto builds."
+  os:
+    - linux
+  scope:
+    - functional
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Scheduler/CPU_affinity
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh CPU_affinity.res || true
+

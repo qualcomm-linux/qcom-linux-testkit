@@ -1,0 +1,26 @@
+metadata:
+  name: fastrpc-test
+  format: "Lava-Test Test Definition 1.0"
+  description: "The **fastrpc_test** runner validates FastRPC (Fast Remote Procedure Call) on Qualcomm targets, offloading work to DSP domains (e.g., **CDSP**)."
+  os:
+    - linux
+  scope:
+    - functional
+
+params:
+  ARCH: ""  # Architecture (only if explicitly provided)
+  BIN_DIR: "/usr/bin"  # Directory containing 'fastrpc_test' (default: /usr/bin)
+  DOMAIN: "0"  # <0|1|2|3> DSP domain: 0=ADSP, 1=MDSP, 2=SDSP, 3=CDSP
+  DOMAIN_NAME: "adsp"  # DSP domain by name: adsp|mdsp|sdsp|cdsp
+  USER_PD: 0  # Use '-U 1' (user/unsigned PD). Default is '-U 0'.
+  REPEAT: 1  # Number of repetitions (default: 1)
+  TIMEOUT: ""  # Timeout for each run (no timeout if omitted)
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Multimedia/CDSP/fastrpc_test
+    - USER_PD_PARAM=""
+    - if [ "${USER_PD}" != 0 ]; then USER_PD_PARAM="--user-pd"; fi
+    - ./run.sh --arch "${ARCH}" --bin-dir "${BIN_DIR}" --domain "${DOMAIN}" --domain-name "${DOMAIN_NAME}" --repeat "${REPEAT}" --timeout "${TIMEOUT}" $USER_PD_PARAM || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh fastrpc_test.res || true

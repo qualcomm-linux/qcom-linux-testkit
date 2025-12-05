@@ -1,0 +1,16 @@
+metadata:
+  name: ipa
+  format: "Lava-Test Test Definition 1.0"
+  description: "Test basic IPA features"
+  os:
+    - linux
+  scope:
+    - functional
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/IPA
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh IPA.res || true
+

@@ -1,0 +1,16 @@
+metadata:
+  name: bt-scan
+  format: "Lava-Test Test Definition 1.0"
+  description: "BT_SCAN – Bluetooth scanning validation (non-expect version)"
+  os:
+    - linux
+  scope:
+    - functional
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Connectivity/Bluetooth/BT_SCAN/
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh BT_SCAN.res
+

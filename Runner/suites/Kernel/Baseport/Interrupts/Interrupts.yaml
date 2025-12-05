@@ -1,0 +1,18 @@
+metadata:
+    format: Lava-Test Test Definition 1.0
+    name: interrupts
+    description: "Test basic CPU interrupts features"
+    maintainer:
+        - vnarapar@qti.qualcomm.com
+    os:
+        - openembedded
+    scope:
+        - functional
+    devices:
+        - rb3gen2
+
+run:
+    steps:
+        - cd Runner
+        - $PWD/suites/Kernel/Baseport/Interrupts/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/Interrupts/Interrupts.res || true

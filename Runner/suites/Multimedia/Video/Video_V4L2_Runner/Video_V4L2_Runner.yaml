@@ -1,0 +1,26 @@
+metadata:
+  name: video-v4l2-runner
+  format: "Lava-Test Test Definition 1.0"
+  description: "These scripts automate validation of video **encoding** and **decoding** on Qualcomm Linux platforms running a Yocto-based rootfs."
+  os:
+    - linux
+  scope:
+    - functional
+
+params:
+  # path to iris_v4l2_test binary
+  APP_PATH: "/usr/bin/iris_v4l2_test"
+  # specific config can be selected. Available: h264Decoder.json, h264Encoder.json, h265Decoder.json, h265Encoder.json, vp9Decoder.json. Default is to use all of them
+  CONFIG_PATH: "./"
+  # platform is autodetected by the test script
+  PLATFORM: ""
+  LOGLEVEL: 15
+  RETRY_ON_FAIL: 5
+  POST_TEST_SLEEP: 10
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Multimedia/Video/Video_V4L2_Runner/
+    - ./run.sh --app "${APP_PATH}" --config "${CONFIG_PATH}" --platform "${PLATFORM}" --loglevel "${LOGLEVEL}" --retry-on-fail "${RETRY_ON_FAIL}" --post-test-sleep "${POST_TEST_SLEEP}" || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh Video_V4L2_Runner.res || true

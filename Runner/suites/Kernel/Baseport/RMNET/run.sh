@@ -50,13 +50,14 @@ fi
 # Load module if needed
 MODNAME="rmnet"
 PRE_LOADED=0
+FAILURE=0
 if is_module_loaded "$MODNAME"; then
     PRE_LOADED=1
     log_info "Module $MODNAME already loaded"
 else
     MODPATH=$(find_kernel_module "$MODNAME")
-    [ -n "$MODPATH" ] || log_fail "$MODNAME.ko not found in filesystem"
-    load_kernel_module "$MODPATH" || log_fail "Failed to load $MODNAME"
+    [ -n "$MODPATH" ] || (log_fail "$MODNAME.ko not found in filesystem"; FAILURE=1)
+    load_kernel_module "$MODPATH" || (log_fail "Failed to load $MODNAME"; FAILURE=1)
     log_pass "$MODNAME module loaded"
 fi
 
@@ -74,6 +75,7 @@ if [ -n "$first_node" ]; then
         log_pass "rmnet node $first_node is present"
     else
         log_fail "rmnet node $first_node did not appear within timeout"
+        FAILURE=1
     fi
 else
     log_warn "No /dev/rmnet* nodes found"
@@ -83,6 +85,7 @@ fi
 scan_dmesg_errors "rmnet" "." "panic|oops|fault|stall|abort" ""
 if [ -s "./rmnet_dmesg_errors.log" ]; then
     log_fail "rmnet-related errors found in dmesg"
+    FAILURE=1
 else
     log_info "No rmnet-related errors in dmesg"
 fi
@@ -105,7 +108,14 @@ else
 fi
 
 log_info "-------------------Completed $TESTNAME Testcase----------------------------"
-log_pass "$TESTNAME PASS"
-echo "$TESTNAME PASS" >"$RES_FILE"
+if [ "$FAILURE" = 0 ]; then
+    log_pass "$TESTNAME PASS"
+    log_info "Writing to file $RES_FILE"
+    echo "$TESTNAME PASS" >"$RES_FILE"
+else
+    log_fail "$TESTNAME FAIL"
+    log_info "Writing to file $RES_FILE"
+    echo "$TESTNAME FAIL" >"$RES_FILE"
+fi
 exit 0
 

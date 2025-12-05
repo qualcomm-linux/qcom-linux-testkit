@@ -1,0 +1,27 @@
+metadata:
+  name: bt-scan-pair
+  format: "Lava-Test Test Definition 1.0"
+  description: "This test automates Bluetooth scanning, pairing, and post-pair verification (via l2ping) on embedded Linux devices using BlueZ and bluetoothctl."
+  os:
+    - linux
+  scope:
+    - functional
+
+params:
+  # Max pairing attempts per device
+  - PAIR_RETRIES: 3
+  # Max scan retries per device before pairing
+  - SCAN_ATTEMPTS: 2
+  # Overrides direct MAC (same format as CLI argument)
+  - BT_MAC_ENV: ""
+  # Overrides device name
+  - BT_NAME_ENV: ""
+  # Comma-separated MACs or names allowed for pairing
+  - BT_WHITELIST_ENV: ""
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Connectivity/Bluetooth/BT_SCAN_PAIR/
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh BT_SCAN_PAIR.res

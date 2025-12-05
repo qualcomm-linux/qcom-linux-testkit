@@ -56,12 +56,14 @@ pass=true
 CONFIGS="CONFIG_IOMMU_SUPPORT CONFIG_QCOM_IOMMU CONFIG_ARM_SMMU"
 check_kernel_config "$CONFIGS" || {
     log_fail "Kernel config validation failed."
+    log_info "Writing to file $res_file"
     echo "$TESTNAME FAIL" > "$res_file"
     exit 1
 }
 LOADED_MODULES="msm_iommu arm_smmu"
 check_driver_loaded "$LOADED_MODULES" || {
     log_fail "Failed to load required driver modules"
+    log_info "Writing to file $res_file"
     echo "$TESTNAME FAIL" > "$res_file"
     exit 1
 }
@@ -69,6 +71,7 @@ check_driver_loaded "$LOADED_MODULES" || {
 DT_NODES="/proc/device-tree/soc@0/iommu@15000000 /proc/device-tree/soc/iommu@15000000"
 check_dt_nodes "$DT_NODES" || {
     log_fail "Device tree validation failed."
+    log_info "Writing to file $res_file"
     echo "$TESTNAME FAIL" > "$res_file"
     exit 1
 }
@@ -77,10 +80,12 @@ check_runtime_behavior || pass=false
 
 if $pass; then
     log_pass "$TESTNAME : Test Passed"
+    log_info "Writing to file $res_file"
     echo "$TESTNAME PASS" > "$res_file"
     exit 0
 else
     log_fail "$TESTNAME : Test Failed"
+    log_info "Writing to file $res_file"
     echo "$TESTNAME FAIL" > "$res_file"
     exit 1
 fi

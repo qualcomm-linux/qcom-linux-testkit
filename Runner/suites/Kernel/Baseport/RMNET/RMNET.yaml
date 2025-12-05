@@ -1,0 +1,16 @@
+metadata:
+  name: adsp-remoteproc
+  format: "Lava-Test Test Definition 1.0"
+  description: "Test for RMNET driver: skip if CONFIG_RMNET not enabled, then builtin vs module, verify /dev/rmnet, functional sysfs & dmesg checks."
+  os:
+    - linux
+  scope:
+    - functional
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/RMNET
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh RMNET.res || true
+

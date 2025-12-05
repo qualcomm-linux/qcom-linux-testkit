@@ -1,0 +1,15 @@
+metadata:
+  name: dsp-audio-pd
+  format: "Lava-Test Test Definition 1.0"
+  description: "Test adsprpcd"
+  os:
+    - linux
+  scope:
+    - functional
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Multimedia/DSP_AudioPD
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh DSP_AudioPD.res || true

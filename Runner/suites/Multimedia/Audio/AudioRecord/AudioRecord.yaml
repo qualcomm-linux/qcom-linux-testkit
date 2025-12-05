@@ -1,0 +1,26 @@
+metadata:
+  name: audio-record
+  format: "Lava-Test Test Definition 1.0"
+  description: "This suite automates the validation of audio recording capabilities on Qualcomm Linux-based platforms running a Yocto-based Linux system. It supports both PipeWire and PulseAudio backends, with robust evidence-based PASS/FAIL logic, asset management, and diagnostic logging."
+  os:
+    - linux
+  scope:
+    - functional
+
+params:
+  AUDIO_BACKEND: ""	 # Selects backend: pipewire or pulseaudio, default: auto-detect
+  SOURCE_CHOICE: "mic"  # Recording source: mic or null, default: mic
+  DURATIONS: "short"  # Playback durations: short, medium, long, default: short
+  RECORD_SECONDS: 5  # Number of seconds to record (numeric or mapped), default: 5
+  LOOPS: 1  # Number of playback loops, default: 1
+  TIMEOUT: 0  # Playback timeout per loop (e.g., 15s, 0=none), default: 0
+  STRICT: 0  # Enable strict mode (fail on any error), default: 0
+  DMESG_SCAN: 1  # Scan dmesg for errors after playback, default: 1
+  VERBOSE: 0  # Enable verbose logging, default: 0
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Multimedia/Audio/AudioRecord/
+    - ./run.sh --backend "${AUDIO_BACKEND}" --source "${SOURCE_CHOICE}" --durations "${DURATIONS}" --record-seconds "${RECORD_SECONDS}" --loops "${LOOPS}" --timeout "${TIMEOUT}" --strict "${STRICT}" || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh AudioRecord.res || true

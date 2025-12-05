@@ -1,0 +1,21 @@
+metadata:
+  name: gpdsp-remoteproc
+  format: "Lava-Test Test Definition 1.0"
+  description: "Test GPDSP basic features"
+  os:
+    - linux
+  scope:
+    - functional
+
+params:
+  STOP_TO: 10  # remoteproc stop timeout (s)
+  START_TO: 10 # remoteproc start timeout (s)
+  POLL_I: 1 # state poll interval (s)
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/gpdsp_remoteproc
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh gpdsp_remoteproc.res
+

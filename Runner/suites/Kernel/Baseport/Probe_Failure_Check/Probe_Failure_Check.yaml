@@ -1,0 +1,15 @@
+metadata:
+  name: proble-failure-check
+  format: "Lava-Test Test Definition 1.0"
+  description: "This test verifies that no device driver probe errors occurred during the most recent system boot."
+  os:
+    - linux
+  scope:
+    - functional
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/Probe_Failure_Check
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh Probe_Failure_Check.res || true
