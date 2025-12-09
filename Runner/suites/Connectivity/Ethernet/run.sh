@@ -37,11 +37,32 @@ rm -f "$res_file" "$summary_file"
 log_info "--------------------------------------------------------------------------"
 log_info "-------------------Starting $TESTNAME Testcase----------------------------"
 
+# CLI parsing: --interface/-i, --speed/-s
+user_iface=""
+speed=""
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --interface|-i)
+            user_iface="$2"
+            shift 2
+            ;;
+        --speed|-s)
+            speed="$2"
+            shift 2
+            ;;
+        *)
+
+            shift 1
+            ;;
+    esac
+done
+
+[ -z "$speed" ] && speed=1000
+
 # Check for dependencies
 check_dependencies ip ping
 
-# User-specified interface (argument) or all detected
-user_iface="$1"
 if [ -n "$user_iface" ]; then
     ETH_IFACES="$user_iface"
     log_info "User specified interface: $user_iface"
@@ -62,6 +83,8 @@ any_tested=0
 
 for iface in $ETH_IFACES; do
     log_info "---- Testing interface: $iface ----"
+    log_info "Setting the speed to $speed"
+    ethtool -s "$iface" speed "$speed" autoneg off duplex full
 
     if ! is_interface_up "$iface"; then
         log_warn "$iface is DOWN, skipping"
