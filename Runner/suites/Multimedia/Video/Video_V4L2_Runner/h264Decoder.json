@@ -11,7 +11,8 @@
                 "PixelFormat": "NV12",
                 "Width": 1280,
                 "Height": 720,
-                "Outputpath": "./720p_AVC.yuv",
+                "Outputpath": "",
+                "_Outputpath_original": "./720p_AVC.yuv",
                 "InputBufferCount": 16,
                 "OutputBufferCount": 16
             }
