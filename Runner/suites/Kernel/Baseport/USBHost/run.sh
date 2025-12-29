@@ -55,9 +55,10 @@ echo "Enumerated USB devices..."
 echo "$usb_output"
 
 # Check if any USB devices were found
-if [ "$device_count" -eq 0 ]; then
+if [ -z "$usb_output" ] || [ "$device_count" -eq 0 ]; then
     log_fail "$TESTNAME : Test Failed - No USB devices found."
     echo "$TESTNAME FAIL" > "$res_file"
+	exit 1
 
 elif [ "$non_hub_count" -eq 0 ]; then
     log_fail "$TESTNAME : Test Failed - Only USB hubs detected, no functional USB devices."
