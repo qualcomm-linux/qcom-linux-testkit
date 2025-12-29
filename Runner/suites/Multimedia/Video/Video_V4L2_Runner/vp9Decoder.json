@@ -11,7 +11,8 @@
                 "PixelFormat": "NV12",
                 "Width": 1280,
                 "Height": 720,
-                "Outputpath": "./720x1280_vp9.yuv",
+		        "Outputpath": "",
+                "_Outputpath_original": "./720x1280_vp9.yuv",
                 "InputBufferCount": 16,
                 "OutputBufferCount": 16,
                 "UseMinBufferCtrl": false
