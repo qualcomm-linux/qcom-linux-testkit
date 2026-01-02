@@ -29,12 +29,39 @@ check_audio_daemon() {
 }
 
 # ---------- Assets / clips ----------
+# Resolve clip path for legacy matrix mode (formats × durations)
+# Returns: clip path on stdout, 0=success, 1=no clip found
+# Fallback: If hardcoded clip missing, uses first available .wav file
 resolve_clip() {
   fmt="$1"; dur="$2"
   base="${AUDIO_CLIPS_BASE_DIR:-AudioClips}"
+  
   case "$fmt:$dur" in
-    wav:short|wav:medium|wav:long) printf '%s\n' "$base/yesterday_48KHz.wav" ;;
-    *) printf '%s\n' "" ;;
+    wav:short|wav:medium|wav:long)
+      # Try hardcoded clip first (backward compatibility)
+      clip="$base/yesterday_48KHz.wav"
+      if [ -f "$clip" ]; then
+        printf '%s\n' "$clip"
+        return 0
+      fi
+      
+      # Fallback: discover first available clip
+      first_clip="$(find "$base" -maxdepth 1 -name "*.wav" -type f 2>/dev/null | head -n1)"
+      if [ -n "$first_clip" ] && [ -f "$first_clip" ]; then
+        log_info "Using legacy matrix mode. Using fallback: $(basename "$first_clip")" >&2
+        printf '%s\n' "$first_clip"
+        return 0
+      fi
+      
+      # No clips available
+      log_error "No audio clips found in $base" >&2
+      printf '%s\n' ""
+      return 1
+      ;;
+    *)
+      printf '%s\n' ""
+      return 1
+      ;;
   esac
 }
 
@@ -152,7 +179,7 @@ audio_timeout_run() {
       wait "$pid" 2>/dev/null
       return 143
     fi
-    sleep 1; t=$((t+1))
+    sleep 1; t=$(expr $t + 1)
   done
   wait "$pid"; return $?
 }
@@ -218,10 +245,10 @@ setup_overlay_audio_environment() {
         fi
         
         sleep $poll_interval
-        elapsed=$((elapsed + poll_interval))
+        elapsed=$(expr $elapsed + $poll_interval)
         
-        if [ $((elapsed % 10)) -eq 0 ]; then
-            log_info "Still waiting for pipewire... (${elapsed}s/${max_wait}s)"
+        if [ "$(expr $elapsed % 10)" -eq 0 ]; then
+          log_info "Still waiting for pipewire... (${elapsed}s/${max_wait}s)"
         fi
     done
     
@@ -263,7 +290,7 @@ pw_sink_name_safe() {
     name="$(wpctl status 2>/dev/null \
       | sed -n '/Sinks:/,/Sources:/p' \
       | grep -E "^[^0-9]*${id}[.][[:space:]]" \
-      | sed 's/^[^0-9]*[0-9]\+[.][[:space:]]\+//' \
+      | sed 's/^[^0-9]*[0-9][0-9]*[.][[:space:]][[:space:]]*//' \
       | sed 's/[[:space:]]*\[vol:.*$//' \
       | head -n1)"
   fi
@@ -297,7 +324,7 @@ pw_source_label_safe() {
     label="$(wpctl status 2>/dev/null \
       | sed -n '/Sources:/,/Filters:/p' \
       | grep -E "^[^0-9]*${id}[.][[:space:]]" \
-      | sed 's/^[^0-9]*[0-9]\+[.][[:space:]]\+//' \
+      | sed 's/^[^0-9]*[0-9][0-9]*[.][[:space:]][[:space:]]*//' \
       | sed 's/[[:space:]]*\[vol:.*$//' \
       | head -n1)"
   fi
@@ -359,22 +386,6 @@ pa_resolve_mic_fallback() {
   printf '%s\n' "$s"
 }
 
-# PipeWire sink label by ID (tries description, then node.name, then status line)
-pw_sink_name_safe() {
-  id="$1"; [ -n "$id" ] || return 1
-  name="$(wpctl inspect "$id" 2>/dev/null | grep -m1 'node.description' | cut -d'"' -f2)"
-  [ -n "$name" ] || name="$(wpctl inspect "$id" 2>/dev/null | grep -m1 'node.name' | cut -d'"' -f2)"
-  if [ -z "$name" ]; then
-    name="$(wpctl status 2>/dev/null \
-      | sed -n '/^[[:space:]]*Sinks:/,/^[[:space:]]*$/p' \
-      | grep -E "^[[:space:]]*\*?[[:space:]]*${id}[.][[:space:]]" \
-      | sed 's/^[[:space:]]*\*\?[[:space:]]*[0-9]\+[.][[:space:]]\+//' \
-      | sed 's/[[:space:]]*\[vol:.*$//' \
-      | head -n1)"
-  fi
-  printf '%s\n' "$name"
-}
-
 # ----------- PulseAudio Source Helpers -----------
 pa_default_mic() {
   def="$(pactl info 2>/dev/null | sed -n 's/^Default Source:[[:space:]]*//p' | head -n1)"
@@ -428,7 +439,7 @@ audio_evidence_pa_streaming() {
     cookie=""
     [ -r "$d/pulse/cookie" ] && cookie="$d/pulse/cookie"
     # try to derive a home cookie for that uid as well
-    uid="$(stat -c %u "$d" 2>/dev/null || echo)"
+    uid="$(stat -c %u "$d" 2>/dev/null || stat -f %u "$d" 2>/dev/null || echo)"
     if [ -n "$uid" ]; then
       home="$(getent passwd "$uid" 2>/dev/null | awk -F: '{print $6}')"
       [ -n "$home" ] && [ -r "$home/.config/pulse/cookie" ] && cookie="$home/.config/pulse/cookie"
@@ -451,8 +462,8 @@ EOF
       if [ "$sock" = "::env::" ]; then
         pactl info >/dev/null 2>&1 || true
         if pactl list sinks 2>/dev/null | grep -qi -m1 '^[[:space:]]*State:[[:space:]]*RUNNING' \
-           || pactl list short sink-inputs 2>/dev/null | grep -q '^[0-9]\+' \
-           || pactl list short source-outputs 2>/dev/null | grep -q '^[0-9]\+' ; then
+           || pactl list short sink-inputs 2>/dev/null | grep -q '^[0-9][0-9]*' \
+           || pactl list short source-outputs 2>/dev/null | grep -q '^[0-9][0-9]*' ; then
           echo 1; return
         fi
       else
@@ -462,8 +473,8 @@ $rest
 EOF
             continue; }
           if PULSE_SERVER="unix:$sock" PULSE_COOKIE="$cookie" pactl list sinks 2>/dev/null | grep -qi -m1 '^[[:space:]]*State:[[:space:]]*RUNNING' \
-             || PULSE_SERVER="unix:$sock" PULSE_COOKIE="$cookie" pactl list short sink-inputs 2>/dev/null | grep -q '^[0-9]\+' \
-             || PULSE_SERVER="unix:$sock" PULSE_COOKIE="$cookie" pactl list short source-outputs 2>/dev/null | grep -q '^[0-9]\+' ; then
+             || PULSE_SERVER="unix:$sock" PULSE_COOKIE="$cookie" pactl list short sink-inputs 2>/dev/null | grep -q '^[0-9][0-9]*' \
+             || PULSE_SERVER="unix:$sock" PULSE_COOKIE="$cookie" pactl list short source-outputs 2>/dev/null | grep -q '^[0-9][0-9]*' ; then
             echo 1; return
           fi
         else
@@ -472,8 +483,8 @@ $rest
 EOF
             continue; }
           if PULSE_SERVER="unix:$sock" pactl list sinks 2>/dev/null | grep -qi -m1 '^[[:space:]]*State:[[:space:]]*RUNNING' \
-             || PULSE_SERVER="unix:$sock" pactl list short sink-inputs 2>/dev/null | grep -q '^[0-9]\+' \
-             || PULSE_SERVER="unix:$sock" pactl list short source-outputs 2>/dev/null | grep -q '^[0-9]\+' ; then
+             || PULSE_SERVER="unix:$sock" pactl list short sink-inputs 2>/dev/null | grep -q '^[0-9][0-9]*' \
+             || PULSE_SERVER="unix:$sock" pactl list short source-outputs 2>/dev/null | grep -q '^[0-9][0-9]*' ; then
             echo 1; return
           fi
         fi
@@ -598,7 +609,9 @@ audio_parse_secs() {
         3) h=$1; m=$2; s=$3 ;;
         *) return 1 ;;
       esac
-      printf '%s\n' $(( ${h:-0}*3600 + ${m:-0}*60 + ${s:-0} ))
+      h_val=${h:-0}; m_val=${m:-0}; s_val=${s:-0}
+      result=$(expr $h_val \* 3600 + $m_val \* 60 + $s_val)
+      printf '%s\n' "$result"
       return 0
       ;;
     *[!0-9]*)
@@ -606,9 +619,9 @@ audio_parse_secs() {
         [0-9]*s|[0-9]*sec|[0-9]*secs|[0-9]*second|[0-9]*seconds)
           n=$(printf '%s' "$norm" | sed -n 's/^\([0-9][0-9]*\).*/\1/p'); printf '%s\n' "$n"; return 0 ;;
         [0-9]*m|[0-9]*min|[0-9]*mins|[0-9]*minute|[0-9]*minutes)
-          n=$(printf '%s' "$norm" | sed -n 's/^\([0-9][0-9]*\).*/\1/p'); printf '%s\n' $((n*60)); return 0 ;;
+          n=$(printf '%s' "$norm" | sed -n 's/^\([0-9][0-9]*\).*/\1/p'); printf '%s\n' "$(expr $n \* 60)"; return 0 ;;
         [0-9]*h|[0-9]*hr|[0-9]*hrs|[0-9]*hour|[0-9]*hours)
-          n=$(printf '%s' "$norm" | sed -n 's/^\([0-9][0-9]*\).*/\1/p'); printf '%s\n' $((n*3600)); return 0 ;;
+          n=$(printf '%s' "$norm" | sed -n 's/^\([0-9][0-9]*\).*/\1/p'); printf '%s\n' "$(expr $n \* 3600)"; return 0 ;;
         *)
           tokens=$(printf '%s' "$norm" | sed 's/\([0-9][0-9]*[a-z][a-z]*\)/\1 /g')
           total=0; ok=0
@@ -617,11 +630,11 @@ audio_parse_secs() {
             u=$(printf '%s' "$t" | sed -n 's/^[0-9][0-9]*\([a-z][a-z]*\)$/\1/p')
             case "$u" in
               s|sec|secs|second|seconds) add=$n ;;
-              m|min|mins|minute|minutes) add=$((n*60)) ;;
-              h|hr|hrs|hour|hours)       add=$((n*3600)) ;;
+              m|min|mins|minute|minutes) add=$(expr $n \* 60) ;;
+              h|hr|hrs|hour|hours)       add=$(expr $n \* 3600) ;;
               *) return 1 ;;
             esac
-            total=$((total+add)); ok=1
+            total=$(expr $total + $add); ok=1
           done
           [ "$ok" -eq 1 ] 2>/dev/null || return 1
           printf '%s\n' "$total"
@@ -677,6 +690,40 @@ audio_exec_with_timeout() {
 }
 
 # --------------------------------------------------------------------
+# File size helper (portable across different stat implementations)
+# --------------------------------------------------------------------
+
+# Get file size in bytes using portable method
+# Input: file path
+# Output: file size in bytes to stdout
+# Returns: 0=success, 1=file not found or not readable
+file_size_bytes() {
+  file="$1"
+  [ -f "$file" ] || return 1
+  [ -r "$file" ] || return 1
+  wc -c < "$file" 2>/dev/null
+}
+
+# Extract clip duration from filename
+# Input: clip filename (e.g., "play_48KHz_30s_16b_2ch.wav")
+# Output: duration in seconds (e.g., "30") to stdout
+# Returns: 0=success, 1=unable to parse duration
+extract_clip_duration() {
+  filename="$1"
+  
+  # Extract duration field from pattern: _RATE_DURATIONs_BITS_CHANNELS.wav
+  # Use sed to match the exact 4-field structure
+  duration_str="$(printf '%s' "$filename" | sed -n 's/.*_[0-9.][0-9.]*KHz_\([0-9][0-9]*\)s_[0-9][0-9]*b_[0-9][0-9]*ch\.wav$/\1/p')"
+  
+  if [ -z "$duration_str" ]; then
+    return 1
+  fi
+  
+  printf '%s\n' "$duration_str"
+  return 0
+}
+
+# --------------------------------------------------------------------
 # Backend chain + minimal ALSA capture picker (for fallback in run.sh)
 # --------------------------------------------------------------------
 
@@ -701,17 +748,6 @@ build_backend_chain() {
 # Pick a plausible ALSA capture device.
 # Returns something like hw:0,0 if available, else "default".
 alsa_pick_capture() {
-  line="$(arecord -l 2>/dev/null | sed -n 's/^card \([0-9][0-9]*\):.*device \([0-9][0-9]*\):.*/\1 \2/p' | head -n1)"
-  if [ -n "$line" ]; then
-    set -- "$line"
-    printf 'hw:%s,%s\n' "$1" "$2"
-    return 0
-  fi
-  printf '%s\n' "default"
-  return 0
-}
-
-alsa_pick_capture() {
   command -v arecord >/dev/null 2>&1 || return 1
   # Prefer the first real capture device from `arecord -l`
   arecord -l 2>/dev/null | awk '
@@ -727,7 +763,7 @@ alsa_pick_capture() {
 # Prefer virtual capture PCMs (PipeWire/Pulse) over raw hw: when a sound server is present
 alsa_pick_virtual_pcm() {
   command -v arecord >/dev/null 2>&1 || return 1
-  pcs="$(arecord -L 2>/dev/null | sed -n 's/^[[:space:]]*\([[:alnum:]_]\+\)[[:space:]]*$/\1/p')"
+  pcs="$(arecord -L 2>/dev/null | sed -n 's/^[[:space:]]*\([[:alnum:]_][[:alnum:]_]*\)[[:space:]]*$/\1/p')"
   for pcm in pipewire pulse default; do
     if printf '%s\n' "$pcs" | grep -m1 -x "$pcm" >/dev/null 2>&1; then
       printf '%s\n' "$pcm"
@@ -748,10 +784,566 @@ audio_check_clips_available() {
   for fmt in $formats; do
     for dur in $durations; do
       clip="$(resolve_clip "$fmt" "$dur")"
-      if [ -n "$clip" ] && [ ! -s "$clip" ]; then
+      # If resolve_clip returns empty string or clip doesn't exist/is empty
+      if [ -z "$clip" ] || [ ! -s "$clip" ]; then
         return 1  # At least one clip missing or empty
       fi
     done
   done
   return 0  # All clips present and non-empty
+}
+
+# ---------- New Clip Discovery Functions (for 20-clip enhancement) ----------
+
+# ---------- Config Mapping ----------
+# Provides stable, deterministic mapping from Config1-Config20 to specific
+# audio format test cases. This ensures reproducible test coverage across
+# different systems and releases.
+#
+# Config numbers map to specific sample rate, bit depth, and channel combinations:
+#   Config1  → 16 KHz, 16-bit, 2ch    Config11 → 352.8 KHz, 32-bit, 1ch
+#   Config2  → 176.4 KHz, 24-bit, 1ch Config12 → 384 KHz, 32-bit, 2ch
+#   Config3  → 176.4 KHz, 32-bit, 6ch Config13 → 44.1 KHz, 16-bit, 1ch
+#   Config4  → 192 KHz, 16-bit, 6ch   Config14 → 44.1 KHz, 8-bit, 6ch
+#   Config5  → 192 KHz, 32-bit, 8ch   Config15 → 48 KHz, 8-bit, 2ch
+#   Config6  → 22.05 KHz, 8-bit, 1ch  Config16 → 48 KHz, 8-bit, 8ch
+#   Config7  → 24 KHz, 24-bit, 6ch    Config17 → 88.2 KHz, 16-bit, 8ch
+#   Config8  → 24 KHz, 32-bit, 8ch    Config18 → 88.2 KHz, 24-bit, 2ch
+#   Config9  → 32 KHz, 16-bit, 2ch    Config19 → 8 KHz, 8-bit, 1ch
+#   Config10 → 32 KHz, 8-bit, 8ch     Config20 → 96 KHz, 24-bit, 6ch
+
+# Translate Config number to test case name
+# Returns descriptive test case name for given config number
+map_config_to_testcase() {
+  config_num="$1"
+  case "$config_num" in
+    1)  printf 'play_16KHz_16b_2ch\n' ;;
+    2)  printf 'play_176.4KHz_24b_1ch\n' ;;
+    3)  printf 'play_176.4KHz_32b_6ch\n' ;;
+    4)  printf 'play_192KHz_16b_6ch\n' ;;
+    5)  printf 'play_192KHz_32b_8ch\n' ;;
+    6)  printf 'play_22.05KHz_8b_1ch\n' ;;
+    7)  printf 'play_24KHz_24b_6ch\n' ;;
+    8)  printf 'play_24KHz_32b_8ch\n' ;;
+    9)  printf 'play_32KHz_16b_2ch\n' ;;
+    10) printf 'play_32KHz_8b_8ch\n' ;;
+    11) printf 'play_352.8KHz_32b_1ch\n' ;;
+    12) printf 'play_384KHz_32b_2ch\n' ;;
+    13) printf 'play_44.1KHz_16b_1ch\n' ;;
+    14) printf 'play_44.1KHz_8b_6ch\n' ;;
+    15) printf 'play_48KHz_8b_2ch\n' ;;
+    16) printf 'play_48KHz_8b_8ch\n' ;;
+    17) printf 'play_88.2KHz_16b_8ch\n' ;;
+    18) printf 'play_88.2KHz_24b_2ch\n' ;;
+    19) printf 'play_8KHz_8b_1ch\n' ;;
+    20) printf 'play_96KHz_24b_6ch\n' ;;
+    *) return 1 ;;
+  esac
+  return 0
+}
+
+# Discover all audio clip files in the clips directory
+# Outputs newline-separated list of clip filenames (basenames only) to stdout
+# Logs diagnostic messages to stderr
+# Exit codes: 0=success, 1=directory not found or no clips
+discover_audio_clips() {
+  clips_dir="${AUDIO_CLIPS_BASE_DIR:-AudioClips}"
+  
+  # Check directory exists
+  if [ ! -d "$clips_dir" ]; then
+    log_error "Clips directory not found: $clips_dir" >&2
+    return 1
+  fi
+  
+  # Find .wav files (only in top level, not recursive)
+  clips="$(find "$clips_dir" -maxdepth 1 -name "*.wav" -type f 2>/dev/null | sort)"
+  
+  # Check if any clips found
+  if [ -z "$clips" ]; then
+    log_error "No .wav files found in $clips_dir" >&2
+    return 1
+  fi
+  
+  # Output basenames only to stdout
+  for clip in $clips; do
+    basename "$clip"
+  done
+  return 0
+}
+
+# Parse clip filename to extract metadata
+# Input: yesterday_48KHz_30s_16b_2ch.wav
+# Output: rate=48KHz bits=16b channels=2ch (space-separated key=value pairs)
+# Returns: 0=success, 1=parse failure
+parse_clip_metadata() {
+  filename="$1"
+  
+  # Extract rate, bits, and channels in one sed call
+  # Pattern matches exact 4-field structure from end: _RATE_DURATIONs_BITS_CHANNELS.wav
+  # Anchored to .wav extension to ensure we're matching the correct fields
+  metadata="$(printf '%s' "$filename" | sed -n 's/.*_\([0-9.][0-9.]*KHz\)_\([0-9][0-9]*s\)_\([0-9][0-9]*b\)_\([0-9][0-9]*ch\)\.wav$/\1 \3 \4/p')"
+  
+  # Validate extraction succeeded
+  if [ -z "$metadata" ]; then
+    log_warn "Cannot parse metadata from: $filename (skipping)"
+    return 1
+  fi
+  
+  # Split extracted fields (rate bits channels)
+  set -- $metadata
+  rate="$1"; bits="$2"; channels="$3"
+  
+  # Validate all components present
+  if [ -z "$rate" ] || [ -z "$bits" ] || [ -z "$channels" ]; then
+    log_warn "Cannot parse metadata from: $filename (skipping)"
+    return 1
+  fi
+  
+  printf 'rate=%s bits=%s channels=%s\n' "$rate" "$bits" "$channels"
+  return 0
+}
+
+# Generate test case name from clip filename
+# Input: yesterday_48KHz_30s_16b_2ch.wav
+# Output: play_48KHz_16b_2ch
+# Returns: 0=success, 1=parse failure
+generate_clip_testcase_name() {
+  filename="$1"
+  
+  # Parse metadata (returns "rate=48KHz bits=16b channels=2ch")
+  metadata="$(parse_clip_metadata "$filename")" || return 1
+  
+  # Extract values using positional parameters and prefix stripping
+  set -- $metadata
+  rate="${1#rate=}"
+  bits="${2#bits=}"
+  channels="${3#channels=}"
+  
+  # Generate test case name
+  printf 'play_%s_%s_%s\n' "$rate" "$bits" "$channels"
+  return 0
+}
+
+# Resolve clip file path from test case name or clip name
+# Input: play_48KHz_16b_2ch OR 48KHz_16b_2ch OR yesterday_48KHz_30s_16b_2ch.wav
+# Output: AudioClips/yesterday_48KHz_30s_16b_2ch.wav
+# Returns: 0=success, 1=not found
+resolve_clip_by_name() {
+  name="$1"
+  clips_dir="${AUDIO_CLIPS_BASE_DIR:-AudioClips}"
+  
+  # If name already looks like a filename, try direct path
+  if printf '%s' "$name" | grep -F -q -- '.wav'; then
+    clip_path="$clips_dir/$name"
+    if [ -f "$clip_path" ]; then
+      printf '%s\n' "$clip_path"
+      return 0
+    fi
+  fi
+  
+  # Strip "play_" prefix if present
+  search_name="$(printf '%s' "$name" | sed 's/^play_//')"
+  
+  # Search for matching clip using literal string matching
+  for clip_file in "$clips_dir"/*.wav; do
+    [ -f "$clip_file" ] || continue
+    clip_basename="$(basename "$clip_file")"
+    
+    # Check if clip contains the search pattern (literal string match)
+    if printf '%s' "$clip_basename" | grep -F -q -- "$search_name"; then
+      printf '%s\n' "$clip_file"
+      return 0
+    fi
+  done
+  
+  return 1
+}
+
+# Validate clip name against available clips
+# Input: requested_name (e.g., play_48KHz_16b_2ch OR Config1), available_clips (list)
+# Output: matching clip filename to stdout
+# Logs error messages to stderr
+# Returns: 0=found, 1=not found
+validate_clip_name() {
+  requested_name="$1"
+  available_clips="$2"
+  
+  # Check if requested_name is a generic config name (Config1, Config2, etc.)
+  # Support both "Config1" and "config1" (case-insensitive)
+  config_num="$(printf '%s' "$requested_name" | sed -n 's/^[Cc]onfig\([0-9][0-9]*\)$/\1/p')"
+  
+  if [ -n "$config_num" ]; then
+    # Generic config name - map to clip by index (1-based)
+    # Count total clips first using POSIX-compliant approach
+    set -- $available_clips
+    idx=$#
+    
+    # Validate config number is positive and within range
+    if [ "$config_num" -le 0 ] 2>/dev/null || [ "$config_num" -gt "$idx" ] 2>/dev/null; then
+      log_error "Invalid config number: $requested_name. Available range: Config1 to Config$idx. Please check again." >&2
+      return 1
+    fi
+    
+    # Get clip by index (1-based) using POSIX-compliant approach
+    current_idx=0
+    for clip in $available_clips; do
+      current_idx=$(expr $current_idx + 1)
+      if [ "$current_idx" -eq "$config_num" ]; then
+        printf '%s\n' "$clip"
+        return 0
+      fi
+    done
+    
+    # This shouldn't happen, but just in case
+    log_error "Invalid config number: $requested_name. Available range: Config1 to Config$idx. Please check again." >&2
+    return 1
+  fi
+  
+  # Try exact match for specific clip names (play_48KHz_16b_2ch format)
+  for clip in $available_clips; do
+    test_name="$(generate_clip_testcase_name "$clip" 2>/dev/null)" || continue
+    if [ "$test_name" = "$requested_name" ]; then
+      printf '%s\n' "$clip"
+      return 0
+    fi
+  done
+  
+  # No match found - count available clips for helpful message using POSIX-compliant approach
+  set -- $available_clips
+  idx=$#
+  
+  # No match found - provide helpful error message with range
+  log_error "Wrong clip name: '$requested_name'. Available range: Config1 to Config$idx. Please check again." >&2
+  return 1
+}
+
+# Input: filter (space-separated patterns), available_clips (list)
+# Output: filtered clip list
+# Returns: 0=success, 1=no matches
+apply_clip_filter() {
+  filter="$1"
+  available_clips="$2"
+  
+  # If no filter, return all clips
+  if [ -z "$filter" ]; then
+    printf '%s\n' "$available_clips"
+    return 0
+  fi
+  
+  # Apply filter
+  filtered=""
+  for clip in $available_clips; do
+    for pattern in $filter; do
+      # Match against filename or test case name
+      test_name="$(generate_clip_testcase_name "$clip" 2>/dev/null)" || continue
+      if printf '%s %s' "$clip" "$test_name" | grep -F -q -- "$pattern"; then
+        filtered="$filtered $clip"
+        break
+      fi
+    done
+  done
+  
+  # Remove leading space
+  filtered="$(printf '%s' "$filtered" | sed 's/^ //')"
+  
+  # Check if filter matched anything
+  if [ -z "$filtered" ]; then
+    log_error "Filter '$filter' matched no clips" >&2
+    log_info "Available clips:" >&2
+    for clip in $available_clips; do
+      log_info "  - $(basename "$clip")" >&2
+    done
+    return 1
+  fi
+  
+  printf '%s\n' "$filtered"
+  return 0
+}
+
+# Validate clip file is accessible and non-empty
+# Input: clip_path
+# Returns: 0=valid, 1=invalid
+validate_clip_file() {
+  clip_path="$1"
+  
+  # Check exists
+  if [ ! -f "$clip_path" ]; then
+    log_error "Clip file not found: $clip_path"
+    return 1
+  fi
+  
+  # Check readable
+  if [ ! -r "$clip_path" ]; then
+    log_error "Clip file not readable: $clip_path"
+    return 1
+  fi
+  
+  # Check not empty using portable file size helper
+  size="$(file_size_bytes "$clip_path")"
+  if [ -z "$size" ] || [ "$size" -le 0 ] 2>/dev/null; then
+    log_error "Clip file is empty: $clip_path"
+    return 1
+  fi
+  
+  return 0
+}
+
+# Discover and filter clips based on user input
+# Input: clip_names (explicit list), clip_filter (pattern filter)
+# Output: final list of clip filenames to test (to stdout)
+# Logs error messages to stderr
+# Returns: 0=success, 1=no valid clips
+discover_and_filter_clips() {
+  clip_names="$1"
+  clip_filter="$2"
+  
+  # Discover all available clips (logs go to stderr automatically)
+  available_clips="$(discover_audio_clips)" || {
+    log_error "Failed to discover audio clips" >&2
+    return 1
+  }
+  
+  # If explicit clip names provided, validate and use them
+  if [ -n "$clip_names" ]; then
+    validated=""
+    failed_names=""
+    
+    for name in $clip_names; do
+      # Validate clip name - let error messages display to stderr
+      if clip="$(validate_clip_name "$name" "$available_clips")"; then
+        validated="$validated $clip"
+      else
+        failed_names="$failed_names $name"
+      fi
+    done
+    
+    validated="$(printf '%s' "$validated" | sed 's/^ //')"
+    failed_names="$(printf '%s' "$failed_names" | sed 's/^ //')"
+    
+    if [ -z "$validated" ]; then
+      # Don't repeat the error - validate_clip_name already showed it
+      return 1
+    fi
+    
+    # Warn about any failed names (only if there are some valid ones)
+    if [ -n "$failed_names" ]; then
+      log_warn "Invalid clip/config names skipped: $failed_names" >&2
+    fi
+    
+    printf '%s\n' "$validated"
+    return 0
+  fi
+  
+  # Apply filter if provided
+  if [ -n "$clip_filter" ]; then
+    filtered="$(apply_clip_filter "$clip_filter" "$available_clips" 2>/dev/null)" || {
+      log_error "Filter did not match any clips" >&2
+      return 1
+    }
+    printf '%s\n' "$filtered"
+    return 0
+  fi
+  
+  # No filter - return all clips
+  printf '%s\n' "$available_clips"
+  return 0
+}
+
+# ---------- Record Configuration Functions (10-config enhancement) ----------
+
+# Discover all available record configurations
+# Returns: space-separated list of record_config1 through record_config10
+# Exit codes: 0=success (always succeeds - configs are predefined)
+discover_record_configs() {
+  printf '%s\n' "record_config1 record_config2 record_config3 record_config4 record_config5 record_config6 record_config7 record_config8 record_config9 record_config10"
+  return 0
+}
+
+# Get recording parameters for a specific config
+# Input: config_name (e.g., record_config1, record_8KHz_1ch)
+# Output: "rate channels" (e.g., "8000 1")
+# Returns: 0=success, 1=invalid config
+get_record_config_params() {
+  config_name="$1"
+  case "$config_name" in
+    record_config1|record_8KHz_1ch)      printf '%s\n' "8000 1" ;;
+    record_config2|record_16KHz_1ch)     printf '%s\n' "16000 1" ;;
+    record_config3|record_16KHz_2ch)     printf '%s\n' "16000 2" ;;
+    record_config4|record_24KHz_1ch)     printf '%s\n' "24000 1" ;;
+    record_config5|record_32KHz_2ch)     printf '%s\n' "32000 2" ;;
+    record_config6|record_44.1KHz_2ch)   printf '%s\n' "44100 2" ;;
+    record_config7|record_48KHz_2ch)     printf '%s\n' "48000 2" ;;
+    record_config8|record_48KHz_6ch)     printf '%s\n' "48000 6" ;;
+    record_config9|record_96KHz_2ch)     printf '%s\n' "96000 2" ;;
+    record_config10|record_96KHz_6ch)    printf '%s\n' "96000 6" ;;
+    *) return 1 ;;
+  esac
+  return 0
+}
+
+# Generate descriptive test case name from config name
+# Input: record_config1
+# Output: record_8KHz_1ch
+# Returns: 0=success, 1=invalid config
+generate_record_testcase_name() {
+  config_name="$1"
+  case "$config_name" in
+    record_config1)  printf '%s\n' "record_8KHz_1ch" ;;
+    record_config2)  printf '%s\n' "record_16KHz_1ch" ;;
+    record_config3)  printf '%s\n' "record_16KHz_2ch" ;;
+    record_config4)  printf '%s\n' "record_24KHz_1ch" ;;
+    record_config5)  printf '%s\n' "record_32KHz_2ch" ;;
+    record_config6)  printf '%s\n' "record_44.1KHz_2ch" ;;
+    record_config7)  printf '%s\n' "record_48KHz_2ch" ;;
+    record_config8)  printf '%s\n' "record_48KHz_6ch" ;;
+    record_config9)  printf '%s\n' "record_96KHz_2ch" ;;
+    record_config10) printf '%s\n' "record_96KHz_6ch" ;;
+    *) printf '%s\n' "$config_name" ;;  # Already descriptive or unknown
+  esac
+  return 0
+}
+
+# Generate output filename with parameters
+# Input: testcase_base (e.g., "record_short"), rate (e.g., "48000"), channels (e.g., "2")
+# Output: record_short_48KHz_2ch.wav
+# Returns: 0=success
+generate_record_filename() {
+  testcase_base="$1"
+  rate="$2"
+  channels="$3"
+  
+  # Convert rate to KHz format
+  rate_khz="$rate"
+  case "$rate" in
+    8000)  rate_khz="8KHz" ;;
+    16000) rate_khz="16KHz" ;;
+    22050) rate_khz="22.05KHz" ;;
+    24000) rate_khz="24KHz" ;;
+    32000) rate_khz="32KHz" ;;
+    44100) rate_khz="44.1KHz" ;;
+    48000) rate_khz="48KHz" ;;
+    88200) rate_khz="88.2KHz" ;;
+    96000) rate_khz="96KHz" ;;
+    176400) rate_khz="176.4KHz" ;;
+    192000) rate_khz="192KHz" ;;
+    352800) rate_khz="352.8KHz" ;;
+    384000) rate_khz="384KHz" ;;
+    *) rate_khz="${rate}Hz" ;;  # Fallback for unknown rates
+  esac
+  
+  printf '%s_%s_%sch.wav\n' "$testcase_base" "$rate_khz" "$channels"
+  return 0
+}
+
+# Validate record config name
+# Input: requested_name (e.g., record_config1, record_8KHz_1ch)
+# Returns: 0=valid, 1=invalid (with helpful error message)
+validate_record_config_name() {
+  requested_name="$1"
+  
+  # Validate by checking if get_record_config_params() supports it
+  # This eliminates redundant pattern matching that could be misleading
+  if get_record_config_params "$requested_name" >/dev/null 2>&1; then
+    return 0
+  fi
+  
+  log_error "Invalid record config name: $requested_name" >&2
+  log_error "Available configs: record_config1-record_config10, record_8KHz_1ch, record_16KHz_1ch, record_16KHz_2ch, record_24KHz_1ch, record_32KHz_2ch, record_44.1KHz_2ch, record_48KHz_2ch, record_48KHz_6ch, record_96KHz_2ch, record_96KHz_6ch" >&2
+  return 1
+}
+
+# Apply filter to record configs
+# Input: filter (space-separated patterns), available_configs (list)
+# Output: filtered config list
+# Returns: 0=success, 1=no matches
+apply_record_config_filter() {
+  filter="$1"
+  available_configs="$2"
+  
+  # If no filter, return all configs
+  if [ -z "$filter" ]; then
+    printf '%s\n' "$available_configs"
+    return 0
+  fi
+  
+  # Apply filter
+  filtered=""
+  for config in $available_configs; do
+    # Generate descriptive name for matching
+    desc_name="$(generate_record_testcase_name "$config" 2>/dev/null)" || continue
+    
+    for pattern in $filter; do
+      # Match against config name or descriptive name
+      if printf '%s %s' "$config" "$desc_name" | grep -F -q -- "$pattern"; then
+        filtered="$filtered $config"
+        break
+      fi
+    done
+  done
+  
+  # Remove leading space
+  filtered="$(printf '%s' "$filtered" | sed 's/^ //')"
+  
+  # Check if filter matched anything
+  if [ -z "$filtered" ]; then
+    log_error "Filter '$filter' matched no record configs" >&2
+    log_info "Available configs: record_config1 to record_config10" >&2
+    return 1
+  fi
+  
+  printf '%s\n' "$filtered"
+  return 0
+}
+
+# Discover and filter record configs based on user input
+# Input: config_names (explicit list), config_filter (pattern filter)
+# Output: final list of config names to test (to stdout)
+# Logs error messages to stderr
+# Returns: 0=success, 1=no valid configs
+discover_and_filter_record_configs() {
+  config_names="$1"
+  config_filter="$2"
+  
+  # Get all available configs
+  available_configs="$(discover_record_configs)"
+  
+  # If explicit config names provided, validate and use them
+  if [ -n "$config_names" ]; then
+    validated=""
+    failed_names=""
+    
+    for name in $config_names; do
+      if validate_record_config_name "$name"; then
+        validated="$validated $name"
+      else
+        failed_names="$failed_names $name"
+      fi
+    done
+    
+    validated="$(printf '%s' "$validated" | sed 's/^ //')"
+    failed_names="$(printf '%s' "$failed_names" | sed 's/^ //')"
+    
+    if [ -z "$validated" ]; then
+      return 1
+    fi
+    
+    # Warn about any failed names (only if there are some valid ones)
+    if [ -n "$failed_names" ]; then
+      log_warn "Invalid record config names skipped: $failed_names" >&2
+    fi
+    
+    printf '%s\n' "$validated"
+    return 0
+  fi
+  
+  # Apply filter if provided
+  if [ -n "$config_filter" ]; then
+    filtered="$(apply_record_config_filter "$config_filter" "$available_configs")" || return 1
+    printf '%s\n' "$filtered"
+    return 0
+  fi
+  
+  # No filter - return all configs
+  printf '%s\n' "$available_configs"
+  return 0
 }
