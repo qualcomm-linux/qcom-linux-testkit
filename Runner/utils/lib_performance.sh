@@ -864,3 +864,1284 @@ perf_kpi_check_previous_reboot() {
 
     perf_kpi_reboot_state_save "$state_file" "$PERF_KPI_BOOT_ID" "$PERF_KPI_UPTIME_SEC" "0" "$PERF_KPI_STATE_ITER_DONE"
 }
+
+# ---------------------------------------------------------------------------
+# Small math / parsing helpers (POSIX)
+# ---------------------------------------------------------------------------
+perf_is_number() {
+    printf '%s\n' "$1" | awk '
+      BEGIN{ok=0}
+      /^[0-9]+(\.[0-9]+)?$/ {ok=1}
+      END{exit(ok?0:1)}'
+}
+
+perf_avg_file() {
+    f=$1
+    [ -s "$f" ] || { echo ""; return 0; }
+
+    awk '
+      /^[0-9]+(\.[0-9]+)?$/ {sum+=$1; n++}
+      END { if (n>0) printf("%.3f\n", sum/n); else print "" }
+    ' "$f"
+}
+
+perf_pct_change_lower_better() {
+    cur=$1
+    base=$2
+    if ! perf_is_number "$cur" || ! perf_is_number "$base"; then
+        echo ""
+        return 0
+    fi
+    awk -v c="$cur" -v b="$base" '
+      BEGIN{
+        if (b<=0) { print ""; exit }
+        p=((c-b)/b)*100.0
+        printf("%.2f\n", p)
+      }'
+}
+
+perf_pct_change_higher_better() {
+    cur=$1
+    base=$2
+    if ! perf_is_number "$cur" || ! perf_is_number "$base"; then
+        echo ""
+        return 0
+    fi
+    awk -v c="$cur" -v b="$base" '
+      BEGIN{
+        if (b<=0) { print ""; exit }
+        p=((b-c)/b)*100.0
+        printf("%.2f\n", p)
+      }'
+}
+
+perf_metric_check() {
+    name=$1
+    cur=$2
+    base=$3
+    direction=$4
+    delta=$5
+
+    if [ -z "$base" ]; then
+        log_warn "$name: baseline missing → skipping compare (current=$cur)"
+        return 2
+    fi
+
+    if ! perf_is_number "$cur" || ! perf_is_number "$base"; then
+        log_warn "$name: non-numeric compare (current=$cur baseline=$base) → skipping"
+        return 2
+    fi
+
+    allowed_pct=$(printf '%s\n' "$delta" | awk '{printf("%.2f\n",$1*100.0)}')
+
+    case "$direction" in
+        lower) pct=$(perf_pct_change_lower_better "$cur" "$base") ;;
+        higher) pct=$(perf_pct_change_higher_better "$cur" "$base") ;;
+        *)
+            log_warn "$name: unknown direction '$direction' → skipping"
+            return 2
+            ;;
+    esac
+
+    if [ -z "$pct" ]; then
+        log_warn "$name: could not compute delta (current=$cur baseline=$base) → skipping"
+        return 2
+    fi
+
+    pass=$(awk -v p="$pct" -v a="$allowed_pct" 'BEGIN{ if (p <= a) print 1; else print 0 }')
+    if [ "$pass" = "1" ]; then
+        log_info "$name: PASS current=$cur baseline=$base regression=${pct}% (allowed<=${allowed_pct}%)"
+        return 0
+    fi
+
+    log_error "$name: FAIL current=$cur baseline=$base regression=${pct}% (allowed<=${allowed_pct}%)"
+    return 1
+}
+
+perf_baseline_get() {
+    key=$1
+    file=$2
+    [ -f "$file" ] || { echo ""; return 0; }
+ 
+    awk -v k="$key" '
+      {
+        line=$0
+        sub(/^[ \t]*/, "", line)
+ 
+        # exact prefix match on key (string compare, not regex)
+        kl = length(k)
+        if (substr(line, 1, kl) != k) next
+ 
+        rest = substr(line, kl + 1)
+ 
+        # allow optional spaces then ":" or "=" then optional spaces
+        if (rest ~ /^[ \t]*[=:][ \t]*/) {
+          sub(/^[ \t]*[=:][ \t]*/, "", rest)
+          sub(/\r$/, "", rest)
+          print rest
+          exit
+        }
+      }
+    ' "$file" 2>/dev/null
+}
+
+# ---------------------------------------------------------------------------
+# Sysbench helpers (run + parse + average + optional CSV)
+# ---------------------------------------------------------------------------
+
+# Run a command and stream output to console while also writing to a logfile.
+# POSIX-safe: uses mkfifo + tee to preserve command exit code.
+# Usage: perf_run_cmd_tee /path/to/log -- cmd args...
+perf_run_cmd_tee() {
+    log_file=$1
+    shift
+ 
+    [ -n "$log_file" ] || return 1
+ 
+    dir=$(dirname "$log_file")
+    mkdir -p "$dir" 2>/dev/null || true
+ 
+    fifo="${log_file}.fifo.$$"
+    rm -f "$fifo" 2>/dev/null || true
+ 
+    if ! mkfifo "$fifo" 2>/dev/null; then
+        # Fallback: no fifo support → just log (no live console)
+        "$@" >"$log_file" 2>&1
+        return $?
+    fi
+ 
+    # Start tee first (reader)
+    tee "$log_file" <"$fifo" &
+    tee_pid=$!
+ 
+    # Run command, write both stdout+stderr into FIFO (writer)
+    "$@" >"$fifo" 2>&1
+    rc=$?
+ 
+    # Give tee a short window to drain+exit; then kill if still alive (avoid hangs)
+    i=0
+    while kill -0 "$tee_pid" 2>/dev/null; do
+        i=$((i + 1))
+        [ "$i" -ge 5 ] && break
+        sleep 1
+    done
+ 
+    if kill -0 "$tee_pid" 2>/dev/null; then
+        # tee is still alive unexpectedly → terminate and move on
+        kill "$tee_pid" 2>/dev/null || true
+        wait "$tee_pid" 2>/dev/null || true
+    else
+        wait "$tee_pid" 2>/dev/null || true
+    fi
+ 
+    rm -f "$fifo" 2>/dev/null || true
+    return $rc
+}
+
+# Parse total time (sec) from sysbench 1.0+ output.
+# Supports both:
+#   "total time: 30.0009s"
+#   "total time taken by event execution: 29.9943s"
+perf_sysbench_parse_time_sec() {
+    log_file=$1
+    [ -f "$log_file" ] || { echo ""; return 0; }
+
+    v=$(
+        sed -n \
+          -e 's/^[[:space:]]*total time taken by event execution:[[:space:]]*\([0-9.][0-9.]*\)s.*/\1/p' \
+          -e 's/^[[:space:]]*total time:[[:space:]]*\([0-9.][0-9.]*\)s.*/\1/p' \
+          "$log_file" 2>/dev/null | head -n 1
+    )
+    printf '%s' "$v"
+}
+
+# Parse memory throughput (MB/sec) from sysbench memory output:
+#   "... transferred (2486.38 MB/sec)"
+# Also tolerates MiB/sec
+perf_sysbench_parse_mem_mbps() {
+    log_file=$1
+    [ -f "$log_file" ] || { echo ""; return 0; }
+
+    v=$(
+        sed -n \
+          -e 's/.*(\([0-9.][0-9.]*\)[[:space:]]*MB\/sec).*/\1/p' \
+          -e 's/.*(\([0-9.][0-9.]*\)[[:space:]]*MiB\/sec).*/\1/p' \
+	  -e 's/.*(\([0-9.][0-9.]*\)[[:space:]]*MB\/s).*/\1/p' \
+	  -e 's/.*(\([0-9.][0-9.]*\)[[:space:]]*MiB\/s).*/\1/p' \
+          "$log_file" 2>/dev/null | head -n 1
+    )
+    printf '%s' "$v"
+}
+
+# Append a numeric value to a values file (one per line).
+perf_values_append() {
+    values_file=$1
+    val=$2
+    [ -n "$values_file" ] || return 0
+    [ -n "$val" ] || return 0
+    printf '%s\n' "$val" >>"$values_file" 2>/dev/null || true
+}
+
+# Compute average from values file. Prints avg or empty.
+perf_values_avg() {
+    values_file=$1
+    [ -s "$values_file" ] || { echo ""; return 0; }
+
+    awk '
+      $1 ~ /^[0-9.]+$/ { s += $1; n++ }
+      END { if (n > 0) printf("%.3f\n", s/n); }
+    ' "$values_file" 2>/dev/null
+}
+
+# Optional CSV append (only if CSV_FILE is non-empty).
+# CSV format:
+# timestamp,test,threads,metric,iteration,value
+perf_sysbench_csv_append() {
+    csv=$1
+    test=$2
+    threads=$3
+    metric=$4
+    iteration=$5
+    value=$6
+    status=${7:-}
+    baseline=${8:-}
+    goal=${9:-}
+    op=${10:-}
+    score_pct=${11:-}
+    delta=${12:-}
+ 
+    [ -n "$csv" ] || return 0
+    [ -n "$value" ] || return 0
+ 
+    dir=$(dirname "$csv")
+    mkdir -p "$dir" 2>/dev/null || true
+ 
+    if [ ! -f "$csv" ] || [ ! -s "$csv" ]; then
+        # Backward-compatible: old columns first, new columns appended.
+        echo "timestamp,test,threads,metric,iteration,value,status,baseline,goal,op,score_pct,delta" >"$csv"
+    fi
+ 
+    if command -v nowstamp >/dev/null 2>&1; then
+        ts=$(nowstamp)
+    else
+        ts=$(date "+%Y-%m-%d %H:%M:%S" 2>/dev/null || echo "unknown")
+    fi
+ 
+    # Always write all columns; empty fields are OK.
+    echo "$ts,$test,$threads,$metric,$iteration,$value,$status,$baseline,$goal,$op,$score_pct,$delta" >>"$csv" 2>/dev/null || true
+}
+
+# ---------------------------------------------------------------------------
+# Sysbench helpers
+# ---------------------------------------------------------------------------
+# Helper: extract "key=value" from a single line of space-separated kv tokens.
+kv_get() {
+  line=$1
+  key=$2
+  printf "%s\n" "$line" | awk -v k="$key" '
+    {
+      for (i=1; i<=NF; i++) {
+        split($i, a, "=")
+        if (a[1] == k) { print a[2]; exit }
+      }
+    }'
+}
+
+# helper: extract key=value tokens from perf_sysbench_gate_eval_line output (no function def)
+kv() {
+  line=$1
+  key=$2
+
+  printf "%s\n" "$line" | awk -v k="$key" '
+    {
+      for (i = 1; i <= NF; i++) {
+        split($i, a, "=")
+        if (a[1] == k) {
+          print a[2]
+          exit
+        }
+      }
+    }'
+}
+
+run_sysbench_case() {
+  label=$1
+  out_log=$2
+  shift 2
+
+  log_info "Running $label → $out_log"
+  log_info "CMD: $*"
+
+  if command -v perf_run_cmd_tee >/dev/null 2>&1; then
+    perf_run_cmd_tee "$out_log" "$@"
+    return $?
+  fi
+
+  # fallback
+  "$@" >"$out_log" 2>&1
+  cat "$out_log"
+  return $?
+}
+
+# Convert MiB/s -> MB/s (MB = MiB * 1.048576) to match baseline units
+sysbench_mib_to_mb() {
+  v=$1
+  [ -z "$v" ] && { echo ""; return 0; }
+ 
+  if command -v perf_f_mul >/dev/null 2>&1; then
+    perf_f_mul "$v" "1.048576"
+  else
+    awk -v x="$v" 'BEGIN{printf "%.6f", x*1.048576}'
+  fi
+}
+
+perf_sysbench_extract_total_time_sec() {
+    f=$1
+    [ -f "$f" ] || { echo ""; return 0; }
+
+    v=$(grep -E 'total time taken by event execution:' "$f" 2>/dev/null \
+        | head -n 1 | sed 's/.*: *//; s/[[:space:]]*s.*$//')
+    if [ -z "$v" ]; then
+        v=$(grep -E '^total time:' "$f" 2>/dev/null \
+            | head -n 1 | sed 's/.*: *//; s/[[:space:]]*s.*$//')
+    fi
+
+    v=$(printf '%s\n' "$v" | awk '{print $1}')
+    if perf_is_number "$v"; then
+        printf '%.3f\n' "$v" 2>/dev/null || printf '%s\n' "$v"
+    else
+        echo ""
+    fi
+}
+
+perf_sysbench_extract_memory_mbps() {
+    f=$1
+    [ -f "$f" ] || { echo ""; return 0; }
+
+    line=$(grep -E 'transferred.*\([0-9.]+[[:space:]]*(MiB|MB)/(sec|s)\)' "$f" 2>/dev/null | head -n 1)
+    if [ -z "$line" ]; then
+        line=$(grep -E '\([0-9.]+[[:space:]]*(MiB|MB)/(sec|s)\)' "$f" 2>/dev/null | head -n 1)
+    fi
+    [ -n "$line" ] || { echo ""; return 0; }
+
+    v=$(printf '%s\n' "$line" \
+        | sed -n 's/.*(\([0-9.][0-9.]*\)[[:space:]]*\(MiB\|MB\)\/\(sec\|s\)).*/\1/p' \
+        | head -n 1)
+
+    if perf_is_number "$v"; then
+        printf '%.3f\n' "$v" 2>/dev/null || printf '%s\n' "$v"
+    else
+        echo ""
+    fi
+}
+
+perf_sysbench_cmd_prefix() {
+    core_list=$1
+    if [ -n "$core_list" ]; then
+        printf 'taskset -c %s' "$core_list"
+        return 0
+    fi
+    echo ""
+}
+
+perf_sysbench_run_to_log() {
+    prefix=$1
+    out_log=$2
+    shift 2
+
+    : >"$out_log" 2>/dev/null || true
+
+    if [ -n "$prefix" ]; then
+        # Intentionally word-split prefix (taskset -c ...)
+        # shellcheck disable=SC2086
+        set -- $prefix sysbench "$@" run
+        "$@" >"$out_log" 2>&1
+        return $?
+    fi
+
+    sysbench "$@" run >"$out_log" 2>&1
+}
+
+perf_sysbench_values_file() {
+    outdir=$1
+    tag=$2
+    printf '%s/%s.values' "$outdir" "$tag"
+}
+
+perf_sysbench_print_iterations() {
+    label=$1
+    values_file=$2
+
+    if [ ! -s "$values_file" ]; then
+        log_warn "$label: no iteration values recorded"
+        return 0
+    fi
+
+    i=1
+    while IFS= read -r v; do
+        [ -n "$v" ] || continue
+        log_info "$label: iteration $i = $v"
+        i=$((i + 1))
+    done <"$values_file"
+}
+
+perf_sysbench_run_n_and_avg_time() {
+    name=$1
+    outdir=$2
+    tag=$3
+    iterations=$4
+    prefix=$5
+    shift 5
+
+    values_file=$(perf_sysbench_values_file "$outdir" "$tag")
+    : >"$values_file" 2>/dev/null || true
+
+    i=1
+    while [ "$i" -le "$iterations" ]; do
+        log_file="$outdir/${tag}_iter${i}.log"
+        log_info "Running $name (iteration $i/$iterations) → $log_file"
+
+        perf_sysbench_run_to_log "$prefix" "$log_file" "$@"
+        rc=$?
+        if [ "$rc" -ne 0 ]; then
+            log_warn "$name: sysbench exited rc=$rc (continuing; will evaluate parsed metrics)"
+        fi
+
+        t=$(perf_sysbench_extract_total_time_sec "$log_file")
+        if [ -n "$t" ]; then
+            echo "$t" >>"$values_file" 2>/dev/null || true
+            log_info "$name: iteration $i time_sec=$t"
+        else
+            log_warn "$name: iteration $i could not parse time from $log_file"
+        fi
+
+        i=$((i + 1))
+    done
+
+    perf_avg_file "$values_file"
+}
+
+perf_sysbench_run_n_and_avg_mem_mbps() {
+    name=$1
+    outdir=$2
+    tag=$3
+    iterations=$4
+    prefix=$5
+    shift 5
+
+    values_file=$(perf_sysbench_values_file "$outdir" "$tag")
+    : >"$values_file" 2>/dev/null || true
+
+    i=1
+    while [ "$i" -le "$iterations" ]; do
+        log_file="$outdir/${tag}_iter${i}.log"
+        log_info "Running $name (iteration $i/$iterations) → $log_file"
+
+        perf_sysbench_run_to_log "$prefix" "$log_file" "$@"
+        rc=$?
+        if [ "$rc" -ne 0 ]; then
+            log_warn "$name: sysbench exited rc=$rc (continuing; will evaluate parsed metrics)"
+        fi
+
+        mbps=$(perf_sysbench_extract_memory_mbps "$log_file")
+        if [ -n "$mbps" ]; then
+            echo "$mbps" >>"$values_file" 2>/dev/null || true
+            log_info "$name: iteration $i mem_mbps=$mbps"
+        else
+            log_warn "$name: iteration $i could not parse mem MB/s from $log_file"
+        fi
+
+        i=$((i + 1))
+    done
+
+    perf_avg_file "$values_file"
+}
+
+# ---------------------------------------------------------------------------
+# Optional CSV helpers (per-iteration + average)
+# ---------------------------------------------------------------------------
+
+perf_csv_init() {
+    csv=$1
+    [ -n "$csv" ] || return 0
+
+    if [ ! -f "$csv" ]; then
+        echo "timestamp,test,metric,unit,threads,iteration,value,core_list,seed,time_sec,extra" >"$csv"
+        log_info "CSV created → $csv"
+        log_info "CSV header: timestamp,test,metric,unit,threads,iteration,value,core_list,seed,time_sec,extra"
+    fi
+}
+
+perf_csv_append_line() {
+    csv=$1
+    line=$2
+    [ -n "$csv" ] || return 0
+    [ -n "$line" ] || return 0
+
+    echo "$line" >>"$csv" 2>/dev/null || true
+    log_info "CSV: $line"
+}
+
+perf_sysbench_csv_append_values_and_avg() {
+    csv=$1
+    test=$2
+    metric=$3
+    unit=$4
+    threads=$5
+    values_file=$6
+    avg=$7
+    core_list=$8
+    seed=$9
+    time_sec=${10}
+    extra=${11}
+
+    [ -n "$csv" ] || return 0
+
+    perf_csv_init "$csv"
+    ts=$(nowstamp)
+
+    if [ -s "$values_file" ]; then
+        i=1
+        while IFS= read -r v; do
+            [ -n "$v" ] || continue
+            line="$ts,$test,$metric,$unit,$threads,$i,$v,${core_list:-},${seed:-},${time_sec:-},\"$(esc "${extra:-}")\""
+            perf_csv_append_line "$csv" "$line"
+            i=$((i + 1))
+        done <"$values_file"
+    else
+        line="$ts,$test,$metric,$unit,$threads,1,,${core_list:-},${seed:-},${time_sec:-},\"$(esc "${extra:-}")\""
+        perf_csv_append_line "$csv" "$line"
+    fi
+
+    if [ -n "$avg" ]; then
+        line="$ts,$test,$metric,$unit,$threads,avg,$avg,${core_list:-},${seed:-},${time_sec:-},\"$(esc "${extra:-}")\""
+        perf_csv_append_line "$csv" "$line"
+    else
+        line="$ts,$test,$metric,$unit,$threads,avg,,${core_list:-},${seed:-},${time_sec:-},\"$(esc "${extra:-}")\""
+        perf_csv_append_line "$csv" "$line"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Final summary writer
+# ---------------------------------------------------------------------------
+
+perf_sysbench_write_final_summary() {
+    summary_file=$1
+    outdir=$2
+    iterations=$3
+    core_list=$4
+    delta=$5
+    cpu_tag=$6
+    mem_tag=$7
+    thr_tag=$8
+    mtx_tag=$9
+    cpu_avg=${10}
+    mem_avg=${11}
+    thr_avg=${12}
+    mtx_avg=${13}
+
+    cpu_vals=$(perf_sysbench_values_file "$outdir" "$cpu_tag")
+    mem_vals=$(perf_sysbench_values_file "$outdir" "$mem_tag")
+    thr_vals=$(perf_sysbench_values_file "$outdir" "$thr_tag")
+    mtx_vals=$(perf_sysbench_values_file "$outdir" "$mtx_tag")
+
+    {
+        echo "Sysbench Summary"
+        echo " timestamp : $(nowstamp)"
+        echo " iterations : $iterations"
+        echo " core_list : ${core_list:-none}"
+        echo " delta_allowed : $delta"
+        echo ""
+        echo "CPU (time_sec, lower better)"
+        if [ -s "$cpu_vals" ]; then
+            i=1
+            while IFS= read -r v; do
+                [ -n "$v" ] || continue
+                echo " iteration_$i : $v"
+                i=$((i + 1))
+            done <"$cpu_vals"
+        else
+            echo " iteration_1 : "
+        fi
+        echo " avg : ${cpu_avg:-}"
+        echo ""
+        echo "Memory (MB/s, higher better)"
+        if [ -s "$mem_vals" ]; then
+            i=1
+            while IFS= read -r v; do
+                [ -n "$v" ] || continue
+                echo " iteration_$i : $v"
+                i=$((i + 1))
+            done <"$mem_vals"
+        else
+            echo " iteration_1 : "
+        fi
+        echo " avg : ${mem_avg:-}"
+        echo ""
+        echo "Threads (time_sec, lower better)"
+        if [ -s "$thr_vals" ]; then
+            i=1
+            while IFS= read -r v; do
+                [ -n "$v" ] || continue
+                echo " iteration_$i : $v"
+                i=$((i + 1))
+            done <"$thr_vals"
+        else
+            echo " iteration_1 : "
+        fi
+        echo " avg : ${thr_avg:-}"
+        echo ""
+        echo "Mutex (time_sec, lower better)"
+        if [ -s "$mtx_vals" ]; then
+            i=1
+            while IFS= read -r v; do
+                [ -n "$v" ] || continue
+                echo " iteration_$i : $v"
+                i=$((i + 1))
+            done <"$mtx_vals"
+        else
+            echo " iteration_1 : "
+        fi
+        echo " avg : ${mtx_avg:-}"
+        echo ""
+        echo "Logs in: $outdir"
+    } >"$summary_file" 2>/dev/null || true
+
+    log_info "Final summary written → $summary_file"
+}
+
+# -----------------------------------------------------------------------------
+# Sysbench helpers: run with live console + file logging
+# -----------------------------------------------------------------------------
+perf_run_cmd_tee() {
+    log_file=$1
+    shift
+
+    [ -n "$log_file" ] || return 1
+
+    dir=$(dirname "$log_file")
+    mkdir -p "$dir" 2>/dev/null || true
+
+    fifo="${log_file}.fifo.$$"
+    rm -f "$fifo" 2>/dev/null || true
+
+    if ! mkfifo "$fifo" 2>/dev/null; then
+        # Fallback: no fifo support → just log (no live console)
+        "$@" >"$log_file" 2>&1
+        return $?
+    fi
+
+    # Tee reads from FIFO and writes to both console + log file.
+    tee "$log_file" <"$fifo" &
+    tee_pid=$!
+
+    # Run command, write both stdout+stderr into FIFO
+    "$@" >"$fifo" 2>&1
+    rc=$?
+
+    # Wait for tee to finish draining FIFO
+    wait "$tee_pid" 2>/dev/null || true
+    rm -f "$fifo" 2>/dev/null || true
+
+    return "$rc"
+}
+
+# -----------------------------------------------------------------------------
+# Sysbench CSV append (consistent schema)
+# Header: timestamp,test,threads,metric,iteration,value
+# -----------------------------------------------------------------------------
+perf_sysbench_csv_append() {
+    csv=$1
+    test=$2
+    threads=$3
+    metric=$4
+    iteration=$5
+    value=$6
+
+    [ -n "$csv" ] || return 0
+    [ -n "$value" ] || return 0
+
+    dir=$(dirname "$csv")
+    mkdir -p "$dir" 2>/dev/null || true
+
+    if [ ! -f "$csv" ] || [ ! -s "$csv" ]; then
+        echo "timestamp,test,threads,metric,iteration,value" >"$csv"
+    fi
+
+    if command -v nowstamp >/dev/null 2>&1; then
+        ts=$(nowstamp)
+    else
+        ts=$(date "+%Y-%m-%d %H:%M:%S" 2>/dev/null || echo "unknown")
+    fi
+
+    echo "$ts,$test,$threads,$metric,$iteration,$value" >>"$csv" 2>/dev/null || true
+}
+
+# -----------------------------------------------------------------------------
+# Baseline file parsing helpers
+# Format: key=value (spaces around '=' allowed), '#' comments allowed.
+# -----------------------------------------------------------------------------
+perf_baseline_get_value() {
+    f=$1
+    key=$2
+ 
+    [ -n "$f" ] || return 0
+    [ -f "$f" ] || return 0
+    [ -n "$key" ] || return 0
+ 
+    awk -v k="$key" '
+        /^[[:space:]]*#/ {next}
+        /^[[:space:]]*$/ {next}
+        {
+            line=$0
+            sub(/^[[:space:]]+/, "", line)
+            sub(/[[:space:]]+$/, "", line)
+            pos = index(line, "=")
+            if (pos <= 0) next
+            kk = substr(line, 1, pos-1)
+            vv = substr(line, pos+1)
+            sub(/[[:space:]]+$/, "", kk)
+            sub(/^[[:space:]]+/, "", vv)
+            sub(/[[:space:]]+$/, "", vv)
+            if (kk == k) { print vv; exit }
+        }
+    ' "$f" 2>/dev/null
+}
+
+# Construct the expected key used in sysbench_baseline.conf
+# Example keys:
+#   cpu_time_sec.t4=30.001
+#   memory_mem_mbps.t4=7213.250
+#   threads_time_sec.t4=30.000
+#   mutex_time_sec.t4=0.241
+perf_sysbench_baseline_key() {
+    sb_case=$1
+    metric=$2
+    thr=$3
+    printf "%s_%s.t%s" "$sb_case" "$metric" "$thr"
+}
+
+# -----------------------------------------------------------------------------
+# Float helpers (POSIX) using awk
+# -----------------------------------------------------------------------------
+perf_f_add() { awk -v a="$1" -v b="$2" 'BEGIN{printf "%.6f", (a+0)+(b+0)}'; }
+perf_f_sub() { awk -v a="$1" -v b="$2" 'BEGIN{printf "%.6f", (a+0)-(b+0)}'; }
+perf_f_mul() { awk -v a="$1" -v b="$2" 'BEGIN{printf "%.6f", (a+0)*(b+0)}'; }
+perf_f_div() { awk -v a="$1" -v b="$2" 'BEGIN{ if (b==0) exit 1; printf "%.6f",(a/b)}'; }
+# pct = (num/den)*100, prints with 2 decimals; empty if invalid
+perf_f_pct() {
+    num=$1
+    den=$2
+    awk -v n="$num" -v d="$den" 'BEGIN{
+        if ((d+0) == 0) exit 1
+        printf "%.2f", ((n+0)/(d+0))*100.0
+    }' 2>/dev/null || true
+}
+
+# Returns 0 if true, 1 if false
+perf_f_ge() { awk -v a="$1" -v b="$2" 'BEGIN{exit !((a+0) >= (b+0))}'; }
+perf_f_le() { awk -v a="$1" -v b="$2" 'BEGIN{exit !((a+0) <= (b+0))}'; }
+
+# Metric direction:
+# - time_sec: lower is better
+perf_metric_direction() {
+    m=$1
+ 
+    # Lower is better only for explicit time metrics
+    case "$m" in
+        *time_sec*) echo "lower"; return 0 ;;
+    esac
+ 
+    # Everything else (mem_mbps, fileio_*_mbps, etc.) is higher-is-better
+    echo "higher"
+    return 0
+}
+
+# Get baseline value for a given key from key=value file.
+# - Ignores blank lines and comments (# ...)
+# - Accepts optional whitespace around '='
+# Prints value (or empty string if not found).
+perf_sysbench_baseline_get() {
+    file=$1
+    key=$2
+ 
+    [ -f "$file" ] || { printf '%s' ""; return 0; }
+    [ -n "$key" ] || { printf '%s' ""; return 0; }
+ 
+    key_esc=$(perf_sed_escape_bre "$key")
+ 
+    # Match "key = value" (value is first token-ish number)
+    v=$(
+        sed -n \
+          -e 's/[[:space:]]*#.*$//' \
+          -e '/^[[:space:]]*$/d' \
+          -e "s/^[[:space:]]*${key_esc}[[:space:]]*=[[:space:]]*\\([0-9][0-9.]*\\).*$/\\1/p" \
+          "$file" 2>/dev/null | head -n 1
+    )
+    printf '%s' "$v"
+}
+
+# -----------------------------------------------------------------------------
+# Baseline gating evaluation
+#
+# Inputs:
+#   baseline_file, sb_case, threads, metric, avg_value, allowed_deviation
+#
+# Output via globals:
+#   PERF_GATE_STATUS   = PASS|FAIL|NO_BASELINE|NO_AVG
+#   PERF_GATE_BASELINE = baseline numeric
+#   PERF_GATE_GOAL     = goal numeric
+#   PERF_GATE_SCORE_PCT= score percent (higher is better)
+#   PERF_GATE_OP       = ">=" or "<="
+#
+# Return:
+#   0 PASS
+#   1 FAIL
+#   2 No baseline / cannot evaluate
+# -----------------------------------------------------------------------------
+perf_sysbench_gate_eval() {
+    file=$1
+    case_name=$2
+    threads=$3
+    metric=$4
+    value=$5
+    delta=$6
+ 
+    PERF_GATE_KEY="${case_name}_${metric}.t${threads}"
+    PERF_GATE_OP=""
+    PERF_GATE_BASELINE=""
+    PERF_GATE_GOAL=""
+    PERF_GATE_SCORE_PCT=""
+    PERF_GATE_STATUS="SKIP"
+ 
+    # Export for external consumers (run.sh) → fixes SC2034
+    export PERF_GATE_KEY PERF_GATE_OP PERF_GATE_BASELINE PERF_GATE_GOAL PERF_GATE_SCORE_PCT PERF_GATE_STATUS
+ 
+    [ -f "$file" ] || return 2
+    [ -n "$case_name" ] || return 2
+    [ -n "$threads" ] || return 2
+    [ -n "$metric" ] || return 2
+    [ -n "$value" ] || return 2
+    [ -n "$delta" ] || delta=0
+ 
+    base=$(perf_sysbench_baseline_get "$file" "$PERF_GATE_KEY")
+    [ -n "$base" ] || return 2
+ 
+    PERF_GATE_BASELINE="$base"
+    export PERF_GATE_BASELINE
+ 
+    # Decide direction:
+    # - Throughput (mem_mbps): higher is better
+    # - time_sec: lower is better
+    higher_is_better=0
+    if [ "$metric" = "mem_mbps" ] || echo "$metric" | grep -q "mbps"; then
+        higher_is_better=1
+    fi
+ 
+    if [ "$higher_is_better" -eq 1 ]; then
+        PERF_GATE_OP=">="
+        goal=$(awk -v b="$base" -v d="$delta" 'BEGIN{printf "%.6f", (b*(1-d))}')
+        PERF_GATE_GOAL="$goal"
+        score=$(awk -v b="$base" -v v="$value" 'BEGIN{ if (b==0) print ""; else printf "%.2f", (v/b*100) }')
+        PERF_GATE_SCORE_PCT="$score"
+        export PERF_GATE_OP PERF_GATE_GOAL PERF_GATE_SCORE_PCT
+ 
+        pass=$(awk -v v="$value" -v g="$goal" 'BEGIN{print (v+0 >= g+0) ? 1 : 0}')
+    else
+        PERF_GATE_OP="<="
+        goal=$(awk -v b="$base" -v d="$delta" 'BEGIN{printf "%.6f", (b*(1+d))}')
+        PERF_GATE_GOAL="$goal"
+        # score_pct: convert to "bigger is better" by using base/value
+        score=$(awk -v b="$base" -v v="$value" 'BEGIN{ if (v==0) print ""; else printf "%.2f", (b/v*100) }')
+        PERF_GATE_SCORE_PCT="$score"
+        export PERF_GATE_OP PERF_GATE_GOAL PERF_GATE_SCORE_PCT
+ 
+        pass=$(awk -v v="$value" -v g="$goal" 'BEGIN{print (v+0 <= g+0) ? 1 : 0}')
+    fi
+ 
+    if [ "$pass" -eq 1 ]; then
+        PERF_GATE_STATUS="PASS"
+        export PERF_GATE_STATUS
+        return 0
+    fi
+ 
+    PERF_GATE_STATUS="FAIL"
+    export PERF_GATE_STATUS
+    return 1
+}
+
+# -----------------------------------------------------------------------------
+# Optional sanity warning: epoch timestamps (RTC not set)
+# -----------------------------------------------------------------------------
+perf_clock_sanity_warn() {
+    y=$(date "+%Y" 2>/dev/null || echo "")
+    case "$y" in
+      ""|*[!0-9]*) return 0 ;;
+    esac
+    if [ "$y" -lt 2000 ]; then
+        if command -v log_warn >/dev/null 2>&1; then
+            log_warn "System clock looks unset (year=$y). Timestamps in logs/CSV may be misleading."
+        else
+            echo "[WARN] System clock looks unset (year=$y). Timestamps in logs/CSV may be misleading." >&2
+        fi
+    fi
+}
+
+# -----------------------------------------------------------------------------
+# Gate evaluation (no globals). Prints a single machine-parsable line:
+#   status=<PASS|FAIL|NO_BASELINE|NO_AVG> baseline=<..> goal=<..> op=<>=|<=> score_pct=<..> key=<..>
+#
+# Return:
+#   0 PASS
+#   1 FAIL
+#   2 cannot evaluate (no baseline or no avg)
+# -----------------------------------------------------------------------------
+perf_sysbench_gate_eval_line() {
+    f=$1
+    sb_case=$2
+    thr=$3
+    metric=$4
+    avg=$5
+    delta=$6
+ 
+    if [ -z "$avg" ]; then
+        echo "status=NO_AVG baseline=NA goal=NA op=NA score_pct=NA key=NA"
+        return 2
+    fi
+ 
+    key=$(perf_sysbench_baseline_key "$sb_case" "$metric" "$thr")
+    base=$(perf_baseline_get_value "$f" "$key")
+    if [ -z "$base" ]; then
+        echo "status=NO_BASELINE baseline=NA goal=NA op=NA score_pct=NA key=$key"
+        return 2
+    fi
+ 
+    dir=$(perf_metric_direction "$metric")
+ 
+    if [ "$dir" = "higher" ]; then
+        one_minus=$(perf_f_sub "1.0" "$delta")
+        goal=$(perf_f_mul "$base" "$one_minus")
+        score=$(perf_f_pct "$avg" "$base")
+        if perf_f_ge "$avg" "$goal"; then
+            echo "status=PASS baseline=$base goal=$goal op=>= score_pct=${score:-NA} key=$key"
+            return 0
+        fi
+        echo "status=FAIL baseline=$base goal=$goal op=>= score_pct=${score:-NA} key=$key"
+        return 1
+    fi
+ 
+    # lower-is-better
+    one_plus=$(perf_f_add "1.0" "$delta")
+    goal=$(perf_f_mul "$base" "$one_plus")
+    score=$(perf_f_pct "$base" "$avg")  # higher is better (baseline/avg)
+    if perf_f_le "$avg" "$goal"; then
+        echo "status=PASS baseline=$base goal=$goal op=<= score_pct=${score:-NA} key=$key"
+        return 0
+    fi
+    echo "status=FAIL baseline=$base goal=$goal op=<= score_pct=${score:-NA} key=$key"
+    return 1
+}
+
+# Warn when a path is on tmpfs/ramfs (fileio numbers will be meaningless for storage perf)
+perf_fs_sanity_warn() {
+    p=$1
+    [ -n "$p" ] || return 0
+
+    # Find fstype for the *longest matching* mountpoint in /proc/mounts
+    fs=$(
+        awk -v path="$p" '
+          function is_prefix(mp, s) {
+            if (mp == "/") return 1
+            return (index(s, mp) == 1)
+          }
+          BEGIN { best_len = -1; best_fs = "" }
+          {
+            mp = $2
+            f  = $3
+            if (is_prefix(mp, path)) {
+              l = length(mp)
+              if (l > best_len) { best_len = l; best_fs = f }
+            }
+          }
+          END { print best_fs }
+        ' /proc/mounts 2>/dev/null
+    )
+
+    if [ "$fs" = "tmpfs" ] || [ "$fs" = "ramfs" ]; then
+        log_warn "FILEIO safety: FILEIO_DIR=$p is on $fs. Results will reflect RAM/tmpfs, not storage."
+        log_warn "FILEIO safety: choose ext4/xfs-backed path (example: /var/tmp/sysbench_fileio or under /)."
+    fi
+}
+
+# Parse sysbench fileio throughput. sysbench prints:
+#   read, MiB/s:  <num>
+#   written, MiB/s: <num>
+# Some builds show MB/s; handle both.
+perf_sysbench_parse_fileio_read_mibps() {
+    log_file=$1
+    [ -f "$log_file" ] || { echo ""; return 0; }
+
+    v=$(
+        sed -n \
+          -e 's/^[[:space:]]*read,[[:space:]]*MiB\/s:[[:space:]]*\([0-9.][0-9.]*\).*$/\1/p' \
+          -e 's/^[[:space:]]*read,[[:space:]]*MB\/s:[[:space:]]*\([0-9.][0-9.]*\).*$/\1/p' \
+          "$log_file" 2>/dev/null | head -n 1
+    )
+    printf '%s' "$v"
+}
+
+perf_sysbench_parse_fileio_written_mibps() {
+    log_file=$1
+    [ -f "$log_file" ] || { echo ""; return 0; }
+
+    v=$(
+        sed -n \
+          -e 's/^[[:space:]]*written,[[:space:]]*MiB\/s:[[:space:]]*\([0-9.][0-9.]*\).*$/\1/p' \
+          -e 's/^[[:space:]]*written,[[:space:]]*MB\/s:[[:space:]]*\([0-9.][0-9.]*\).*$/\1/p' \
+          "$log_file" 2>/dev/null | head -n 1
+    )
+    printf '%s' "$v"
+}
+
+perf_mibps_to_gbps() {
+    mibps=$1
+    [ -n "$mibps" ] || { echo ""; return 0; }
+    awk -v v="$mibps" 'BEGIN{printf "%.4f", (v/1024.0)}'
+}
+
+perf_sysbench_fileio_prepare() {
+    dir=$1
+    threads=$2
+    seed=$3
+    total=$4
+    num=$5
+    blksz=$6
+    iomode=$7
+    extra=$8
+    out_log=$9
+ 
+    [ -n "$dir" ] || return 1
+    mkdir -p "$dir" 2>/dev/null || true
+ 
+    (
+        cd "$dir" 2>/dev/null || exit 1
+ 
+        set -- sysbench --rand-seed="$seed" --threads="$threads" fileio \
+          --file-total-size="$total" \
+          --file-num="$num" \
+          --file-block-size="$blksz" \
+          --file-io-mode="$iomode" \
+          --file-test-mode=seqwr
+ 
+        if [ -n "$extra" ]; then
+          # shellcheck disable=SC2086
+          set -- "$@" $extra
+        fi
+ 
+        set -- "$@" prepare
+        perf_run_cmd_tee "$out_log" "$@"
+    )
+}
+ 
+perf_sysbench_fileio_cleanup() {
+    dir=$1
+    total=$2
+    num=$3
+    blksz=$4
+    iomode=$5
+    extra=$6
+ 
+    [ -n "$dir" ] || return 0
+ 
+    (
+        cd "$dir" 2>/dev/null || exit 0
+ 
+        set -- sysbench fileio \
+          --file-total-size="$total" \
+          --file-num="$num" \
+          --file-block-size="$blksz" \
+          --file-io-mode="$iomode" \
+          --file-test-mode=seqwr
+ 
+        if [ -n "$extra" ]; then
+          # shellcheck disable=SC2086
+          set -- "$@" $extra
+        fi
+ 
+        set -- "$@" cleanup
+        "$@" >/dev/null 2>&1 || true
+    )
+    return 0
+}
+ 
+# Runs one fileio mode and prints one line of kv tokens:
+#   mode=seqwr mibps=0.40 gbps=0.0004
+perf_sysbench_fileio_run_mode() {
+    dir=$1
+    threads=$2
+    seed=$3
+    time=$4
+    total=$5
+    num=$6
+    blksz=$7
+    iomode=$8
+    extra=$9
+    mode=${10}
+    out_log=${11}
+ 
+    [ -n "$dir" ] || { echo ""; return 1; }
+ 
+    (
+        cd "$dir" 2>/dev/null || exit 1
+ 
+        set -- sysbench --time="$time" --rand-seed="$seed" --threads="$threads" fileio \
+          --file-total-size="$total" \
+          --file-num="$num" \
+          --file-block-size="$blksz" \
+          --file-io-mode="$iomode" \
+          --file-test-mode="$mode"
+ 
+        if [ -n "$extra" ]; then
+          # shellcheck disable=SC2086
+          set -- "$@" $extra
+        fi
+ 
+        set -- "$@" run
+        perf_run_cmd_tee "$out_log" "$@"
+    ) || true
+ 
+    case "$mode" in
+      seqrd)
+        r=$(perf_sysbench_parse_fileio_read_mibps "$out_log")
+        g=$(perf_mibps_to_gbps "$r")
+        printf 'mode=%s mibps=%s gbps=%s\n' "$mode" "${r:-}" "${g:-}"
+        ;;
+      seqwr|rndwr)
+        w=$(perf_sysbench_parse_fileio_written_mibps "$out_log")
+        printf 'mode=%s mibps=%s gbps=\n' "$mode" "${w:-}"
+        ;;
+      *)
+        printf 'mode=%s mibps= gbps=\n' "$mode"
+        ;;
+    esac
+    return 0
+}
+
+# Extract sysbench fileio throughput (MiB/s) for "read" or "written"
+# Example lines:
+#   Throughput:
+#     read, MiB/s:                  4755.69
+#     written, MiB/s:               3849.61
+perf_sysbench_parse_fileio_mibps() {
+    log_file=$1
+    which=$2  # "read" or "written"
+
+    [ -f "$log_file" ] || { printf '%s' ""; return 0; }
+    [ -n "$which" ] || which="read"
+
+    v=$(
+        sed -n \
+          -e "s/^[[:space:]]*$which,[[:space:]]*MiB\/s:[[:space:]]*\\([0-9][0-9.]*\\).*$/\\1/p" \
+          "$log_file" 2>/dev/null | head -n 1
+    )
+    printf '%s' "$v"
+}
+
+# Return filesystem type of the mount backing a path (best-effort)
+perf_path_fstype() {
+    p=$1
+    [ -n "$p" ] || { echo "unknown"; return 0; }
+
+    # Normalize path
+    case "$p" in
+        /*) : ;;
+        *) p="/$p" ;;
+    esac
+
+    # Pick the longest mountpoint prefix match from /proc/mounts
+    awk -v P="$p" '
+      function is_prefix(mp, path) {
+        if (mp == "/") return 1
+        return (index(path, mp "/") == 1 || path == mp)
+      }
+      {
+        mp=$2; fs=$3
+        if (is_prefix(mp, P)) {
+          if (length(mp) > bestlen) { bestlen=length(mp); bestfs=fs; bestmp=mp }
+        }
+      }
+      END {
+        if (bestfs == "") bestfs="unknown"
+        print bestfs
+      }
+    ' /proc/mounts 2>/dev/null
+}
+
+perf_is_tmpfs_path() {
+    p=$1
+    fs=$(perf_path_fstype "$p")
+    case "$fs" in
+        tmpfs|ramfs) return 0 ;;
+    esac
+    return 1
+}
+
+# Choose a writable directory that is NOT on tmpfs/ramfs.
+# Echoes chosen dir (creates it).
+perf_pick_fileio_dir() {
+    # Candidates (prefer real disk)
+    for d in \
+        "/var/tmp/sysbench_fileio" \
+        "/root/sysbench_fileio" \
+        "/home/root/sysbench_fileio" \
+        "/sysbench_fileio"
+    do
+        mkdir -p "$d" 2>/dev/null || continue
+        if ! perf_is_tmpfs_path "$d"; then
+            echo "$d"
+            return 0
+        fi
+    done
+
+    # Last resort (will be tmpfs on many systems)
+    d="/tmp/sysbench_fileio"
+    mkdir -p "$d" 2>/dev/null || true
+    echo "$d"
+    return 0
+}
+
+# Sysbench default threads is 1. Only pass --threads for non-1 to keep behavior consistent.
+sysbench_threads_opt() {
+  t=$1
+  if [ -n "$t" ] && [ "$t" != "1" ]; then
+    printf '%s' "--threads=$t"
+  fi
+}
+
+# Treat placeholder baselines (__FILL_ME__) as "no baseline" (report-only, no gate fail).
+perf_sysbench_gate_eval_line_safe() {
+  f=$1
+  sb_case=$2
+  thr=$3
+  metric=$4
+  avg=$5
+  delta=$6
+
+  if [ -z "$avg" ]; then
+    echo "status=NO_AVG baseline=NA goal=NA op=NA score_pct=NA key=NA"
+    return 2
+  fi
+
+  if command -v perf_sysbench_baseline_key >/dev/null 2>&1 && command -v perf_baseline_get_value >/dev/null 2>&1; then
+    key=$(perf_sysbench_baseline_key "$sb_case" "$metric" "$thr")
+    base=$(perf_baseline_get_value "$f" "$key")
+    if [ -z "$base" ] || [ "$base" = "__FILL_ME__" ]; then
+      echo "status=NO_BASELINE baseline=NA goal=NA op=NA score_pct=NA key=$key"
+      return 2
+    fi
+  fi
+
+  perf_sysbench_gate_eval_line "$f" "$sb_case" "$thr" "$metric" "$avg" "$delta"
+  return $?
+}

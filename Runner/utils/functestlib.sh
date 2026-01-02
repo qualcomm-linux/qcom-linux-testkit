@@ -293,28 +293,191 @@ ensure_reasonable_clock() {
     now="$(date +%s 2>/dev/null || echo 0)"
     cutoff="$(date -d '2020-01-01 UTC' +%s 2>/dev/null || echo 1577836800)"
     [ -z "$cutoff" ] && cutoff=1577836800
+ 
     [ "$now" -ge "$cutoff" ] 2>/dev/null && return 0
  
-    log_warn "System clock looks invalid (epoch=$now). Attempting quick time sync..."
-    if command -v timedatectl >/dev/null 2>&1; then
-        timedatectl set-ntp true 2>/dev/null || true
+    log_warn "System clock looks invalid (epoch=$now). Trying local time sources (no network)..."
+ 
+    # Optional diagnostics file (caller may set this, e.g. CLOCK_DIAG_FILE="$OUT_DIR/clock_diag.txt")
+    diag_file="${CLOCK_DIAG_FILE:-}"
+ 
+    # ---- Diagnostics (only when invalid clock) ----
+    if [ -n "$diag_file" ]; then
+        {
+            echo "==== CLOCK DIAGNOSTICS ===="
+            echo "timestamp=$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null || true)"
+            echo "epoch_now=$now cutoff=$cutoff"
+            echo
+        } >>"$diag_file" 2>/dev/null || true
     fi
-    grace=25
-    start="$(date +%s 2>/dev/null || echo 0)"
-    end=$((start + grace))
-    while :; do
-        cur="$(date +%s 2>/dev/null || echo 0)"
-        if [ "$cur" -ge "$cutoff" ] 2>/dev/null; then
-            log_pass "Clock synchronized."
+ 
+    # Log minimal summaries to stdout; write full outputs to diag file.
+    # date summary
+    date_out="$(date 2>&1 || true)"
+    if [ -n "$diag_file" ]; then
+        {
+            echo "---- date ----"
+            echo "$date_out"
+            echo
+        } >>"$diag_file" 2>/dev/null || true
+    fi
+    log_info "date: $(printf '%s' "$date_out" | head -n 1)"
+ 
+    # timedatectl summaries + full dump
+    if command -v timedatectl >/dev/null 2>&1; then
+        td_status="$(timedatectl status 2>&1 || true)"
+        if [ -n "$diag_file" ]; then
+            {
+                echo "---- timedatectl status ----"
+                echo "$td_status"
+                echo
+            } >>"$diag_file" 2>/dev/null || true
+        fi
+ 
+        # minimal, stable-ish summaries
+        td_local="$(printf '%s\n' "$td_status" | sed -n 's/^[[:space:]]*Local time:[[:space:]]*//p' | head -n 1)"
+        td_sync="$(printf '%s\n' "$td_status" | sed -n 's/^[[:space:]]*System clock synchronized:[[:space:]]*//p' | head -n 1)"
+        td_ntp="$(printf '%s\n' "$td_status" | sed -n 's/^[[:space:]]*NTP service:[[:space:]]*//p' | head -n 1)"
+        td_rtc="$(printf '%s\n' "$td_status" | sed -n 's/^[[:space:]]*RTC time:[[:space:]]*//p' | head -n 1)"
+ 
+        [ -n "$td_local" ] && log_info "timedatectl: Local time: $td_local"
+        [ -n "$td_rtc" ] && log_info "timedatectl: RTC time: $td_rtc"
+        [ -n "$td_sync" ] && log_info "timedatectl: System clock synchronized: $td_sync"
+        [ -n "$td_ntp" ] && log_info "timedatectl: NTP service: $td_ntp"
+ 
+        td_show="$(timedatectl show-timesync --all 2>&1 || true)"
+        if [ -n "$diag_file" ]; then
+            {
+                echo "---- timedatectl show-timesync --all ----"
+                echo "$td_show"
+                echo
+            } >>"$diag_file" 2>/dev/null || true
+        fi
+ 
+        td_server="$(printf '%s\n' "$td_show" | sed -n 's/^ServerName=//p' | head -n 1)"
+        td_addr="$(printf '%s\n' "$td_show" | sed -n 's/^ServerAddress=//p' | head -n 1)"
+        td_sysntp="$(printf '%s\n' "$td_show" | sed -n 's/^SystemNTPServers=//p' | head -n 1)"
+        td_fallback="$(printf '%s\n' "$td_show" | sed -n 's/^FallbackNTPServers=//p' | head -n 1)"
+ 
+        if [ -n "$td_server" ] || [ -n "$td_addr" ]; then
+            log_info "timesync: server=${td_server:-NA} addr=${td_addr:-NA}"
+        fi
+        if [ -n "$td_sysntp" ]; then
+            # Keep it short
+            short_sysntp="$(printf '%s' "$td_sysntp" | awk '{print $1" "$2" "$3" "$4}')"
+            log_info "timesync: SystemNTPServers: ${short_sysntp:-NA}"
+        elif [ -n "$td_fallback" ]; then
+            short_fb="$(printf '%s' "$td_fallback" | awk '{print $1" "$2" "$3" "$4}')"
+            log_info "timesync: FallbackNTPServers: ${short_fb:-NA}"
+        fi
+ 
+        td_ts="$(timedatectl timesync-status 2>&1 || true)"
+        if [ -n "$diag_file" ]; then
+            {
+                echo "---- timedatectl timesync-status ----"
+                echo "$td_ts"
+                echo
+            } >>"$diag_file" 2>/dev/null || true
+        fi
+ 
+        td_pkt="$(printf '%s\n' "$td_ts" | sed -n 's/^[[:space:]]*Packet count:[[:space:]]*//p' | head -n 1)"
+        td_srvline="$(printf '%s\n' "$td_ts" | sed -n 's/^[[:space:]]*Server:[[:space:]]*//p' | head -n 1)"
+        [ -n "$td_srvline" ] && log_info "timesync-status: Server: $td_srvline"
+        [ -n "$td_pkt" ] && log_info "timesync-status: Packet count: $td_pkt"
+    else
+        log_info "timedatectl: not available"
+        if [ -n "$diag_file" ]; then
+            echo "timedatectl: not available" >>"$diag_file" 2>/dev/null || true
+        fi
+    fi
+ 
+    # systemctl status summaries + full dump
+    if command -v systemctl >/dev/null 2>&1; then
+        sdts="$(systemctl status systemd-timesyncd --no-pager --full 2>&1 || true)"
+        if [ -n "$diag_file" ]; then
+            {
+                echo "---- systemctl status systemd-timesyncd ----"
+                echo "$sdts"
+                echo
+            } >>"$diag_file" 2>/dev/null || true
+        fi
+ 
+        sd_active="$(printf '%s\n' "$sdts" | sed -n 's/^[[:space:]]*Active:[[:space:]]*//p' | head -n 1)"
+        sd_pid="$(printf '%s\n' "$sdts" | sed -n 's/^[[:space:]]*Main PID:[[:space:]]*//p' | head -n 1)"
+        [ -n "$sd_active" ] && log_info "systemd-timesyncd: Active: $sd_active"
+        [ -n "$sd_pid" ] && log_info "systemd-timesyncd: Main PID: $sd_pid"
+    else
+        log_info "systemctl: not available"
+        if [ -n "$diag_file" ]; then
+            echo "systemctl: not available" >>"$diag_file" 2>/dev/null || true
+        fi
+    fi
+ 
+    # 1) Try RTC (if it is sane)
+    if command -v hwclock >/dev/null 2>&1 && [ -e /dev/rtc0 ]; then
+        hwclock -s 2>/dev/null || true
+        now="$(date +%s 2>/dev/null || echo 0)"
+        if [ "$now" -ge "$cutoff" ] 2>/dev/null; then
+            log_pass "Clock restored from RTC."
             return 0
         fi
-        if [ "$cur" -ge "$end" ] 2>/dev/null; then
-            break
-        fi
-        sleep 1
-    done
  
-    log_warn "Clock still invalid; TLS downloads may fail. Treating as limited network."
+        if [ -r /sys/class/rtc/rtc0/since_epoch ]; then
+            rtc_epoch="$(tr -cd 0-9 < /sys/class/rtc/rtc0/since_epoch 2>/dev/null)"
+            if [ -n "$rtc_epoch" ]; then
+                log_info "rtc0: since_epoch=$rtc_epoch"
+                if [ -n "$diag_file" ]; then
+                    echo "rtc0: since_epoch=$rtc_epoch" >>"$diag_file" 2>/dev/null || true
+                fi
+            fi
+            if [ -n "$rtc_epoch" ] && [ "$rtc_epoch" -ge "$cutoff" ] 2>/dev/null; then
+                if date -d "@$rtc_epoch" >/dev/null 2>&1; then
+                    date -s "@$rtc_epoch" >/dev/null 2>&1 || true
+                fi
+                now="$(date +%s 2>/dev/null || echo 0)"
+                if [ "$now" -ge "$cutoff" ] 2>/dev/null; then
+                    log_pass "Clock restored from rtc0 since_epoch."
+                    return 0
+                fi
+            fi
+        fi
+    else
+        log_info "RTC: hwclock or /dev/rtc0 not available"
+        if [ -n "$diag_file" ]; then
+            echo "RTC: hwclock or /dev/rtc0 not available" >>"$diag_file" 2>/dev/null || true
+        fi
+    fi
+ 
+    # 2) Try kernel build timestamp from /proc/version or uname -v
+    kb="$(uname -v 2>/dev/null || cat /proc/version 2>/dev/null || true)"
+    if [ -n "$diag_file" ]; then
+        {
+            echo "---- kernel version string ----"
+            echo "$kb"
+            echo
+        } >>"$diag_file" 2>/dev/null || true
+    fi
+ 
+    kb_date="$(printf '%s\n' "$kb" | sed -n \
+        's/.*\([A-Z][a-z][a-z] [A-Z][a-z][a-z] [ 0-9][0-9] [0-9][0-9]:[0-9][0-9]:[0-9][0-9] [A-Z][A-Za-z0-9+:-]* [0-9][0-9][0-9][0-9]\).*/\1/p' \
+        | head -n 1)"
+ 
+    if [ -n "$kb_date" ]; then
+        log_info "kernel-build-time: parsed='$kb_date'"
+        kb_epoch="$(date -d "$kb_date" +%s 2>/dev/null || echo 0)"
+        if [ "$kb_epoch" -ge "$cutoff" ] 2>/dev/null; then
+            date -s "$kb_date" >/dev/null 2>&1 || true
+            now="$(date +%s 2>/dev/null || echo 0)"
+            if [ "$now" -ge "$cutoff" ] 2>/dev/null; then
+                log_pass "Clock seeded from kernel build time: $kb_date"
+                return 0
+            fi
+        fi
+    else
+        log_info "kernel-build-time: could not parse from uname -v / /proc/version"
+    fi
+ 
+    log_warn "Clock still invalid; continuing (timestamps may be epoch)."
     return 1
 }
 

@@ -1,0 +1,68 @@
+metadata:
+  name: sysbench-performance
+  format: "Lava-Test Test Definition 1.0"
+  description: "Sysbench performance suite (CPU / memory / threads / mutex + fileio seqwr/seqrd/rndwr) with per-iteration logs + summary averages + optional baseline gating."
+  os:
+    - linux
+  scope:
+    - performance
+    - functional
+
+params:
+  OUT_DIR: "./logs_Sysbench_Performance"
+
+  # Iteration controls
+  ITERATIONS: "3"
+  TIME: "30"
+  RAND_SEED: "1234"
+  THREADS_LIST: "4" # space-separated list, e.g. "1 4 8 16"
+
+  # CPU
+  CPU_MAX_PRIME: "20000"
+
+  # Threads test
+  THREAD_LOCKS: "20"
+  THREAD_YIELDS: "" # optional override; empty uses sysbench default
+
+  # Memory test
+  MEMORY_OPER: "write" # read|write
+  MEMORY_ACCESS_MODE: "rnd" # seq|rnd
+  MEMORY_BLOCK_SIZE: "1M"
+  MEMORY_TOTAL_SIZE: "100G" # keep explicit for stability
+
+  # Mutex test
+  MUTEX_NUM: ""
+  MUTEX_LOCKS: ""
+  MUTEX_LOOPS: ""
+
+  # Core pinning (optional)
+  TASKSET_CPU_LIST: ""
+
+  # Baselines + thresholds (optional gating; empty => report-only)
+  # If empty, run.sh may auto-pick ./sysbench_baseline.conf from the test folder (if present)
+  BASELINE_FILE: ""
+  ALLOWED_DEVIATION: "0.10" # 0.05..0.10 typical
+
+  # Optional CSV append (NOT default). If empty, no CSV is written.
+  CSV_FILE: ""
+
+  VERBOSE: "0" # 1|0
+
+  # ---------------- FileIO (storage-backed) ----------------
+  # IMPORTANT: use ext4-backed path (NOT /tmp or other tmpfs paths)
+  FILEIO_DIR: "/var/tmp/sysbench_fileio"
+
+  # Recommended stable fileio parameters
+  FILEIO_TOTAL_SIZE: "1G"
+  FILEIO_NUM_FILES: "64"
+  FILEIO_BLOCK_SIZE: "4K"
+  FILEIO_IO_MODE: "sync" # sync|async
+  FILEIO_MODE_LIST: "seqwr seqrd rndwr" # fileio modes to run
+  FILEIO_EXTRA_FLAGS: "" # optional additional sysbench fileio flags
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Performance/Sysbench_Performance/
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh Sysbench_Performance.res || true
