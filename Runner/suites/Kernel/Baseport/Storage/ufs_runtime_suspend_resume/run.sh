@@ -1,5 +1,4 @@
 #!/bin/sh
-
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause-Clear
 
@@ -31,7 +30,7 @@ fi
 # shellcheck disable=SC1090,SC1091
 . "$TOOLS/functestlib.sh"
 
-TESTNAME="UFS_Validation"
+TESTNAME="ufs_runtime_suspend_resume"
 test_path=$(find_test_case_by_name "$TESTNAME")
 cd "$test_path" || exit 1
 res_file="./$TESTNAME.res"
@@ -39,7 +38,7 @@ res_file="./$TESTNAME.res"
 log_info "--------------------------------------------------"
 log_info "------------- Starting $TESTNAME Test ------------"
 
-check_dependencies dd
+check_dependencies dd sleep
 
 MANDATORY_CONFIGS="CONFIG_SCSI_UFSHCD CONFIG_SCSI_UFS_QCOM"
 OPTIONAL_CONFIGS="CONFIG_SCSI_UFSHCD_PLATFORM CONFIG_SCSI_UFSHCD_PCI CONFIG_SCSI_UFS_CDNS_PLATFORM CONFIG_SCSI_UFS_HISI CONFIG_SCSI_UFS_EXYNOS CONFIG_SCSI_UFS_ROCKCHIP CONFIG_SCSI_UFS_BSG"
@@ -75,69 +74,69 @@ if [ -z "$block_dev" ]; then
 fi
 log_info "Detected UFS block: $block_dev"
 
-if command -v findmnt >/dev/null 2>&1; then
-    rootfs_dev=$(findmnt -n -o SOURCE /)
-else
-    log_warn "findmnt not available, using fallback rootfs detection"
-    rootfs_dev=$(awk '$2 == "/" { print $1 }' /proc/mounts)
-fi
 
-resolved_block=$(readlink -f "$block_dev" 2>/dev/null)
-resolved_rootfs=$(readlink -f "$rootfs_dev" 2>/dev/null)
+log_info "Validating UFS Runtime Suspend/Resume on load & no-load conditions"
 
-if [ -n "$resolved_block" ] && [ -n "$resolved_rootfs" ] && [ "$resolved_block" = "$resolved_rootfs" ]; then
-    log_warn "Detected block ($resolved_block) is the root filesystem. Skipping read test."
+# Check for UFS runtime status node and assign to variable
+log_info "Checking for UFS runtime status node..."
+if ! check_dt_nodes "/sys/devices/platform/soc@0/*ufs*/power/runtime_status"; then
+    log_skip "UFS runtime status node not found"
     echo "$TESTNAME SKIP" > "$res_file"
     exit 0
 fi
 
-log_info "Running basic read test on $block_dev (non-rootfs)..."
-if echo | dd of=/dev/null iflag=direct 2>/dev/null; then
-    DD_CMD="dd if=$block_dev of=/dev/null bs=1M count=32 iflag=direct"
+RUNTIME_STATUS_NODE=$(get_dt_node_path "/sys/devices/platform/soc@0/*ufs*/power/runtime_status")
+if [ -z "$RUNTIME_STATUS_NODE" ]; then
+    log_skip "Failed to get runtime status node path"
+    echo "$TESTNAME SKIP" > "$res_file"
+    exit 0
+fi
+log_info "Found runtime status node: $RUNTIME_STATUS_NODE"
+
+# Generate load using dd command and check for active state
+log_info "Starting I/O load test to verify UFS runtime active state..."
+tmpfile="/ufs_runtime_test.tmp"
+
+# Start dd in background
+dd if=/dev/zero of="$tmpfile" bs=2M count=1024 >/dev/null 2>&1 &
+DD_PID=$!
+
+log_info "Checking UFS runtime status during load..."
+RUNTIME_STATUS_CHECK_LOAD=0
+
+# Use check_node_status to verify ufs if ufs runtime status is active
+if ! check_node_status "$RUNTIME_STATUS_NODE" "active" 5 0.5; then
+    log_fail "UFS runtime status validation failed during load"
+    RUNTIME_STATUS_CHECK_LOAD=1
 else
-    log_warn "'iflag=direct' not supported by dd. Falling back to standard dd."
-    DD_CMD="dd if=$block_dev of=/dev/null bs=1M count=32"
+    log_pass "UFS runtime status during load is active"
 fi
 
-if $DD_CMD >/dev/null 2>&1; then
-    log_pass "UFS read test succeeded"
-else
-    log_fail "UFS read test failed"
-    log_info "Try manually: $DD_CMD"
-    echo "$TESTNAME FAIL" > "$res_file"
-    exit 1
+# Wait for dd to complete if it's still running
+if kill -0 $DD_PID 2>/dev/null; then
+    log_info "Waiting for I/O load test to complete..."
+    wait $DD_PID 2>/dev/null
+    sync
 fi
 
-log_info "Running I/O stress test (64MB read+write on tmpfile)..."
-tmpfile="$test_path/ufs_test.img"
+# Clean up temp file
+rm -f "$tmpfile"
 
-if echo | dd of=/dev/null conv=fsync 2>/dev/null; then
-    DD_WRITE="dd if=/dev/zero of=$tmpfile bs=1M count=64 conv=fsync"
+# Wait for 180 seconds for UFS to enter suspended state
+log_info "Waiting 180 seconds for UFS to enter suspended state..."
+sleep 180
+
+RUNTIME_STATUS_CHECK_NO_LOAD=0
+# Use check_node_status to verify ufs runtime status is suspended
+if ! check_node_status "$RUNTIME_STATUS_NODE" "suspended" 2 1; then
+    log_fail "UFS runtime status validation failed without load"
+    RUNTIME_STATUS_CHECK_NO_LOAD=1
 else
-    log_warn "'conv=fsync' not supported by dd. Using basic write."
-    DD_WRITE="dd if=/dev/zero of=$tmpfile bs=1M count=64"
+    log_pass "UFS runtime status without load is suspended"
 fi
 
-if $DD_WRITE >/dev/null 2>&1 &&
-   dd if="$tmpfile" of=/dev/null bs=1M count=64 >/dev/null 2>&1; then
-    log_pass "UFS I/O stress test passed"
-    if command -v stat >/dev/null 2>&1; then
-        stat --format="[INFO] Size: %s bytes File: %n" "$tmpfile"
-    else
-        find "$tmpfile" -printf "[INFO] Size: %s bytes File: %p\n"
-    fi
-    rm -f "$tmpfile"
-else
-    log_fail "UFS I/O stress test failed"
-    df -h . | sed 's/^/[INFO] /'
-    if [ -f "$tmpfile" ]; then
-        if command -v stat >/dev/null 2>&1; then
-            stat --format="[INFO] Size: %s bytes File: %n" "$tmpfile"
-        else
-            find "$tmpfile" -printf "[INFO] Size: %s bytes File: %p\n"
-        fi
-        rm -f "$tmpfile"
-    fi
+if [ "$RUNTIME_STATUS_CHECK_LOAD" -ne 0 ] || [ "$RUNTIME_STATUS_CHECK_NO_LOAD" -ne 0 ]; then
+    log_fail "UFS active/suspended test failed"
     echo "$TESTNAME FAIL" > "$res_file"
     exit 1
 fi
