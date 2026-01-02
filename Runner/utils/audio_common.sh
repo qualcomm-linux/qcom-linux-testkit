@@ -359,22 +359,6 @@ pa_resolve_mic_fallback() {
   printf '%s\n' "$s"
 }
 
-# PipeWire sink label by ID (tries description, then node.name, then status line)
-pw_sink_name_safe() {
-  id="$1"; [ -n "$id" ] || return 1
-  name="$(wpctl inspect "$id" 2>/dev/null | grep -m1 'node.description' | cut -d'"' -f2)"
-  [ -n "$name" ] || name="$(wpctl inspect "$id" 2>/dev/null | grep -m1 'node.name' | cut -d'"' -f2)"
-  if [ -z "$name" ]; then
-    name="$(wpctl status 2>/dev/null \
-      | sed -n '/^[[:space:]]*Sinks:/,/^[[:space:]]*$/p' \
-      | grep -E "^[[:space:]]*\*?[[:space:]]*${id}[.][[:space:]]" \
-      | sed 's/^[[:space:]]*\*\?[[:space:]]*[0-9]\+[.][[:space:]]\+//' \
-      | sed 's/[[:space:]]*\[vol:.*$//' \
-      | head -n1)"
-  fi
-  printf '%s\n' "$name"
-}
-
 # ----------- PulseAudio Source Helpers -----------
 pa_default_mic() {
   def="$(pactl info 2>/dev/null | sed -n 's/^Default Source:[[:space:]]*//p' | head -n1)"
@@ -754,4 +738,509 @@ audio_check_clips_available() {
     done
   done
   return 0  # All clips present and non-empty
+}
+
+# ---------- New Clip Discovery Functions (for 20-clip enhancement) ----------
+
+# Discover all audio clip files in the clips directory
+# Returns: space-separated list of clip filenames (basenames only)
+# Exit codes: 0=success, 1=directory not found or no clips
+discover_audio_clips() {
+  clips_dir="${AUDIO_CLIPS_BASE_DIR:-AudioClips}"
+  
+  # Check directory exists
+  if [ ! -d "$clips_dir" ]; then
+    log_error "Clips directory not found: $clips_dir"
+    return 1
+  fi
+  
+  # Find .wav files (only in top level, not recursive)
+  clips="$(find "$clips_dir" -maxdepth 1 -name "*.wav" -type f 2>/dev/null | sort)"
+  
+  # Check if any clips found
+  if [ -z "$clips" ]; then
+    log_error "No .wav files found in $clips_dir"
+    return 1
+  fi
+  
+  # Return basenames only
+  for clip in $clips; do
+    basename "$clip"
+  done
+  return 0
+}
+
+# Parse clip filename to extract metadata
+# Input: yesterday_48KHz_30s_16b_2ch.wav
+# Output: rate=48KHz bits=16b channels=2ch (space-separated key=value pairs)
+# Returns: 0=success, 1=parse failure
+parse_clip_metadata() {
+  filename="$1"
+  
+  # Expected pattern: yesterday_{rate}_{duration}_{bits}_{channels}.wav
+  # Extract components using sed
+  rate="$(printf '%s' "$filename" | sed -n 's/.*_\([0-9.]\+KHz\)_.*/\1/p')"
+  bits="$(printf '%s' "$filename" | sed -n 's/.*_\([0-9]\+b\)_.*/\1/p')"
+  channels="$(printf '%s' "$filename" | sed -n 's/.*_\([0-9]\+ch\)\.wav$/\1/p')"
+  
+  # Validate all components extracted
+  if [ -z "$rate" ] || [ -z "$bits" ] || [ -z "$channels" ]; then
+    log_warn "Cannot parse metadata from: $filename (skipping)"
+    return 1
+  fi
+  
+  printf 'rate=%s bits=%s channels=%s\n' "$rate" "$bits" "$channels"
+  return 0
+}
+
+# Generate test case name from clip filename
+# Input: yesterday_48KHz_30s_16b_2ch.wav
+# Output: play_48KHz_16b_2ch
+# Returns: 0=success, 1=parse failure
+generate_clip_testcase_name() {
+  filename="$1"
+  
+  # Parse metadata
+  metadata="$(parse_clip_metadata "$filename")" || return 1
+  
+  # Extract values
+  rate="$(printf '%s' "$metadata" | sed -n 's/.*rate=\([^ ]*\).*/\1/p')"
+  bits="$(printf '%s' "$metadata" | sed -n 's/.*bits=\([^ ]*\).*/\1/p')"
+  channels="$(printf '%s' "$metadata" | sed -n 's/.*channels=\([^ ]*\).*/\1/p')"
+  
+  # Generate test case name
+  printf 'play_%s_%s_%s\n' "$rate" "$bits" "$channels"
+  return 0
+}
+
+# Resolve clip file path from test case name or clip name
+# Input: play_48KHz_16b_2ch OR 48KHz_16b_2ch OR yesterday_48KHz_30s_16b_2ch.wav
+# Output: AudioClips/yesterday_48KHz_30s_16b_2ch.wav
+# Returns: 0=success, 1=not found
+resolve_clip_by_name() {
+  name="$1"
+  clips_dir="${AUDIO_CLIPS_BASE_DIR:-AudioClips}"
+  
+  # If name already looks like a filename, try direct path
+  if printf '%s' "$name" | grep -q '\.wav$'; then
+    clip_path="$clips_dir/$name"
+    if [ -f "$clip_path" ]; then
+      printf '%s\n' "$clip_path"
+      return 0
+    fi
+  fi
+  
+  # Strip "play_" prefix if present
+  search_name="$(printf '%s' "$name" | sed 's/^play_//')"
+  
+  # Search for matching clip
+  for clip_file in "$clips_dir"/*.wav; do
+    [ -f "$clip_file" ] || continue
+    clip_basename="$(basename "$clip_file")"
+    
+    # Check if clip contains the search pattern
+    if printf '%s' "$clip_basename" | grep -q "$search_name"; then
+      printf '%s\n' "$clip_file"
+      return 0
+    fi
+  done
+  
+  return 1
+}
+
+# Validate clip name against available clips
+# Input: requested_name (e.g., play_48KHz_16b_2ch OR Config1), available_clips (list)
+# Output: matching clip filename
+# Returns: 0=found, 1=not found (with helpful error message)
+validate_clip_name() {
+  requested_name="$1"
+  available_clips="$2"
+  
+  # Check if requested_name is a generic config name (Config1, Config2, etc.)
+  # Support both "Config1" and "config1" (case-insensitive)
+  config_num="$(printf '%s' "$requested_name" | sed -n 's/^[Cc]onfig\([0-9]\+\)$/\1/p')"
+  
+  if [ -n "$config_num" ]; then
+    # Generic config name - map to clip by index (1-based)
+    # Count total clips first
+    idx=0
+    for clip in $available_clips; do
+      idx=$((idx + 1))
+    done
+    
+    # Validate config number is positive and within range
+    if [ "$config_num" -le 0 ] 2>/dev/null || [ "$config_num" -gt "$idx" ] 2>/dev/null; then
+      log_error "Invalid config number: $requested_name. Available range: Config1 to Config$idx. Please check again."
+      return 1
+    fi
+    
+    # Get clip by index (1-based)
+    current_idx=0
+    for clip in $available_clips; do
+      current_idx=$((current_idx + 1))
+      if [ "$current_idx" -eq "$config_num" ]; then
+        printf '%s\n' "$clip"
+        return 0
+      fi
+    done
+    
+    # This shouldn't happen, but just in case
+    log_error "Invalid config number: $requested_name. Available range: Config1 to Config$idx. Please check again."
+    return 1
+  fi
+  
+  # Try exact match for specific clip names (play_48KHz_16b_2ch format)
+  for clip in $available_clips; do
+    test_name="$(generate_clip_testcase_name "$clip" 2>/dev/null)" || continue
+    if [ "$test_name" = "$requested_name" ]; then
+      printf '%s\n' "$clip"
+      return 0
+    fi
+  done
+  
+  # No match found - count available clips for helpful message
+  idx=0
+  for clip in $available_clips; do
+    idx=$((idx + 1))
+  done
+  
+  # No match found - provide helpful error message with range
+  log_error "Wrong clip name: '$requested_name'. Available range: Config1 to Config$idx. Please check again."
+  return 1
+}
+
+# Input: filter (space-separated patterns), available_clips (list)
+# Output: filtered clip list
+# Returns: 0=success, 1=no matches
+apply_clip_filter() {
+  filter="$1"
+  available_clips="$2"
+  
+  # If no filter, return all clips
+  if [ -z "$filter" ]; then
+    printf '%s\n' "$available_clips"
+    return 0
+  fi
+  
+  # Apply filter
+  filtered=""
+  for clip in $available_clips; do
+    for pattern in $filter; do
+      # Match against filename or test case name
+      test_name="$(generate_clip_testcase_name "$clip" 2>/dev/null)" || continue
+      if printf '%s %s' "$clip" "$test_name" | grep -q "$pattern"; then
+        filtered="$filtered $clip"
+        break
+      fi
+    done
+  done
+  
+  # Remove leading space
+  filtered="$(printf '%s' "$filtered" | sed 's/^ //')"
+  
+  # Check if filter matched anything
+  if [ -z "$filtered" ]; then
+    log_error "Filter '$filter' matched no clips"
+    log_info "Available clips:"
+    for clip in $available_clips; do
+      log_info "  - $(basename "$clip")"
+    done
+    return 1
+  fi
+  
+  printf '%s\n' "$filtered"
+  return 0
+}
+
+# Validate clip file is accessible and non-empty
+# Input: clip_path
+# Returns: 0=valid, 1=invalid
+validate_clip_file() {
+  clip_path="$1"
+  
+  # Check exists
+  if [ ! -f "$clip_path" ]; then
+    log_error "Clip file not found: $clip_path"
+    return 1
+  fi
+  
+  # Check readable
+  if [ ! -r "$clip_path" ]; then
+    log_error "Clip file not readable: $clip_path"
+    return 1
+  fi
+  
+  # Check not empty
+  size="$(stat -c '%s' "$clip_path" 2>/dev/null || wc -c < "$clip_path" 2>/dev/null)"
+  if [ -z "$size" ] || [ "$size" -le 0 ] 2>/dev/null; then
+    log_error "Clip file is empty: $clip_path"
+    return 1
+  fi
+  
+  return 0
+}
+
+# Discover and filter clips based on user input
+# Input: clip_names (explicit list), clip_filter (pattern filter)
+# Output: final list of clip filenames to test
+# Returns: 0=success, 1=no valid clips
+discover_and_filter_clips() {
+  clip_names="$1"
+  clip_filter="$2"
+  
+  # Discover all available clips
+  available_clips="$(discover_audio_clips 2>&1)" || {
+    log_error "Failed to discover audio clips" >&2
+    return 1
+  }
+  
+  # If explicit clip names provided, validate and use them
+  if [ -n "$clip_names" ]; then
+    validated=""
+    failed_names=""
+    
+    for name in $clip_names; do
+      # Validate clip name - let error messages display to stderr
+      if clip="$(validate_clip_name "$name" "$available_clips")"; then
+        validated="$validated $clip"
+      else
+        failed_names="$failed_names $name"
+      fi
+    done
+    
+    validated="$(printf '%s' "$validated" | sed 's/^ //')"
+    failed_names="$(printf '%s' "$failed_names" | sed 's/^ //')"
+    
+    if [ -z "$validated" ]; then
+      # Don't repeat the error - validate_clip_name already showed it
+      return 1
+    fi
+    
+    # Warn about any failed names (only if there are some valid ones)
+    if [ -n "$failed_names" ]; then
+      log_warn "Invalid clip/config names skipped: $failed_names" >&2
+    fi
+    
+    printf '%s\n' "$validated"
+    return 0
+  fi
+  
+  # Apply filter if provided
+  if [ -n "$clip_filter" ]; then
+    filtered="$(apply_clip_filter "$clip_filter" "$available_clips" 2>/dev/null)" || {
+      log_error "Filter did not match any clips" >&2
+      return 1
+    }
+    printf '%s\n' "$filtered"
+    return 0
+  fi
+  
+  # No filter - return all clips
+  printf '%s\n' "$available_clips"
+  return 0
+}
+
+# ---------- Record Configuration Functions (10-config enhancement) ----------
+
+# Discover all available record configurations
+# Returns: space-separated list of record_config1 through record_config10
+# Exit codes: 0=success (always succeeds - configs are predefined)
+discover_record_configs() {
+  printf '%s\n' "record_config1 record_config2 record_config3 record_config4 record_config5 record_config6 record_config7 record_config8 record_config9 record_config10"
+  return 0
+}
+
+# Get recording parameters for a specific config
+# Input: config_name (e.g., record_config1, record_8KHz_1ch)
+# Output: "rate channels" (e.g., "8000 1")
+# Returns: 0=success, 1=invalid config
+get_record_config_params() {
+  config_name="$1"
+  case "$config_name" in
+    record_config1|record_8KHz_1ch)      printf '%s\n' "8000 1" ;;
+    record_config2|record_16KHz_1ch)     printf '%s\n' "16000 1" ;;
+    record_config3|record_16KHz_2ch)     printf '%s\n' "16000 2" ;;
+    record_config4|record_24KHz_1ch)     printf '%s\n' "24000 1" ;;
+    record_config5|record_32KHz_2ch)     printf '%s\n' "32000 2" ;;
+    record_config6|record_44.1KHz_2ch)   printf '%s\n' "44100 2" ;;
+    record_config7|record_48KHz_2ch)     printf '%s\n' "48000 2" ;;
+    record_config8|record_48KHz_6ch)     printf '%s\n' "48000 6" ;;
+    record_config9|record_96KHz_2ch)     printf '%s\n' "96000 2" ;;
+    record_config10|record_96KHz_6ch)    printf '%s\n' "96000 6" ;;
+    *) return 1 ;;
+  esac
+  return 0
+}
+
+# Generate descriptive test case name from config name
+# Input: record_config1
+# Output: record_8KHz_1ch
+# Returns: 0=success, 1=invalid config
+generate_record_testcase_name() {
+  config_name="$1"
+  case "$config_name" in
+    record_config1)  printf '%s\n' "record_8KHz_1ch" ;;
+    record_config2)  printf '%s\n' "record_16KHz_1ch" ;;
+    record_config3)  printf '%s\n' "record_16KHz_2ch" ;;
+    record_config4)  printf '%s\n' "record_24KHz_1ch" ;;
+    record_config5)  printf '%s\n' "record_32KHz_2ch" ;;
+    record_config6)  printf '%s\n' "record_44.1KHz_2ch" ;;
+    record_config7)  printf '%s\n' "record_48KHz_2ch" ;;
+    record_config8)  printf '%s\n' "record_48KHz_6ch" ;;
+    record_config9)  printf '%s\n' "record_96KHz_2ch" ;;
+    record_config10) printf '%s\n' "record_96KHz_6ch" ;;
+    *) printf '%s\n' "$config_name" ;;  # Already descriptive or unknown
+  esac
+  return 0
+}
+
+# Generate output filename with parameters
+# Input: testcase_base (e.g., "record_short"), rate (e.g., "48000"), channels (e.g., "2")
+# Output: record_short_48KHz_2ch.wav
+# Returns: 0=success
+generate_record_filename() {
+  testcase_base="$1"
+  rate="$2"
+  channels="$3"
+  
+  # Convert rate to KHz format
+  rate_khz="$rate"
+  case "$rate" in
+    8000)  rate_khz="8KHz" ;;
+    16000) rate_khz="16KHz" ;;
+    22050) rate_khz="22.05KHz" ;;
+    24000) rate_khz="24KHz" ;;
+    32000) rate_khz="32KHz" ;;
+    44100) rate_khz="44.1KHz" ;;
+    48000) rate_khz="48KHz" ;;
+    88200) rate_khz="88.2KHz" ;;
+    96000) rate_khz="96KHz" ;;
+    176400) rate_khz="176.4KHz" ;;
+    192000) rate_khz="192KHz" ;;
+    352800) rate_khz="352.8KHz" ;;
+    384000) rate_khz="384KHz" ;;
+    *) rate_khz="${rate}Hz" ;;  # Fallback for unknown rates
+  esac
+  
+  printf '%s_%s_%sch.wav\n' "$testcase_base" "$rate_khz" "$channels"
+  return 0
+}
+
+# Validate record config name
+# Input: requested_name (e.g., record_config1, record_8KHz_1ch)
+# Returns: 0=valid, 1=invalid (with helpful error message)
+validate_record_config_name() {
+  requested_name="$1"
+  
+  # Check if it's a valid record_config1-10 or descriptive name
+  case "$requested_name" in
+    record_config[1-9]|record_config10)
+      return 0
+      ;;
+    record_*KHz_*ch)
+      # Check if we can get parameters for this descriptive name
+      if get_record_config_params "$requested_name" >/dev/null 2>&1; then
+        return 0
+      fi
+      ;;
+  esac
+  
+  log_error "Invalid record config name: $requested_name"
+  log_error "Available range: record_config1 to record_config10"
+  return 1
+}
+
+# Apply filter to record configs
+# Input: filter (space-separated patterns), available_configs (list)
+# Output: filtered config list
+# Returns: 0=success, 1=no matches
+apply_record_config_filter() {
+  filter="$1"
+  available_configs="$2"
+  
+  # If no filter, return all configs
+  if [ -z "$filter" ]; then
+    printf '%s\n' "$available_configs"
+    return 0
+  fi
+  
+  # Apply filter
+  filtered=""
+  for config in $available_configs; do
+    # Generate descriptive name for matching
+    desc_name="$(generate_record_testcase_name "$config" 2>/dev/null)" || continue
+    
+    for pattern in $filter; do
+      # Match against config name or descriptive name
+      if printf '%s %s' "$config" "$desc_name" | grep -q "$pattern"; then
+        filtered="$filtered $config"
+        break
+      fi
+    done
+  done
+  
+  # Remove leading space
+  filtered="$(printf '%s' "$filtered" | sed 's/^ //')"
+  
+  # Check if filter matched anything
+  if [ -z "$filtered" ]; then
+    log_error "Filter '$filter' matched no record configs"
+    log_info "Available configs: record_config1 to record_config10"
+    return 1
+  fi
+  
+  printf '%s\n' "$filtered"
+  return 0
+}
+
+# Discover and filter record configs based on user input
+# Input: config_names (explicit list), config_filter (pattern filter)
+# Output: final list of config names to test
+# Returns: 0=success, 1=no valid configs
+discover_and_filter_record_configs() {
+  config_names="$1"
+  config_filter="$2"
+  
+  # Get all available configs
+  available_configs="$(discover_record_configs)"
+  
+  # If explicit config names provided, validate and use them
+  if [ -n "$config_names" ]; then
+    validated=""
+    failed_names=""
+    
+    for name in $config_names; do
+      if validate_record_config_name "$name"; then
+        validated="$validated $name"
+      else
+        failed_names="$failed_names $name"
+      fi
+    done
+    
+    validated="$(printf '%s' "$validated" | sed 's/^ //')"
+    failed_names="$(printf '%s' "$failed_names" | sed 's/^ //')"
+    
+    if [ -z "$validated" ]; then
+      return 1
+    fi
+    
+    # Warn about any failed names (only if there are some valid ones)
+    if [ -n "$failed_names" ]; then
+      log_warn "Invalid record config names skipped: $failed_names"
+    fi
+    
+    printf '%s\n' "$validated"
+    return 0
+  fi
+  
+  # Apply filter if provided
+  if [ -n "$config_filter" ]; then
+    filtered="$(apply_record_config_filter "$config_filter" "$available_configs")" || return 1
+    printf '%s\n' "$filtered"
+    return 0
+  fi
+  
+  # No filter - return all configs
+  printf '%s\n' "$available_configs"
+  return 0
 }
