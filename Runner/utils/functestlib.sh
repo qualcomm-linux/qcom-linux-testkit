@@ -4293,3 +4293,59 @@ get_pid() {
         return 1
     fi
 }
+
+# Function to get the first matching node path
+get_dt_node_path() {
+    node_pattern="$1"
+    found_node=""
+
+    for node in $node_pattern; do
+        if [ -d "$node" ] || [ -f "$node" ]; then
+            found_node="$node"
+            break
+        fi
+    done
+
+    printf "%s" "$found_node"
+}
+
+# Function to check node status with retries by reading from a file
+check_node_status() {
+    node_name="$1"
+    expected_status="$2"
+    retries="$3"
+    delay="$4"
+    
+    # Default values if not provided
+    [ -z "$retries" ] && retries=5
+    [ -z "$delay" ] && delay=1
+    
+    attempt=1
+    
+    echo "Checking status of node '$node_name', expecting: '$expected_status'"
+    echo "Will retry up to $retries times with $delay second(s) delay between attempts"
+    
+    while [ "$attempt" -le "$retries" ]; do
+        echo "Attempt $attempt of $retries..."
+        
+        # Get node status by directly reading from the file with the node's name
+        status=$(cat "$node_name")
+        
+        if [ "$status" = "$expected_status" ]; then
+            echo "Success! Node '$node_name' has status: '$status'"
+            return 0
+        else
+            echo "Current status: '$status', waiting for: '$expected_status'"
+            
+            if [ "$attempt" -lt "$retries" ]; then
+                echo "Retrying in $delay second(s)..."
+                sleep "$delay"
+            fi
+        fi
+        
+        attempt=$((attempt + 1))
+    done
+    
+    echo "Failed after $retries attempts. Last status: '$status', expected: '$expected_status'"
+    return 1
+}
