@@ -31,27 +31,27 @@ fi
 # shellcheck disable=SC1090,SC1091
 . "$TOOLS/functestlib.sh"
 
-TESTNAME="eMMC_Validation"
+TESTNAME="ufs_read_writes"
 test_path=$(find_test_case_by_name "$TESTNAME")
 cd "$test_path" || exit 0
 res_file="./$TESTNAME.res"
 
 log_info "--------------------------------------------------"
-log_info "------------ Starting $TESTNAME Test -------------"
+log_info "------------- Starting $TESTNAME Test ------------"
 
-check_dependencies dd grep
+check_dependencies dd
 
-MANDATORY_CONFIGS="CONFIG_MMC CONFIG_MMC_BLOCK"
-OPTIONAL_CONFIGS="CONFIG_MMC_SDHCI CONFIG_MMC_SDHCI_MSM CONFIG_MMC_BLOCK_MINORS"
+MANDATORY_CONFIGS="CONFIG_SCSI_UFSHCD CONFIG_SCSI_UFS_QCOM"
+OPTIONAL_CONFIGS="CONFIG_SCSI_UFSHCD_PLATFORM CONFIG_SCSI_UFSHCD_PCI CONFIG_SCSI_UFS_CDNS_PLATFORM CONFIG_SCSI_UFS_HISI CONFIG_SCSI_UFS_EXYNOS CONFIG_SCSI_UFS_ROCKCHIP CONFIG_SCSI_UFS_BSG"
 
-log_info "Checking mandatory kernel configs for eMMC..."
+log_info "Checking mandatory kernel configs for UFS..."
 if ! check_kernel_config "$MANDATORY_CONFIGS" 2>/dev/null; then
-    log_skip "Missing mandatory eMMC kernel configs: $MANDATORY_CONFIGS"
+    log_skip "Missing mandatory UFS kernel configs: $MANDATORY_CONFIGS"
     echo "$TESTNAME SKIP" > "$res_file"
     exit 0
 fi
 
-log_info "Checking optional kernel configs for eMMC..."
+log_info "Checking optional kernel configs for UFS..."
 missing_optional=""
 for cfg in $OPTIONAL_CONFIGS; do
     if ! check_kernel_config "$cfg" 2>/dev/null; then
@@ -61,18 +61,18 @@ for cfg in $OPTIONAL_CONFIGS; do
 done
 [ -n "$missing_optional" ] && log_info "Optional configs not present but continuing:$missing_optional"
 
-check_dt_nodes "/sys/bus/mmc/devices/*mmc*" || {
+check_dt_nodes "/sys/bus/platform/devices/*ufs*" || {
     echo "$TESTNAME SKIP" > "$res_file"
     exit 0
 }
 
-block_dev=$(detect_emmc_partition_block)
+block_dev=$(detect_ufs_partition_block)
 if [ -z "$block_dev" ]; then
-    log_skip "No eMMC block device found."
+    log_skip "No UFS block device found."
     echo "$TESTNAME SKIP" > "$res_file"
     exit 0
 fi
-log_info "Detected eMMC block: $block_dev"
+log_info "Detected UFS block: $block_dev"
 
 if command -v findmnt >/dev/null 2>&1; then
     rootfs_dev=$(findmnt -n -o SOURCE /)
@@ -85,62 +85,63 @@ resolved_block=$(readlink -f "$block_dev" 2>/dev/null)
 resolved_rootfs=$(readlink -f "$rootfs_dev" 2>/dev/null)
 
 if [ -n "$resolved_block" ] && [ -n "$resolved_rootfs" ] && [ "$resolved_block" = "$resolved_rootfs" ]; then
-    log_warn "Detected eMMC block ($resolved_block) is the root filesystem. Skipping read test."
+    log_warn "Detected block ($resolved_block) is the root filesystem. Skipping read test."
+    echo "$TESTNAME SKIP" > "$res_file"
+    exit 0
+fi
+
+log_info "Running basic read test on $block_dev (non-rootfs)..."
+if echo | dd of=/dev/null iflag=direct 2>/dev/null; then
+    DD_CMD="dd if=$block_dev of=/dev/null bs=1M count=32 iflag=direct"
 else
-    log_info "Running basic read test on $block_dev (non-rootfs)..."
-    if dd if="$block_dev" of=/dev/null bs=1M count=32 iflag=direct status=none 2>/dev/null; then
-        log_pass "eMMC read test succeeded"
-    else
-        log_warn "'iflag=direct' not supported by dd. Trying fallback..."
-        if dd if="$block_dev" of=/dev/null bs=1M count=32 status=none 2>/dev/null; then
-            log_pass "eMMC read test succeeded (fallback)"
-        else
-            log_fail "eMMC read test failed"
-            echo "$TESTNAME FAIL" > "$res_file"
-            exit 0
-        fi
-    fi
+    log_warn "'iflag=direct' not supported by dd. Falling back to standard dd."
+    DD_CMD="dd if=$block_dev of=/dev/null bs=1M count=32"
+fi
+
+if $DD_CMD >/dev/null 2>&1; then
+    log_pass "UFS read test succeeded"
+else
+    log_fail "UFS read test failed"
+    log_info "Try manually: $DD_CMD"
+    echo "$TESTNAME FAIL" > "$res_file"
+    exit 0
 fi
 
 log_info "Running I/O stress test (64MB read+write on tmpfile)..."
-tmpfile="$test_path/emmc_test.img"
+tmpfile="$test_path/ufs_test.img"
 
-if dd if=/dev/zero of="$tmpfile" bs=1M count=64 conv=fsync status=none 2>/dev/null; then
-    if dd if="$tmpfile" of=/dev/null bs=1M status=none 2>/dev/null; then
-        log_pass "eMMC I/O stress test passed"
-        if command -v stat >/dev/null 2>&1; then
-            stat --format="[INFO] Size: %s bytes File: %n" "$tmpfile"
-        else
-            find "$tmpfile" -printf "[INFO] Size: %s bytes File: %p\n"
-        fi
-        rm -f "$tmpfile"
-    else
-        log_fail "eMMC I/O stress test failed (read)"
-        rm -f "$tmpfile"
-        echo "$TESTNAME FAIL" > "$res_file"
-        exit 0
-    fi
+if echo | dd of=/dev/null conv=fsync 2>/dev/null; then
+    DD_WRITE="dd if=/dev/zero of=$tmpfile bs=1M count=64 conv=fsync"
 else
-    log_warn "'conv=fsync' not supported. Trying basic write fallback."
-    if dd if=/dev/zero of="$tmpfile" bs=1M count=64 status=none 2>/dev/null &&
-       dd if="$tmpfile" of=/dev/null bs=1M status=none 2>/dev/null; then
-        log_pass "eMMC I/O stress test passed (fallback)"
-        if command -v stat >/dev/null 2>&1; then
-            stat --format="[INFO] Size: %s bytes File: %n" "$tmpfile"
-        else
-            find "$tmpfile" -printf "[INFO] Size: %s bytes File: %p\n"
-        fi
-        rm -f "$tmpfile"
-    else
-        log_fail "eMMC I/O stress test failed (fallback)"
-        rm -f "$tmpfile"
-        echo "$TESTNAME FAIL" > "$res_file"
-        exit 0
-    fi
+    log_warn "'conv=fsync' not supported by dd. Using basic write."
+    DD_WRITE="dd if=/dev/zero of=$tmpfile bs=1M count=64"
 fi
 
-scan_dmesg_errors "mmc" "$test_path"
+if $DD_WRITE >/dev/null 2>&1 &&
+   dd if="$tmpfile" of=/dev/null bs=1M count=64 >/dev/null 2>&1; then
+    log_pass "UFS I/O stress test passed"
+    if command -v stat >/dev/null 2>&1; then
+        stat --format="[INFO] Size: %s bytes File: %n" "$tmpfile"
+    else
+        find "$tmpfile" -printf "[INFO] Size: %s bytes File: %p\n"
+    fi
+    rm -f "$tmpfile"
+else
+    log_fail "UFS I/O stress test failed"
+    df -h . | sed 's/^/[INFO] /'
+    if [ -f "$tmpfile" ]; then
+        if command -v stat >/dev/null 2>&1; then
+            stat --format="[INFO] Size: %s bytes File: %n" "$tmpfile"
+        else
+            find "$tmpfile" -printf "[INFO] Size: %s bytes File: %p\n"
+        fi
+        rm -f "$tmpfile"
+    fi
+    echo "$TESTNAME FAIL" > "$res_file"
+    exit 0
+fi
+
+scan_dmesg_errors "$test_path" "ufs"
 log_pass "$TESTNAME completed successfully"
 echo "$TESTNAME PASS" > "$res_file"
 exit 0
-
