@@ -70,6 +70,11 @@ EXTRACT_AUDIO_ASSETS="${EXTRACT_AUDIO_ASSETS:-true}"
 ENABLE_NETWORK_DOWNLOAD="${ENABLE_NETWORK_DOWNLOAD:-false}" # Default: no network operations
 AUDIO_CLIPS_BASE_DIR="${AUDIO_CLIPS_BASE_DIR:-}" # Custom path for audio clips (CI use)
 
+# New clip-based testing options
+CLIP_NAMES=""        # Explicit clip names to test (e.g., "play_48KHz_16b_2ch play_8KHz_8b_1ch")
+CLIP_FILTER=""       # Filter pattern for clips (e.g., "48KHz" or "16b")
+USE_CLIP_DISCOVERY="${USE_CLIP_DISCOVERY:-auto}"  # auto|true|false
+
 # Network bring-up knobs (match video behavior)
 if [ -z "${NET_STABILIZE_SLEEP:-}" ]; then
   NET_STABILIZE_SLEEP="5"
@@ -86,8 +91,11 @@ usage() {
 Usage: $0 [options]
   --backend {pipewire|pulseaudio}
   --sink {speakers|null}
-  --formats "wav"
-  --durations "short|short medium|short medium long"
+  --formats "wav"                    # DEPRECATED: Use clip discovery instead
+  --durations "short|short medium"   # DEPRECATED: Use clip discovery instead
+  --clip-name "play_48KHz_16b_2ch"   # Test specific clip(s) by name (space-separated)
+                                     # Also supports Config1, Config2, ..., Config20
+  --clip-filter "48KHz"              # Filter clips by pattern
   --loops N
   --timeout SECS # set 0 to disable watchdog
   --enable-network-download
@@ -99,6 +107,19 @@ Usage: $0 [options]
   --password PASS
   --verbose
   --help
+
+Examples:
+  # Test all discovered clips
+  $0
+
+  # Test specific clips by descriptive name
+  $0 --clip-name "play_48KHz_16b_2ch play_8KHz_8b_1ch"
+
+  # Test specific clips by config number
+  $0 --clip-name "Config1 Config2 Config3"
+
+  # Filter clips by pattern
+  $0 --clip-filter "48KHz"
 EOF
 }
 
@@ -114,10 +135,22 @@ while [ $# -gt 0 ]; do
       ;;
     --formats)
       FORMATS="$2"
+      USE_CLIP_DISCOVERY=false  # Explicit formats = use old matrix mode
       shift 2
       ;;
     --durations)
       DURATIONS="$2"
+      USE_CLIP_DISCOVERY=false  # Explicit durations = use old matrix mode
+      shift 2
+      ;;
+    --clip-name)
+      CLIP_NAMES="$2"
+      USE_CLIP_DISCOVERY=true
+      shift 2
+      ;;
+    --clip-filter)
+      CLIP_FILTER="$2"
+      USE_CLIP_DISCOVERY=true
       shift 2
       ;;
     --loops)
@@ -177,6 +210,49 @@ done
 if [ -n "$SSID" ] && [ -n "$PASSWORD" ]; then
   log_info "WiFi credentials provided, auto-enabling network download"
   ENABLE_NETWORK_DOWNLOAD=true
+fi
+
+# ------------- Mode Detection and Validation -------------
+# Determine whether to use clip discovery or legacy matrix mode
+if [ "$USE_CLIP_DISCOVERY" = "auto" ]; then
+  # Auto mode: use clip discovery if AudioClips directory exists, otherwise legacy
+  clips_dir="${AUDIO_CLIPS_BASE_DIR:-AudioClips}"
+  if [ -d "$clips_dir" ] && [ -n "$(find "$clips_dir" -maxdepth 1 -name "*.wav" -type f 2>/dev/null | head -n1)" ]; then
+    USE_CLIP_DISCOVERY=true
+    log_info "Auto-detected clip discovery mode (found clips in $clips_dir)"
+  else
+    USE_CLIP_DISCOVERY=false
+    log_info "Auto-detected legacy matrix mode (no clips found in $clips_dir)"
+  fi
+fi
+
+# Show deprecation warnings for legacy options when using clip discovery
+if [ "$USE_CLIP_DISCOVERY" = "true" ]; then
+  if [ "$FORMATS" != "wav" ] || [ "$DURATIONS" != "short" ]; then
+    log_warn "DEPRECATION WARNING: --formats and --durations are deprecated"
+    log_info "Use --clip-name or --clip-filter for clip-based testing"
+    log_info "Legacy options will be ignored in clip discovery mode"
+  fi
+fi
+
+# Validate CLI option conflicts
+if [ -n "$CLIP_NAMES" ] && [ -n "$CLIP_FILTER" ]; then
+  log_warn "Both --clip-name and --clip-filter specified"
+  log_info "Using --clip-name (ignoring --clip-filter)"
+  CLIP_FILTER=""
+fi
+
+# Validate numeric parameters
+case "$LOOPS" in
+  ''|*[!0-9]*) 
+    log_error "Invalid --loops value: $LOOPS (must be positive integer)"
+    exit 1
+    ;;
+esac
+
+if [ "$LOOPS" -le 0 ] 2>/dev/null; then
+  log_error "Invalid --loops value: $LOOPS (must be positive)"
+  exit 1
 fi
 
 # Ensure we run from the testcase dir
@@ -350,15 +426,194 @@ else
   log_info "Watchdog/timeout: disabled (no timeout)"
 fi
 
-# ------------- Matrix execution -------------
+# ------------- Test Execution (Matrix or Clip Discovery) -------------
 total=0
 pass=0
 fail=0
 skip=0
 suite_rc=0
 
-for fmt in $FORMATS; do
-  for dur in $DURATIONS; do
+if [ "$USE_CLIP_DISCOVERY" = "true" ]; then
+  # ========== NEW: Clip Discovery Mode ==========
+  log_info "Using clip discovery mode"
+  
+  # Discover and filter clips
+  clips_dir="${AUDIO_CLIPS_BASE_DIR:-AudioClips}"
+  
+  # Get list of clips to test
+  if [ -n "$CLIP_NAMES" ] || [ -n "$CLIP_FILTER" ]; then
+    # Use discover_and_filter_clips helper - capture both stdout and stderr
+    CLIPS_OUTPUT="$(discover_and_filter_clips "$CLIP_NAMES" "$CLIP_FILTER" 2>&1)"
+    CLIPS_RC=$?
+    
+    # Extract just the clip list (non-log lines)
+    CLIPS_TO_TEST="$(printf '%s\n' "$CLIPS_OUTPUT" | grep -v "^\[[A-Z]*\]")"
+    
+    if [ $CLIPS_RC -ne 0 ] || [ -z "$CLIPS_TO_TEST" ]; then
+      # Extract error message with range information if available
+      ERROR_MSG="$(printf '%s\n' "$CLIPS_OUTPUT" | grep "^\[ERROR\].*Available range" | head -1)"
+      if [ -z "$ERROR_MSG" ]; then
+        # No range info found, get count and show generic message
+        AVAILABLE_CLIPS="$(discover_audio_clips 2>/dev/null | wc -l)"
+        log_skip "$TESTNAME SKIP - Invalid clip/config name(s) provided. Available range: Config1 to Config$AVAILABLE_CLIPS"
+      else
+        log_skip "$TESTNAME SKIP - $ERROR_MSG"
+      fi
+      echo "$TESTNAME SKIP" > "$RES_FILE"
+      exit 0
+    fi
+  else
+    # Discover all clips
+    CLIPS_TO_TEST="$(discover_audio_clips 2>&1)" || {
+      # Error messages already printed, just skip
+      log_skip "$TESTNAME SKIP - No audio clips found in $clips_dir"
+      echo "$TESTNAME SKIP" > "$RES_FILE"
+      exit 0
+    }
+  fi
+  
+  # Count clips
+  clip_count=0
+  for clip_file in $CLIPS_TO_TEST; do
+    clip_count=$((clip_count + 1))
+  done
+  
+  log_info "Discovered $clip_count clips to test"
+  
+  # Test each clip
+  for clip_file in $CLIPS_TO_TEST; do
+    # Generate test case name from clip filename
+    case_name="$(generate_clip_testcase_name "$clip_file")" || {
+      log_warn "Skipping clip with unparseable name: $clip_file"
+      continue
+    }
+    
+    # Resolve full path
+    clip_path="$clips_dir/$clip_file"
+    
+    # Validate clip file
+    if ! validate_clip_file "$clip_path"; then
+      log_skip "[$case_name] SKIP: Invalid clip file: $clip_path"
+      echo "$case_name SKIP (invalid file)" >> "$LOGDIR/summary.txt"
+      skip=$((skip + 1))
+      continue
+    fi
+    
+    total=$((total + 1))
+    logf="$LOGDIR/${case_name}.log"
+    : > "$logf"
+    export AUDIO_LOGCTX="$logf"
+    
+    CLIP_BYTES="$(stat -c '%s' "$clip_path" 2>/dev/null || wc -c < "$clip_path" 2>/dev/null || echo 0)"
+    log_info "[$case_name] Using clip: $clip_file (${CLIP_BYTES} bytes)"
+    
+    i=1
+    ok_runs=0
+    last_elapsed=0
+    
+    while [ "$i" -le "$LOOPS" ]; do
+      iso="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      
+      if [ "$AUDIO_BACKEND" = "pipewire" ]; then
+        loop_hdr="sink=$SINK_CHOICE($SINK_ID)"
+      else
+        loop_hdr="sink=$SINK_CHOICE($SINK_NAME)"
+      fi
+      
+      log_info "[$case_name] loop $i/$LOOPS start=$iso clip=$clip_file backend=$AUDIO_BACKEND $loop_hdr"
+      
+      start_s="$(date +%s 2>/dev/null || echo 0)"
+      
+      if [ "$AUDIO_BACKEND" = "pipewire" ]; then
+        log_info "[$case_name] exec: pw-play -v \"$clip_path\""
+        audio_exec_with_timeout "$TIMEOUT" pw-play -v "$clip_path" >>"$logf" 2>&1
+        rc=$?
+      else
+        log_info "[$case_name] exec: paplay --device=\"$SINK_NAME\" \"$clip_path\""
+        audio_exec_with_timeout "$TIMEOUT" paplay --device="$SINK_NAME" "$clip_path" >>"$logf" 2>&1
+        rc=$?
+      fi
+      
+      end_s="$(date +%s 2>/dev/null || echo 0)"
+      last_elapsed=$((end_s - start_s))
+      if [ "$last_elapsed" -lt 0 ]; then
+        last_elapsed=0
+      fi
+      
+      # Evidence collection
+      pw_ev="$(audio_evidence_pw_streaming || echo 0)"
+      pa_ev="$(audio_evidence_pa_streaming || echo 0)"
+      
+      # Minimal PulseAudio fallback
+      if [ "$AUDIO_BACKEND" = "pulseaudio" ] && [ "$pa_ev" -eq 0 ]; then
+        if [ "$rc" -eq 0 ] || { [ "$rc" -eq 124 ] && [ "$dur_s" -gt 0 ] 2>/dev/null && [ "$last_elapsed" -ge "$min_ok" ]; }; then
+          pa_ev=1
+        fi
+      fi
+      
+      alsa_ev="$(audio_evidence_alsa_running_any || echo 0)"
+      asoc_ev="$(audio_evidence_asoc_path_on || echo 0)"
+      pwlog_ev="$(audio_evidence_pw_log_seen || echo 0)"
+      if [ "$AUDIO_BACKEND" = "pulseaudio" ]; then
+        pwlog_ev=0
+      fi
+      
+      # Fast teardown fallback
+      if [ "$alsa_ev" -eq 0 ]; then
+        if [ "$AUDIO_BACKEND" = "pipewire" ] && [ "$pw_ev" -eq 1 ]; then
+          alsa_ev=1
+        fi
+        if [ "$AUDIO_BACKEND" = "pulseaudio" ] && [ "$pa_ev" -eq 1 ]; then
+          alsa_ev=1
+        fi
+      fi
+      
+      if [ "$asoc_ev" -eq 0 ] && [ "$alsa_ev" -eq 1 ]; then
+        asoc_ev=1
+      fi
+      
+      log_info "[$case_name] evidence: pw_streaming=$pw_ev pa_streaming=$pa_ev alsa_running=$alsa_ev asoc_path_on=$asoc_ev pw_log=$pwlog_ev"
+      
+      # Determine result
+      if [ "$rc" -eq 0 ]; then
+        log_pass "[$case_name] loop $i OK (rc=0, ${last_elapsed}s)"
+        ok_runs=$((ok_runs + 1))
+      elif [ "$rc" -eq 124 ] && [ "$dur_s" -gt 0 ] 2>/dev/null && [ "$last_elapsed" -ge "$min_ok" ]; then
+        log_warn "[$case_name] TIMEOUT ($TIMEOUT) - PASS (ran ~${last_elapsed}s)"
+        ok_runs=$((ok_runs + 1))
+      elif [ "$rc" -ne 0 ] && { [ "$pw_ev" -eq 1 ] || [ "$pa_ev" -eq 1 ] || [ "$alsa_ev" -eq 1 ] || [ "$asoc_ev" -eq 1 ]; }; then
+        log_warn "[$case_name] nonzero rc=$rc but evidence indicates playback - PASS"
+        ok_runs=$((ok_runs + 1))
+      else
+        log_fail "[$case_name] loop $i FAILED (rc=$rc, ${last_elapsed}s) - see $logf"
+      fi
+      
+      i=$((i + 1))
+    done
+    
+    # Aggregate result for this clip
+    if [ "$ok_runs" -ge 1 ]; then
+      pass=$((pass + 1))
+      echo "$case_name PASS" >> "$LOGDIR/summary.txt"
+    else
+      fail=$((fail + 1))
+      echo "$case_name FAIL" >> "$LOGDIR/summary.txt"
+      suite_rc=1
+    fi
+  done
+  
+  # Collect evidence once at end (not per clip)
+  if [ "$DMESG_SCAN" -eq 1 ]; then
+    scan_audio_dmesg "$LOGDIR"
+    dump_mixers "$LOGDIR/mixer_dump.txt"
+  fi
+
+else
+  # ========== LEGACY: Matrix Mode ==========
+  log_info "Using legacy matrix mode (formats × durations)"
+  
+  for fmt in $FORMATS; do
+    for dur in $DURATIONS; do
     clip="$(resolve_clip "$fmt" "$dur")"
     case_name="play_${fmt}_${dur}"
     total=$((total + 1))
@@ -488,8 +743,9 @@ for fmt in $FORMATS; do
       echo "$case_name FAIL" >> "$LOGDIR/summary.txt"
       suite_rc=1
     fi
+    done
   done
-done
+fi
 
 log_info "Summary: total=$total pass=$pass fail=$fail skip=$skip"
 
