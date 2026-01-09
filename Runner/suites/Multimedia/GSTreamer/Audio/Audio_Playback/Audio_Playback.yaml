@@ -1,0 +1,72 @@
+metadata:
+  name: gstreamer-audio-playback
+  format: "Lava-Test Test Definition 1.0"
+  description: >
+    Audio playback validation using GStreamer (gst-launch-1.0) on Qualcomm Linux platforms.
+    Supports backend chaining (pipewire/pulseaudio/alsa), optional overlay stack setup,
+    clip provisioning from local assets or URL, caps inference via gst-discoverer, and
+    evidence-based PASS/FAIL (PipeWire/Pulse/ALSA + optional ASoC path_on fallback).
+  os:
+    - linux
+  scope:
+    - functional
+
+params:
+  # Mirrors run.sh CLI + env behavior
+  AUDIO_BACKEND: "" # auto|pipewire|pulseaudio|alsa (empty -> run.sh default "auto")
+  AUDIO_STACK: "" # auto|base|overlay (empty -> run.sh default "auto")
+  AUDIO_FORMAT: "wav" # wav|aac|mp3|flac
+  AUDIO_DURATION: "10s" # N|Ns|Nm|Nh|MM:SS|HH:MM:SS
+  AUDIO_CLIPDUR: "short" # short|medium|long
+  AUDIO_CLIP: "" # absolute path override (optional)
+
+  AUDIO_CLIPS_DIR: "" # directory containing clips (sets AUDIO_CLIPS_BASE_DIR inside run.sh)
+  AUDIO_ASSETS: "" # dir or .tar/.tar.gz/.tgz file to provision clips
+  AUDIO_ASSETS_URL: "" # optional URL used only if clip missing and audio_ensure_clip_ready exists
+
+  AUDIO_RATE: "" # force/inject caps rate (Hz) (optional)
+  AUDIO_CHANNELS: "" # force/inject caps channels (optional)
+  AUDIO_SINK: "" # sink selector (PipeWire id/substr, Pulse sink/index)
+  AUDIO_NULL_SINK: "0" # 1 to add --null-sink
+
+  AUDIO_ALSA_DEVICE: "" # hw:C,D or default (optional override for alsasink fallback)
+  AUDIO_GST_DEBUG: "2" # 1|2|3|4|5|6|7|9
+
+run:
+  steps:
+    - REPO_PATH="$PWD"
+
+    # IMPORTANT: path matches your repo layout shown in the prompt
+    - cd Runner/suites/Multimedia/GSTreamer/Audio/Audio_Playback/
+
+    # Build CLI args only when params are non-empty
+    - |
+      CMD="./run.sh"
+
+      [ -n "${AUDIO_BACKEND}" ] && CMD="${CMD} --backend ${AUDIO_BACKEND}"
+      [ -n "${AUDIO_STACK}" ] && CMD="${CMD} --stack ${AUDIO_STACK}"
+      [ -n "${AUDIO_FORMAT}" ] && CMD="${CMD} --format ${AUDIO_FORMAT}"
+      [ -n "${AUDIO_DURATION}" ] && CMD="${CMD} --duration ${AUDIO_DURATION}"
+      [ -n "${AUDIO_CLIPDUR}" ] && CMD="${CMD} --clipdur ${AUDIO_CLIPDUR}"
+      [ -n "${AUDIO_CLIP}" ] && CMD="${CMD} --clip ${AUDIO_CLIP}"
+
+      [ -n "${AUDIO_CLIPS_DIR}" ] && CMD="${CMD} --clips-dir ${AUDIO_CLIPS_DIR}"
+      [ -n "${AUDIO_ASSETS}" ] && CMD="${CMD} --assets ${AUDIO_ASSETS}"
+      [ -n "${AUDIO_ASSETS_URL}" ] && CMD="${CMD} --assets-url ${AUDIO_ASSETS_URL}"
+
+      [ -n "${AUDIO_RATE}" ] && CMD="${CMD} --rate ${AUDIO_RATE}"
+      [ -n "${AUDIO_CHANNELS}" ] && CMD="${CMD} --channels ${AUDIO_CHANNELS}"
+      [ -n "${AUDIO_SINK}" ] && CMD="${CMD} --sink ${AUDIO_SINK}"
+
+      [ -n "${AUDIO_ALSA_DEVICE}" ] && CMD="${CMD} --alsa-device ${AUDIO_ALSA_DEVICE}"
+      [ -n "${AUDIO_GST_DEBUG}" ] && CMD="${CMD} --gst-debug ${AUDIO_GST_DEBUG}"
+
+      if [ "${AUDIO_NULL_SINK}" = "1" ] || [ "${AUDIO_NULL_SINK}" = "true" ]; then
+        CMD="${CMD} --null-sink"
+      fi
+
+      echo "[LAVA] Running: ${CMD}"
+      sh -c "${CMD}" || true
+
+    # Your run.sh writes ./Audio_Playback.res in this directory
+    - "${REPO_PATH}/Runner/utils/send-to-lava.sh Audio_Playback.res || true"
