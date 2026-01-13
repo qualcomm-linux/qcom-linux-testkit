@@ -1,0 +1,32 @@
+metadata:
+  name: gstreamer-Multimedia-tests
+  format: "Lava-Test Test Definition 1.0"
+  description: "These scripts automate validation of GStreamer encoding and decoding using v4l2h264dec, v4l2h265dec, v4l2h264enc, and v4l2h265enc on Qualcomm Linux platforms."
+  os:
+    - linux
+  scope:
+    - functional
+
+params:
+  # Timeout for each test in seconds
+  TIMEOUT: "60"
+  # Enable strict mode (treat dmesg warnings as failures)
+  STRICT: "0"
+  # Enable dmesg scanning
+  DMESG_SCAN: "1"
+  # Log level
+  LOGLEVEL: "15"
+  # Number of times to retry on failure
+  RETRY_ON_FAIL: "3"
+  # Sleep time after each test in seconds
+  POST_TEST_SLEEP: "5"
+  # platform is autodetected by the test script
+  PLATFORM: ""
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Multimedia/Gstreamer/
+    - chmod +x ./run.sh
+    - ./run.sh --timeout "${TIMEOUT}" --loglevel "${LOGLEVEL}" --platform "${PLATFORM}" --retry-on-fail "${RETRY_ON_FAIL}" --post-test-sleep "${POST_TEST_SLEEP}" || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh "Gstreamer Multimedia Tests.res" || true

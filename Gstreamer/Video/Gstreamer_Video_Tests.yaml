@@ -1,0 +1,39 @@
+metadata:
+  name: gstreamer-video-tests
+  format: "Lava-Test Test Definition 1.0"
+  description: "GStreamer Video Encode/Decode validation using V4L2 hardware acceleration (H.264, H.265, VP9)"
+  os:
+    - linux
+  scope:
+    - functional
+
+params:
+  # Timeout for each test in seconds
+  TIMEOUT: "60"
+  # Enable strict mode (treat dmesg warnings as failures)
+  STRICT: "0"
+  # Enable dmesg scanning
+  DMESG_SCAN: "1"
+  # Log level
+  LOGLEVEL: "15"
+  # Sleep time after each test in seconds
+  POST_TEST_SLEEP: "5"
+  # Platform (auto-detected if empty)
+  PLATFORM: ""
+  # Video stack selection
+  VIDEO_STACK: "auto"
+  # VP9 clips download URL (optional, uses GitHub release by default)
+  VP9_CLIPS_URL: ""
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Gstreamer/Video/
+    - chmod +x ./run.sh
+    - |
+      if [ -n "${VP9_CLIPS_URL}" ]; then
+        ./run.sh --timeout "${TIMEOUT}" --loglevel "${LOGLEVEL}" --platform "${PLATFORM}" --stack "${VIDEO_STACK}" --post-test-sleep "${POST_TEST_SLEEP}" --vp9-clips-url "${VP9_CLIPS_URL}" || true
+      else
+        ./run.sh --timeout "${TIMEOUT}" --loglevel "${LOGLEVEL}" --platform "${PLATFORM}" --stack "${VIDEO_STACK}" --post-test-sleep "${POST_TEST_SLEEP}" || true
+      fi
+    - $REPO_PATH/Runner/utils/send-to-lava.sh "Gstreamer_Video_Tests.res" || true
