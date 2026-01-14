@@ -1,0 +1,42 @@
+# Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+# SPDX-License-Identifier: BSD-3-Clause-Clear
+
+metadata:
+  format: Lava-Test Test Definition 1.0
+  name: Gstreamer_Camera_Tests
+  description: "GStreamer Camera Tests - Camera capture, encoding, preview, and snapshot validation using V4L2"
+  maintainer:
+    - qualcomm-linux-test@quicinc.com
+  os:
+    - linux
+
+params:
+  # Timeout for each test in seconds
+  TIMEOUT: "120"
+  # Camera device path
+  CAMERA_DEVICE: "/dev/video0"
+  # Capture duration in seconds
+  CAPTURE_DURATION: "5"
+  # Enable strict mode (treat warnings as failures)
+  STRICT: "false"
+  # Enable dmesg scanning
+  DMESG_SCAN: "true"
+  # Repeat count
+  REPEAT: "1"
+  # Repeat policy (all or any)
+  REPEAT_POLICY: "all"
+
+run:
+  steps:
+    - cd Runner/suites/Gstreamer/Camera
+    - chmod +x ./run.sh
+    - |
+      ./run.sh --all \
+        --timeout "${TIMEOUT}" \
+        --camera "${CAMERA_DEVICE}" \
+        --duration "${CAPTURE_DURATION}" \
+        --repeat "${REPEAT}" \
+        --repeat-policy "${REPEAT_POLICY}" \
+        $([ "${STRICT}" = "true" ] && echo "--strict") \
+        $([ "${DMESG_SCAN}" = "false" ] && echo "--no-dmesg") \
+        || true
