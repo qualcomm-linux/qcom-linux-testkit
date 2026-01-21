@@ -1,0 +1,19 @@
+metadata:
+  name: weston-clickdot
+  format: Lava-Test Test Definition 1.0
+  description: "Run weston-clickdot under an active Wayland session and validate it creates/commits a surface"
+  maintainer:
+    - "Qualcomm Linux Testkit"
+
+params:
+  DURATION: "30s" # Client runtime (default 30s)
+  STOP_GRACE: "3s" # Reserved (default 3s)
+  VALIDATE_WAYLAND_PROTO: 1 # 1 enables WAYLAND_DEBUG protocol validation (default 1)
+  VALIDATE_SCREENSHOT: 0 # 1 enables screenshot delta when tools allow (default 0)
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Multimedia/Display/weston-clickdot
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh weston-clickdot.res
