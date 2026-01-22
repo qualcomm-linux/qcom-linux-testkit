@@ -796,47 +796,55 @@ audio_check_clips_available() {
 # ---------- New Clip Discovery Functions (for 20-clip enhancement) ----------
 
 # ---------- Config Mapping ----------
-# Provides stable, deterministic mapping from Config1-Config20 to specific
+# Provides stable, deterministic mapping from playback_config1-playback_config10 to specific
 # audio format test cases. This ensures reproducible test coverage across
 # different systems and releases.
 #
-# Config numbers map to specific sample rate, bit depth, and channel combinations:
-#   Config1  → 16 KHz, 16-bit, 2ch    Config11 → 352.8 KHz, 32-bit, 1ch
-#   Config2  → 176.4 KHz, 24-bit, 1ch Config12 → 384 KHz, 32-bit, 2ch
-#   Config3  → 176.4 KHz, 32-bit, 6ch Config13 → 44.1 KHz, 16-bit, 1ch
-#   Config4  → 192 KHz, 16-bit, 6ch   Config14 → 44.1 KHz, 8-bit, 6ch
-#   Config5  → 192 KHz, 32-bit, 8ch   Config15 → 48 KHz, 8-bit, 2ch
-#   Config6  → 22.05 KHz, 8-bit, 1ch  Config16 → 48 KHz, 8-bit, 8ch
-#   Config7  → 24 KHz, 24-bit, 6ch    Config17 → 88.2 KHz, 16-bit, 8ch
-#   Config8  → 24 KHz, 32-bit, 8ch    Config18 → 88.2 KHz, 24-bit, 2ch
-#   Config9  → 32 KHz, 16-bit, 2ch    Config19 → 8 KHz, 8-bit, 1ch
-#   Config10 → 32 KHz, 8-bit, 8ch     Config20 → 96 KHz, 24-bit, 6ch
+# Playback config numbers map to specific sample rate, bit depth, and channel combinations:
+#   playback_config1  → 8 KHz, 8-bit, 1ch
+#   playback_config2  → 16 KHz, 8-bit, 6ch
+#   playback_config3  → 16 KHz, 16-bit, 2ch
+#   playback_config4  → 22.05 KHz, 8-bit, 1ch
+#   playback_config5  → 24 KHz, 24-bit, 6ch
+#   playback_config6  → 24 KHz, 32-bit, 1ch
+#   playback_config7  → 32 KHz, 8-bit, 8ch
+#   playback_config8  → 32 KHz, 16-bit, 2ch
+#   playback_config9  → 44.1 KHz, 16-bit, 1ch
+#   playback_config10 → 48 KHz, 8-bit, 2ch
 
-# Translate Config number to test case name
-# Returns descriptive test case name for given config number
+# Translate playback_config name to test case name
+# Returns descriptive test case name for given config
 map_config_to_testcase() {
-  config_num="$1"
+  config="$1"
+  
+  # Extract config number if using playback_config format
+  config_num=""
+  case "$config" in
+    playback_config*)
+      config_num="$(printf '%s' "$config" | sed -n 's/^playback_config\([0-9][0-9]*\)$/\1/p')"
+      ;;
+    Config*)
+      # For backward compatibility
+      config_num="$(printf '%s' "$config" | sed -n 's/^Config\([0-9][0-9]*\)$/\1/p')"
+      ;;
+    [0-9]*)
+      # Direct number input
+      config_num="$config"
+      ;;
+  esac
+  
+  # Map config number to test case name
   case "$config_num" in
-    1)  printf 'play_16KHz_16b_2ch\n' ;;
-    2)  printf 'play_176.4KHz_24b_1ch\n' ;;
-    3)  printf 'play_176.4KHz_32b_6ch\n' ;;
-    4)  printf 'play_192KHz_16b_6ch\n' ;;
-    5)  printf 'play_192KHz_32b_8ch\n' ;;
-    6)  printf 'play_22.05KHz_8b_1ch\n' ;;
-    7)  printf 'play_24KHz_24b_6ch\n' ;;
-    8)  printf 'play_24KHz_32b_8ch\n' ;;
-    9)  printf 'play_32KHz_16b_2ch\n' ;;
-    10) printf 'play_32KHz_8b_8ch\n' ;;
-    11) printf 'play_352.8KHz_32b_1ch\n' ;;
-    12) printf 'play_384KHz_32b_2ch\n' ;;
-    13) printf 'play_44.1KHz_16b_1ch\n' ;;
-    14) printf 'play_44.1KHz_8b_6ch\n' ;;
-    15) printf 'play_48KHz_8b_2ch\n' ;;
-    16) printf 'play_48KHz_8b_8ch\n' ;;
-    17) printf 'play_88.2KHz_16b_8ch\n' ;;
-    18) printf 'play_88.2KHz_24b_2ch\n' ;;
-    19) printf 'play_8KHz_8b_1ch\n' ;;
-    20) printf 'play_96KHz_24b_6ch\n' ;;
+    1)  printf 'play_8KHz_8b_1ch\n' ;;
+    2)  printf 'play_16KHz_8b_6ch\n' ;;
+    3)  printf 'play_16KHz_16b_2ch\n' ;;
+    4)  printf 'play_22.05KHz_8b_1ch\n' ;;
+    5)  printf 'play_24KHz_24b_6ch\n' ;;
+    6)  printf 'play_24KHz_32b_1ch\n' ;;
+    7)  printf 'play_32KHz_8b_8ch\n' ;;
+    8)  printf 'play_32KHz_16b_2ch\n' ;;
+    9)  printf 'play_44.1KHz_16b_1ch\n' ;;
+    10) printf 'play_48KHz_8b_2ch\n' ;;
     *) return 1 ;;
   esac
   return 0
@@ -960,7 +968,7 @@ resolve_clip_by_name() {
 }
 
 # Validate clip name against available clips
-# Input: requested_name (e.g., play_48KHz_16b_2ch OR Config1), available_clips (list)
+# Input: requested_name (e.g., play_48KHz_16b_2ch OR playback_config1), available_clips (list)
 # Output: matching clip filename to stdout
 # Logs error messages to stderr
 # Returns: 0=found, 1=not found
@@ -968,9 +976,17 @@ validate_clip_name() {
   requested_name="$1"
   available_clips="$2"
   
-  # Check if requested_name is a generic config name (Config1, Config2, etc.)
-  # Support both "Config1" and "config1" (case-insensitive)
-  config_num="$(printf '%s' "$requested_name" | sed -n 's/^[Cc]onfig\([0-9][0-9]*\)$/\1/p')"
+  # Check if requested_name is a generic config name (playback_config1, Config1, etc.)
+  # Support both formats for backward compatibility
+  config_num=""
+  case "$requested_name" in
+    playback_config*)
+      config_num="$(printf '%s' "$requested_name" | sed -n 's/^playback_config\([0-9][0-9]*\)$/\1/p')"
+      ;;
+    [Cc]onfig*)
+      config_num="$(printf '%s' "$requested_name" | sed -n 's/^[Cc]onfig\([0-9][0-9]*\)$/\1/p')"
+      ;;
+  esac
   
   if [ -n "$config_num" ]; then
     # Generic config name - map to clip by index (1-based)
@@ -1013,7 +1029,7 @@ validate_clip_name() {
   idx=$#
   
   # No match found - provide helpful error message with range
-  log_error "Wrong clip name: '$requested_name'. Available range: Config1 to Config$idx. Please check again." >&2
+  log_error "Wrong clip name: '$requested_name'. Available range: playback_config1 to playback_config$idx. Please check again." >&2
   return 1
 }
 

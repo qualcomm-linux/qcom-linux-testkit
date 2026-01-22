@@ -113,7 +113,7 @@ Usage: $0 [options]
   --formats "wav"                    # Legacy matrix mode only 
   --durations "short|short medium"   # Legacy matrix mode only (not recommended for new tests)
   --clip-name "play_48KHz_16b_2ch"   # Test specific clip(s) by name (space-separated)
-                                     # Also supports Config1, Config2, ..., Config20
+                                     # Also supports playback_config1, playback_config2, ..., playback_config10
   --clip-filter "48KHz"              # Filter clips by pattern
   --res-suffix SUFFIX                # Suffix for unique result file (e.g., "Config1")
                                      # Generates AudioPlayback_SUFFIX.res instead of AudioPlayback.res
@@ -135,9 +135,9 @@ Testing Modes:
     - Use --clip-name or --clip-filter to select specific clips
     - Provides descriptive test case names based on audio format
     - Examples:
-        $0 --clip-name "Config1 Config7"
+        $0 --clip-name "playback_config1 playback_config7"
         $0 --clip-filter "48KHz"
-        $0 --clip-name "Config1" --res-suffix "Config1"  # CI/LAVA use
+        $0 --clip-name "playback_config1" --res-suffix "Config1"  # CI/LAVA use
   
   Legacy Matrix Mode:
     - Uses --formats and --durations to generate test matrix
@@ -190,8 +190,16 @@ while [ $# -gt 0 ]; do
       shift 2
       ;;
     --strict)
-      STRICT=1
-      shift
+      case "$2" in
+        --*|"")
+          STRICT=1
+          shift
+          ;;
+        *)
+          STRICT="$2"
+          shift 2
+          ;;
+      esac
       ;;
     --no-dmesg)
       DMESG_SCAN=0
@@ -597,15 +605,24 @@ if [ "$USE_CLIP_DISCOVERY" = "true" ]; then
       
       log_info "[$case_name] loop $i/$LOOPS start=$iso clip=$clip_file backend=$AUDIO_BACKEND $loop_hdr"
       
+      # Determine effective timeout: use clip duration when TIMEOUT is disabled
+      effective_timeout="$TIMEOUT"
+      if [ "$TIMEOUT" = "0" ] || [ "$TIMEOUT" = "" ]; then
+        if [ "$clip_duration" -gt 0 ] 2>/dev/null; then
+          effective_timeout="$clip_duration"
+          log_info "[$case_name] Using clip duration as timeout: ${effective_timeout}s"
+        fi
+      fi
+      
       start_s="$(date +%s 2>/dev/null || echo 0)"
       
       if [ "$AUDIO_BACKEND" = "pipewire" ]; then
         log_info "[$case_name] exec: pw-play -v \"$clip_path\""
-        audio_exec_with_timeout "$TIMEOUT" pw-play -v "$clip_path" >>"$logf" 2>&1
+        audio_exec_with_timeout "$effective_timeout" pw-play -v "$clip_path" >>"$logf" 2>&1
         rc=$?
       else
         log_info "[$case_name] exec: paplay --device=\"$SINK_NAME\" \"$clip_path\""
-        audio_exec_with_timeout "$TIMEOUT" paplay --device="$SINK_NAME" "$clip_path" >>"$logf" 2>&1
+        audio_exec_with_timeout "$effective_timeout" paplay --device="$SINK_NAME" "$clip_path" >>"$logf" 2>&1
         rc=$?
       fi
       

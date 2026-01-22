@@ -25,5 +25,5 @@ run:
   steps:
     - REPO_PATH=$PWD
     - cd Runner/suites/Multimedia/Audio/AudioRecord/
-    - ./run.sh --backend "${AUDIO_BACKEND}" --source "${SOURCE_CHOICE}" --config-name "${CONFIG_NAMES}" --config-filter "${CONFIG_FILTER}" --durations "${DURATIONS}" --record-seconds "${RECORD_SECONDS}" --loops "${LOOPS}" --timeout "${TIMEOUT}" --strict "${STRICT}" --res-suffix "${RES_SUFFIX}" || true
+    - ./run.sh --backend "${AUDIO_BACKEND}" --source "${SOURCE_CHOICE}" --config-name "${CONFIG_NAMES}" --config-filter "${CONFIG_FILTER}" --record-seconds "${RECORD_SECONDS}" --loops "${LOOPS}" --timeout "${TIMEOUT}" --strict "${STRICT}" --res-suffix "${RES_SUFFIX}" || true
     - $REPO_PATH/Runner/utils/send-to-lava.sh AudioRecord${RES_SUFFIX:+_${RES_SUFFIX}}.res || true

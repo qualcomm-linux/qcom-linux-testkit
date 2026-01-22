@@ -10,7 +10,7 @@ metadata:
 params:
   AUDIO_BACKEND: ""  # Selects backend: pipewire or pulseaudio, default: auto-detect
   SINK_CHOICE: "speakers"  # Playback sink: speakers or null, default: speakers
-  CLIP_NAMES: "Config1"  # Test specific clips (e.g., "Config1 Config2" or "play_48KHz_8b_2ch"), default: Config1
+  CLIP_NAMES: "playback_config1"  # Test specific clips (e.g., "playback_config1 playback_config2" or "play_48KHz_8b_2ch"), default: playback_config1
   CLIP_FILTER: ""  # Filter clips by pattern (e.g., "48KHz" or "16b" or "2ch"), default: unset
   FORMATS: "wav"  # Audio formats: e.g. wav, default: wav
   DURATIONS: "short"  # Playback durations: short, medium, long, default: short
@@ -21,7 +21,7 @@ params:
   VERBOSE: 0  # Enable verbose logging, default: 0
   EXTRACT_AUDIO_ASSETS: true  # Download/extract audio assets if missing, default: true
   ENABLE_NETWORK_DOWNLOAD: false  # Enable network download of missing audio files, default: false
-  AUDIO_CLIPS_BASE_DIR: ""  # Custom path to pre-staged audio clips (for CI), default: unset
+  AUDIO_CLIPS_BASE_DIR: "/home/AudioClips"  # Custom path to pre-staged audio clips (for CI), default: /home/AudioClips
   SSID: ""  # Wi-Fi SSID for network connection, default: unset
   PASSWORD: ""  # Wi-Fi password for network connection, default: unset
   NET_PROBE_ROUTE_IP: "1.1.1.1"  # IP used for route probing, default: 1.1.1.1
@@ -32,5 +32,5 @@ run:
   steps:
     - REPO_PATH=$PWD
     - cd Runner/suites/Multimedia/Audio/AudioPlayback/
-    - ./run.sh --backend "${AUDIO_BACKEND}" --sink "${SINK_CHOICE}" --clip-name "${CLIP_NAMES}" --clip-filter "${CLIP_FILTER}" --formats "${FORMATS}" --durations "${DURATIONS}" --loops "${LOOPS}" --timeout "${TIMEOUT}" --strict "${STRICT}" --audio-clips-path "${AUDIO_CLIPS_BASE_DIR}" --res-suffix "${RES_SUFFIX}" --ssid "${SSID}" --password "${PASSWORD}" || true
+    - ./run.sh --backend "${AUDIO_BACKEND}" --sink "${SINK_CHOICE}" --clip-name "${CLIP_NAMES}" --clip-filter "${CLIP_FILTER}" --loops "${LOOPS}" --timeout "${TIMEOUT}" --strict "${STRICT}" --audio-clips-path "${AUDIO_CLIPS_BASE_DIR}" --res-suffix "${RES_SUFFIX}" --ssid "${SSID}" --password "${PASSWORD}" || true
     - $REPO_PATH/Runner/utils/send-to-lava.sh AudioPlayback${RES_SUFFIX:+_${RES_SUFFIX}}.res || true

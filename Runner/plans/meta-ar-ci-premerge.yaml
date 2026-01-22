@@ -13,49 +13,49 @@ run:
     steps:
         - cd Runner
         
-        # ========== AudioPlayback Test Cases (7 configs) ==========
+        # ========== AudioPlayback Test Cases (5 configs) ==========
         
-        # Playback Test 1: Config1 (16KHz, 16-bit, 2ch)
-        - $PWD/suites/Multimedia/Audio/AudioPlayback/run.sh --clip-name "Config1" --res-suffix "Config1" --audio-clips-path /home/AudioClips/ --no-extract-assets || true
+        # Playback Test 1: playback_config1 (8KHz, 8-bit, 1ch)
+        - $PWD/suites/Multimedia/Audio/AudioPlayback/run.sh --clip-name "playback_config1" --res-suffix "Config1" --audio-clips-path /home/AudioClips/ --no-extract-assets || true
         - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/Audio/AudioPlayback/AudioPlayback_Config1.res || true
         
-        # Playback Test 2: Config7 (24KHz, 24-bit, 6ch)
-        - $PWD/suites/Multimedia/Audio/AudioPlayback/run.sh --clip-name "Config7" --res-suffix "Config7" --audio-clips-path /home/AudioClips/ --no-extract-assets || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/Audio/AudioPlayback/AudioPlayback_Config7.res || true
+        # Playback Test 2: playback_config3 (16KHz, 16-bit, 2ch)
+        - $PWD/suites/Multimedia/Audio/AudioPlayback/run.sh --clip-name "playback_config3" --res-suffix "Config3" --audio-clips-path /home/AudioClips/ --no-extract-assets || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/Audio/AudioPlayback/AudioPlayback_Config3.res || true
         
-        # Playback Test 3: Config13 (44.1KHz, 16-bit, 1ch)
-        - $PWD/suites/Multimedia/Audio/AudioPlayback/run.sh --clip-name "Config13" --res-suffix "Config13" --audio-clips-path /home/AudioClips/ --no-extract-assets || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/Audio/AudioPlayback/AudioPlayback_Config13.res || true
-        
-        # Playback Test 4: Config15 (48KHz, 8-bit, 2ch)
-        - $PWD/suites/Multimedia/Audio/AudioPlayback/run.sh --clip-name "Config15" --res-suffix "Config15" --audio-clips-path /home/AudioClips/ --no-extract-assets || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/Audio/AudioPlayback/AudioPlayback_Config15.res || true
-        
-        # Playback Test 5: Config18 (88.2KHz, 24-bit, 2ch)
-        - $PWD/suites/Multimedia/Audio/AudioPlayback/run.sh --clip-name "Config18" --res-suffix "Config18" --audio-clips-path /home/AudioClips/ --no-extract-assets || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/Audio/AudioPlayback/AudioPlayback_Config18.res || true
-        
-        # Playback Test 6: Config20 (96KHz, 24-bit, 6ch)
-        - $PWD/suites/Multimedia/Audio/AudioPlayback/run.sh --clip-name "Config20" --res-suffix "Config20" --audio-clips-path /home/AudioClips/ --no-extract-assets || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/Audio/AudioPlayback/AudioPlayback_Config20.res || true
-        
-        # Playback Test 7: Config5 (192KHz, 32-bit, 8ch)
-        - $PWD/suites/Multimedia/Audio/AudioPlayback/run.sh --clip-name "Config5" --res-suffix "Config5" --audio-clips-path /home/AudioClips/ --no-extract-assets || true
+        # Playback Test 3: playback_config5 (24KHz, 24-bit, 6ch)
+        - $PWD/suites/Multimedia/Audio/AudioPlayback/run.sh --clip-name "playback_config5" --res-suffix "Config5" --audio-clips-path /home/AudioClips/ --no-extract-assets || true
         - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/Audio/AudioPlayback/AudioPlayback_Config5.res || true
         
-        # ========== AudioRecord Test Cases (3 configs) ==========
+        # Playback Test 4: playback_config8 (32KHz, 16-bit, 2ch)
+        - $PWD/suites/Multimedia/Audio/AudioPlayback/run.sh --clip-name "playback_config8" --res-suffix "Config8" --audio-clips-path /home/AudioClips/ --no-extract-assets || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/Audio/AudioPlayback/AudioPlayback_Config8.res || true
+        
+        # Playback Test 5: playback_config10 (48KHz, 8-bit, 2ch)
+        - $PWD/suites/Multimedia/Audio/AudioPlayback/run.sh --clip-name "playback_config10" --res-suffix "Config10" --audio-clips-path /home/AudioClips/ --no-extract-assets || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/Audio/AudioPlayback/AudioPlayback_Config10.res || true
+        
+        # ========== AudioRecord Test Cases (5 configs) ==========
         
         # Record Test 1: record_config1 (8KHz, 1ch)
         - $PWD/suites/Multimedia/Audio/AudioRecord/run.sh --config-name "record_config1" --res-suffix "Config1" --record-seconds 10s || true
         - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/Audio/AudioRecord/AudioRecord_Config1.res || true
         
-        # Record Test 2: record_config7 (48KHz, 2ch)
+        # Record Test 2: record_config3 (16KHz, 2ch)
+        - $PWD/suites/Multimedia/Audio/AudioRecord/run.sh --config-name "record_config3" --res-suffix "Config3" --record-seconds 10s || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/Audio/AudioRecord/AudioRecord_Config3.res || true
+        
+        # Record Test 3: record_config5 (32KHz, 2ch)
+        - $PWD/suites/Multimedia/Audio/AudioRecord/run.sh --config-name "record_config5" --res-suffix "Config5" --record-seconds 10s || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/Audio/AudioRecord/AudioRecord_Config5.res || true
+        
+        # Record Test 4: record_config7 (48KHz, 2ch)
         - $PWD/suites/Multimedia/Audio/AudioRecord/run.sh --config-name "record_config7" --res-suffix "Config7" --record-seconds 10s || true
         - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/Audio/AudioRecord/AudioRecord_Config7.res || true
         
-        # Record Test 3: record_config10 (96KHz, 6ch)
-        - $PWD/suites/Multimedia/Audio/AudioRecord/run.sh --config-name "record_config10" --res-suffix "Config10" --record-seconds 10s || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/Audio/AudioRecord/AudioRecord_Config10.res || true
+        # Record Test 5: record_config9 (96KHz, 2ch)
+        - $PWD/suites/Multimedia/Audio/AudioRecord/run.sh --config-name "record_config9" --res-suffix "Config9" --record-seconds 10s || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/Audio/AudioRecord/AudioRecord_Config9.res || true
         
         # Parse and report results
         - $PWD/utils/result_parse.sh
