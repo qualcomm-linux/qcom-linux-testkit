@@ -27,6 +27,7 @@ fi
 if [ -z "$__INIT_ENV_LOADED" ]; then
     # shellcheck disable=SC1090
     . "$INIT_ENV"
+	__INIT_ENV_LOADED=1
 fi
 # Always source functestlib.sh, using $TOOLS exported by init_env
 # shellcheck disable=SC1090,SC1091
@@ -42,20 +43,16 @@ log_info "----------------------------------------------------------------------
 log_info "-------------------Starting $TESTNAME Testcase----------------------------"
 log_info "=== Test Initialization ==="
 
-# Check if lsusb is installed, else skip test
-check_dependencies lsusb grep || {
-  log_skip "$TESTNAME SKIP - lsusb is missing"
-  echo "$TESTNAME SKIP" >"$RES_FILE"
-  exit 0
-}
+# Check if grep is installed, else skip test
+deps_list="grep"
+check_dependencies "$deps_list"
 
+# Count interfaces with bInterfaceClass = 03 (HID) under /sys/bus/usb/devices
+hid_iface_count=0
 log_info "=== USB HID device Detection ==="
-hid_iface_count="$(lsusb -v 2>/dev/null | grep -i 'Human Interface Device' | wc -l)"
+hid_iface_count="$(cat /sys/bus/usb/devices/*/bInterfaceClass 2>/dev/null | grep -i '03' | wc -l)"
 
-echo "lsusb -v HID descriptors:"
-lsusb -v 2>/dev/null | grep -i 'Human Interface Device' || true
-
-echo "Number of HID interfaces found: $hid_iface_count"
+printf "Number of HID interfaces found: $hid_iface_count"
 
 if [ "$hid_iface_count" -gt 0 ]; then
     log_pass "$TESTNAME : Test Passed - USB HID interface(s) detected"
