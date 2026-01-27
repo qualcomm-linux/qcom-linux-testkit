@@ -1,0 +1,15 @@
+metadata:
+  name: ufs-read-writes
+  format: "Lava-Test Test Definition 1.0"
+  description: "Test file I/O on UFS device using dd command"
+  os:
+    - linux
+  scope:
+    - functional
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/Storage/ufs_read_writes
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh ufs_read_writes.res || true
