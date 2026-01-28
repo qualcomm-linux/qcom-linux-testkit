@@ -30,6 +30,7 @@ This suite automates the validation of audio playback capabilities on Qualcomm L
 
 The test suite includes 10 diverse audio clip configurations covering various sample rates, bit depths, and channel configurations:
 
+```
 Playback Config     Descriptive Name         Sample Rate    Bit Rate    Channels
 playback_config1    play_16KHz_16b_2ch       16 KHz         16-bit      2ch
 playback_config2    play_16KHz_8b_6ch        16 KHz         8-bit       6ch
@@ -41,12 +42,15 @@ playback_config7    play_32KHz_8b_8ch        32 KHz         8-bit       8ch
 playback_config8    play_44.1KHz_16b_1ch     44.1 KHz       16-bit      1ch
 playback_config9    play_48KHz_8b_2ch        48 KHz         8-bit       2ch
 playback_config10   play_8KHz_8b_1ch         8 KHz          8-bit       1ch
+```
 
+```
 Coverage Summary:
 - Sample Rates: 8 KHz, 16 KHz, 22.05 KHz, 24 KHz, 32 KHz, 44.1 KHz, 48 KHz
 - Bit Depths: 8-bit, 16-bit, 24-bit, 32-bit
 - Channel Configurations: 1ch (Mono), 2ch (Stereo), 6ch (5.1 Surround), 8ch (7.1 Surround)
 - Total Configurations: 10 unique audio format combinations
+```
 
 ## Prerequisites
 
@@ -78,9 +82,14 @@ Runner/
 └── suites/
     └── Multimedia/
         └── Audio/
-            ├── AudioPlayback/
+            └── AudioPlayback/
                 ├── run.sh
-                └── Read_me.md
+                ├── Read_me.md
+                └── AudioPlayback_Configs/
+                    ├── AudioPlayback_Config01.yaml
+                    ├── AudioPlayback_Config02.yaml
+                    ├── ...
+                    └── AudioPlayback_Config10.yaml
 ```
 
 ## Usage
@@ -182,7 +191,14 @@ cd Runner/suites/Multimedia/Audio/AudioPlayback
 # Provide JUnit output and disable dmesg scan
 ./run.sh --junit results.xml --no-dmesg
 
-# CI/LAVA workflow: Generate unique result files for each test
+# CI/LAVA workflow: Using pre-configured YAML files
+# Each configuration has its own YAML file in the AudioPlayback_Configs directory
+# These can be run directly by LAVA as separate test cases
+
+# Method 1: Using the pre-configured YAML files directly (recommended for LAVA)
+# LAVA will execute these automatically based on the YAML definitions
+
+# Method 2: Using run.sh with specific configurations
 ./run.sh --clip-name "playback_config1" --res-suffix "Config1" --audio-clips-path /home/AudioClips/ --no-extract-assets
 ./run.sh --clip-name "playback_config7" --res-suffix "Config7" --audio-clips-path /home/AudioClips/ --no-extract-assets
 # This generates AudioPlayback_Config1.res and AudioPlayback_Config7.res (no overwriting)
