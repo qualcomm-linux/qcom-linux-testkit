@@ -858,89 +858,143 @@ weston_pids() {
     echo "$pids"
 }
 
-# Is Weston running?
+# Is Weston running
 weston_is_running() {
     [ -n "$(weston_pids)" ]
 }
 
-# Stop all Weston processes
+# Stop all Weston processes, also stop socket activation and instances
 weston_stop() {
+    if command -v systemctl >/dev/null 2>&1; then
+        log_info "Stopping Weston, stopping weston.socket to prevent auto restart"
+        systemctl stop weston.socket >/dev/null 2>&1 || true
+
+        log_info "Stopping Weston, stopping weston.service"
+        systemctl stop weston.service >/dev/null 2>&1 || true
+
+        log_info "Stopping Weston, stopping weston@root.service if present"
+        systemctl stop weston@root.service >/dev/null 2>&1 || true
+
+        # Stop any active weston@*.service instances
+        units="$(systemctl list-units 'weston@*.service' --no-legend --no-pager 2>/dev/null | awk '{print $1}')"
+        if [ -n "$units" ]; then
+            for u in $units; do
+                log_info "Stopping Weston, stopping instance unit $u"
+                systemctl stop "$u" >/dev/null 2>&1 || true
+            done
+        fi
+    fi
+
     if weston_is_running; then
-        log_info "Stopping Weston..."
-        pkill -x weston
-        for i in $(seq 1 10); do
-            log_info "Waiting for Weston to stop with $i attempt "
+        log_info "Stopping Weston processes"
+        pkill -TERM -x weston >/dev/null 2>&1 || true
+
+        i=1
+        while [ "$i" -le 10 ]; do
+            log_info "Waiting for Weston to stop, attempt $i of 10"
             if ! weston_is_running; then
                 log_info "Weston stopped successfully"
                 return 0
             fi
             sleep 1
+            i=$((i + 1))
         done
-        log_error "Failed to stop Weston after waiting."
+
+        log_warn "Weston still running after grace period, sending SIGKILL"
+        pkill -KILL -x weston >/dev/null 2>&1 || true
+
+        i=1
+        while [ "$i" -le 5 ]; do
+            log_info "Waiting for Weston to stop after SIGKILL, attempt $i of 5"
+            if ! weston_is_running; then
+                log_info "Weston stopped successfully"
+                return 0
+            fi
+            sleep 1
+            i=$((i + 1))
+        done
+
+        log_error "Failed to stop Weston completely"
         return 1
-    else
-        log_info "Weston is not running."
     fi
+
+    log_info "Weston is not running"
     return 0
 }
 
 # Start weston with correct env if not running
 weston_start() {
     if weston_is_running; then
-        log_info "Weston already running."
+        log_info "Weston already running"
         return 0
     fi
- 
+
     if command -v systemctl >/dev/null 2>&1; then
-        log_info "Attempting to start via systemd: weston.service"
+        log_info "Attempting to start Weston, enabling weston.socket if available"
+        systemctl start weston.socket >/dev/null 2>&1 || true
+        sleep 1
+
+        log_info "Attempting to start Weston via weston.service"
         systemctl start weston.service >/dev/null 2>&1 || true
         sleep 1
         if weston_is_running; then
-            log_info "Weston started via systemd (weston.service)."
+            log_info "Weston started via weston.service"
             return 0
         fi
- 
-        log_info "Attempting to start via systemd: weston@.service"
-        systemctl start weston@.service >/dev/null 2>&1 || true
+
+        log_info "Attempting to start Weston via weston@root.service"
+        systemctl start weston@root.service >/dev/null 2>&1 || true
         sleep 1
         if weston_is_running; then
-            log_info "Weston started via systemd (weston@.service)."
+            log_info "Weston started via weston@root.service"
             return 0
         fi
- 
-        log_warn "systemd start did not bring Weston up; will try direct spawn."
+
+        # Try one enabled weston@ instance if any exists
+        enabled_unit="$(systemctl list-unit-files 'weston@*.service' --no-legend --no-pager 2>/dev/null | awk '$2=="enabled"{print $1; exit}')"
+        if [ -n "$enabled_unit" ]; then
+            log_info "Attempting to start Weston via enabled instance $enabled_unit"
+            systemctl start "$enabled_unit" >/dev/null 2>&1 || true
+            sleep 1
+            if weston_is_running; then
+                log_info "Weston started via instance $enabled_unit"
+                return 0
+            fi
+        fi
+
+        log_warn "systemd start did not bring Weston up, trying direct spawn"
     fi
- 
-    # Minimal-friendly direct spawn (no headless module guesses here).
+
+    # Minimal-friendly direct spawn
     ensure_xdg_runtime_dir
- 
+
     if ! command -v weston >/dev/null 2>&1; then
-        log_fail "weston binary not found in PATH."
+        log_fail "weston binary not found in PATH"
         return 1
     fi
- 
-    log_info "Attempting to spawn Weston (no backend override). Log: /tmp/weston.self.log"
+
+    log_info "Spawning Weston directly, log file is /tmp/weston.self.log"
     ( nohup weston --log=/tmp/weston.self.log >/dev/null 2>&1 & ) || true
- 
+
     tries=0
-    while [ $tries -lt 5 ]; do
+    while [ "$tries" -lt 8 ]; do
         if weston_is_running; then
-            log_info "Weston is now running (PID(s): $(weston_pids))."
+            log_info "Weston is now running, PID list is $(weston_pids)"
             return 0
         fi
-        if [ -n "$(find_wayland_sockets | head -n1)" ]; then
-            log_info "A Wayland socket appeared after spawn."
+        if [ -n "$(find_wayland_sockets 2>/dev/null | head -n 1)" ]; then
+            log_info "Wayland socket appeared after spawn"
             return 0
         fi
         sleep 1
-        tries=$((tries+1))
+        tries=$((tries + 1))
     done
- 
+
     if [ -f /tmp/weston.self.log ]; then
-        log_warn "Weston spawn failed; last log lines:"
+        log_warn "Weston spawn failed, last log lines follow"
         tail -n 20 /tmp/weston.self.log 2>/dev/null | sed 's/^/[weston.log] /' || true
     else
-        log_warn "Weston spawn failed; no log file present."
+        log_warn "Weston spawn failed, no log file present"
     fi
     return 1
 }

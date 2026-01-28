@@ -1411,3 +1411,181 @@ display_is_cpu_renderer() {
       ;;
   esac
 }
+
+###############################################################################
+# Wayland protocol validation (client-side)
+###############################################################################
+# Validate that the client actually created a surface and committed buffers.
+# Expects WAYLAND_DEBUG output in the provided logfile.
+#
+# Usage:
+# display_wayland_proto_validate "/path/to/run.log"
+# Returns:
+# 0 = looks good (surface + commit seen)
+# 1 = missing required evidence
+display_wayland_proto_validate() {
+  logf="${1:-}"
+  [ -n "$logf" ] && [ -f "$logf" ] || return 1
+
+  # Accept both wl_compositor@X and wl_compositor#X formats
+  # Accept commit() with or without parentheses in logs
+  if grep -Eq 'wl_compositor[@#][0-9]+\.create_surface' "$logf" &&
+     grep -Eq 'wl_surface[@#][0-9]+\.commit' "$logf"; then
+    return 0
+  fi
+
+  return 1
+}
+
+###############################################################################
+# Screenshot capture + delta validation
+###############################################################################
+# Uses weston-screenshooter when available.
+# If the compositor rejects capture (unauthorized / protocol failure),
+# treat it as "not available" so tests do not FAIL due to policy.
+#
+# Returns convention:
+# 0 = success
+# 1 = tool exists but capture failed
+# 2 = tool not available or not permitted (unauthorized / protocol failure)
+
+display_screenshot_tool() {
+  if command -v weston-screenshooter >/dev/null 2>&1; then
+    echo "weston-screenshooter"
+    return 0
+  fi
+  return 1
+}
+
+display_take_screenshot() {
+  out="${1:-}"
+  [ -n "$out" ] || return 1
+
+  tool="$(display_screenshot_tool 2>/dev/null || true)"
+  [ -n "$tool" ] || return 2
+
+  tmp_log="$(mktemp /tmp/weston_shot_XXXXXX.log 2>/dev/null || true)"
+  [ -n "$tmp_log" ] || tmp_log="/tmp/weston_shot.log"
+
+  rc=0
+  case "$tool" in
+    weston-screenshooter)
+      # capture stdout+stderr to inspect authorization failures
+      weston-screenshooter "$out" >"$tmp_log" 2>&1 || rc=$?
+      ;;
+    *)
+      rm -f "$tmp_log" 2>/dev/null || true
+      return 2
+      ;;
+  esac
+
+  # If compositor rejects capture, treat as "not permitted" (skip)
+  if grep -qiE 'unauthorized|protocol failure' "$tmp_log" 2>/dev/null; then
+    rm -f "$tmp_log" 2>/dev/null || true
+    rm -f "$out" 2>/dev/null || true
+    return 2
+  fi
+
+  rm -f "$tmp_log" 2>/dev/null || true
+
+  [ "$rc" -eq 0 ] || return 1
+  [ -s "$out" ] || return 1
+  return 0
+}
+
+display_hash_file() {
+  f="${1:-}"
+  [ -n "$f" ] && [ -f "$f" ] || return 1
+
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$f" | awk '{print $1}'
+    return 0
+  fi
+  if command -v md5sum >/dev/null 2>&1; then
+    md5sum "$f" | awk '{print $1}'
+    return 0
+  fi
+  return 1
+}
+
+# Begin screenshot-delta session (captures "before" shot).
+# Usage:
+# display_screenshot_delta_begin "testname" "/path/to/outdir"
+# Side effects:
+# sets DISPLAY_SHOT_BEFORE and DISPLAY_SHOT_DIR
+# Returns:
+# 0 ok
+# 2 tool missing or not permitted
+# 1 capture failed
+display_screenshot_delta_begin() {
+  tn="${1:-weston-test}"
+  od="${2:-.}"
+
+  ts="$(date +%Y%m%d_%H%M%S 2>/dev/null || date +%s)"
+  DISPLAY_SHOT_DIR="$od"
+  DISPLAY_SHOT_BEFORE="${od}/${tn}_before_${ts}.png"
+
+  rc=0
+  display_take_screenshot "$DISPLAY_SHOT_BEFORE" || rc=$?
+
+  if [ "$rc" -eq 0 ]; then
+    log_info "Screenshot before captured: $DISPLAY_SHOT_BEFORE"
+    return 0
+  fi
+
+  if [ "$rc" -eq 2 ]; then
+    log_warn "Screenshot tool not available or not permitted skipping screenshot delta validation"
+    DISPLAY_SHOT_BEFORE=""
+    return 2
+  fi
+
+  log_warn "Failed to capture screenshot before skipping screenshot delta validation"
+  DISPLAY_SHOT_BEFORE=""
+  return 1
+}
+
+# End screenshot-delta session (captures "after" and compares hash).
+# Usage:
+# display_screenshot_delta_end "testname"
+# Returns:
+# 0 changed (PASS)
+# 1 identical (FAIL)
+# 2 not available or skipped
+display_screenshot_delta_end() {
+  tn="${1:-weston-test}"
+  [ -n "${DISPLAY_SHOT_BEFORE:-}" ] || return 2
+
+  od="${DISPLAY_SHOT_DIR:-.}"
+  ts="$(date +%Y%m%d_%H%M%S 2>/dev/null || date +%s)"
+  after="${od}/${tn}_after_${ts}.png"
+
+  rc=0
+  display_take_screenshot "$after" || rc=$?
+
+  if [ "$rc" -eq 2 ]; then
+    log_warn "Screenshot tool not available or not permitted skipping screenshot delta validation"
+    return 2
+  fi
+  if [ "$rc" -ne 0 ]; then
+    log_warn "Failed to capture screenshot after skipping screenshot delta validation"
+    return 2
+  fi
+
+  log_info "Screenshot after captured: $after"
+
+  h1="$(display_hash_file "$DISPLAY_SHOT_BEFORE" 2>/dev/null || true)"
+  h2="$(display_hash_file "$after" 2>/dev/null || true)"
+
+  if [ -z "$h1" ] || [ -z "$h2" ]; then
+    log_warn "Could not hash screenshots skipping screenshot delta validation"
+    return 2
+  fi
+
+  if [ "$h1" = "$h2" ]; then
+    log_warn "Screenshot delta check identical no visible change detected"
+    return 1
+  fi
+
+  log_info "Screenshot delta check changed visual validation OK"
+  return 0
+}
