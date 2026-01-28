@@ -1,7 +1,7 @@
 metadata:
-  name: audio-playback
+  name: audio-playback-config5
   format: "Lava-Test Test Definition 1.0"
-  description: "This suite automates the validation of audio playback capabilities on Qualcomm Linux-based platforms running a Yocto-based Linux system. It supports both PipeWire and PulseAudio backends, with robust evidence-based PASS/FAIL logic, asset management, and diagnostic logging."
+  description: "Audio playback validation for Config5: 24KHz, 24-bit, 6ch. This suite automates the validation of audio playback capabilities on Qualcomm Linux-based platforms running a Yocto-based Linux system. It supports both PipeWire and PulseAudio backends, with robust evidence-based PASS/FAIL logic, asset management, and diagnostic logging."
   os:
     - linux
   scope:
@@ -10,12 +10,12 @@ metadata:
 params:
   AUDIO_BACKEND: ""  # Selects backend: pipewire or pulseaudio, default: auto-detect
   SINK_CHOICE: "speakers"  # Playback sink: speakers or null, default: speakers
-  CLIP_NAMES: "playback_config1"  # Test specific clips (e.g., "playback_config1 playback_config2" or "play_48KHz_8b_2ch"), default: playback_config1
+  CLIP_NAMES: "playback_config5"  # Test specific clips (Config5: 24KHz, 24-bit, 6ch)
   CLIP_FILTER: ""  # Filter clips by pattern (e.g., "48KHz" or "16b" or "2ch"), default: unset
   FORMATS: "wav"  # Audio formats: e.g. wav, default: wav
-  DURATIONS: "short"  # Playback durations: short, medium, long, default: short
+  DURATIONS: ""  # Playback durations: short, medium, long (legacy mode only, not used in config discovery mode), default: unset
   LOOPS: 1  # Number of playback loops, default: 1
-  TIMEOUT: 0  # Playback timeout per loop (e.g., 15s, 0=none), default: 0
+  TIMEOUT: "10s"  # Playback timeout per loop (e.g., 15s, 0=none), default: 10s
   STRICT: 0  # Enable strict mode (fail on any error), default: 0
   DMESG_SCAN: 1  # Scan dmesg for errors after playback, default: 1
   VERBOSE: 0  # Enable verbose logging, default: 0
@@ -26,7 +26,7 @@ params:
   PASSWORD: ""  # Wi-Fi password for network connection, default: unset
   NET_PROBE_ROUTE_IP: "1.1.1.1"  # IP used for route probing, default: 1.1.1.1
   NET_PING_HOST: "8.8.8.8"  # Host used for ping reachability check, default: 8.8.8.8
-  RES_SUFFIX: ""  # Suffix for unique result file and log directory (e.g., "Config1" generates AudioPlayback_Config1.res and results/AudioPlayback_Config1/), default: unset
+  RES_SUFFIX: "Config5"  # Suffix for unique result file and log directory (generates AudioPlayback_Config5.res and results/AudioPlayback_Config5/)
 
 run:
   steps:

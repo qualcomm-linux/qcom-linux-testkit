@@ -1,7 +1,7 @@
 metadata:
-  name: audio-record
+  name: audio-record-config7
   format: "Lava-Test Test Definition 1.0"
-  description: "This suite automates the validation of audio recording capabilities on Qualcomm Linux-based platforms running a Yocto-based Linux system. It supports both PipeWire and PulseAudio backends, with robust evidence-based PASS/FAIL logic, asset management, and diagnostic logging."
+  description: "Audio recording validation for Config7: 48KHz, 2ch. This suite automates the validation of audio recording capabilities on Qualcomm Linux-based platforms running a Yocto-based Linux system. It supports both PipeWire and PulseAudio backends, with robust evidence-based PASS/FAIL logic, asset management, and diagnostic logging."
   os:
     - linux
   scope:
@@ -10,16 +10,16 @@ metadata:
 params:
   AUDIO_BACKEND: ""  # Selects backend: pipewire or pulseaudio, default: auto-detect
   SOURCE_CHOICE: "mic"  # Recording source: mic or null, default: mic
-  CONFIG_NAMES: "record_config1"  # Test specific configs (e.g., "record_config1 record_config2"), default: record_config1
+  CONFIG_NAMES: "record_config7"  # Test specific configs (Config7: 48KHz, 2ch)
   CONFIG_FILTER: ""  # Filter configs by pattern (e.g., "48KHz" or "2ch"), default: unset
-  DURATIONS: "short"  # Recording durations: short, medium, long, default: short
+  DURATIONS: ""  # Recording durations: short, medium, long (legacy mode only, not used in config discovery mode), default: unset
   RECORD_SECONDS: "5s"  # Recording duration with unit suffix (e.g., "5s", "10s", "30s"), default: 5s
   LOOPS: 1  # Number of recording loops, default: 1
   TIMEOUT: 0  # Recording timeout per loop (e.g., 15s, 0=none), default: 0
   STRICT: 0  # Enable strict mode (fail on any error), default: 0
   DMESG_SCAN: 1  # Scan dmesg for errors after recording, default: 1
   VERBOSE: 0  # Enable verbose logging, default: 0
-  RES_SUFFIX: ""  # Suffix for unique result file and log directory (e.g., "Config1" generates AudioRecord_Config1.res and results/AudioRecord_Config1/), default: unset
+  RES_SUFFIX: "Config7"  # Suffix for unique result file and log directory (generates AudioRecord_Config7.res and results/AudioRecord_Config7/)
 
 run:
   steps:
