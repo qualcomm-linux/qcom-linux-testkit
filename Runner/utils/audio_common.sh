@@ -821,11 +821,12 @@ map_config_to_testcase() {
   config_num=""
   case "$config" in
     playback_config*)
-      config_num="$(printf '%s' "$config" | sed -n 's/^playback_config\([0-9][0-9]*\)$/\1/p')"
+      # Handle both formats: playback_config1 and playback_config01
+      config_num="$(printf '%s' "$config" | sed -n 's/^playback_config0*\([0-9][0-9]*\)$/\1/p')"
       ;;
     Config*)
       # For backward compatibility
-      config_num="$(printf '%s' "$config" | sed -n 's/^Config\([0-9][0-9]*\)$/\1/p')"
+      config_num="$(printf '%s' "$config" | sed -n 's/^Config0*\([0-9][0-9]*\)$/\1/p')"
       ;;
     [0-9]*)
       # Direct number input
@@ -1176,12 +1177,23 @@ discover_record_configs() {
 }
 
 # Get recording parameters for a specific config
-# Input: config_name (e.g., record_config1, record_8KHz_1ch)
+# Input: config_name (e.g., record_config1, record_config01, record_8KHz_1ch)
 # Output: "rate channels" (e.g., "8000 1")
 # Returns: 0=success, 1=invalid config
 get_record_config_params() {
   config_name="$1"
+  
+  # Normalize config name to handle both formats (record_config1 and record_config01)
+  normalized_name="$config_name"
   case "$config_name" in
+    record_config0*)
+      # Extract number and remove leading zero for internal processing
+      config_num="$(printf '%s' "$config_name" | sed -n 's/^record_config0*\([0-9][0-9]*\)$/\1/p')"
+      normalized_name="record_config$config_num"
+      ;;
+  esac
+  
+  case "$normalized_name" in
     record_config1|record_8KHz_1ch)      printf '%s\n' "8000 1" ;;
     record_config2|record_16KHz_1ch)     printf '%s\n' "16000 1" ;;
     record_config3|record_16KHz_2ch)     printf '%s\n' "16000 2" ;;
@@ -1198,12 +1210,23 @@ get_record_config_params() {
 }
 
 # Generate descriptive test case name from config name
-# Input: record_config1
+# Input: record_config1 or record_config01
 # Output: record_8KHz_1ch
 # Returns: 0=success, 1=invalid config
 generate_record_testcase_name() {
   config_name="$1"
+  
+  # Normalize config name to handle both formats (record_config1 and record_config01)
+  normalized_name="$config_name"
   case "$config_name" in
+    record_config0*)
+      # Extract number and remove leading zero for internal processing
+      config_num="$(printf '%s' "$config_name" | sed -n 's/^record_config0*\([0-9][0-9]*\)$/\1/p')"
+      normalized_name="record_config$config_num"
+      ;;
+  esac
+  
+  case "$normalized_name" in
     record_config1)  printf '%s\n' "record_8KHz_1ch" ;;
     record_config2)  printf '%s\n' "record_16KHz_1ch" ;;
     record_config3)  printf '%s\n' "record_16KHz_2ch" ;;

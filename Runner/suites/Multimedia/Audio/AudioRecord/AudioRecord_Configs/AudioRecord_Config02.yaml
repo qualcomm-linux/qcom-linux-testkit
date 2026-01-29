@@ -1,0 +1,29 @@
+metadata:
+  name: audio-record-config02
+  format: "Lava-Test Test Definition 1.0"
+  description: "Audio recording validation for Config02: 16KHz, 1ch"
+  os:
+    - linux
+  scope:
+    - functional
+
+params:
+  AUDIO_BACKEND: ""  # Selects backend: pipewire or pulseaudio, default: auto-detect
+  SOURCE_CHOICE: "mic"  # Recording source: mic or null, default: mic
+  CONFIG_NAMES: "record_config02"  # Test specific configs (Config02: 16KHz, 1ch)
+  CONFIG_FILTER: ""  # Filter configs by pattern (e.g., "48KHz" or "2ch"), default: unset
+  DURATIONS: ""  # Recording durations: short, medium, long (legacy mode only, not used in config discovery mode), default: unset
+  RECORD_SECONDS: "5s"  # Recording duration with unit suffix (e.g., "5s", "10s", "30s"), default: 5s
+  LOOPS: 1  # Number of recording loops, default: 1
+  TIMEOUT: 0  # Recording timeout per loop (e.g., 15s, 0=none), default: 0
+  STRICT: 0  # Enable strict mode (fail on any error), default: 0
+  DMESG_SCAN: 1  # Scan dmesg for errors after recording, default: 1
+  VERBOSE: 0  # Enable verbose logging, default: 0
+  RES_SUFFIX: "Config02"  # Suffix for unique result file and log directory (generates AudioRecord_Config02.res and results/AudioRecord_Config02/)
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Multimedia/Audio/AudioRecord/
+    - ./run.sh --backend "${AUDIO_BACKEND}" --source "${SOURCE_CHOICE}" --config-name "${CONFIG_NAMES}" --config-filter "${CONFIG_FILTER}" --record-seconds "${RECORD_SECONDS}" --loops "${LOOPS}" --timeout "${TIMEOUT}" --strict "${STRICT}" --res-suffix "${RES_SUFFIX}"
+    - $REPO_PATH/Runner/utils/send-to-lava.sh AudioRecord${RES_SUFFIX:+_${RES_SUFFIX}}.res

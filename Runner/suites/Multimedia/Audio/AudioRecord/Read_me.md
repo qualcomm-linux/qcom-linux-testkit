@@ -27,22 +27,25 @@ This suite automates the validation of audio recording capabilities on Qualcomm 
 
 The test suite includes 10 diverse audio record configurations covering various sample rates and channel configurations:
 
-Config           Descriptive Name    Sample Rate  Channels 
-record_config1   record_8KHz_1ch     8 KHz        1ch
-record_config2   record_16KHz_1ch    16 KHz       1ch
-record_config3   record_16KHz_2ch    16 KHz       2ch
-record_config4   record_24KHz_1ch    24 KHz       1ch
-record_config5   record_32KHz_2ch    32 KHz       2ch
-record_config6   record_44.1KHz_2ch  44.1 KHz     2ch
-record_config7   record_48KHz_2ch    48 KHz       2ch
-record_config8   record_48KHz_6ch    48 KHz       6ch
-record_config9   record_96KHz_2ch    96 KHz       2ch
-record_config10  record_96KHz_6ch    96 KHz       6ch
+```  
+| Config   | Config Name      | Sample Rate | Channels |
+|----------|------------------|-------------|----------|
+| Config01 | record_config1   | 8 KHz       | 1ch      |
+| Config02 | record_config2   | 16 KHz      | 1ch      |
+| Config03 | record_config3   | 16 KHz      | 2ch      |
+| Config04 | record_config4   | 24 KHz      | 1ch      |
+| Config05 | record_config5   | 32 KHz      | 2ch      |
+| Config06 | record_config6   | 44.1 KHz    | 2ch      |
+| Config07 | record_config7   | 48 KHz      | 2ch      |
+| Config08 | record_config8   | 48 KHz      | 6ch      |
+| Config09 | record_config9   | 96 KHz      | 2ch      |
+| Config10 | record_config10  | 96 KHz      | 6ch      |
+```   
 
 **Coverage Summary:**
-- **Sample Rates**: 8 KHz, 16 KHz, 24 KHz, 32 KHz, 44.1 KHz, 48 KHz, 96 KHz
-- **Channel Configurations**: 1ch (Mono), 2ch (Stereo), 6ch (5.1 Surround)
-- **Total Configurations**: 10 unique audio format combinations
+- Sample Rates: 8 KHz, 16 KHz, 24 KHz, 32 KHz, 44.1 KHz, 48 KHz, 96 KHz
+- Channel Configurations: 1ch (Mono), 2ch (Stereo), 6ch (5.1 Surround)
+- Total Configurations: 10 unique audio format combinations
 
 ## Prerequisites
 
@@ -75,9 +78,14 @@ Runner/
 └── suites/
     └── Multimedia/
         └── Audio/
-            ├── AudioRecord/
+            └── AudioRecord/
                 ├── run.sh         
-                └── Read_me.md      
+                ├── Read_me.md
+                └── AudioRecord_Configs/
+                    ├── AudioRecord_Config01.yaml
+                    ├── AudioRecord_Config02.yaml
+                    ├── ...
+                    └── AudioRecord_Config10.yaml
 ```
 
 ## Usage
@@ -148,7 +156,14 @@ cd Runner/suites/Multimedia/Audio/AudioRecord
 # Provide JUnit output and disable dmesg scan
 ./run.sh --junit results.xml --no-dmesg
 
-# CI/LAVA workflow: Generate unique result files for each test
+# CI/LAVA workflow: Using pre-configured YAML files
+# Each configuration has its own YAML file in the AudioRecord_Configs directory
+# These can be run directly by LAVA as separate test cases
+
+# Method 1: Using the pre-configured YAML files directly (recommended for LAVA)
+# LAVA will execute these automatically based on the YAML definitions
+
+# Method 2: Using run.sh with specific configurations
 ./run.sh --config-name "record_config1" --res-suffix "Config1" --record-seconds 10s
 ./run.sh --config-name "record_config7" --res-suffix "Config7" --record-seconds 10s
 ./run.sh --config-name "record_config10" --res-suffix "Config10" --record-seconds 10s
