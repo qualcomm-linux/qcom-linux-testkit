@@ -2755,3 +2755,1196 @@ perf_tiotest_gate_eval_line_safe() {
   echo "status=FAIL baseline=$base goal=$goal op=$op score_pct=$score key=${prefix}"
   return 1
 }
+
+###############################################################################
+# Geekbench / Performance reusable helpers for lib_performance.sh
+###############################################################################
+# -----------------------------------------------------------------------------
+# Small local-safe helpers (do not depend on other libs)
+# -----------------------------------------------------------------------------
+perf_nowstamp_safe() {
+  if command -v nowstamp >/dev/null 2>&1; then
+    nowstamp
+  else
+    date "+%Y-%m-%d %H:%M:%S" 2>/dev/null || date
+  fi
+}
+
+perf_is_number_safe() {
+  v=$1
+  [ -n "$v" ] || return 1
+  # Accept: 123 or 123.45
+  case "$v" in
+    *[!0-9.]*|"."|*.*.*) return 1 ;;
+  esac
+  w=$v
+  if printf '%s' "$v" | grep -q '\.' 2>/dev/null; then
+    w=$(printf '%s' "$v" | tr -d '.')
+  fi
+  [ -n "$w" ] || return 1
+  case "$w" in *[!0-9]*) return 1 ;; esac
+  return 0
+}
+
+perf_avg_file_safe() {
+  file=$1
+  [ -f "$file" ] || return 0
+  awk '
+    $0 ~ /^[0-9]+(\.[0-9]+)?$/ { n++; s+=$0 }
+    END { if (n>0) printf "%.3f", s/n }
+  ' "$file" 2>/dev/null
+}
+
+perf_csv_escape() {
+  # Escape for putting inside "...", double quotes
+  printf '%s' "$1" | sed 's/"/""/g'
+}
+
+# POSIX-safe: preserve rc without PIPESTATUS (no tee pipeline).
+# If perf_run_cmd_tee exists, use it (it should already be POSIX-safe in your tree).
+perf_run_cmd_tee_safe() {
+  # perf_run_cmd_tee_safe LOGFILE -- cmd...
+  logfile=$1
+  shift
+  if [ "${1:-}" = "--" ]; then
+    shift
+  fi
+
+  : >"$logfile" 2>/dev/null || true
+
+  if command -v perf_run_cmd_tee >/dev/null 2>&1; then
+    perf_run_cmd_tee "$logfile" "$@"
+    return $?
+  fi
+
+  # Fallback: capture output to logfile, then print logfile to console.
+  if command -v stdbuf >/dev/null 2>&1; then
+    stdbuf -oL -eL "$@" >"$logfile" 2>&1
+    rc=$?
+  else
+    "$@" >"$logfile" 2>&1
+    rc=$?
+  fi
+
+  cat "$logfile" 2>/dev/null || true
+  return "$rc"
+}
+
+# -----------------------------------------------------------------------------
+# Basic file + log helper
+# -----------------------------------------------------------------------------
+
+# perf_write_and_log FILE MESSAGE...
+# Append message to file and also log_info to console
+perf_write_and_log() {
+  file=$1
+  shift
+  msg=$*
+  [ -n "$file" ] || return 1
+  printf "%s\n" "$msg" >>"$file" 2>/dev/null || true
+  if command -v log_info >/dev/null 2>&1; then
+    log_info "$msg"
+  else
+    printf "[INFO] %s\n" "$msg"
+  fi
+}
+
+# -----------------------------------------------------------------------------
+# Live progress runner
+# -----------------------------------------------------------------------------
+
+# perf_run_cmd_with_progress OUTDIR RUN_LOG HEARTBEAT_SECS LABEL -- CMD...
+# - Streams raw command output to console
+# - Writes raw output to RUN_LOG
+# - Emits log_info progress + heartbeat lines while running
+#
+# Requires: mkfifo, sleep, awk (stdbuf optional)
+perf_run_cmd_with_progress() {
+  outdir=$1
+  run_log=$2
+  heartbeat_secs=$3
+  label=$4
+  shift 4
+ 
+  mkdir -p "${outdir:-.}" 2>/dev/null || true
+  : >"$run_log" 2>/dev/null || true
+ 
+  case "${heartbeat_secs:-}" in
+    ""|*[!0-9]*) heartbeat_secs=15 ;;
+  esac
+  if [ "$heartbeat_secs" -lt 1 ] 2>/dev/null; then
+    heartbeat_secs=15
+  fi
+ 
+  if [ "${1:-}" != "--" ]; then
+    log_warn "perf_run_cmd_with_progress: missing -- separator, falling back to tee"
+    perf_run_cmd_tee_safe "$run_log" -- "$@"
+    return $?
+  fi
+  shift
+ 
+  tmpdir=$(mktemp -d "$outdir/.perftmp.XXXXXX" 2>/dev/null)
+  if [ -z "${tmpdir:-}" ] || [ ! -d "$tmpdir" ]; then
+    tmpdir=$(mktemp -d 2>/dev/null)
+  fi
+  if [ -z "${tmpdir:-}" ] || [ ! -d "$tmpdir" ]; then
+    log_warn "perf_run_cmd_with_progress: mktemp failed, falling back to tee"
+    perf_run_cmd_tee_safe "$run_log" -- "$@"
+    return $?
+  fi
+ 
+  fifo="$tmpdir/fifo"
+  status_file="$tmpdir/status"
+  : >"$status_file" 2>/dev/null || true
+ 
+  if ! mkfifo "$fifo" 2>/dev/null; then
+    rm -rf "$tmpdir" 2>/dev/null || true
+    log_warn "perf_run_cmd_with_progress: mkfifo failed, falling back to tee"
+    perf_run_cmd_tee_safe "$run_log" -- "$@"
+    return $?
+  fi
+ 
+  log_info "Progress, $label, started"
+  log_info "Progress, command, $*"
+  printf "%s\n" "$label, invoked, waiting for output" >"$status_file" 2>/dev/null || true
+ 
+  if command -v stdbuf >/dev/null 2>&1; then
+    (stdbuf -oL -eL "$@" >"$fifo" 2>&1) &
+  else
+    ("$@" >"$fifo" 2>&1) &
+  fi
+  pid=$!
+ 
+  (
+    while kill -0 "$pid" 2>/dev/null; do
+      sleep "$heartbeat_secs" 2>/dev/null || break
+      if kill -0 "$pid" 2>/dev/null; then
+        s=$(cat "$status_file" 2>/dev/null)
+        if [ -n "${s:-}" ]; then
+          log_info "Progress, $s, still running"
+        fi
+      fi
+    done
+  ) &
+  hbpid=$!
+ 
+  mode=""
+  sc=0
+  mc=0
+ 
+  while IFS= read -r line; do
+    printf "%s\n" "$line"
+    printf "%s\n" "$line" >>"$run_log" 2>/dev/null || true
+ 
+    case "$line" in
+      "Single-Core")
+        mode="Single-Core"
+        sc=0
+        printf "%s\n" "$label, entered Single-Core" >"$status_file" 2>/dev/null || true
+        log_info "Progress, $label, entered Single-Core"
+        continue
+        ;;
+      "Multi-Core")
+        mode="Multi-Core"
+        mc=0
+        printf "%s\n" "$label, entered Multi-Core" >"$status_file" 2>/dev/null || true
+        log_info "Progress, $label, entered Multi-Core"
+        continue
+        ;;
+      "Benchmark Summary")
+        # Fix-1: stop workload tracking at summary to avoid
+        # "Single-Core Score / Integer Score / Floating Point Score" being seen as workloads.
+        mode=""
+        printf "%s\n" "$label, entered Benchmark Summary" >"$status_file" 2>/dev/null || true
+        log_info "Progress, $label, entered Benchmark Summary"
+        continue
+        ;;
+      "System Information"|"CPU Information"|"Memory Information")
+        # Defensive: these are not workloads; stop tracking.
+        mode=""
+        printf "%s\n" "$label, entered $line" >"$status_file" 2>/dev/null || true
+        log_info "Progress, $label, entered $line"
+        continue
+        ;;
+    esac
+ 
+    if [ -n "$mode" ]; then
+      name=$(
+        printf "%s\n" "$line" |
+          awk '
+            function trim(s){ sub(/^[ \t]+/,"",s); sub(/[ \t]+$/,"",s); return s }
+            {
+              first=0
+              for(i=1;i<=NF;i++){
+                if($i ~ /^[0-9]+$/){ first=i; break }
+              }
+              if(first<=1) exit 1
+              out=""
+              for(i=1;i<first;i++){
+                out = (out=="" ? $i : out " " $i)
+              }
+              out=trim(out)
+              # Extra safety (even though we clear mode at Benchmark Summary)
+              if (out=="Single-Core Score" || out=="Multi-Core Score" ||
+                  out=="Integer Score" || out=="Floating Point Score") exit 1
+              print out
+            }
+          ' 2>/dev/null
+      )
+ 
+      if [ -n "${name:-}" ]; then
+        if [ "$mode" = "Single-Core" ]; then
+          sc=$((sc + 1))
+          printf "%s\n" "$label, Single-Core, $sc, $name" >"$status_file" 2>/dev/null || true
+          log_info "Progress, $label, Single-Core, $sc, $name"
+        else
+          mc=$((mc + 1))
+          printf "%s\n" "$label, Multi-Core, $mc, $name" >"$status_file" 2>/dev/null || true
+          log_info "Progress, $label, Multi-Core, $mc, $name"
+        fi
+      fi
+    fi
+  done <"$fifo"
+ 
+  wait "$pid"
+  rc=$?
+ 
+  kill "$hbpid" 2>/dev/null || true
+  wait "$hbpid" 2>/dev/null || true
+ 
+  rm -rf "$tmpdir" 2>/dev/null || true
+ 
+  if [ "$rc" -eq 0 ]; then
+    log_info "Progress, $label, completed, rc, 0"
+  else
+    log_warn "Progress, $label, completed, rc, $rc"
+  fi
+ 
+  return "$rc"
+}
+
+# -----------------------------------------------------------------------------
+# Parsers, summary + workloads
+# -----------------------------------------------------------------------------
+# perf_parse_geekbench_summary_scores LOGFILE
+# Prints: single_total single_int single_fp multi_total multi_int multi_fp
+# Prints: st|si|sf|mt|mi|mf
+perf_parse_geekbench_summary_scores() {
+  logfile=$1
+  [ -n "$logfile" ] || return 1
+  [ -f "$logfile" ] || return 1
+ 
+  awk '
+    function clean(line) {
+      gsub(/\r/, "", line)
+      # strip common ANSI CSI sequences (best effort)
+      gsub(/\033\[[0-9;]*[A-Za-z]/, "", line)
+      return line
+    }
+    function last_int(line, n,a,i,t) {
+      n=split(line, a, /[[:space:]]+/)
+      for (i=n; i>=1; i--) {
+        t=a[i]
+        gsub(/\033\[[0-9;]*[A-Za-z]/, "", t)
+        if (t ~ /^[0-9]+$/) return t
+      }
+      return ""
+    }
+ 
+    BEGIN{
+      in_summary=0
+      cur=""
+      st=""; si=""; sf=""
+      mt=""; mi=""; mf=""
+    }
+ 
+    { $0 = clean($0) }
+ 
+    # Start summary (allow indentation)
+    /^[[:space:]]*Benchmark Summary[[:space:]]*$/ { in_summary=1; cur=""; next }
+ 
+    in_summary==1 {
+      # If a new big header begins, stop
+      if ($0 ~ /^[[:space:]]*System Information[[:space:]]*$/) { in_summary=0; next }
+      if ($0 ~ /^[[:space:]]*CPU Information[[:space:]]*$/) { in_summary=0; next }
+      if ($0 ~ /^[[:space:]]*Memory Information[[:space:]]*$/) { in_summary=0; next }
+ 
+      if (index($0, "Single-Core Score") > 0) {
+        v = last_int($0)
+        if (v != "") { st=v; cur="single" }
+        next
+      }
+      if (index($0, "Multi-Core Score") > 0) {
+        v = last_int($0)
+        if (v != "") { mt=v; cur="multi" }
+        next
+      }
+ 
+      if (index($0, "Integer Score") > 0) {
+        v = last_int($0)
+        if (v != "") {
+          if (cur=="single" && si=="") si=v
+          else if (cur=="multi" && mi=="") mi=v
+        }
+        next
+      }
+      if (index($0, "Floating Point Score") > 0) {
+        v = last_int($0)
+        if (v != "") {
+          if (cur=="single" && sf=="") sf=v
+          else if (cur=="multi" && mf=="") mf=v
+        }
+        next
+      }
+      next
+    }
+ 
+    END{
+      if (st!="" || mt!="") {
+        printf "%s|%s|%s|%s|%s|%s\n", st, si, sf, mt, mi, mf
+      }
+    }
+  ' "$logfile" 2>/dev/null
+}
+
+# perf_append_geekbench_workloads_csv LOGFILE TIMESTAMP TESTNAME ITER CSVFILE
+# Appends rows:
+# timestamp,test,iter,core_mode,workload,score,throughput
+perf_append_geekbench_workloads_csv() {
+  logfile=$1
+  ts=$2
+  testname=$3
+  iter=$4
+  csvfile=$5
+
+  [ -n "$logfile" ] || return 1
+  [ -n "$ts" ] || return 1
+  [ -n "$testname" ] || return 1
+  [ -n "$iter" ] || return 1
+  [ -n "$csvfile" ] || return 1
+
+  awk -v ts="$ts" -v test="$testname" -v iter="$iter" '
+    function trim(s){ sub(/^[ \t]+/,"",s); sub(/[ \t]+$/,"",s); return s }
+    BEGIN{ mode=""; }
+
+    /^[[:space:]]*Benchmark Summary/ { exit }
+
+    /^[[:space:]]*Single-Core[[:space:]]*$/ { mode="Single-Core"; next }
+    /^[[:space:]]*Multi-Core[[:space:]]*$/ { mode="Multi-Core"; next }
+
+    mode!="" {
+      score=""; name=""; thr=""; first=0
+
+      for (i=1;i<=NF;i++){
+        if ($i ~ /^[0-9]+$/) { first=i; score=$i; break }
+      }
+      if (first==0) next
+
+      for (i=1;i<first;i++){
+        name = (name=="" ? $i : name " " $i)
+      }
+      name=trim(name)
+
+      # Skip summary-style score names if they ever appear in section output
+      if (name=="Single-Core Score" || name=="Multi-Core Score" ||
+          name=="Integer Score" || name=="Floating Point Score") {
+        next
+      }
+
+      for (i=first+1;i<=NF;i++){
+        thr = (thr=="" ? $i : thr " " $i)
+      }
+      thr=trim(thr)
+
+      gsub(/"/, "\"\"", name)
+      gsub(/"/, "\"\"", thr)
+
+      printf "%s,%s,%s,%s,\"%s\",%s,\"%s\"\n", ts, test, iter, mode, name, score, thr
+    }
+  ' "$logfile" >>"$csvfile" 2>/dev/null || true
+}
+
+
+# -----------------------------------------------------------------------------
+# Geekbench “readable” CSV init helpers (2 files)
+# -----------------------------------------------------------------------------
+perf_geekbench_summary_csv_init() {
+  csvfile=$1
+  [ -n "$csvfile" ] || return 0
+  if [ ! -f "$csvfile" ] || [ ! -s "$csvfile" ]; then
+    printf '%s\n' "timestamp,test,iteration,single_total,single_integer,single_float,multi_total,multi_integer,multi_float" >"$csvfile" 2>/dev/null || true
+  fi
+  return 0
+}
+
+# perf_geekbench_workloads_csv_init FILE
+perf_geekbench_workloads_csv_init() {
+  csvfile=$1
+  [ -n "$csvfile" ] || return 0
+  if [ ! -f "$csvfile" ] || [ ! -s "$csvfile" ]; then
+    printf '%s\n' "timestamp,test,iteration,core_mode,workload,score,throughput" >"$csvfile" 2>/dev/null || true
+  fi
+  return 0
+}
+
+
+perf_geekbench_write_iter_summary_txt() {
+  st=$1; si=$2; sf=$3
+  mt=$4; mi=$5; mf=$6
+  outfile=$7
+ 
+  [ -n "$outfile" ] || return 1
+ 
+  : >"$outfile" 2>/dev/null || true
+ 
+  if [ -n "${st:-}" ]; then
+    echo "Benchmark Summary" >>"$outfile"
+    echo "  Single-Core Score: ${st}" >>"$outfile"
+    [ -n "${si:-}" ] && echo "    Integer Score: ${si}" >>"$outfile"
+    [ -n "${sf:-}" ] && echo "    Floating Point Score: ${sf}" >>"$outfile"
+    echo "" >>"$outfile"
+  fi
+ 
+  if [ -n "${mt:-}" ]; then
+    echo "Benchmark Summary" >>"$outfile"
+    echo "  Multi-Core Score: ${mt}" >>"$outfile"
+    [ -n "${mi:-}" ] && echo "    Integer Score: ${mi}" >>"$outfile"
+    [ -n "${mf:-}" ] && echo "    Floating Point Score: ${mf}" >>"$outfile"
+    echo "" >>"$outfile"
+  fi
+ 
+  if [ -z "${st:-}" ] && [ -z "${mt:-}" ]; then
+    echo "Benchmark Summary present but totals could not be parsed." >>"$outfile"
+  fi
+ 
+  return 0
+}
+
+# perf_geekbench_write_iter_subscores_txt LOGFILE OUTFILE
+# Writes a readable list:
+# Single-Core workloads:
+# - Foo: 123
+# Multi-Core workloads:
+# - Bar: 456
+perf_geekbench_write_iter_subscores_txt() {
+  logfile=$1
+  outfile=$2
+
+  [ -n "$logfile" ] || return 1
+  [ -n "$outfile" ] || return 1
+  [ -f "$logfile" ] || return 1
+
+  awk '
+    function trim(s){ sub(/^[ \t]+/,"",s); sub(/[ \t]+$/,"",s); return s }
+    BEGIN{ mode=""; printed_sc=0; printed_mc=0 }
+
+    /^[[:space:]]*Benchmark Summary/ { exit }
+
+    /^[[:space:]]*Single-Core[[:space:]]*$/ {
+      mode="Single-Core"
+      if (!printed_sc) { print "Single-Core workloads:"; printed_sc=1 }
+      next
+    }
+    /^[[:space:]]*Multi-Core[[:space:]]*$/ {
+      mode="Multi-Core"
+      if (!printed_mc) { print ""; print "Multi-Core workloads:"; printed_mc=1 }
+      next
+    }
+
+    mode!="" {
+      score=""; name=""; first=0
+
+      for (i=1;i<=NF;i++){
+        if ($i ~ /^[0-9]+$/) { first=i; score=$i; break }
+      }
+      if (first==0) next
+
+      for (i=1;i<first;i++){
+        name = (name=="" ? $i : name " " $i)
+      }
+      name=trim(name)
+      if (name=="") next
+
+      # Skip summary score lines (defensive)
+      if (name=="Single-Core Score" || name=="Multi-Core Score" ||
+          name=="Integer Score" || name=="Floating Point Score") {
+        next
+      }
+
+      print " - " name ": " score
+    }
+  ' "$logfile" >"$outfile" 2>/dev/null || true
+}
+
+# perf_geekbench_scores_to_vars SCORELINE
+# Input: "st|si|sf|mt|mi|mf"
+# Output: prints 6 lines "st=..", etc (for eval)
+perf_geekbench_scores_to_vars() {
+  s=$1
+  [ -n "$s" ] || return 1
+ 
+  # Split without relying on bash arrays
+  st=$(printf '%s' "$s" | awk -F'|' '{print $1}')
+  si=$(printf '%s' "$s" | awk -F'|' '{print $2}')
+  sf=$(printf '%s' "$s" | awk -F'|' '{print $3}')
+  mt=$(printf '%s' "$s" | awk -F'|' '{print $4}')
+  mi=$(printf '%s' "$s" | awk -F'|' '{print $5}')
+  mf=$(printf '%s' "$s" | awk -F'|' '{print $6}')
+ 
+  # Quote values safely for eval. Values are numeric/empty, but keep it robust.
+  printf "st='%s'\n" "$(printf '%s' "$st" | sed "s/'/'\\\\''/g")"
+  printf "si='%s'\n" "$(printf '%s' "$si" | sed "s/'/'\\\\''/g")"
+  printf "sf='%s'\n" "$(printf '%s' "$sf" | sed "s/'/'\\\\''/g")"
+  printf "mt='%s'\n" "$(printf '%s' "$mt" | sed "s/'/'\\\\''/g")"
+  printf "mi='%s'\n" "$(printf '%s' "$mi" | sed "s/'/'\\\\''/g")"
+  printf "mf='%s'\n" "$(printf '%s' "$mf" | sed "s/'/'\\\\''/g")"
+}
+
+# perf_geekbench_has_benchmark_summary LOGFILE
+# Returns 0 if "Benchmark Summary" header appears (allow indentation)
+perf_geekbench_has_benchmark_summary() {
+  f=$1
+  [ -n "$f" ] || return 1
+  [ -f "$f" ] || return 1
+  grep -q '[[:space:]]*Benchmark Summary[[:space:]]*$' "$f" 2>/dev/null
+}
+
+# perf_geekbench_log_subscores_file FILE
+# Prints file lines using log_info (if available), otherwise echo.
+perf_geekbench_log_subscores_file() {
+  f=$1
+  [ -n "$f" ] || return 1
+  [ -s "$f" ] || return 1
+
+  if command -v log_info >/dev/null 2>&1; then
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      log_info "$line"
+    done <"$f"
+  else
+    cat "$f"
+  fi
+  return 0
+}
+
+# perf_geekbench_log_summary_scores ST SI SF MT MI MF
+# Logs a "Benchmark Summary (this run)" block (single-only or multi-only)
+perf_geekbench_log_summary_scores() {
+  st=$1; si=$2; sf=$3
+  mt=$4; mi=$5; mf=$6
+
+  if command -v log_info >/dev/null 2>&1; then
+    log_info "Geekbench summary (this run):"
+    if [ -n "${st:-}" ] && perf_is_number_safe "$st"; then
+      log_info " Single-Core Score : $st"
+      if [ -n "${si:-}" ] && perf_is_number_safe "$si"; then log_info " Integer Score : $si"; fi
+      if [ -n "${sf:-}" ] && perf_is_number_safe "$sf"; then log_info " FP Score : $sf"; fi
+    fi
+    if [ -n "${mt:-}" ] && perf_is_number_safe "$mt"; then
+      log_info " Multi-Core Score : $mt"
+      if [ -n "${mi:-}" ] && perf_is_number_safe "$mi"; then log_info " Integer Score : $mi"; fi
+      if [ -n "${mf:-}" ] && perf_is_number_safe "$mf"; then log_info " FP Score : $mf"; fi
+    fi
+  else
+    echo "Geekbench summary (this run):"
+    [ -n "${st:-}" ] && echo " Single-Core Score : $st"
+    [ -n "${si:-}" ] && echo " Integer Score : $si"
+    [ -n "${sf:-}" ] && echo " FP Score : $sf"
+    [ -n "${mt:-}" ] && echo " Multi-Core Score : $mt"
+    [ -n "${mi:-}" ] && echo " Integer Score : $mi"
+    [ -n "${mf:-}" ] && echo " FP Score : $mf"
+  fi
+  return 0
+}
+# -----------------------------------------------------------------------------
+# Geekbench bin + unlock helpers
+# -----------------------------------------------------------------------------
+perf_geekbench_pick_bin() {
+  # Optional override: can be a directory or a file or a command name
+  # Backward compatible: if not given, uses $GEEKBENCH_BIN then PATH.
+  spec=$1
+ 
+  if [ -z "${spec:-}" ]; then
+    spec=${GEEKBENCH_BIN:-}
+  fi
+ 
+  # If user provided a directory, pick executable inside it and fix +x
+  if [ -n "${spec:-}" ] && [ -d "$spec" ]; then
+    # try common names inside bundle
+    for cand in "$spec/geekbench_aarch64" "$spec/geekbench" "$spec/geekbench6_aarch64" "$spec/geekbench6"; do
+      if [ -f "$cand" ]; then
+        if [ ! -x "$cand" ]; then
+          chmod +x "$cand" 2>/dev/null || true
+        fi
+        # Also fix common wrapper scripts if present (best effort)
+        for w in "$spec/run.sh" "$spec/Geekbench" "$spec/geekbench.sh"; do
+          if [ -f "$w" ] && [ ! -x "$w" ]; then
+            chmod +x "$w" 2>/dev/null || true
+          fi
+        done
+        if [ -x "$cand" ]; then
+          echo "$cand"
+          return 0
+        fi
+      fi
+    done
+    echo ""
+    return 1
+  fi
+ 
+  # If user provided a file path, chmod +x if needed
+  if [ -n "${spec:-}" ] && [ -f "$spec" ]; then
+    if [ ! -x "$spec" ]; then
+      chmod +x "$spec" 2>/dev/null || true
+    fi
+    if [ -x "$spec" ]; then
+      echo "$spec"
+      return 0
+    fi
+    echo ""
+    return 1
+  fi
+ 
+  # If user provided a command name present in PATH
+  if [ -n "${spec:-}" ] && command -v "$spec" >/dev/null 2>&1; then
+    p=$(command -v "$spec" 2>/dev/null)
+    # best effort chmod if it is a file and not exec (rare)
+    if [ -n "${p:-}" ] && [ -f "$p" ] && [ ! -x "$p" ]; then
+      chmod +x "$p" 2>/dev/null || true
+    fi
+    if [ -n "${p:-}" ] && [ -x "$p" ]; then
+      echo "$p"
+      return 0
+    fi
+  fi
+ 
+  # Default PATH lookup
+  if command -v geekbench_aarch64 >/dev/null 2>&1; then
+    p=$(command -v geekbench_aarch64 2>/dev/null)
+    if [ -n "${p:-}" ] && [ -f "$p" ] && [ ! -x "$p" ]; then
+      chmod +x "$p" 2>/dev/null || true
+    fi
+    if [ -n "${p:-}" ] && [ -x "$p" ]; then
+      echo "$p"
+      return 0
+    fi
+  fi
+ 
+  if command -v geekbench >/dev/null 2>&1; then
+    p=$(command -v geekbench 2>/dev/null)
+    if [ -n "${p:-}" ] && [ -f "$p" ] && [ ! -x "$p" ]; then
+      chmod +x "$p" 2>/dev/null || true
+    fi
+    if [ -n "${p:-}" ] && [ -x "$p" ]; then
+      echo "$p"
+      return 0
+    fi
+  fi
+ 
+  echo ""
+  return 1
+}
+
+# -----------------------------------------------------------------------------
+# Geekbench bin resolver + chmod fix (reusable)
+# -----------------------------------------------------------------------------
+perf_geekbench_fix_exec_perms_dir() {
+  d=$1
+  [ -n "$d" ] || return 1
+  [ -d "$d" ] || return 1
+ 
+  # Best effort: known names in Geekbench bundles
+  for f in \
+    "$d/geekbench_aarch64" \
+    "$d/geekbench" \
+    "$d/Geekbench"* \
+    "$d/geekbench"*; do
+    [ -f "$f" ] || continue
+    if [ ! -x "$f" ]; then
+      chmod +x "$f" 2>/dev/null || true
+    fi
+  done
+  return 0
+}
+ 
+# perf_geekbench_resolve_bin_and_fix_perms REQUESTED
+# - REQUESTED can be: empty, command, file path, or directory path
+# - Prints resolved executable path to stdout
+perf_geekbench_resolve_bin_and_fix_perms() {
+  req=$1
+ 
+  # empty -> try PATH candidates
+  if [ -z "${req:-}" ]; then
+    if command -v geekbench_aarch64 >/dev/null 2>&1; then
+      command -v geekbench_aarch64 2>/dev/null
+      return 0
+    fi
+    if command -v geekbench >/dev/null 2>&1; then
+      command -v geekbench 2>/dev/null
+      return 0
+    fi
+    return 1
+  fi
+ 
+  # directory provided
+  if [ -d "$req" ]; then
+    perf_geekbench_fix_exec_perms_dir "$req" 2>/dev/null || true
+ 
+    if [ -f "$req/geekbench_aarch64" ]; then
+      [ -x "$req/geekbench_aarch64" ] || chmod +x "$req/geekbench_aarch64" 2>/dev/null || true
+      echo "$req/geekbench_aarch64"
+      return 0
+    fi
+    if [ -f "$req/geekbench" ]; then
+      [ -x "$req/geekbench" ] || chmod +x "$req/geekbench" 2>/dev/null || true
+      echo "$req/geekbench"
+      return 0
+    fi
+ 
+    # last resort: pick first file matching geekbench*
+    for f in "$req"/geekbench* "$req"/Geekbench*; do
+      [ -f "$f" ] || continue
+      [ -x "$f" ] || chmod +x "$f" 2>/dev/null || true
+      echo "$f"
+      return 0
+    done
+    return 1
+  fi
+ 
+  # file provided
+  if [ -f "$req" ]; then
+    [ -x "$req" ] || chmod +x "$req" 2>/dev/null || true
+    echo "$req"
+    return 0
+  fi
+ 
+  # command provided
+  if command -v "$req" >/dev/null 2>&1; then
+    p=$(command -v "$req" 2>/dev/null)
+    [ -n "$p" ] || return 1
+    echo "$p"
+    return 0
+  fi
+ 
+  return 1
+}
+
+perf_geekbench_unlock_if_requested() {
+  bin=$1
+  email=$2
+  key=$3
+  logf=$4
+
+  [ -n "$bin" ] || return 1
+  [ -n "$email" ] || return 0
+  [ -n "$key" ] || return 0
+  [ -n "$logf" ] || logf="./geekbench_unlock.log"
+
+  : >"$logf" 2>/dev/null || true
+  if command -v log_info >/dev/null 2>&1; then
+    log_info "Geekbench, unlock requested, log, $logf"
+  fi
+
+  perf_run_cmd_tee_safe "$logf" -- "$bin" --unlock "$email" "$key"
+  rc=$?
+
+  if [ "$rc" -eq 0 ]; then
+    if command -v log_info >/dev/null 2>&1; then
+      log_info "Geekbench, unlock done, rc, 0"
+    fi
+    return 0
+  fi
+
+  if grep -qi "already" "$logf" 2>/dev/null; then
+    if command -v log_info >/dev/null 2>&1; then
+      log_info "Geekbench, already unlocked, continuing"
+    fi
+    return 0
+  fi
+
+  if command -v log_warn >/dev/null 2>&1; then
+    log_warn "Geekbench, unlock failed, rc, $rc, continuing"
+  fi
+  return 1
+}
+
+# -----------------------------------------------------------------------------
+# Runner: run Geekbench N times and dump 2 readable CSVs (summary + workloads)
+# Uses live progress streaming via perf_run_cmd_with_progress
+# -----------------------------------------------------------------------------
+
+# perf_geekbench_run_and_dump_csv BIN OUTDIR TESTNAME ITERS SUMMARY_CSV WORKLOADS_CSV HEARTBEAT_SECS -- GEEKBENCH_ARGS...
+perf_geekbench_run_and_dump_csv() {
+  bin=$1
+  outdir=$2
+  testname=$3
+  iters=$4
+  summary_csv=$5
+  workloads_csv=$6
+  heartbeat_secs=$7
+  shift 7
+
+  if [ "${1:-}" = "--" ]; then
+    shift
+  fi
+
+  [ -n "$bin" ] || return 1
+  [ -n "$outdir" ] || outdir="."
+  [ -n "$testname" ] || testname="geekbench"
+  case "${iters:-}" in ""|*[!0-9]*) iters=1 ;; esac
+  [ "$iters" -lt 1 ] && iters=1
+
+  mkdir -p "$outdir" 2>/dev/null || true
+  perf_geekbench_summary_csv_init "$summary_csv"
+  perf_geekbench_workloads_csv_init "$workloads_csv"
+
+  vst="$outdir/${testname}_sum_single_total.values"
+  vsi="$outdir/${testname}_sum_single_integer.values"
+  vsf="$outdir/${testname}_sum_single_fp.values"
+  vmt="$outdir/${testname}_sum_multi_total.values"
+  vmi="$outdir/${testname}_sum_multi_integer.values"
+  vmf="$outdir/${testname}_sum_multi_fp.values"
+  : >"$vst" 2>/dev/null || true
+  : >"$vsi" 2>/dev/null || true
+  : >"$vsf" 2>/dev/null || true
+  : >"$vmt" 2>/dev/null || true
+  : >"$vmi" 2>/dev/null || true
+  : >"$vmf" 2>/dev/null || true
+
+  i=1
+  while [ "$i" -le "$iters" ]; do
+    ts=$(perf_nowstamp_safe)
+    run_log="$outdir/${testname}_iter${i}.log"
+    label="$testname, iter, $i, of, $iters"
+
+    if command -v log_info >/dev/null 2>&1; then
+      log_info "Geekbench, iteration, $i, of, $iters"
+    fi
+
+    perf_run_cmd_with_progress "$outdir" "$run_log" "$heartbeat_secs" "$label" -- "$bin" "$@"
+    rc=$?
+
+    if [ "$rc" -ne 0 ] && command -v log_warn >/dev/null 2>&1; then
+      log_warn "Geekbench, iteration, $i, rc, $rc, continuing, parse"
+    fi
+
+    if grep -q '^Benchmark Summary' "$run_log" 2>/dev/null; then
+      scores=$(perf_parse_geekbench_summary_scores "$run_log")
+      st=$(printf '%s\n' "$scores" | awk '{print $1}')
+      si=$(printf '%s\n' "$scores" | awk '{print $2}')
+      sf=$(printf '%s\n' "$scores" | awk '{print $3}')
+      mt=$(printf '%s\n' "$scores" | awk '{print $4}')
+      mi=$(printf '%s\n' "$scores" | awk '{print $5}')
+      mf=$(printf '%s\n' "$scores" | awk '{print $6}')
+
+      echo "$ts,$testname,$i,$st,$si,$sf,$mt,$mi,$mf" >>"$summary_csv" 2>/dev/null || true
+      perf_append_geekbench_workloads_csv "$run_log" "$ts" "$testname" "$i" "$workloads_csv"
+
+      # POSIX-safe, ShellCheck-safe (no A&&B||true)
+      if perf_is_number_safe "$st"; then
+        printf '%s\n' "$st" >>"$vst" 2>/dev/null || true
+      fi
+      if perf_is_number_safe "$si"; then
+        printf '%s\n' "$si" >>"$vsi" 2>/dev/null || true
+      fi
+      if perf_is_number_safe "$sf"; then
+        printf '%s\n' "$sf" >>"$vsf" 2>/dev/null || true
+      fi
+      if perf_is_number_safe "$mt"; then
+        printf '%s\n' "$mt" >>"$vmt" 2>/dev/null || true
+      fi
+      if perf_is_number_safe "$mi"; then
+        printf '%s\n' "$mi" >>"$vmi" 2>/dev/null || true
+      fi
+      if perf_is_number_safe "$mf"; then
+        printf '%s\n' "$mf" >>"$vmf" 2>/dev/null || true
+      fi
+    else
+      if command -v log_info >/dev/null 2>&1; then
+        log_info "Geekbench, no benchmark summary for iter, $i, mode like sysinfo or list is ok"
+      fi
+    fi
+
+    i=$((i + 1))
+  done
+
+  ast=$(perf_avg_file_safe "$vst")
+  asi=$(perf_avg_file_safe "$vsi")
+  asf=$(perf_avg_file_safe "$vsf")
+  amt=$(perf_avg_file_safe "$vmt")
+  ami=$(perf_avg_file_safe "$vmi")
+  amf=$(perf_avg_file_safe "$vmf")
+
+  if [ -n "$ast" ] || [ -n "$amt" ]; then
+    ts=$(perf_nowstamp_safe)
+    echo "$ts,$testname,avg,$ast,$asi,$asf,$amt,$ami,$amf" >>"$summary_csv" 2>/dev/null || true
+  fi
+
+  if command -v log_info >/dev/null 2>&1; then
+    log_info "Geekbench, csv, summary, $summary_csv"
+    log_info "Geekbench, csv, workloads, $workloads_csv"
+  fi
+  return 0
+}
+
+# -----------------------------------------------------------------------------
+# ALL-metrics extraction (long-format CSV)
+# -----------------------------------------------------------------------------
+
+perf_geekbench_sanitize_key() {
+  printf '%s' "$1" | tr ' ' '_' | tr -cd 'A-Za-z0-9._-'
+}
+
+# perf_geekbench_extract_metrics_from_text FILE
+# Emits TSV: metric<TAB>value<TAB>unit<TAB>kind
+perf_geekbench_extract_metrics_from_text() {
+  file=$1
+  [ -f "$file" ] || return 1
+
+  awk '
+    function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
+    function join_name(a, start, end, s,i) {
+      s=""
+      for (i=start; i<=end; i++) {
+        if (s=="") s=a[i]; else s=s" "a[i]
+      }
+      return s
+    }
+    function emit(metric, value, unit, kind) {
+      if (unit=="") unit="NA"
+      if (kind=="") kind="NA"
+      printf "%s\t%s\t%s\t%s\n", metric, value, unit, kind
+    }
+
+    BEGIN { section=""; sum_mode="" }
+
+    /^Single-Core[[:space:]]*$/ { section="single"; next }
+    /^Multi-Core[[:space:]]*$/ { section="multi"; next }
+    /^Benchmark Summary[[:space:]]*$/ { section="summary"; sum_mode=""; next }
+
+    section=="summary" {
+      line=$0
+      if (match(line, /Single-Core Score[[:space:]]+[0-9]+/)) {
+        sum_mode="single"
+        v=line; sub(/.*Single-Core Score[[:space:]]+/, "", v); v=trim(v)
+        emit("geekbench.summary.single.total_score", v, "score", "summary")
+        next
+      }
+      if (match(line, /Multi-Core Score[[:space:]]+[0-9]+/)) {
+        sum_mode="multi"
+        v=line; sub(/.*Multi-Core Score[[:space:]]+/, "", v); v=trim(v)
+        emit("geekbench.summary.multi.total_score", v, "score", "summary")
+        next
+      }
+      if (sum_mode!="") {
+        if (match(line, /Integer Score[[:space:]]+[0-9]+/)) {
+          v=line; sub(/.*Integer Score[[:space:]]+/, "", v); v=trim(v)
+          emit("geekbench.summary."sum_mode".integer_score", v, "score", "summary")
+          next
+        }
+        if (match(line, /Floating Point Score[[:space:]]+[0-9]+/)) {
+          v=line; sub(/.*Floating Point Score[[:space:]]+/, "", v); v=trim(v)
+          emit("geekbench.summary."sum_mode".floating_point_score", v, "score", "summary")
+          next
+        }
+      }
+      next
+    }
+
+    (section=="single" || section=="multi") {
+      line=trim($0)
+      if (line=="") next
+      if (line ~ /^Geekbench /) next
+      if (line ~ /^System Information/ || line ~ /^CPU Information/ || line ~ /^Memory Information/) next
+      if (line ~ /^Operating System/ || line ~ /^Kernel/ || line ~ /^Model/ || line ~ /^Motherboard/) next
+      if (line ~ /^Name/ || line ~ /^Topology/ || line ~ /^Identifier/ || line ~ /^Base Frequency/) next
+      if (line ~ /^Size/) next
+      if (line ~ /^Benchmark Summary/) next
+
+      n=split(line, a, /[[:space:]]+/)
+      if (n < 4) next
+
+      unit=a[n]
+      thr=a[n-1]
+      score=""
+      score_i=0
+
+      for (i=n-2; i>=1; i--) {
+        if (a[i] ~ /^[0-9]+$/) { score=a[i]; score_i=i; break }
+      }
+      if (score=="") next
+
+      name=join_name(a, 1, score_i-1)
+      name=trim(name)
+      if (name=="") next
+
+      emit("geekbench."section".workload."name".score", score, "score", "workload")
+
+      if (thr ~ /^[0-9]+(\.[0-9]+)?$/) {
+        emit("geekbench."section".workload."name".throughput", thr, unit, "throughput")
+      } else {
+        emit("geekbench."section".workload."name".throughput", "", unit, "throughput")
+      }
+      next
+    }
+  ' "$file"
+}
+
+# Long CSV append: timestamp,test,metric,iteration,value,extra
+perf_geekbench_csv_append() {
+  csv=$1
+  test=$2
+  metric=$3
+  iter=$4
+  value=$5
+  extra=$6
+
+  [ -n "$csv" ] || return 0
+
+  dir=$(dirname "$csv")
+  mkdir -p "$dir" 2>/dev/null || true
+
+  if [ ! -f "$csv" ] || [ ! -s "$csv" ]; then
+    echo "timestamp,test,metric,iteration,value,extra" >"$csv"
+  fi
+
+  ts=$(perf_nowstamp_safe)
+
+  mq=$(perf_csv_escape "$metric")
+  eq=$(perf_csv_escape "${extra:-}")
+
+  echo "$ts,$test,\"$mq\",$iter,$value,\"$eq\"" >>"$csv" 2>/dev/null || true
+}
+
+perf_geekbench_metric_seen_add() {
+  listf=$1
+  metric=$2
+  [ -n "$listf" ] || return 0
+  [ -n "$metric" ] || return 0
+  if [ ! -f "$listf" ] || ! grep -qxF "$metric" "$listf" 2>/dev/null; then
+    echo "$metric" >>"$listf" 2>/dev/null || true
+  fi
+}
+
+perf_geekbench_values_file_for_metric() {
+  outdir=$1
+  metric=$2
+  safe=$(perf_geekbench_sanitize_key "$metric")
+  printf '%s/%s.values' "$outdir" "$safe"
+}
+
+perf_geekbench_append_if_number() {
+  file=$1
+  value=$2
+  [ -n "$file" ] || return 0
+  [ -n "$value" ] || return 0
+  if perf_is_number_safe "$value"; then
+    printf '%s\n' "$value" >>"$file" 2>/dev/null || true
+  fi
+}
+
+# perf_geekbench_run_n_dump_all_metrics BIN OUTDIR TESTNAME ITERS LONGCSV EXTRA HEARTBEAT_SECS -- GEEKBENCH_ARGS...
+# Prints: single_total_avg=... multi_total_avg=...
+perf_geekbench_run_n_dump_all_metrics() {
+  bin=$1
+  outdir=$2
+  testname=$3
+  iters=$4
+  csv=$5
+  extra=$6
+  heartbeat_secs=$7
+  shift 7
+
+  if [ "${1:-}" = "--" ]; then
+    shift
+  fi
+
+  [ -n "$bin" ] || return 1
+  [ -n "$outdir" ] || outdir="."
+  [ -n "$testname" ] || testname="geekbench"
+  case "${iters:-}" in ""|*[!0-9]*) iters=1 ;; esac
+  [ "$iters" -lt 1 ] && iters=1
+
+  mkdir -p "$outdir" 2>/dev/null || true
+
+  metrics_list="$outdir/${testname}_metrics.list"
+  : >"$metrics_list" 2>/dev/null || true
+
+  single_vals="$outdir/${testname}_single_total.values"
+  multi_vals="$outdir/${testname}_multi_total.values"
+  : >"$single_vals" 2>/dev/null || true
+  : >"$multi_vals" 2>/dev/null || true
+
+  i=1
+  while [ "$i" -le "$iters" ]; do
+    run_log="$outdir/${testname}_iter${i}.log"
+    txt_out="$outdir/${testname}_iter${i}.txt"
+    met_out="$outdir/${testname}_iter${i}.metrics.tsv"
+    label="$testname, metrics, iter, $i, of, $iters"
+
+    if command -v log_info >/dev/null 2>&1; then
+      log_info "Geekbench, iteration, $i, of, $iters, export-text, $txt_out"
+    fi
+
+    perf_run_cmd_with_progress "$outdir" "$run_log" "$heartbeat_secs" "$label" -- \
+      "$bin" "$@" --export-text "$txt_out"
+    rc=$?
+
+    if [ "$rc" -ne 0 ] && command -v log_warn >/dev/null 2>&1; then
+      log_warn "Geekbench, iter, $i, rc, $rc, continuing"
+    fi
+
+    src="$txt_out"
+    if [ ! -f "$src" ]; then
+      src="$run_log"
+    fi
+
+    : >"$met_out" 2>/dev/null || true
+    perf_geekbench_extract_metrics_from_text "$src" >"$met_out" 2>/dev/null || true
+
+    if [ ! -s "$met_out" ]; then
+      if command -v log_warn >/dev/null 2>&1; then
+        log_warn "Geekbench, iter, $i, no metrics extracted"
+      fi
+      i=$((i + 1))
+      continue
+    fi
+
+    while IFS="$(printf '\t')" read -r metric value unit kind; do
+      [ -n "$metric" ] || continue
+
+      perf_geekbench_metric_seen_add "$metrics_list" "$metric"
+      ex="$extra unit=${unit:-NA} kind=${kind:-NA}"
+      perf_geekbench_csv_append "$csv" "$testname" "$metric" "$i" "${value:-}" "$ex"
+
+      vf=$(perf_geekbench_values_file_for_metric "$outdir" "$metric")
+      perf_geekbench_append_if_number "$vf" "$value"
+
+      if [ "$metric" = "geekbench.summary.single.total_score" ]; then
+        perf_geekbench_append_if_number "$single_vals" "$value"
+      fi
+      if [ "$metric" = "geekbench.summary.multi.total_score" ]; then
+        perf_geekbench_append_if_number "$multi_vals" "$value"
+      fi
+    done <"$met_out"
+
+    i=$((i + 1))
+  done
+
+  if [ -s "$metrics_list" ]; then
+    while IFS= read -r metric; do
+      [ -n "$metric" ] || continue
+      vf=$(perf_geekbench_values_file_for_metric "$outdir" "$metric")
+      avg=$(perf_avg_file_safe "$vf")
+      if [ -n "$avg" ]; then
+        perf_geekbench_csv_append "$csv" "$testname" "$metric" "avg" "$avg" "$extra kind=avg"
+      fi
+    done <"$metrics_list"
+  fi
+
+  single_total_avg=$(perf_avg_file_safe "$single_vals")
+  multi_total_avg=$(perf_avg_file_safe "$multi_vals")
+
+  printf "single_total_avg=%s multi_total_avg=%s\n" "${single_total_avg:-}" "${multi_total_avg:-}"
+  return 0
+}

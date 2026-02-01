@@ -1,0 +1,117 @@
+metadata:
+  name: geekbench-performance
+  format: "Lava-Test Test Definition 1.0"
+  description: >
+    Geekbench 6 CPU performance runner with live console progress, per-iteration logs,
+    readable CSV dumps (summary + workloads), and optional full metrics CSV.
+    Designed for Yocto / LE platforms. LAVA-friendly runner (does not hard-fail the job).
+  os:
+    - linux
+  scope:
+    - performance
+    - functional
+
+params:
+  # Output
+  OUT_DIR: "./logs_Geekbench"
+  RES_FILE: "" # optional, defaults to Geekbench.res in suite dir
+
+  # Outer loop (how many times run.sh invokes geekbench)
+  RUNS: "1"
+
+  # Progress heartbeat
+  HEARTBEAT_SECS: "15"
+
+  # Optional pinning
+  CORE_LIST: "" # e.g. "0-3" or "0,2,4,6"
+
+  # Environment/stability
+  SET_PERF_GOV: "1"
+
+  # Geekbench binary override (else run.sh auto-detects)
+  GEEKBENCH_BIN: "geekbench_aarch64"
+
+  # Unlock (optional)
+  UNLOCK_EMAIL: ""
+  UNLOCK_KEY: ""
+
+  # Upload policy
+  NO_UPLOAD: "1"
+  UPLOAD: "0"
+
+  # Actions / modes (leave empty to run default CPU benchmark)
+  CPU: "1"
+  SYSINFO: "0"
+
+  # GPU (optional)
+  GPU: "" # "" or "1" or "OpenCL"
+  GPU_LIST: "0"
+  GPU_PLATFORM_ID: ""
+  GPU_DEVICE_ID: ""
+
+  # Pro options (optional)
+  SECTION: "" # e.g. "1" or "1,2" or "1-3"
+  WORKLOAD: "" # e.g. "1,4,7" or "1-10"
+  WORKLOAD_LIST: "0"
+  SINGLE_CORE: "0"
+  MULTI_CORE: "0"
+  CPU_WORKERS: "" # e.g. "8"
+  GB_ITERATIONS: "" # geekbench internal --iterations
+  WORKLOAD_GAP: "" # ms gap between workloads
+
+  # Export options (optional)
+  LOAD_FILE: ""
+  SAVE_FILE: ""
+  EXPORT_CSV_FILE: ""
+  EXPORT_HTML_FILE: ""
+  EXPORT_JSON_FILE: ""
+  EXPORT_XML_FILE: ""
+  EXPORT_TEXT_FILE: ""
+  EXPORT_LICENSE_DIR: ""
+
+  # Raw extra args appended as-is (space-separated)
+  EXTRA_ARGS: ""
+
+  # Standalone mode (no init_env) if your run.sh supports it
+  STANDALONE: "0"
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Performance/Geekbench/ || exit 0
+    - ./run.sh
+      --outdir "$OUT_DIR"
+      --res-file "${RES_FILE:-}"
+      --runs "$RUNS"
+      --core-list "${CORE_LIST:-}"
+      --bin "$GEEKBENCH_BIN"
+      --progress-heartbeat "$HEARTBEAT_SECS"
+      $( [ "$SET_PERF_GOV" = "1" ] && true || echo --no-perf-gov )
+      $( [ "$NO_UPLOAD" = "1" ] && echo --no-upload || true )
+      $( [ "$UPLOAD" = "1" ] && echo --upload || true )
+      $( [ "$CPU" = "1" ] && echo --cpu || true )
+      $( [ "$SYSINFO" = "1" ] && echo --sysinfo || true )
+      $( [ -n "$GPU" ] && echo --gpu "$GPU" || true )
+      $( [ "$GPU_LIST" = "1" ] && echo --gpu-list || true )
+      $( [ -n "$GPU_PLATFORM_ID" ] && echo --gpu-platform-id "$GPU_PLATFORM_ID" || true )
+      $( [ -n "$GPU_DEVICE_ID" ] && echo --gpu-device-id "$GPU_DEVICE_ID" || true )
+      $( [ -n "$SECTION" ] && echo --section "$SECTION" || true )
+      $( [ -n "$WORKLOAD" ] && echo --workload "$WORKLOAD" || true )
+      $( [ "$WORKLOAD_LIST" = "1" ] && echo --workload-list || true )
+      $( [ "$SINGLE_CORE" = "1" ] && echo --single-core || true )
+      $( [ "$MULTI_CORE" = "1" ] && echo --multi-core || true )
+      $( [ -n "$CPU_WORKERS" ] && echo --cpu-workers "$CPU_WORKERS" || true )
+      $( [ -n "$GB_ITERATIONS" ] && echo --iterations "$GB_ITERATIONS" || true )
+      $( [ -n "$WORKLOAD_GAP" ] && echo --workload-gap "$WORKLOAD_GAP" || true )
+      $( [ -n "$LOAD_FILE" ] && echo --load "$LOAD_FILE" || true )
+      $( [ -n "$SAVE_FILE" ] && echo --save "$SAVE_FILE" || true )
+      $( [ -n "$EXPORT_CSV_FILE" ] && echo --export-csv "$EXPORT_CSV_FILE" || true )
+      $( [ -n "$EXPORT_HTML_FILE" ] && echo --export-html "$EXPORT_HTML_FILE" || true )
+      $( [ -n "$EXPORT_JSON_FILE" ] && echo --export-json "$EXPORT_JSON_FILE" || true )
+      $( [ -n "$EXPORT_XML_FILE" ] && echo --export-xml "$EXPORT_XML_FILE" || true )
+      $( [ -n "$EXPORT_TEXT_FILE" ] && echo --export-text "$EXPORT_TEXT_FILE" || true )
+      $( [ -n "$EXPORT_LICENSE_DIR" ] && echo --export-license "$EXPORT_LICENSE_DIR" || true )
+      $( [ -n "$UNLOCK_EMAIL" ] && [ -n "$UNLOCK_KEY" ] && echo --unlock "$UNLOCK_EMAIL" "$UNLOCK_KEY" || true )
+      -- ${EXTRA_ARGS:-}
+      || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh Geekbench.res
