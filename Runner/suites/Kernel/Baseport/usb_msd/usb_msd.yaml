@@ -11,7 +11,5 @@ run:
   steps:
     - REPO_PATH=$PWD
     - cd Runner/suites/Kernel/Baseport/usb_msd
-	- chmod +x run.sh
     - ./run.sh || true
     - $REPO_PATH/Runner/utils/send-to-lava.sh usb_msd.res || true
-
