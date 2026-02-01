@@ -5,14 +5,14 @@
             "Name": "VP9 Decode TestCase",
             "TestConfigs": {
                 "Domain": "Decoder",
-                "InputPath": "./720x1280_vp9.ivf",
+                "InputPath": "./320_240_10fps.ivf",
                 "NumFrames": -1,
                 "CodecName": "VP9",
                 "PixelFormat": "NV12",
                 "Width": 1280,
                 "Height": 720,
 		        "Outputpath": "",
-                "_Outputpath_original": "./720x1280_vp9.yuv",
+                "_Outputpath_original": "./320_240_10fps_vp9.yuv",
                 "InputBufferCount": 16,
                 "OutputBufferCount": 16,
                 "UseMinBufferCtrl": false
