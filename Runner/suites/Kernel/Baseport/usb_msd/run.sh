@@ -27,6 +27,7 @@ fi
 if [ -z "$__INIT_ENV_LOADED" ]; then
     # shellcheck disable=SC1090
     . "$INIT_ENV"
+	__INIT_ENV_LOADED=1
 fi
 # Always source functestlib.sh, using $TOOLS exported by init_env
 # shellcheck disable=SC1090,SC1091
@@ -42,17 +43,16 @@ log_info "----------------------------------------------------------------------
 log_info "-------------------Starting $TESTNAME Testcase----------------------------"
 log_info "=== Test Initialization ==="
 
-# Check if lsusb is installed
-check_dependencies lsusb grep
+# Check if grep is installed, else skip test
+deps_list="grep"
+check_dependencies "$deps_list"
 
+# Count interfaces with bInterfaceClass = 08 (MSD) under /sys/bus/usb/devices
+msd_iface_count=0
 log_info "=== USB Mass Storage device Detection ==="
-# Count interfaces reported as Mass Storage by lsusb -v
-msd_iface_count="$(lsusb -v 2>/dev/null | grep -i 'Mass Storage' | wc -l)"
+msd_iface_count="$(cat /sys/bus/usb/devices/*/bInterfaceClass 2>/dev/null | grep -i '08' | wc -l)"
 
-echo "lsusb -v Mass Storage descriptors:"
-lsusb -v 2>/dev/null | grep -i 'Mass Storage' || true
-
-echo "Number of Mass Storage interfaces found: $msd_iface_count"
+printf "Number of MSD interfaces found: $msd_iface_count"
 
 if [ "$msd_iface_count" -gt 0 ]; then
     log_pass "$TESTNAME : Test Passed - USB Mass Storage interface(s) detected"
@@ -64,4 +64,6 @@ else
     exit 1
 fi
 
+log_info "-------------------Completed $TESTNAME Testcase----------------------------"
+=======
 log_info "-------------------Completed $TESTNAME Testcase----------------------------"
