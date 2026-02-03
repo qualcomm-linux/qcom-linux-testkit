@@ -1,7 +1,7 @@
 metadata:
   format: Lava-Test Test Definition 1.0
-  name: Video_V4L2_LocalClips
-  description: "Run Video V4L2 runner with local clips tar and custom .ko dir; auto-args for kodiak vs lemans/monaco; run base only"
+  name: Video_V4L2_LocalClips_Compliance
+  description: "Run Video V4L2 runner (Upstream Only) with explicit V4L2 Compliance testing."
   maintainer:
     - smuppand@qti.qualcomm.com
   os:
@@ -10,59 +10,63 @@ metadata:
     - functional
 
 run:
+  # ADDED: Explicit timeout to prevent LAVA from killing the long-running encoder test
+  timeout:
+    minutes: 30
+
   steps:
     - cd Runner
     - export REPO_ROOT="$PWD"
-    - export TARGET="${TARGET:-}" # kodiak | lemans | monaco (case-insensitive)
+    - export TARGET="${TARGET:-}"
 
     - |
-      RPATH="$REPO_ROOT/suites/Multimedia/Video/Video_V4L2_Runner/run.sh"
+      # --- Configuration ---
+      RPATH="$REPO_ROOT/suites/Multimedia/Video/Video_V4L2_Runner/run_v4l2_iris.sh"
       RESFILE="$REPO_ROOT/suites/Multimedia/Video/Video_V4L2_Runner/Video_V4L2_Runner.res"
-
-      # Custom media bundle (local) path
+      
+      # Local resources
       CLIPS_TAR="/data/vendor/iris_test_app/video_clips_iris.tar.gz"
+      
+      # (Note: V4L2_BIN is no longer needed here as the script handles it)
 
-      # Optional: downstream module / FW (not used now, but kept for future)
-      KO_DIR="/data/vendor/iris_test_app"
-      DS_FW="/data/vendor/iris_test_app/vpu20_1v.mbn"
-
-      # Prefer explicit TARGET; otherwise derive from LAVA device-type
+      # --- Platform Detection ---
       if [ -n "${TARGET:-}" ]; then
         TL="$(printf '%s' "$TARGET" | tr '[:upper:]' '[:lower:]')"
       else
         DEVTYPE_RAW="${DEVICE_TYPE:-${LAVA_DEVICE_TYPE:-${LAVA_DEVICE_TYPE_NAME:-${DEVICE_TYPE_NAME:-}}}}"
         DEVTYPE="$(printf '%s' "$DEVTYPE_RAW" | tr '[:upper:]' '[:lower:]')"
         case "$DEVTYPE" in
-          # monaco
           qcs8300-ride|qcs8300-ride-sx|iq-8275-evk) TL="monaco" ;;
-          # lemans
           qcs9100-ride-r3|sa8775p-ride|iq-9075-evk|qcs9075-rb8|qcs9100-ride-sx) TL="lemans" ;;
-          # kodiak
           qcs6490-rb3gen2|rb3gen2|qcs6490-rb3gen2-core-kit) TL="kodiak" ;;
-          # fallback to autodetect in run.sh
           *) TL="" ;;
         esac
       fi
 
       case "$TL" in
         kodiak|lemans|monaco) PLAT="--platform $TL" ;;
-        *) PLAT="" ;; # autodetect
+        *) PLAT="" ;; 
       esac
 
-      echo "DEBUG: TARGET='${TARGET:-}' DEVTYPE='${DEVTYPE:-}' -> TL='$TL' PLAT='$PLAT'"
+      echo "DEBUG: TARGET='${TARGET:-}' Detected Platform='$TL' Args='$PLAT'"
 
-      # Common args (local clips; no Wi-Fi/TAR_URL needed)
-      ARGS_COMMON="--clips-tar $CLIPS_TAR --app /data/vendor/iris_test_app/iris_v4l2_test $PLAT --retry-on-fail 2 --loglevel 15"
+      # --- Arguments ---
+      # CHANGED: Added --v4l2-compliance flag here so the script runs the streaming tests
+      ARGS_COMMON="--clips-tar $CLIPS_TAR --app /data/vendor/iris_test_app/iris_v4l2_test $PLAT --retry-on-fail 2 --loglevel 15 --v4l2-compliance"
 
-      # --- BASE (upstream) only ---
+      # Force BASE stack only
       ARGS_BASE="--stack base $ARGS_COMMON"
-
-      echo "BASE ARGS: $ARGS_BASE"
-
-      # Run BASE (upstream)
-      # shellcheck disable=SC2086
+      
+      # ---------------------------------------------------------
+      # STEP 1: Run Upstream (Base) Functional + Compliance Tests
+      # ---------------------------------------------------------
+      echo ">>> [LAVA] Starting Upstream (Base) Functional & Compliance Tests"
+      
+      # The script now handles both functional tests AND the 52-case streaming compliance
       sh -lc "$RPATH $ARGS_BASE" || true
       "$REPO_ROOT/utils/send-to-lava.sh" "$RESFILE" || true
 
-      # Optional roll-up (ignored if absent)
+      # ---------------------------------------------------------
+      # FINISH: Parse Results
+      # ---------------------------------------------------------
       "$REPO_ROOT/utils/result_parse.sh" || true
