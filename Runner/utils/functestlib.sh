@@ -4456,3 +4456,67 @@ get_pid() {
         return 1
     fi
 }
+
+# Returns count of "Test service" lines
+get_qrtr_test_service_count() {
+    if ! command -v qrtr-lookup >/dev/null 2>&1; then
+        echo "0"
+        return
+    fi
+    qrtr-lookup | grep -F -c 'Test service'
+}
+
+# Check if a specific Node ID (column 3) exists
+qrtr_id_exists() {
+    target="$1"
+    if ! command -v qrtr-lookup >/dev/null 2>&1; then
+        return 1
+    fi
+    qrtr-lookup | awk -v target="$target" '$3 == target { found=1; exit } END { if(!found) exit 1 }'
+}
+
+# Map human-readable names to IDs
+get_qrtr_id_from_name() {
+    key=$(echo "$1" | tr '[:upper:]' '[:lower:]')
+    case "$key" in
+        "adsp" | "adsp-root")         echo "32" ;;
+        "adsp-audiopd" | "audio")     echo "33" ;;
+        "adsp-sensorpd" | "sensor")   echo "34" ;;
+        "adsp-chargerpd" | "charger") echo "35" ;;
+        "mpss" | "modem")             echo "5" ;;
+        "mpss-oempd" | "modem-oempd") echo "6" ;;
+        "cdsp")                       echo "64" ;;
+        "cdsp1")                      echo "72" ;;
+        "gpdsp0" | "gpdsp0-root")     echo "112" ;;
+        "gpdsp0-user")                echo "113" ;;
+        "gpdsp1" | "gpdsp1-root")     echo "120" ;;
+        "gpdsp1-user")                echo "121" ;;
+        "soccp")                      echo "141" ;;
+        "dcp")                        echo "142" ;;
+        "wpss")                       echo "128" ;;
+        *)                            echo "" ;;
+    esac
+}
+
+# Reverse mapping for display
+get_qrtr_name_from_id() {
+    id="$1"
+    case "$id" in
+        "32")  echo "ADSP Root" ;;
+        "33")  echo "ADSP AudioPD" ;;
+        "34")  echo "ADSP SensorPD" ;;
+        "35")  echo "ADSP ChargerPD" ;;
+        "5")   echo "MPSS Modem" ;;
+        "6")   echo "MPSS OEMPD" ;;
+        "64")  echo "CDSP Root" ;;
+        "72")  echo "CDSP1" ;;
+        "112") echo "GPDSP0 Root" ;;
+        "113") echo "GPDSP0 User" ;;
+        "120") echo "GPDSP1 Root" ;;
+        "121") echo "GPDSP1 User" ;;
+        "141") echo "SOCCP" ;;
+        "142") echo "DCP" ;;
+        "128") echo "WPSS" ;;
+        *)     echo "Unknown Subsystem" ;;
+    esac
+}
