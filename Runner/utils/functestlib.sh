@@ -862,94 +862,136 @@ check_tar_file() {
 
 # Return space-separated PIDs for 'weston' (BusyBox friendly).
 weston_pids() {
-    pids=""
+    # Print weston PIDs (space-separated). Empty if none.
     if command -v pgrep >/dev/null 2>&1; then
-        pids="$(pgrep -x weston 2>/dev/null || true)"
+        pgrep -x weston 2>/dev/null | tr '\n' ' ' | sed 's/[[:space:]]*$//'
+        return 0
     fi
-    if [ -z "$pids" ]; then
-        pids="$(ps -eo pid,comm 2>/dev/null | awk '$2=="weston"{print $1}')"
-    fi
-    echo "$pids"
+
+    # Fallback: ps (avoid matching grep itself)
+    # shellcheck disable=SC2009
+    ps 2>/dev/null | awk '
+        $0 ~ /[[:space:]]weston([[:space:]]|$)/ { print $1 }
+    ' | tr '\n' ' ' | sed 's/[[:space:]]*$//'
+    return 0
 }
 
 # Is Weston running?
 weston_is_running() {
-    [ -n "$(weston_pids)" ]
+    # Process-based ONLY (do not use socket existence)
+    pids="$(weston_pids)"
+    [ -n "$pids" ]
 }
 
 # Stop all Weston processes
 weston_stop() {
-    if weston_is_running; then
-        log_info "Stopping Weston..."
-        pkill -x weston
-        for i in $(seq 1 10); do
-            log_info "Waiting for Weston to stop with $i attempt "
-            if ! weston_is_running; then
-                log_info "Weston stopped successfully"
-                return 0
-            fi
-            sleep 1
-        done
-        log_error "Failed to stop Weston after waiting."
-        return 1
-    else
+    if ! weston_is_running; then
         log_info "Weston is not running."
+        # Still cleanup stale sockets (prevents false positives elsewhere)
+        weston_cleanup_stale_sockets
+        return 0
     fi
+
+    log_info "Stopping Weston..."
+    # First try graceful
+    if command -v pkill >/dev/null 2>&1; then
+        pkill -TERM -x weston >/dev/null 2>&1 || true
+    elif command -v killall >/dev/null 2>&1; then
+        killall weston >/dev/null 2>&1 || true
+    else
+        # Last resort: kill by PID list
+        for p in $(weston_pids); do
+            kill "$p" >/dev/null 2>&1 || true
+        done
+    fi
+
+    i=1
+    while [ "$i" -le 10 ]; do
+        log_info "Waiting for Weston to stop with $i attempt"
+        if ! weston_is_running; then
+            # Clean up stale socket files that may remain after exit
+            weston_cleanup_stale_sockets
+            log_info "Weston stopped successfully"
+            return 0
+        fi
+        sleep 1
+        i=$((i + 1))
+    done
+
+    log_warn "Weston still running after grace period; forcing kill..."
+
+    if command -v pkill >/dev/null 2>&1; then
+        pkill -KILL -x weston >/dev/null 2>&1 || true
+    else
+        for p in $(weston_pids); do
+            kill -9 "$p" >/dev/null 2>&1 || true
+        done
+    fi
+
+    sleep 1
+
+    if weston_is_running; then
+        log_error "Failed to stop Weston (still running: $(weston_pids))"
+        return 1
+    fi
+
+    weston_cleanup_stale_sockets
+    log_info "Weston stopped successfully (forced)"
     return 0
 }
-
 # Start weston with correct env if not running
 weston_start() {
     if weston_is_running; then
-        log_info "Weston already running."
+        log_info "Weston already running (PID(s): $(weston_pids))."
         return 0
     fi
- 
+
+    # If stale sockets exist from previous crash/kill, remove them first
+    weston_cleanup_stale_sockets
+
     if command -v systemctl >/dev/null 2>&1; then
         log_info "Attempting to start via systemd: weston.service"
         systemctl start weston.service >/dev/null 2>&1 || true
         sleep 1
         if weston_is_running; then
-            log_info "Weston started via systemd (weston.service)."
+            log_info "Weston started via systemd (weston.service) (PID(s): $(weston_pids))."
             return 0
         fi
- 
+
         log_info "Attempting to start via systemd: weston@.service"
         systemctl start weston@.service >/dev/null 2>&1 || true
         sleep 1
         if weston_is_running; then
-            log_info "Weston started via systemd (weston@.service)."
+            log_info "Weston started via systemd (weston@.service) (PID(s): $(weston_pids))."
             return 0
         fi
- 
+
         log_warn "systemd start did not bring Weston up; will try direct spawn."
     fi
- 
-    # Minimal-friendly direct spawn (no headless module guesses here).
+
     ensure_xdg_runtime_dir
- 
+
     if ! command -v weston >/dev/null 2>&1; then
         log_fail "weston binary not found in PATH."
         return 1
     fi
- 
+
     log_info "Attempting to spawn Weston (no backend override). Log: /tmp/weston.self.log"
     ( nohup weston --log=/tmp/weston.self.log >/dev/null 2>&1 & ) || true
- 
+
     tries=0
-    while [ $tries -lt 5 ]; do
+    while [ "$tries" -lt 10 ]; do
         if weston_is_running; then
             log_info "Weston is now running (PID(s): $(weston_pids))."
-            return 0
-        fi
-        if [ -n "$(find_wayland_sockets | head -n1)" ]; then
-            log_info "A Wayland socket appeared after spawn."
+            # Optional: show socket for debug (base/prop both)
+            sock="$(find_wayland_sockets | head -n 1)"
+            [ -n "$sock" ] && log_info "Wayland socket: $sock"
             return 0
         fi
         sleep 1
-        tries=$((tries+1))
+        tries=$((tries + 1))
     done
- 
+
     if [ -f /tmp/weston.self.log ]; then
         log_warn "Weston spawn failed; last log lines:"
         tail -n 20 /tmp/weston.self.log 2>/dev/null | sed 's/^/[weston.log] /' || true
@@ -1078,128 +1120,6 @@ wayland_pick_socket() {
         echo "$best"
         return 0
     fi
-    return 1
-}
-
-# ---- Wayland/Weston helpers -----------------------
-# Ensure a private XDG runtime directory exists and is usable (0700).
-weston_start() {
-    # Already up?
-    if weston_is_running; then
-        log_info "Weston already running."
-        return 0
-    fi
- 
-    # 1) Try systemd user/system units if present
-    if command -v systemctl >/dev/null 2>&1; then
-        for unit in weston.service weston@.service; do
-            log_info "Attempting to start via systemd: $unit"
-            systemctl start "$unit" >/dev/null 2>&1 || true
-            sleep 1
-            if weston_is_running; then
-                log_info "Weston started via $unit."
-                return 0
-            fi
-        done
-        log_warn "systemd start did not bring Weston up; will try direct spawn."
-    fi
- 
-    # Helper: attempt spawn for a given uid (empty => current user)
-    # Tries multiple backend names (to cover distro/plugin differences)
-    # Returns 0 if a weston process + socket appears, else non-zero.
-    spawn_weston_try() {
-        target_uid="$1"  # "" or numeric uid
-        backends="${WESTON_BACKENDS:-headless headless-backend.so}"
- 
-        # Prepare runtime dir
-        if [ -n "$target_uid" ]; then
-            run_dir="/run/user/$target_uid"
-            mkdir -p "$run_dir" 2>/dev/null || true
-            chown "$target_uid:$target_uid" "$run_dir" 2>/dev/null || true
-        else
-            ensure_xdg_runtime_dir
-            run_dir="$XDG_RUNTIME_DIR"
-        fi
-        chmod 700 "$run_dir" 2>/dev/null || true
- 
-        # Where to log
-        log_file="/tmp/weston.${target_uid:-self}.log"
-        rm -f "$log_file" 2>/dev/null || true
- 
-        for be in $backends; do
-            log_info "Spawning weston (uid=${target_uid:-$(id -u)}) with backend='$be' …"
-            if ! command -v weston >/dev/null 2>&1; then
-                log_fail "weston binary not found in PATH."
-                return 1
-            fi
- 
-            # Build the command: avoid optional modules that may not exist on minimal builds
-            cmd="XDG_RUNTIME_DIR='$run_dir' weston --backend='$be' --log='$log_file'"
- 
-            if [ -n "$target_uid" ]; then
-                # Run as that uid if we can
-                if command -v su >/dev/null 2>&1; then
-                    su -s /bin/sh -c "$cmd >/dev/null 2>&1 &" "#$target_uid" || true
-                elif command -v runuser >/dev/null 2>&1; then
-                    runuser -u "#$target_uid" -- sh -c "$cmd >/dev/null 2>&1 &" || true
-                else
-                    log_warn "No su/runuser available to switch uid=$target_uid; skipping this mode."
-                    continue
-                fi
-            else
-                # Current user
-                ( nohup sh -c "$cmd" >/dev/null 2>&1 & ) || true
-            fi
- 
-            # Wait up to ~5s for process + a socket to appear
-            tries=0
-            while [ $tries -lt 5 ]; do
-                if weston_is_running; then
-                    # See if a fresh socket is visible
-                    sock="$(wayland_pick_socket)"
-                    if [ -n "$sock" ]; then
-                        log_info "Weston up (backend=$be). Socket: $sock"
-                        return 0
-                    fi
-                fi
-                sleep 1
-                tries=$((tries+1))
-            done
- 
-            # Show weston log tail to aid debugging
-            if [ -r "$log_file" ]; then
-                log_warn "Weston did not come up with backend '$be'. Last log lines:"
-                tail -n 20 "$log_file" | sed 's/^/[weston.log] /'
-            else
-                log_warn "Weston did not come up with backend '$be' and no log file present ($log_file)."
-            fi
-        done
- 
-        return 1
-    }
- 
-    # 2) Try as current user
-    if spawn_weston_try ""; then
-        return 0
-    fi
- 
-    # 3) Try as 'weston' user (common on embedded images)
-    weston_uid=""
-    if command -v getent >/dev/null 2>&1; then
-        weston_uid="$(getent passwd weston 2>/dev/null | awk -F: '{print $3}')"
-    fi
-    [ -z "$weston_uid" ] && weston_uid="$(id -u weston 2>/dev/null || true)"
- 
-    if [ -n "$weston_uid" ]; then
-        log_info "Attempting to spawn Weston as uid=$weston_uid (user 'weston')."
-        if spawn_weston_try "$weston_uid"; then
-            return 0
-        fi
-    else
-        log_info "No 'weston' user found; skipping user-switch spawn."
-    fi
- 
-    log_warn "All weston spawn attempts failed."
     return 1
 }
 
@@ -1412,38 +1332,46 @@ weston_pick_env_or_start() {
 
 # Find candidate Wayland sockets in common locations.
 # Prints absolute socket paths, one per line, most-preferred first.
+weston_is_running() {
+    # Process-based ONLY (do not use socket existence)
+    pids="$(weston_pids)"
+    [ -n "$pids" ]
+}
+ 
 find_wayland_sockets() {
-    uid="$(id -u 2>/dev/null || echo 0)"
- 
-    if [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -n "${WAYLAND_DISPLAY:-}" ] &&
-       [ -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ]; then
-        echo "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY"
-    fi
- 
-    # Current uid
-    for f in "/run/user/$uid/wayland-0" "/run/user/$uid/wayland-1" "/run/user/$uid/wayland-2"; do
-        [ -S "$f" ] && echo "$f"
+    # Keep your base/prop behavior:
+    # - base: /run/user/$uid/wayland-*
+    # - prop: /dev/socket/weston (or /dev/socket/weston/wayland-*)
+    # - also allow /run/wayland-*
+    # NOTE: socket presence != process presence; use only for diagnostics.
+    for s in \
+        /dev/socket/weston \
+        /dev/socket/weston/wayland-* \
+        /run/wayland-* \
+        /run/user/*/wayland-* \
+        "${XDG_RUNTIME_DIR:-}"/wayland-* \
+        ; do
+        [ -S "$s" ] && printf '%s\n' "$s"
     done
-    for f in /run/user/"$uid"/wayland-*; do
-        [ -S "$f" ] && echo "$f"
-    done 2>/dev/null
- 
-    # Any other user under /run/user (covers weston as uid 100, 1000, etc.)
-    for d in /run/user/*; do
-        [ -d "$d" ] || continue
-        [ "$d" = "/run/user/$uid" ] && continue  # skip current uid, already handled above
-        for f in "$d"/wayland-*; do
-            [ -S "$f" ] && echo "$f"
-        done
-    done 2>/dev/null
- 
-    for f in /dev/socket/weston/wayland-*; do
-        [ -S "$f" ] && echo "$f"
-    done 2>/dev/null
- 
-    for f in /tmp/wayland-*; do
-        [ -S "$f" ] && echo "$f"
-    done 2>/dev/null
+}
+
+weston_cleanup_stale_sockets() {
+    # Remove stale sockets only if weston is NOT running.
+    weston_is_running && return 0
+
+    # Collect candidates (base + prop + common)
+    for s in \
+        /dev/socket/weston \
+        /dev/socket/weston/wayland-* \
+        /run/wayland-* \
+        /run/user/*/wayland-* \
+        "${XDG_RUNTIME_DIR:-}"/wayland-* \
+        ; do
+        [ -S "$s" ] || continue
+        # Best-effort cleanup; ignore errors (permissions)
+        rm -f "$s" 2>/dev/null || true
+    done
+    return 0
 }
 
 # Ensure XDG_RUNTIME_DIR has owner=current-user and mode 0700.
