@@ -1,0 +1,18 @@
+metadata:
+  name: weston-scaler
+  description: >
+    Run weston-scaler under Wayland/Weston.
+    Params below are OPTIONAL overrides; run.sh applies the same defaults when unset.
+  format: "Lava-Test-Shell Test Definition 1.0"
+
+params:
+  DURATION: "30s" # Runtime duration (e.g., 10s, 30s, 60s). Default: 30s
+  VALIDATE_WAYLAND_PROTO: "1" # 1=enable WAYLAND_DEBUG protocol evidence checks. Default: 1
+  VALIDATE_SCREENSHOT: "0" # 1=enable screenshot-delta if tools exist. Default: 0
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Multimedia/Display/weston-scaler
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh weston-scaler.res

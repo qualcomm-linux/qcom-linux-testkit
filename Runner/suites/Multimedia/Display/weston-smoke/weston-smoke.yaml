@@ -1,0 +1,19 @@
+metadata:
+  name: weston-smoke
+  format: Lava-Test Test Definition 1.0
+  description: "Run weston-smoke under an active Wayland session and validate basic protocol activity"
+  maintainer:
+    - "Qualcomm Linux Testkit"
+
+params:
+  DURATION: "30s" # Client runtime (default 30s)
+  STOP_GRACE: "3s" # Reserved for future stop grace (default 3s)
+  VALIDATE_WAYLAND_PROTO: 1 # 1 enables WAYLAND_DEBUG based protocol validation (default 1)
+  VALIDATE_SCREENSHOT: 0 # 1 enables screenshot delta when allowed/tools exist (default 0)
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Multimedia/Display/weston-smoke
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh weston-smoke.res
