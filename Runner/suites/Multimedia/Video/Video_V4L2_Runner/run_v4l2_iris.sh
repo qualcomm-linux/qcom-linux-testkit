@@ -1448,6 +1448,147 @@ if [ "$V4L2_COMPLIANCE_RUN" -eq 1 ]; then
             printf '%s\n' "compliance-enc FAIL" >> "$LOG_DIR/summary.txt"
         fi
     fi
+
+    # ======================================================================
+    # --- Custom v4l2-ctl Tests (Decoder & Encoder) ---
+    # ======================================================================
+    log_info "----------------------------------------------------------------------"
+    log_info "Starting Custom v4l2-ctl Tests"
+
+    # Helper to find media files based on extension and optional string pattern
+    find_media_for_test() {
+        local ext="$1"
+        local pattern="${2:-}"
+        local search_dirs="${CLIPS_DEST:-} ${test_path:-} ${DIR:-} ."
+        
+        for d in $search_dirs; do
+            if [ -n "$d" ] && [ -d "$d" ]; then
+                if [ -n "$pattern" ]; then
+                    found=$(find "$d" -name "*${pattern}*.${ext}" 2>/dev/null | head -n 1)
+                else
+                    found=$(find "$d" -name "*.${ext}" 2>/dev/null | head -n 1)
+                fi
+                if [ -n "$found" ]; then
+                    echo "$found"
+                    return 0
+                fi
+            fi
+        done
+        echo ""
+    }
+
+    # --- Decoder v4l2-ctl tests ---
+    log_info "--- Decoder v4l2-ctl tests ---"
+
+    # 1. Decoder H264
+    dec_h264_clip=$(find_media_for_test "264" "")
+    if [ -z "$dec_h264_clip" ]; then dec_h264_clip=$(find_media_for_test "h264" ""); fi
+    
+    if [ -n "$dec_h264_clip" ]; then
+        log_info "Testing Decoder H264 with: $dec_h264_clip"
+        v4l2-ctl --verbose --set-fmt-video-out=pixelformat=H264 --set-fmt-video=pixelformat=NV12 --stream-mmap --stream-out-mmap --stream-from "$dec_h264_clip" --stream-to=/tmp/v4l2_h264_to_nv12_decoder_output.yuv -d /dev/video0
+    else
+        log_warn "Skipping Decoder H264: No .264/.h264 clip found"
+    fi
+
+    # 2. Decoder HEVC
+    dec_hevc_clip=$(find_media_for_test "265" "")
+    if [ -z "$dec_hevc_clip" ]; then dec_hevc_clip=$(find_media_for_test "hevc" ""); fi
+    
+    if [ -n "$dec_hevc_clip" ]; then
+        log_info "Testing Decoder HEVC with: $dec_hevc_clip"
+        v4l2-ctl --verbose --set-fmt-video-out=pixelformat=HEVC --set-fmt-video=pixelformat=NV12 --stream-mmap --stream-out-mmap --stream-from="$dec_hevc_clip" --stream-to=/tmp/v4l2_hevc_to_nv12_decoder_output.yuv -d /dev/video0
+    else
+        log_warn "Skipping Decoder HEVC: No .265/.hevc clip found"
+    fi
+
+    # 3. Decoder VP9
+    dec_vp9_clip=$(find_media_for_test "vp9" "")
+    if [ -z "$dec_vp9_clip" ]; then dec_vp9_clip=$(find_media_for_test "ivf" ""); fi
+    
+    if [ -n "$dec_vp9_clip" ]; then
+        log_info "Testing Decoder VP9 with: $dec_vp9_clip"
+        v4l2-ctl --verbose --set-fmt-video-out=pixelformat=VP90 --set-fmt-video=pixelformat=NV12 --stream-mmap --stream-out-mmap --stream-from-hdr="$dec_vp9_clip" --stream-mmap --stream-to=/tmp/v4l2_vp9_to_nv12_decoder_output.yuv -d /dev/video0
+    else
+        log_warn "Skipping Decoder VP9: No .vp9/.ivf clip found"
+    fi
+
+
+    # --- Encoder v4l2-ctl tests ---
+    log_info "--- Encoder v4l2-ctl tests ---"
+
+    # Helper for Encoder: Find raw input (NV12/YUV) matching resolution or fallback
+    # Note: v4l2-ctl encoding requires raw YUV/NV12 input. We search for .yuv or .nv12.
+    find_raw_clip() {
+        local w="$1"
+        local h="$2"
+        # Try to find a file with width/height in the name, e.g., "1920x1080" or "1080p"
+        local match=$(find_media_for_test "yuv" "${w}x${h}")
+        if [ -z "$match" ]; then match=$(find_media_for_test "nv12" "${w}x${h}"); fi
+        if [ -z "$match" ]; then match=$(find_media_for_test "yuv" "${h}p"); fi
+        
+        # Fallback: Just return any YUV if not found (Command might fail on size mismatch, but we try)
+        if [ -z "$match" ]; then 
+            match=$(find_media_for_test "yuv" "")
+            if [ -n "$match" ]; then log_warn "Exact resolution ${w}x${h} raw clip not found, using generic: $match"; fi
+        fi
+        echo "$match"
+    }
+
+    # H264 Encoder Tests
+    # 1080p
+    raw_1080=$(find_raw_clip "1920" "1080")
+    if [ -n "$raw_1080" ]; then
+        log_info "Enc H264 1080p using: $raw_1080"
+        v4l2-ctl --verbose --set-fmt-video-out=width=1920,height=1080,pixelformat=NV12 --set-selection-output target=crop,top=0,left=0,width=1920,height=1080 --set-fmt-video=pixelformat=H264 --stream-mmap --stream-out-mmap --stream-from="$raw_1080" --stream-to=/tmp/Big_Buck_Bunny_1080_10s.h264 -d /dev/video1
+    fi
+
+    # 720p
+    raw_720=$(find_raw_clip "1280" "720")
+    if [ -n "$raw_720" ]; then
+        log_info "Enc H264 720p using: $raw_720"
+        v4l2-ctl --verbose --set-fmt-video-out=width=1280,height=720,pixelformat=NV12 --set-selection-output target=crop,top=0,left=0,width=1280,height=720 --set-fmt-video=pixelformat=H264 --stream-mmap --stream-out-mmap --stream-from="$raw_720" --stream-to=/tmp/cyclists_1280x720_92frames.h264 -d /dev/video1
+    fi
+
+    # 640x480
+    raw_480=$(find_raw_clip "640" "480")
+    if [ -n "$raw_480" ]; then
+        log_info "Enc H264 480p using: $raw_480"
+        v4l2-ctl --verbose --set-fmt-video-out=width=640,height=480,pixelformat=NV12 --set-selection-output target=crop,top=0,left=0,width=640,height=480 --set-fmt-video=pixelformat=H264 --stream-mmap --stream-out-mmap --stream-from="$raw_480" --stream-to=/tmp/jets_640x480_20frames.h264 -d /dev/video1
+    fi
+
+    # 352x288
+    raw_288=$(find_raw_clip "352" "288")
+    if [ -n "$raw_288" ]; then
+        log_info "Enc H264 288p using: $raw_288"
+        v4l2-ctl --verbose --set-fmt-video-out=width=352,height=288,pixelformat=NV12 --set-selection-output target=crop,top=0,left=0,width=352,height=288 --set-fmt-video=pixelformat=H264 --stream-mmap --stream-out-mmap --stream-from="$raw_288" --stream-to=/tmp/foreman_352x288_20frames.h264 -d /dev/video1
+    fi
+
+    # HEVC Encoder Tests
+    # 1080p
+    if [ -n "$raw_1080" ]; then
+        log_info "Enc HEVC 1080p using: $raw_1080"
+        v4l2-ctl --verbose --set-fmt-video-out=width=1920,height=1080,pixelformat=NV12 --set-selection-output target=crop,top=0,left=0,width=1920,height=1080 --set-fmt-video=pixelformat=HEVC --stream-mmap --stream-out-mmap --stream-from="$raw_1080" --stream-to=/tmp/Big_Buck_Bunny_1080_10s.hevc -d /dev/video1
+    fi
+
+    # 720p
+    if [ -n "$raw_720" ]; then
+        log_info "Enc HEVC 720p using: $raw_720"
+        v4l2-ctl --verbose --set-fmt-video-out=width=1280,height=720,pixelformat=NV12 --set-selection-output target=crop,top=0,left=0,width=1280,height=720 --set-fmt-video=pixelformat=HEVC --stream-mmap --stream-out-mmap --stream-from="$raw_720" --stream-to=/tmp/cyclists_1280x720_92frames.hevc -d /dev/video1
+    fi
+
+    # 640x480
+    if [ -n "$raw_480" ]; then
+        log_info "Enc HEVC 480p using: $raw_480"
+        v4l2-ctl --verbose --set-fmt-video-out=width=640,height=480,pixelformat=NV12 --set-selection-output target=crop,top=0,left=0,width=640,height=480 --set-fmt-video=pixelformat=HEVC --stream-mmap --stream-out-mmap --stream-from="$raw_480" --stream-to=/tmp/jets_640x480_20frames.hevc -d /dev/video1
+    fi
+
+    # 352x288
+    if [ -n "$raw_288" ]; then
+        log_info "Enc HEVC 288p using: $raw_288"
+        v4l2-ctl --verbose --set-fmt-video-out=width=352,height=288,pixelformat=NV12 --set-selection-output target=crop,top=0,left=0,width=352,height=288 --set-fmt-video=pixelformat=HEVC --stream-mmap --stream-out-mmap --stream-from="$raw_288" --stream-to=/tmp/foreman_352x288_20frames.hevc -d /dev/video1
+    fi
+
 else
     log_info "Skipping V4L2 Compliance Tests (use --v4l2-compliance to enable)"
 fi
