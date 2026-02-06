@@ -24,7 +24,7 @@ This test case validates the system suspend/resume functionality on the target d
 ## Usage
 Instructions:
 1. **Copy repo to Host Machine**: Clone or download the repository to your host machine where ADB is installed.
-2. **Connect Device**: Ensure the target device is connected via ADB and visible with `adb devices`.
+2. **Connect Device**: Ensure exactly **one** target device is connected via ADB and visible with `adb devices`.
 3. **Run Test**: Execute the test script which will remotely control the device via ADB.
 
 Run the SuspendResume test using:
@@ -35,13 +35,15 @@ Run the SuspendResume test using:
 git clone <this-repo>
 cd <this-repo>
 
-# Ensure device is connected
+# Ensure exactly one device is connected
 adb devices
 
-# Run the test
-cd Runner/suites/Kernel/Baseport/SuspendResume
+# Run the test from the new location
+cd host-tools/SuspendResume
 ./run.sh
 ```
+
+**Note:** The test requires exactly one ADB device to be connected. If multiple devices are detected, the test will skip with an error message.
 
 ---
 
