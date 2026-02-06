@@ -1402,10 +1402,10 @@ if [ "$V4L2_COMPLIANCE_RUN" -eq 1 ]; then
             "$V4L2_BIN" -d /dev/video0 -s5 --stream-from="$h264_media_file" > "$comp_dec_log" 2>&1
             rc_dec=$?
             
-            # --- PRINT DETAILED LOGS TO CONSOLE ---
-            log_info ">>> DETAILED DECODER COMPLIANCE LOGS START >>>"
-            cat "$comp_dec_log"
-            log_info "<<< DETAILED DECODER COMPLIANCE LOGS END <<<"
+            # --- DETAILED LOGS SAVED TO ARTIFACTS ONLY ---
+            log_info "Detailed Decoder Compliance logs saved to: $comp_dec_log"
+            # Print summary/fail lines only to keep log size down
+            grep -iE "fail|error|summary" "$comp_dec_log" | head -n 50 || true
 
             if [ "$rc_dec" -eq 0 ]; then
                 log_pass "V4L2 Decoder Compliance (video0) PASS"
@@ -1432,10 +1432,10 @@ if [ "$V4L2_COMPLIANCE_RUN" -eq 1 ]; then
         "$V4L2_BIN" -d /dev/video1 -s5 > "$comp_enc_log" 2>&1
         rc_enc=$?
 
-        # --- PRINT DETAILED LOGS TO CONSOLE ---
-        log_info ">>> DETAILED ENCODER COMPLIANCE LOGS START >>>"
-        cat "$comp_enc_log"
-        log_info "<<< DETAILED ENCODER COMPLIANCE LOGS END <<<"
+        # --- DETAILED LOGS SAVED TO ARTIFACTS ONLY ---
+        log_info "Detailed Encoder Compliance logs saved to: $comp_enc_log"
+        # Print summary/fail lines only to keep log size down
+        grep -iE "fail|error|summary" "$comp_enc_log" | head -n 50 || true
 
         if [ "$rc_enc" -eq 0 ]; then
             log_pass "V4L2 Encoder Compliance (video1) PASS"
@@ -1531,7 +1531,7 @@ if [ "$V4L2_COMPLIANCE_RUN" -eq 1 ]; then
         
         if [ -n "$dec_h264_clip" ]; then
             log_info "Testing Decoder H264 with: $dec_h264_clip"
-            v4l2-ctl --verbose --set-fmt-video-out=pixelformat=H264 --set-fmt-video=pixelformat=NV12 --stream-mmap --stream-out-mmap --stream-from "$dec_h264_clip" --stream-to=/tmp/v4l2_h264_to_nv12_decoder_output.yuv -d "$DEC_DEV"
+            v4l2-ctl --set-fmt-video-out=pixelformat=H264 --set-fmt-video=pixelformat=NV12 --stream-mmap --stream-out-mmap --stream-from "$dec_h264_clip" --stream-to=/tmp/v4l2_h264_to_nv12_decoder_output.yuv -d "$DEC_DEV"
         else
             log_warn "Skipping Decoder H264: No .264/.h264 clip found"
         fi
@@ -1542,7 +1542,7 @@ if [ "$V4L2_COMPLIANCE_RUN" -eq 1 ]; then
         
         if [ -n "$dec_hevc_clip" ]; then
             log_info "Testing Decoder HEVC with: $dec_hevc_clip"
-            v4l2-ctl --verbose --set-fmt-video-out=pixelformat=HEVC --set-fmt-video=pixelformat=NV12 --stream-mmap --stream-out-mmap --stream-from="$dec_hevc_clip" --stream-to=/tmp/v4l2_hevc_to_nv12_decoder_output.yuv -d "$DEC_DEV"
+            v4l2-ctl --set-fmt-video-out=pixelformat=HEVC --set-fmt-video=pixelformat=NV12 --stream-mmap --stream-out-mmap --stream-from="$dec_hevc_clip" --stream-to=/tmp/v4l2_hevc_to_nv12_decoder_output.yuv -d "$DEC_DEV"
         else
             log_warn "Skipping Decoder HEVC: No .265/.hevc clip found"
         fi
@@ -1553,7 +1553,7 @@ if [ "$V4L2_COMPLIANCE_RUN" -eq 1 ]; then
         
         if [ -n "$dec_vp9_clip" ]; then
             log_info "Testing Decoder VP9 with: $dec_vp9_clip"
-            v4l2-ctl --verbose --set-fmt-video-out=pixelformat=VP90 --set-fmt-video=pixelformat=NV12 --stream-mmap --stream-out-mmap --stream-from-hdr="$dec_vp9_clip" --stream-mmap --stream-to=/tmp/v4l2_vp9_to_nv12_decoder_output.yuv -d "$DEC_DEV"
+            v4l2-ctl --set-fmt-video-out=pixelformat=VP90 --set-fmt-video=pixelformat=NV12 --stream-mmap --stream-out-mmap --stream-from-hdr="$dec_vp9_clip" --stream-mmap --stream-to=/tmp/v4l2_vp9_to_nv12_decoder_output.yuv -d "$DEC_DEV"
         else
             log_warn "Skipping Decoder VP9: No .vp9/.ivf clip found"
         fi
@@ -1589,10 +1589,10 @@ if [ "$V4L2_COMPLIANCE_RUN" -eq 1 ]; then
             
             if [ -n "$raw_clip" ]; then
                 log_info "Enc H264 ${w}x${h} using: $raw_clip"
-                v4l2-ctl --verbose --set-fmt-video-out=width=$w,height=$h,pixelformat=NV12 --set-selection-output target=crop,top=0,left=0,width=$w,height=$h --set-fmt-video=pixelformat=H264 --stream-mmap --stream-out-mmap --stream-from="$raw_clip" --stream-to=/tmp/${name}_${w}x${h}.h264 -d "$ENC_DEV"
+                v4l2-ctl --set-fmt-video-out=width=$w,height=$h,pixelformat=NV12 --set-selection-output target=crop,top=0,left=0,width=$w,height=$h --set-fmt-video=pixelformat=H264 --stream-mmap --stream-out-mmap --stream-from="$raw_clip" --stream-to=/tmp/${name}_${w}x${h}.h264 -d "$ENC_DEV"
 
                 log_info "Enc HEVC ${w}x${h} using: $raw_clip"
-                v4l2-ctl --verbose --set-fmt-video-out=width=$w,height=$h,pixelformat=NV12 --set-selection-output target=crop,top=0,left=0,width=$w,height=$h --set-fmt-video=pixelformat=HEVC --stream-mmap --stream-out-mmap --stream-from="$raw_clip" --stream-to=/tmp/${name}_${w}x${h}.hevc -d "$ENC_DEV"
+                v4l2-ctl --set-fmt-video-out=width=$w,height=$h,pixelformat=NV12 --set-selection-output target=crop,top=0,left=0,width=$w,height=$h --set-fmt-video=pixelformat=HEVC --stream-mmap --stream-out-mmap --stream-from="$raw_clip" --stream-to=/tmp/${name}_${w}x${h}.hevc -d "$ENC_DEV"
             else
                 log_warn "Skipping Enc ${w}x${h}: No raw input found"
             fi
