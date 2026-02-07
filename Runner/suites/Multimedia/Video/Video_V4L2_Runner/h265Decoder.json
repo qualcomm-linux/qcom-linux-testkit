@@ -5,14 +5,14 @@
             "Name": "HEVC Decoder TestCase",
             "TestConfigs": {
                 "Domain": "Decoder",
-                "InputPath": "./720x1280_hevc.h265",
+                "InputPath": "./256_144p_hevc.h265",
                 "NumFrames": -1,
                 "CodecName": "HEVC",
                 "PixelFormat": "NV12",
                 "Width": 1280,
                 "Height": 720,
 		        "Outputpath": "",
-                "_Outputpath_original": "./720x1280_hevc.yuv",
+                "_Outputpath_original": "./output_256_144p_hevc.yuv",
                 "InputBufferCount": 16,
                 "OutputBufferCount": 16,
                 "UseMinBufferCtrl": false
