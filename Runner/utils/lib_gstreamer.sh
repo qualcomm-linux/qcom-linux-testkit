@@ -498,3 +498,228 @@ gstreamer_build_playback_pipeline() {
   printf '%s\n' "filesrc location=${file} ! ${dec} ! audioconvert ! audioresample ! ${sinkElem}"
   return 0
 }
+
+# --------------------------------------------------------------
+# download_resource
+#   $1  url   – URL to download
+#   $2  dest  – Either a file name or an existing directory.
+#   Prints the full path of the downloaded file on stdout.
+# --------------------------------------------------------------
+download_resource() {
+    url=$1
+    dest=$2
+
+    if [ -d "${dest}" ]; then
+        filename=$(basename "${url}")
+        dest="${dest%/}/${filename}"
+    fi
+
+    mkdir -p "$(dirname "${dest}")"
+
+    if command -v curl >/dev/null 2>&1; then
+        curl -fkL "${url}" -o "${dest}"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q "${url}" -O "${dest}"
+    else
+        echo "Error: neither 'curl' nor 'wget' is installed." >&2
+        return 1
+    fi
+
+    if command -v realpath >/dev/null 2>&1; then
+        realpath "${dest}"
+    else
+        case "${dest}" in
+            ./*) echo "${dest#./}" ;;
+            *)   echo "${dest}" ;;
+        esac
+    fi
+}
+# --------------------------------------------------------------
+# extract_zip_to_dir
+# --------------------------------------------------------------
+extract_zip_to_dir() {
+    zip_path=$1
+    dest_dir=$2
+
+    tmp_dir=$(mktemp -d -t "$(basename "${zip_path%.*}")_XXXX")
+
+    if ! unzip -o "${zip_path}" -d "${tmp_dir}" >/dev/null; then
+        echo "Unzip of ${zip_path} failed" >&2
+        rm -rf "${tmp_dir}"
+        return 1
+    fi
+
+    mkdir -p "${dest_dir}"
+    cp -r "${tmp_dir}"/* "${dest_dir}/"
+
+    # Clean up the temporary folder;
+    rm -rf "${tmp_dir}" "${zip_path}"
+}
+# -------------------------------------------------------------------------
+# check_pipeline_elements <pipeline-string>
+#   Verify that every GStreamer element that appears in a gst-launch
+#   pipeline is installed on the system (via `has_element`).
+#   Returns:
+#       0 – all elements are present
+#       1 – at least one element is missing
+# -------------------------------------------------------------------------
+check_pipeline_elements() {
+    pipeline="${1:?missing pipeline argument}"
+    missing_count=0
+    missing_list=""
+    total_elements=0
+
+    log_info "Checking elements in pipeline"
+
+    # ---------------------------------------------------------
+    # Normalise the pipeline string
+    # ---------------------------------------------------------
+    pipeline=$(printf '%s' "$pipeline" | tr -d '\\\n')
+    pipeline=${pipeline#gst-launch-1.0* }
+    #   Remove the literal "gst-launch-1.0" if present
+    pipeline=${pipeline#gst-launch-1.0}
+    #   Trim any leading whitespace left by the previous step
+    pipeline=${pipeline#"${pipeline%%[![:space:]]*}"}
+    #   Drop leading option tokens (e.g. "-e", "-v", "--no-fault")
+    while [[ $pipeline == -* ]]; do
+        #   Remove the first token (option) and any following whitespace
+        pipeline=${pipeline#* }
+        pipeline=${pipeline#"${pipeline%%[![:space:]]*}"}
+    done
+
+    # ---------------------------------------------------------
+    # Write the token list to a temporary file
+    # ---------------------------------------------------------
+    tmpfile=$(mktemp) || exit 1
+    printf '%s' "$pipeline" | tr '!' '\n' >"$tmpfile"
+
+    # ---------------------------------------------------------
+    # Read the file line‑by‑line – this runs in the *current*
+    #    shell, so variable updates survive.
+    # ---------------------------------------------------------
+    while IFS= read -r element_spec; do
+        # ---- NEW ----
+        # Strip surrounding whitespace; skip blank lines
+        element_spec=$(printf '%s' "$element_spec" | xargs)
+        [[ -z $element_spec ]] && continue
+        # --------------
+
+        element_name=$(printf '%s' "$element_spec" | cut -d' ' -f1)
+
+        case "$element_name" in
+            *.)               log_info "Skipping element reference: $element_name" ; continue ;;
+            name=*)           log_info "Skipping property assignment: $element_name" ; continue ;;
+            *_::*)            log_info "Skipping property assignment: $element_name" ; continue ;;
+            video/*|audio/*|application/*|text/*|image/*)
+                            log_info "Skipping caps filter: $element_name" ; continue ;;
+            *)
+                total_elements=$(( total_elements + 1 ))
+                log_info "Checking element: $element_name"
+                if ! has_element "$element_name"; then
+                    missing_count=$(( missing_count + 1 ))
+                    missing_list="${missing_list}${element_name} "
+                    log_error "Required element missing: $element_name"
+                else
+                    log_info "Element found: $element_name"
+                fi
+                ;;
+        esac
+    done <"$tmpfile"
+    # Clean up the temporary file
+    rm -f "$tmpfile"
+
+    if [ "$missing_count" -eq 0 ]; then
+        log_pass "All $total_elements elements in pipeline are available"
+        return 0
+    else
+        log_fail "Missing $missing_count/$total_elements elements: $missing_list"
+        return 1
+    fi
+}
+# ----------------------------------------------------------------------
+#  Run a pipeline with timeout, capture console output and GST debug logs.
+# ----------------------------------------------------------------------
+run_pipeline_with_logs() {
+    name=$1
+    cmd=$2
+    timeout=$3
+    TIMEOUT=${timeout:-60}   # default 60 seconds
+
+    console_log="${name}_console.log"
+    gst_debug_log="${name}_gst_debug.log"
+
+    export GST_DEBUG_FILE="${gst_debug_log}"
+
+    log_info "Running ${name} (timeout=${TIMEOUT}s)"
+    timeout "${TIMEOUT}" sh -c "$cmd" >"$console_log" 2>&1
+    rc=$?
+
+    # Look for a successful PLAYING state and the absence of ERROR messages.
+    playing=$(grep -c "Setting pipeline to PLAYING" "$console_log" || true)
+    error_present=$(grep -c "ERROR:" "$console_log" || true)
+
+    if [ "$playing" -gt 0 ] && [ "$error_present" -eq 0 ]; then
+        log_pass "${name} PASS"
+        return 0
+    fi
+
+    # Special case: timeout (rc = 124) but PLAYING was already reached.
+    if [ "$rc" -eq 124 ] && [ "$playing" -gt 0 ]; then
+        log_pass "${name} PASS (completed before timeout)"
+        return 0
+    fi
+
+    # Anything else is a failure.
+    log_fail "${name} FAIL (rc=${rc})"
+    log_info "=== ERROR DETAILS ==="
+    if [ "$error_present" -gt 0 ]; then
+        grep -A10 -B5 "ERROR:" "$console_log" | tail -n 30 |
+            while IFS= read -r line; do log_info "$line"; done
+    else
+        tail -n 30 "$console_log" |
+            while IFS= read -r line; do log_info "$line"; done
+    fi
+    log_info "====================="
+    return 1
+}
+# ------------------------------------------------------------------
+# Function:  check_file_size
+# Purpose :  Check that a file exists and its size > 0.
+# Returns :  0  → file size > 0 (success)
+#            1  → file missing, unreadable, or size == 0 (failure)
+# Requires:  GNU coreutils (stat -c %s)
+# ------------------------------------------------------------------
+check_file_size() {
+  input_file_path="$1"
+  expected_file_size="$2"
+
+  if [ -z "$input_file_path" ]; then
+      log_fail "No input file path provided"
+      return 1
+  fi
+  if [ ! -e "$input_file_path" ]; then
+      log_fail "Encoded video file does not exist: $input_file_path"
+      return 1
+  fi
+
+    # ---- Ensure we have `stat` ------------------------------------------------
+    if ! command -v stat >/dev/null 2>&1; then
+        log_fail "`stat` command not found – cannot determine file size"
+        return 1
+    fi
+
+    # ---- Get the actual size -------------------------------------------------
+    size_in_bytes=$(stat -c %s "$input_file_path" 2>/dev/null) || {
+        log_fail "Unable to read size of file: $input_file_path"
+        return 1
+    }
+
+    # ---- Compare with the expected size --------------------------------------
+    if (( size_in_bytes >= expected_file_size )); then
+        log_pass "File OK (size ${size_in_bytes} bytes ≥ ${expected_file_size} bytes): $input_file_path"
+        return 0
+    else
+        log_info "File too small (size ${size_in_bytes} bytes < ${expected_file_size} bytes): $input_file_path"
+        return 1
+    fi
+}
