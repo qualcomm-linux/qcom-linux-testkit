@@ -581,7 +581,7 @@ check_pipeline_elements() {
     #   Trim any leading whitespace left by the previous step
     pipeline=${pipeline#"${pipeline%%[![:space:]]*}"}
     #   Drop leading option tokens (e.g. "-e", "-v", "--no-fault")
-    while [[ $pipeline == -* ]]; do
+    while [ "${pipeline#-}" != "$pipeline" ]; do
         #   Remove the first token (option) and any following whitespace
         pipeline=${pipeline#* }
         pipeline=${pipeline#"${pipeline%%[![:space:]]*}"}
@@ -601,7 +601,7 @@ check_pipeline_elements() {
         # ---- NEW ----
         # Strip surrounding whitespace; skip blank lines
         element_spec=$(printf '%s' "$element_spec" | xargs)
-        [[ -z $element_spec ]] && continue
+        [ -z "$element_spec" ] && continue
         # --------------
 
         element_name=$(printf '%s' "$element_spec" | cut -d' ' -f1)
@@ -704,7 +704,7 @@ check_file_size() {
 
     # ---- Ensure we have `stat` ------------------------------------------------
     if ! command -v stat >/dev/null 2>&1; then
-        log_fail "`stat` command not found – cannot determine file size"
+        log_fail "stat command not found – cannot determine file size"
         return 1
     fi
 
@@ -715,7 +715,7 @@ check_file_size() {
     }
 
     # ---- Compare with the expected size --------------------------------------
-    if (( size_in_bytes >= expected_file_size )); then
+    if [ "$size_in_bytes" -ge "$expected_file_size" ]; then
         log_pass "File OK (size ${size_in_bytes} bytes ≥ ${expected_file_size} bytes): $input_file_path"
         return 0
     else
