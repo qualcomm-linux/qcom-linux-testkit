@@ -22,15 +22,44 @@ This test case validates the system suspend/resume functionality on the target d
    - Complete qcom_stats and suspend_stats dumps
 
 ## Usage
-Instructions:
-1. **Copy repo to Host Machine**: Clone or download the repository to your host machine where ADB is installed.
-2. **Connect Device**: Ensure exactly **one** target device is connected via ADB and visible with `adb devices`.
-3. **Run Test**: Execute the test script which will remotely control the device via ADB.
 
-Run the SuspendResume test using:
----
+### Directory Structure
+This test is located in the `host-tools` directory structure:
+```
+qcom-linux-testkit/
+├── Runner/              # Main test framework
+│   ├── utils/          # Shared utilities (functestlib.sh, etc.)
+│   └── suites/         # Standard test suites
+└── host-tools/         # Host-based tests (ADB, remote control)
+    ├── init_env        # Environment setup (finds Runner/utils)
+    ├── run-test.sh     # Test orchestrator for host-tools tests
+    └── SuspendResume/  # This test
+        ├── run.sh
+        ├── README.md
+        └── SuspendResume.yaml
+```
 
-#### Quick Example
+### Running the Test
+
+#### Method 1: Direct Execution (Recommended for LAVA)
+```sh
+cd host-tools/SuspendResume
+./run.sh
+```
+
+#### Method 2: Using Test Orchestrator
+```sh
+cd host-tools
+./run-test.sh SuspendResume
+```
+
+#### Method 3: Run All Host-Tools Tests
+```sh
+cd host-tools
+./run-test.sh all
+```
+
+### Quick Example
 ```sh
 git clone <this-repo>
 cd <this-repo>
@@ -38,7 +67,7 @@ cd <this-repo>
 # Ensure exactly one device is connected
 adb devices
 
-# Run the test from the new location
+# Run the test
 cd host-tools/SuspendResume
 ./run.sh
 ```
