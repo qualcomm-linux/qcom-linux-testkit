@@ -25,13 +25,8 @@ if [ -z "$__INIT_ENV_LOADED" ]; then
     # shellcheck disable=SC1090
     . "$INIT_ENV"
 fi
-# Always source functestlib.sh, using $TOOLS exported by init_env
-# shellcheck disable=SC1090,SC1091
-. "$TOOLS/functestlib.sh"
 
 TESTNAME="SuspendResume"
-test_path=$(find_test_case_by_name "$TESTNAME")
-cd "$test_path" || exit 1
 # shellcheck disable=SC2034
 res_file="./$TESTNAME.res"
 

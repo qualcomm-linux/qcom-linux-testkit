@@ -7,45 +7,45 @@
 [ -n "$__INIT_ENV_LOADED" ] && return
 __INIT_ENV_LOADED=1
 
-# (Optional) Remove/comment log line below to keep CI logs clean:
-# echo "[INFO] init_env loaded."
-
-# --- Robust root detection ---
+# --- Robust root detection for host-tools ---
 if [ -z "$ROOT_DIR" ]; then
-    # Fast path: current working directory is root
-    if [ -d "./utils" ] && [ -d "./suites" ]; then
-        ROOT_DIR="$(pwd)"
-    # Check if we're in host-tools and Runner exists as sibling
-    elif [ -d "../Runner/utils" ] && [ -d "../Runner/suites" ]; then
-        ROOT_DIR="$(cd ../Runner && pwd)"
+    # When sourced, we need to find the directory containing this init_env file
+    # Try multiple methods to get the script location
+    if [ -n "${BASH_SOURCE:-}" ]; then
+        # Bash
+        _script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    elif [ -n "${ZSH_VERSION:-}" ]; then
+        # Zsh
+        _script_dir="$(cd "$(dirname "${(%):-%x}")" && pwd)"
     else
-        # Fallback: walk up from this script's location
-        _script_dir="$(cd "$(dirname "$0")" && pwd)"
-        _search="$_script_dir"
-        while [ "$_search" != "/" ]; do
-            if [ -d "$_search/utils" ] && [ -d "$_search/suites" ]; then
-                ROOT_DIR="$_search"
-                break
-            fi
-            # Also check for Runner subdirectory
-            if [ -d "$_search/Runner/utils" ] && [ -d "$_search/Runner/suites" ]; then
-                ROOT_DIR="$_search/Runner"
-                break
-            fi
-            _search=$(dirname "$_search")
-        done
+        # POSIX fallback: assume init_env is in a known location relative to caller
+        # The caller (run.sh) sets INIT_ENV variable before sourcing
+        if [ -n "${INIT_ENV:-}" ]; then
+            _script_dir="$(cd "$(dirname "$INIT_ENV")" && pwd)"
+        else
+            _script_dir="$(cd "$(dirname "$0")" && pwd)"
+        fi
+    fi
+    
+    # For host-tools, ROOT_DIR is the host-tools directory itself
+    if [ -d "$_script_dir/utils" ] && [ -f "$_script_dir/utils/functestlib.sh" ]; then
+        ROOT_DIR="$_script_dir"
+    else
+        echo "[ERROR] Could not detect host-tools root (missing utils/ or functestlib.sh)" >&2
+        echo "[DEBUG] Tried _script_dir=$_script_dir" >&2
+        exit 1
     fi
 fi
 
 # --- Validate and export key environment paths ---
 if [ -z "${ROOT_DIR:-}" ] || [ ! -d "$ROOT_DIR/utils" ] || [ ! -f "$ROOT_DIR/utils/functestlib.sh" ]; then
-    echo "[ERROR] Could not detect testkit root (missing utils/ or functestlib.sh)" >&2
+    echo "[ERROR] Could not detect host-tools root (missing utils/ or functestlib.sh)" >&2
     exit 1
 fi
 
 export ROOT_DIR
 export TOOLS="$ROOT_DIR/utils"
-export __RUNNER_SUITES_DIR="$ROOT_DIR/suites"
+export __RUNNER_SUITES_DIR="$ROOT_DIR"
 export __RUNNER_UTILS_BIN_DIR="$ROOT_DIR/common"
 
 # --- Ensure TOOLS is usable in all shells ---
@@ -58,7 +58,6 @@ case ":$PATH:" in
 esac
 
 # --- Source functestlib.sh to make functions available ---
-# Note: functestlib.sh must be sourced for run-test.sh to work properly
 if [ -f "$TOOLS/functestlib.sh" ]; then
     # shellcheck disable=SC1090,SC1091
     . "$TOOLS/functestlib.sh"
