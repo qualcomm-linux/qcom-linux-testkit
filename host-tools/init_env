@@ -28,23 +28,20 @@ if [ -z "$ROOT_DIR" ]; then
     fi
     
     # For host-tools, ROOT_DIR is the host-tools directory itself
-    if [ -d "$_script_dir/utils" ] && [ -f "$_script_dir/utils/functestlib.sh" ]; then
-        ROOT_DIR="$_script_dir"
-    else
-        echo "[ERROR] Could not detect host-tools root (missing utils/ or functestlib.sh)" >&2
-        echo "[DEBUG] Tried _script_dir=$_script_dir" >&2
-        exit 1
-    fi
+    ROOT_DIR="$_script_dir"
 fi
 
 # --- Validate and export key environment paths ---
-if [ -z "${ROOT_DIR:-}" ] || [ ! -d "$ROOT_DIR/utils" ] || [ ! -f "$ROOT_DIR/utils/functestlib.sh" ]; then
-    echo "[ERROR] Could not detect host-tools root (missing utils/ or functestlib.sh)" >&2
+# Point to Runner/utils for shared utilities
+RUNNER_ROOT="$ROOT_DIR/../Runner"
+if [ ! -d "$RUNNER_ROOT/utils" ] || [ ! -f "$RUNNER_ROOT/utils/functestlib.sh" ]; then
+    echo "[ERROR] Could not find Runner/utils/functestlib.sh" >&2
+    echo "[ERROR] Expected at: $RUNNER_ROOT/utils/functestlib.sh" >&2
     exit 1
 fi
 
 export ROOT_DIR
-export TOOLS="$ROOT_DIR/utils"
+export TOOLS="$RUNNER_ROOT/utils"
 export __RUNNER_SUITES_DIR="$ROOT_DIR"
 export __RUNNER_UTILS_BIN_DIR="$ROOT_DIR/common"
 
@@ -57,10 +54,13 @@ case ":$PATH:" in
     ;;
 esac
 
-# --- Source functestlib.sh to make functions available ---
+# --- Source functestlib.sh from Runner to make functions available ---
 if [ -f "$TOOLS/functestlib.sh" ]; then
     # shellcheck disable=SC1090,SC1091
     . "$TOOLS/functestlib.sh"
+else
+    echo "[ERROR] Could not source functestlib.sh from $TOOLS" >&2
+    exit 1
 fi
 
 ###############################################################################
