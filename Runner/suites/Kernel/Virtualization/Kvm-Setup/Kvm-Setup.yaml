@@ -1,0 +1,15 @@
+metadata:
+  name: kvm-setup
+  format: "Lava-Test Test Definition 1.0"
+  description: "Setup and Start Gunyah KVM Virtual Machine"
+  os:
+    - linux
+  scope:
+    - functional
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Virtualization/Kvm-Setup
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh Kvm-Setup.res || true
