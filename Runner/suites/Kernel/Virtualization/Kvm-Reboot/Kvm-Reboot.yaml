@@ -1,0 +1,15 @@
+metadata:
+  name: kvm-reboot
+  format: "Lava-Test Test Definition 1.0"
+  description: "Reboot an active Gunyah KVM Virtual Machine"
+  os:
+    - linux
+  scope:
+    - functional
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Virtualization/Kvm-Reboot
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh Kvm-Reboot.res || true
