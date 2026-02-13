@@ -181,9 +181,25 @@ check_dependencies() {
 # --- Test case directory lookup ---
 find_test_case_by_name() {
     test_name=$1
-    base_dir="${__RUNNER_SUITES_DIR:-$ROOT_DIR/suites}"
-    # Only search under the SUITES directory!
-    testpath=$(find "$base_dir" -type d -iname "$test_name" -print -quit 2>/dev/null)
+    # Use __RUNNER_SUITES_DIR if set, otherwise default to $ROOT_DIR/suites
+    # This allows both host-tools (where __RUNNER_SUITES_DIR=$ROOT_DIR) 
+    # and Runner (where it defaults to $ROOT_DIR/suites) to work correctly
+    if [ -n "${__RUNNER_SUITES_DIR:-}" ]; then
+        base_dir="$__RUNNER_SUITES_DIR"
+    else
+        base_dir="${ROOT_DIR:-$(pwd)}/suites"
+    fi
+    
+    # Use explicit path to Unix find command to avoid conflicts with other find utilities
+    find_cmd="find"
+    if [ -x "/usr/bin/find" ]; then
+        find_cmd="/usr/bin/find"
+    elif [ -x "/bin/find" ]; then
+        find_cmd="/bin/find"
+    fi
+    
+    # Search under the base directory
+    testpath=$("$find_cmd" "$base_dir" -type d -iname "$test_name" -print -quit 2>/dev/null)
     echo "$testpath"
 }
 
