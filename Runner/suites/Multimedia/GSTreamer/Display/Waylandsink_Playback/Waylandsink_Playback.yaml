@@ -1,0 +1,51 @@
+metadata:
+  name: gstreamer-waylandsink-playback
+  format: "Lava-Test Test Definition 1.0"
+  description: >
+    GStreamer waylandsink playback validation with Weston/Wayland server checks
+    on Qualcomm Linux platforms. Uses videotestsrc to generate test patterns
+    and displays them via waylandsink. Validates display connectivity and
+    Wayland compositor functionality.
+  os:
+    - linux
+  scope:
+    - functional
+
+params:
+  # Video resolution (WIDTHxHEIGHT)
+  VIDEO_RESOLUTION: "1920x1080"
+  
+  # Test pattern for videotestsrc
+  VIDEO_PATTERN: "smpte" # smpte|snow|black|white|red|green|blue|checkers-1|checkers-2
+  
+  # Playback duration in seconds
+  PLAYBACK_DURATION: "30"
+  
+  # Frame rate
+  FRAMERATE: "30"
+  
+  # GStreamer debug level
+  VIDEO_GST_DEBUG: "2" # 1-9
+
+run:
+  steps:
+    - REPO_PATH="$PWD"
+
+    # Navigate to test directory
+    - cd Runner/suites/Multimedia/GSTreamer/Display/Waylandsink_Playback/
+
+    # Build CLI args only when params are non-empty
+    - |
+      CMD="./run.sh"
+
+      [ -n "${VIDEO_RESOLUTION}" ] && CMD="${CMD} --resolution ${VIDEO_RESOLUTION}"
+      [ -n "${VIDEO_PATTERN}" ] && CMD="${CMD} --pattern ${VIDEO_PATTERN}"
+      [ -n "${PLAYBACK_DURATION}" ] && CMD="${CMD} --duration ${PLAYBACK_DURATION}"
+      [ -n "${FRAMERATE}" ] && CMD="${CMD} --framerate ${FRAMERATE}"
+      [ -n "${VIDEO_GST_DEBUG}" ] && CMD="${CMD} --gst-debug ${VIDEO_GST_DEBUG}"
+
+      echo "[LAVA] Running: ${CMD}"
+      sh -c "${CMD}" || true
+
+    # Send result to LAVA
+    - "${REPO_PATH}/Runner/utils/send-to-lava.sh Waylandsink_Playback.res || true"
