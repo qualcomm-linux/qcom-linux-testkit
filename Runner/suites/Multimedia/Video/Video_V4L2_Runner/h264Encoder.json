@@ -11,7 +11,7 @@
                 "PixelFormat": "NV12",
                 "Width": 256,
                 "Height": 144,
-		        "Outputpath": "",
+                "Outputpath": "",
                 "_Outputpath_original": "./Output_Animation_144p.h264",
                 "InputBufferCount": 32,
                 "OutputBufferCount": 32,
@@ -23,8 +23,10 @@
                     {"Id": "FrameRC",          "Vtype": "Int",    "Value": 1},
                     {"Id": "BitRate",          "Vtype": "Int",    "Value": 18000000},
                     {"Id": "BitRateMode",      "Vtype": "String", "Value": "CBR"},
-                    {"Id": "PrefixHeaderMode", "Vtype": "String", "Value": "JOINED"}
-                ]
+                    {"Id": "PrefixHeaderMode", "Vtype": "String", "Value": "JOINED"},
+                ],
+                    "DynamicControls": [],
+                    "MemoryType": "MMAP"
             }
         }
     ]

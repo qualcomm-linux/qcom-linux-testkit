@@ -12,7 +12,7 @@
                 "PixelFormat": "NV12",
                 "Width": 256,
                 "Height": 144,
-		        "Outputpath": "",
+                "Outputpath": "",
                 "_Outputpath_original": "./Output_Animation_144p.265",
                 "UseMinBufferCtrl": false,
                 "InputBufferCount": 32,
@@ -61,7 +61,8 @@
                         "Value": 59
                     }
                 ],
-                "DynamicControls": []
+                "DynamicControls": [],
+                "MemoryType": "MMAP"
             }
         }
     ]
