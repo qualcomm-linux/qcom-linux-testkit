@@ -568,3 +568,240 @@ gstreamer_validate_log() {
   
   return 0
 }
+
+# -------------------- Video codec helpers (V4L2) --------------------
+# gstreamer_resolution_to_wh <resolution>
+# Converts resolution name to width and height
+# Prints: "<width> <height>"
+gstreamer_resolution_to_wh() {
+  res="$1"
+  case "$res" in
+    480p)
+      printf '%s %s\n' "640" "480"
+      ;;
+    720p)
+      printf '%s %s\n' "1280" "720"
+      ;;
+    1080p)
+      printf '%s %s\n' "1920" "1080"
+      ;;
+    4k)
+      printf '%s %s\n' "3840" "2160"
+      ;;
+    *)
+      printf '%s %s\n' "640" "480"
+      ;;
+  esac
+}
+
+# gstreamer_v4l2_encoder_for_codec <codec>
+# Returns the V4L2 encoder element for the given codec
+# Prints: encoder element name or empty string if not available
+gstreamer_v4l2_encoder_for_codec() {
+  codec="$1"
+  case "$codec" in
+    h264)
+      if has_element v4l2h264enc; then
+        printf '%s\n' "v4l2h264enc"
+        return 0
+      fi
+      ;;
+    h265|hevc)
+      if has_element v4l2h265enc; then
+        printf '%s\n' "v4l2h265enc"
+        return 0
+      fi
+      ;;
+  esac
+  printf '%s\n' ""
+  return 1
+}
+
+# gstreamer_v4l2_decoder_for_codec <codec>
+# Returns the V4L2 decoder element for the given codec
+# Prints: decoder element name or empty string if not available
+gstreamer_v4l2_decoder_for_codec() {
+  codec="$1"
+  case "$codec" in
+    h264)
+      if has_element v4l2h264dec; then
+        printf '%s\n' "v4l2h264dec"
+        return 0
+      fi
+      ;;
+    h265|hevc)
+      if has_element v4l2h265dec; then
+        printf '%s\n' "v4l2h265dec"
+        return 0
+      fi
+      ;;
+    vp9)
+      if has_element v4l2vp9dec; then
+        printf '%s\n' "v4l2vp9dec"
+        return 0
+      fi
+      ;;
+  esac
+  printf '%s\n' ""
+  return 1
+}
+
+# gstreamer_container_ext_for_codec <codec>
+# Returns the file extension for the given codec
+# Prints: file extension (without dot)
+gstreamer_container_ext_for_codec() {
+  codec="$1"
+  case "$codec" in
+    vp9)
+      printf '%s\n' "ivf"
+      ;;
+    *)
+      # Use mp4 container format for h264/h265
+      printf '%s\n' "mp4"
+      ;;
+  esac
+}
+
+# -------------------- Bitrate and file size helpers --------------------
+# gstreamer_bitrate_for_resolution <width> <height>
+# Returns recommended bitrate in bps based on resolution
+# Prints: bitrate in bps
+gstreamer_bitrate_for_resolution() {
+  width="$1"
+  height="$2"
+  
+  # Default bitrate calculation
+  bitrate=8000000
+  if [ "$width" -le 640 ]; then
+    bitrate=1000000
+  elif [ "$width" -le 1280 ]; then
+    bitrate=2000000
+  elif [ "$width" -le 1920 ]; then
+    bitrate=4000000
+  fi
+  
+  printf '%s\n' "$bitrate"
+}
+
+# gstreamer_file_size_bytes <filepath>
+# Returns file size in bytes (portable across BSD/GNU stat)
+# Prints: file size in bytes or 0 if file doesn't exist
+gstreamer_file_size_bytes() {
+  filepath="$1"
+  
+  [ -f "$filepath" ] || { printf '%s\n' "0"; return 1; }
+  
+  # Try BSD stat first, then GNU stat
+  file_size=$(stat -f%z "$filepath" 2>/dev/null || stat -c%s "$filepath" 2>/dev/null || echo 0)
+  printf '%s\n' "$file_size"
+}
+
+# -------------------- V4L2 encode pipeline builder --------------------
+# gstreamer_build_v4l2_encode_pipeline <codec> <width> <height> <duration> <framerate> <bitrate> <output_file> <video_stack>
+# Builds a complete V4L2 encode pipeline string
+# Prints: pipeline string or empty if encoder not available
+gstreamer_build_v4l2_encode_pipeline() {
+  codec="$1"
+  width="$2"
+  height="$3"
+  duration="$4"
+  framerate="$5"
+  bitrate="$6"
+  output_file="$7"
+  video_stack="${8:-upstream}"
+  
+  encoder=$(gstreamer_v4l2_encoder_for_codec "$codec")
+  if [ -z "$encoder" ]; then
+    printf '%s\n' ""
+    return 1
+  fi
+  
+  # Determine parser based on codec
+  case "$codec" in
+    h264)
+      parser="h264parse"
+      ;;
+    h265|hevc)
+      parser="h265parse"
+      ;;
+    *)
+      parser=""
+      ;;
+  esac
+  
+  # Build encoder parameters
+  encoder_params="extra-controls=\"controls,video_bitrate=${bitrate}\""
+  if [ "$video_stack" = "downstream" ]; then
+    encoder_params="${encoder_params} capture-io-mode=4 output-io-mode=4"
+  fi
+  
+  # Build pipeline with mp4mux for MP4 container
+  if [ -n "$parser" ]; then
+    printf '%s\n' "videotestsrc num-buffers=$((duration * framerate)) pattern=smpte ! video/x-raw,width=${width},height=${height},format=NV12,framerate=${framerate}/1 ! ${encoder} ${encoder_params} ! ${parser} ! mp4mux ! filesink location=${output_file}"
+  else
+    printf '%s\n' "videotestsrc num-buffers=$((duration * framerate)) pattern=smpte ! video/x-raw,width=${width},height=${height},format=NV12,framerate=${framerate}/1 ! ${encoder} ${encoder_params} ! mp4mux ! filesink location=${output_file}"
+  fi
+  
+  return 0
+}
+
+# -------------------- V4L2 decode pipeline builder --------------------
+# gstreamer_build_v4l2_decode_pipeline <codec> <input_file> <video_stack>
+# Builds a complete V4L2 decode pipeline string
+# Prints: pipeline string or empty if decoder not available
+gstreamer_build_v4l2_decode_pipeline() {
+  codec="$1"
+  input_file="$2"
+  video_stack="${3:-upstream}"
+  
+  decoder=$(gstreamer_v4l2_decoder_for_codec "$codec")
+  if [ -z "$decoder" ]; then
+    printf '%s\n' ""
+    return 1
+  fi
+  
+  # Determine parser and container based on codec
+  case "$codec" in
+    h264)
+      parser="h264parse"
+      container="qtdemux"
+      ;;
+    h265|hevc)
+      parser="h265parse"
+      container="qtdemux"
+      ;;
+    vp9)
+      parser="ivfparse"
+      container=""
+      ;;
+    *)
+      parser="identity"
+      container=""
+      ;;
+  esac
+  
+  # Build decoder parameters
+  decoder_params=""
+  if [ "$video_stack" = "downstream" ]; then
+    decoder_params="capture-io-mode=4 output-io-mode=4"
+  fi
+  
+  # Build pipeline based on container format
+  if [ -n "$container" ]; then
+    # MP4 container (h264/h265)
+    if [ -n "$decoder_params" ]; then
+      printf '%s\n' "filesrc location=${input_file} ! ${container} ! ${parser} ! ${decoder} ${decoder_params} ! videoconvert ! fakesink"
+    else
+      printf '%s\n' "filesrc location=${input_file} ! ${container} ! ${parser} ! ${decoder} ! videoconvert ! fakesink"
+    fi
+  else
+    # IVF container (vp9) or no container
+    if [ -n "$decoder_params" ]; then
+      printf '%s\n' "filesrc location=${input_file} ! ${parser} ! ${decoder} ${decoder_params} ! videoconvert ! fakesink"
+    else
+      printf '%s\n' "filesrc location=${input_file} ! ${parser} ! ${decoder} ! videoconvert ! fakesink"
+    fi
+  fi
+  
+  return 0
+}

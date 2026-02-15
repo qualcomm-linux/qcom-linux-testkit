@@ -274,86 +274,6 @@ export GST_DEBUG_NO_COLOR=1
 export GST_DEBUG="$gstDebugLevel"
 export GST_DEBUG_FILE="$GST_LOG"
 
-# -------------------- Helper functions --------------------
-get_resolution_params() {
-  res="$1"
-  case "$res" in
-    480p)
-      printf '%s %s\n' "640" "480"
-      ;;
-    720p)
-      printf '%s %s\n' "1280" "720"
-      ;;
-    1080p)
-      printf '%s %s\n' "1920" "1080"
-      ;;
-    4k)
-      printf '%s %s\n' "3840" "2160"
-      ;;
-    *)
-      printf '%s %s\n' "640" "480"
-      ;;
-  esac
-}
-
-get_encoder_element() {
-  codec="$1"
-  case "$codec" in
-    h264)
-      if has_element v4l2h264enc; then
-        printf '%s\n' "v4l2h264enc"
-        return 0
-      fi
-      ;;
-    h265|hevc)
-      if has_element v4l2h265enc; then
-        printf '%s\n' "v4l2h265enc"
-        return 0
-      fi
-      ;;
-  esac
-  printf '%s\n' ""
-  return 1
-}
-
-get_decoder_element() {
-  codec="$1"
-  case "$codec" in
-    h264)
-      if has_element v4l2h264dec; then
-        printf '%s\n' "v4l2h264dec"
-        return 0
-      fi
-      ;;
-    h265|hevc)
-      if has_element v4l2h265dec; then
-        printf '%s\n' "v4l2h265dec"
-        return 0
-      fi
-      ;;
-    vp9)
-      if has_element v4l2vp9dec; then
-        printf '%s\n' "v4l2vp9dec"
-        return 0
-      fi
-      ;;
-  esac
-  printf '%s\n' ""
-  return 1
-}
-
-get_file_extension() {
-  codec="$1"
-  case "$codec" in
-    vp9)
-      printf '%s\n' "ivf"
-      ;;
-    *)
-      # Use mp4 container format for h264/h265
-      printf '%s\n' "mp4"
-      ;;
-  esac
-}
 
 # -------------------- Encode test function --------------------
 run_encode_test() {
@@ -367,56 +287,30 @@ run_encode_test() {
   log_info "Running: $testname"
   log_info "=========================================="
   
-  encoder=$(get_encoder_element "$codec")
+  # Check if encoder is available
+  encoder=$(gstreamer_v4l2_encoder_for_codec "$codec")
   if [ -z "$encoder" ]; then
     log_warn "Encoder not available for $codec"
     skip_count=$((skip_count + 1))
     return 1
   fi
   
-  ext=$(get_file_extension)
+  ext=$(gstreamer_container_ext_for_codec "$codec")
   output_file="$ENCODED_DIR/${testname}.${ext}"
   test_log="$OUTDIR/${testname}.log"
   
   : >"$test_log"
   
-  # Build pipeline: videotestsrc -> NV12 format -> encoder with bitrate -> parser -> filesink
-  case "$codec" in
-    h264)
-      parser="h264parse"
-      ;;
-    h265|hevc)
-      parser="h265parse"
-      ;;
-    *)
-      parser=""
-      ;;
-  esac
+  # Calculate bitrate based on resolution
+  bitrate=$(gstreamer_bitrate_for_resolution "$width" "$height")
   
-  # Calculate bitrate based on resolution (8Mbps for 4K, scaled for others)
-  bitrate=8000000
-  if [ "$width" -le 640 ]; then
-    bitrate=1000000
-  elif [ "$width" -le 1280 ]; then
-    bitrate=2000000
-  elif [ "$width" -le 1920 ]; then
-    bitrate=4000000
-  fi
+  # Build pipeline using library function
+  pipeline=$(gstreamer_build_v4l2_encode_pipeline "$codec" "$width" "$height" "$duration" "$framerate" "$bitrate" "$output_file" "$detected_stack")
   
-  # Detect video stack and add IO mode parameters for downstream
-  encoder_params="extra-controls=\"controls,video_bitrate=${bitrate}\""
-  if [ "$detected_stack" = "downstream" ]; then
-    encoder_params="${encoder_params} capture-io-mode=4 output-io-mode=4"
-    log_info "Using downstream stack: adding IO mode parameters"
-  else
-    log_info "Using upstream stack: no IO mode parameters needed"
-  fi
-  
-  # Build pipeline with mp4mux for MP4 container
-  if [ -n "$parser" ]; then
-    pipeline="videotestsrc num-buffers=$((duration * framerate)) pattern=smpte ! video/x-raw,width=${width},height=${height},format=NV12,framerate=${framerate}/1 ! ${encoder} ${encoder_params} ! ${parser} ! mp4mux ! filesink location=${output_file}"
-  else
-    pipeline="videotestsrc num-buffers=$((duration * framerate)) pattern=smpte ! video/x-raw,width=${width},height=${height},format=NV12,framerate=${framerate}/1 ! ${encoder} ${encoder_params} ! mp4mux ! filesink location=${output_file}"
+  if [ -z "$pipeline" ]; then
+    log_fail "$testname: FAIL (could not build pipeline)"
+    fail_count=$((fail_count + 1))
+    return 1
   fi
   
   log_info "Pipeline: $pipeline"
@@ -439,7 +333,7 @@ run_encode_test() {
   
   # Check if output file was created and has content
   if [ -f "$output_file" ] && [ -s "$output_file" ]; then
-    file_size=$(stat -f%z "$output_file" 2>/dev/null || stat -c%s "$output_file" 2>/dev/null || echo 0)
+    file_size=$(gstreamer_file_size_bytes "$output_file")
     log_info "Encoded file: $output_file (size: $file_size bytes)"
     
     if [ "$file_size" -gt 1000 ]; then
@@ -468,14 +362,15 @@ run_decode_test() {
   log_info "Running: $testname"
   log_info "=========================================="
   
-  decoder=$(get_decoder_element "$codec")
+  # Check if decoder is available
+  decoder=$(gstreamer_v4l2_decoder_for_codec "$codec")
   if [ -z "$decoder" ]; then
     log_warn "Decoder not available for $codec"
     skip_count=$((skip_count + 1))
     return 1
   fi
   
-  ext=$(get_file_extension "$codec")
+  ext=$(gstreamer_container_ext_for_codec "$codec")
   
   # For VP9, use pre-downloaded clip; for others, use encoded file
   if [ "$codec" = "vp9" ]; then
@@ -497,50 +392,13 @@ run_decode_test() {
   test_log="$OUTDIR/${testname}.log"
   : >"$test_log"
   
-  # Build pipeline: filesrc -> parser -> decoder -> fakesink
-  case "$codec" in
-    h264)
-      parser="h264parse"
-      container="qtdemux"
-      ;;
-    h265|hevc)
-      parser="h265parse"
-      container="qtdemux"
-      ;;
-    vp9)
-      parser="ivfparse"
-      container=""
-      ;;
-    *)
-      parser="identity"
-      container=""
-      ;;
-  esac
+  # Build pipeline using library function
+  pipeline=$(gstreamer_build_v4l2_decode_pipeline "$codec" "$input_file" "$detected_stack")
   
-  # Add IO mode parameters for downstream stack
-  decoder_params=""
-  if [ "$detected_stack" = "downstream" ]; then
-    decoder_params="capture-io-mode=4 output-io-mode=4"
-    log_info "Using downstream stack: adding IO mode parameters to decoder"
-  else
-    log_info "Using upstream stack: no IO mode parameters needed for decoder"
-  fi
-  
-  # Build pipeline based on container format
-  if [ -n "$container" ]; then
-    # MP4 container (h264/h265)
-    if [ -n "$decoder_params" ]; then
-      pipeline="filesrc location=${input_file} ! ${container} ! ${parser} ! ${decoder} ${decoder_params} ! videoconvert ! fakesink"
-    else
-      pipeline="filesrc location=${input_file} ! ${container} ! ${parser} ! ${decoder} ! videoconvert ! fakesink"
-    fi
-  else
-    # IVF container (vp9) or no container
-    if [ -n "$decoder_params" ]; then
-      pipeline="filesrc location=${input_file} ! ${parser} ! ${decoder} ${decoder_params} ! videoconvert ! fakesink"
-    else
-      pipeline="filesrc location=${input_file} ! ${parser} ! ${decoder} ! videoconvert ! fakesink"
-    fi
+  if [ -z "$pipeline" ]; then
+    log_fail "$testname: FAIL (could not build pipeline)"
+    fail_count=$((fail_count + 1))
+    return 1
   fi
   
   log_info "Pipeline: $pipeline"
@@ -634,7 +492,7 @@ if [ "$testMode" = "all" ] || [ "$testMode" = "encode" ]; then
     fi
     
     for res in $resolutions; do
-      params=$(get_resolution_params "$res")
+      params=$(gstreamer_resolution_to_wh "$res")
       width=$(printf '%s' "$params" | awk '{print $1}')
       height=$(printf '%s' "$params" | awk '{print $2}')
       

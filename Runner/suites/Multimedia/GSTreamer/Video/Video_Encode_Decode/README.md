@@ -26,7 +26,7 @@ Runner/suites/Multimedia/GSTreamer/Video/Video_Encode_Decode/run.sh
 
 Required shared utils (sourced from `Runner/utils` via `init_env`):
 - `functestlib.sh`
-- `lib_gstreamer.sh`
+- `lib_gstreamer.sh` - **Contains reusable V4L2 video helpers** (see Library Functions section below)
 - optional: `lib_video.sh` (for video stack management)
 
 ---
@@ -414,6 +414,153 @@ Where:
   gst-inspect-1.0 ivfparse
   ```
 - This is typically part of `gst-plugins-bad` package
+
+---
+
+## Library Functions (Runner/utils/lib_gstreamer.sh)
+
+This test uses reusable helper functions from `lib_gstreamer.sh` that other GStreamer tests can leverage:
+
+### Resolution and Codec Helpers
+
+**`gstreamer_resolution_to_wh <resolution>`**
+- Converts resolution names to width/height
+- Input: `480p`, `720p`, `1080p`, `4k`
+- Output: `"<width> <height>"` (e.g., `"1920 1080"`)
+- Example:
+  ```sh
+  params=$(gstreamer_resolution_to_wh "1080p")
+  width=$(printf '%s' "$params" | awk '{print $1}')   # 1920
+  height=$(printf '%s' "$params" | awk '{print $2}')  # 1080
+  ```
+
+**`gstreamer_v4l2_encoder_for_codec <codec>`**
+- Returns V4L2 encoder element for codec
+- Input: `h264`, `h265`/`hevc`
+- Output: `v4l2h264enc` or `v4l2h265enc` (or empty if not available)
+- Example:
+  ```sh
+  encoder=$(gstreamer_v4l2_encoder_for_codec "h264")  # v4l2h264enc
+  ```
+
+**`gstreamer_v4l2_decoder_for_codec <codec>`**
+- Returns V4L2 decoder element for codec
+- Input: `h264`, `h265`/`hevc`, `vp9`
+- Output: `v4l2h264dec`, `v4l2h265dec`, or `v4l2vp9dec` (or empty if not available)
+- Example:
+  ```sh
+  decoder=$(gstreamer_v4l2_decoder_for_codec "vp9")  # v4l2vp9dec
+  ```
+
+**`gstreamer_container_ext_for_codec <codec>`**
+- Returns file extension for codec
+- Input: `h264`, `h265`, `vp9`
+- Output: `mp4` (for h264/h265) or `ivf` (for vp9)
+- Example:
+  ```sh
+  ext=$(gstreamer_container_ext_for_codec "h264")  # mp4
+  ```
+
+### Bitrate and File Size Helpers
+
+**`gstreamer_bitrate_for_resolution <width> <height>`**
+- Calculates recommended bitrate based on resolution
+- Returns bitrate in bps
+- Bitrate mapping:
+  - ≤640px width: 1 Mbps (1000000 bps)
+  - ≤1280px width: 2 Mbps (2000000 bps)
+  - ≤1920px width: 4 Mbps (4000000 bps)
+  - >1920px width: 8 Mbps (8000000 bps)
+- Example:
+  ```sh
+  bitrate=$(gstreamer_bitrate_for_resolution 1920 1080)  # 4000000
+  ```
+
+**`gstreamer_file_size_bytes <filepath>`**
+- Returns file size in bytes (portable across BSD/GNU stat)
+- Returns `0` if file doesn't exist
+- Example:
+  ```sh
+  size=$(gstreamer_file_size_bytes "/tmp/video.mp4")
+  if [ "$size" -gt 1000 ]; then
+    echo "File is valid"
+  fi
+  ```
+
+### Pipeline Builders
+
+**`gstreamer_build_v4l2_encode_pipeline <codec> <width> <height> <duration> <framerate> <bitrate> <output_file> <video_stack>`**
+- Builds complete V4L2 encode pipeline with videotestsrc
+- Parameters:
+  - `codec`: `h264` or `h265`
+  - `width`, `height`: Video dimensions
+  - `duration`: Duration in seconds
+  - `framerate`: Frames per second
+  - `bitrate`: Bitrate in bps
+  - `output_file`: Output file path
+  - `video_stack`: `upstream` or `downstream` (adds IO mode parameters for downstream)
+- Returns: Complete pipeline string (or empty if encoder not available)
+- Example:
+  ```sh
+  pipeline=$(gstreamer_build_v4l2_encode_pipeline \
+    "h264" 1920 1080 30 30 4000000 "/tmp/test.mp4" "upstream")
+  gstreamer_run_gstlaunch_timeout 40 "$pipeline"
+  ```
+
+**`gstreamer_build_v4l2_decode_pipeline <codec> <input_file> <video_stack>`**
+- Builds complete V4L2 decode pipeline
+- Parameters:
+  - `codec`: `h264`, `h265`, or `vp9`
+  - `input_file`: Input file path
+  - `video_stack`: `upstream` or `downstream`
+- Returns: Complete pipeline string (or empty if decoder not available)
+- Automatically handles:
+  - Container format (MP4 for h264/h265, IVF for vp9)
+  - Parser selection (h264parse, h265parse, ivfparse)
+  - IO mode parameters for downstream stack
+- Example:
+  ```sh
+  pipeline=$(gstreamer_build_v4l2_decode_pipeline \
+    "h264" "/tmp/test.mp4" "upstream")
+  gstreamer_run_gstlaunch_timeout 40 "$pipeline"
+  ```
+
+### Usage in Other Tests
+
+To use these functions in your GStreamer test:
+
+```sh
+#!/bin/sh
+# Source init_env and lib_gstreamer.sh
+. "$INIT_ENV"
+. "$TOOLS/functestlib.sh"
+. "$TOOLS/lib_gstreamer.sh"
+
+# Use the helpers
+params=$(gstreamer_resolution_to_wh "4k")
+width=$(printf '%s' "$params" | awk '{print $1}')
+height=$(printf '%s' "$params" | awk '{print $2}')
+
+bitrate=$(gstreamer_bitrate_for_resolution "$width" "$height")
+
+pipeline=$(gstreamer_build_v4l2_encode_pipeline \
+  "h264" "$width" "$height" 10 30 "$bitrate" "/tmp/output.mp4" "upstream")
+
+if [ -n "$pipeline" ]; then
+  gstreamer_run_gstlaunch_timeout 20 "$pipeline"
+fi
+```
+
+### Testing Pipeline Builders
+
+A test script is provided to verify the pipeline builders:
+
+```bash
+cd Runner/suites/Multimedia/GSTreamer/Video/Video_Encode_Decode
+sh test_pipeline_builders.sh
+```
+
+This will output example pipelines for various codecs, resolutions, and video stacks.
 
 ---
 
