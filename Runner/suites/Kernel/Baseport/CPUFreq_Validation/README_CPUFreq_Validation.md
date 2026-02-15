@@ -67,6 +67,5 @@ Runner/suites/Kernel/FunctionalArea/baseport/CPUFreq_Validation/run.sh
 
 ## License
 
-SPDX-License-Identifier: BSD-3-Clause-Clear  
-(c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+SPDX-License-Identifier: BSD-3-Clause(c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 

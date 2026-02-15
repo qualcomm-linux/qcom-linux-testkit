@@ -1,7 +1,6 @@
 #!/bin/sh
 # Copyright (c) Qualcomm Technologies, Inc.
-# SPDX-License-Identifier: BSD-3-Clause-Clear
-# libcamera 'cam' runner with strong post-capture validation (CLI-config only)
+# SPDX-License-Identifier: BSD-3-Clause# libcamera 'cam' runner with strong post-capture validation (CLI-config only)
 # ---------- Repo env + helpers (single-pass) ----------
 SCRIPT_DIR=$(cd "$(dirname "$0")" || exit 1; pwd)
 SEARCH="$SCRIPT_DIR"

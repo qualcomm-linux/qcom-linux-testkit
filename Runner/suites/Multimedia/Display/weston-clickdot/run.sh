@@ -1,7 +1,6 @@
 #!/bin/sh
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
-# SPDX-License-Identifier: BSD-3-Clause-Clear
-#
+# SPDX-License-Identifier: BSD-3-Clause#
 # Validate weston-clickdot runs under a working Wayland session.
 # - Wayland env resolution (adopts socket & fixes XDG_RUNTIME_DIR perms)
 # - CI-friendly logs and PASS/FAIL/SKIP semantics (LAVA-friendly: exits 0)

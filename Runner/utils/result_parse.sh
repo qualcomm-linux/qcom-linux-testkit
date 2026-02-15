@@ -1,8 +1,7 @@
 #!/bin/sh
 
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
-# SPDX-License-Identifier: BSD-3-Clause-Clear
-echo "Current working directory is $PWD"
+# SPDX-License-Identifier: BSD-3-Clauseecho "Current working directory is $PWD"
 
 find . -type f -name "*.res" 2>/dev/null | while IFS= read res_file; do
     echo "$res_file"

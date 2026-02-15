@@ -1,6 +1,5 @@
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
-# SPDX-License-Identifier: BSD-3-Clause-Clear
-
+# SPDX-License-Identifier: BSD-3-Clause
 # 🛠️ Contributing to qcom-linux-testkit
 
 Thank you for considering contributing to the **qcom-linux-testkit** project! Your contributions help improve the quality and functionality of our test suite. Please follow the guidelines below to ensure a smooth contribution process.
@@ -78,8 +77,7 @@ Runner/
 
 ```sh
 #!/bin/sh
-# SPDX-License-Identifier: BSD-3-Clause-Clear
-
+# SPDX-License-Identifier: BSD-3-Clause
 #Source init_env and functestlib.sh
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 INIT_ENV=""
@@ -160,8 +158,7 @@ Ensure that all new files include the appropriate license header:
 
 ```sh
 #!/bin/sh
-# SPDX-License-Identifier: BSD-3-Clause-Clear
-```
+# SPDX-License-Identifier: BSD-3-Clause```
 
 ---
 

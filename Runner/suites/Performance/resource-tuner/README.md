@@ -161,5 +161,5 @@ The script writes the overall result to `resource-tuner.res`. The **process exit
 - **Very long runs** → a `run_with_timeout` helper (if available in your repo toolchain) will be used automatically.
 
 ## License
-- SPDX-License-Identifier: BSD-3-Clause-Clear
+- SPDX-License-Identifier: BSD-3-Clause
 - (C) Qualcomm Technologies, Inc. and/or its subsidiaries.

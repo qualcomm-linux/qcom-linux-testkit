@@ -1,7 +1,6 @@
 #!/bin/sh
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
-# SPDX-License-Identifier: BSD-3-Clause-Clear
-# Audio Playback validation using GStreamer (auto backend: PipeWire/Pulse/ALSA)
+# SPDX-License-Identifier: BSD-3-Clause# Audio Playback validation using GStreamer (auto backend: PipeWire/Pulse/ALSA)
 # Logs everything to console and also to local log files.
 # PASS/FAIL/SKIP is emitted to .res. Always exits 0 (LAVA-friendly).
 

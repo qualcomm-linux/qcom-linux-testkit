@@ -1,7 +1,6 @@
 #!/bin/sh
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
-# SPDX-License-Identifier: BSD-3-Clause-Clear
-#
+# SPDX-License-Identifier: BSD-3-Clause#
 # Validate weston-editor runs under a working Wayland session.
 # - Uses lib_display.sh to adopt Wayland env (socket + XDG_RUNTIME_DIR)
 # - CI-friendly logs and PASS/FAIL/SKIP semantics (LAVA-friendly: exits 0)

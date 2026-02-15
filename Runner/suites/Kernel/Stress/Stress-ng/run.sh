@@ -1,7 +1,6 @@
 #!/bin/sh
 # Copyright (c) Qualcomm Technologies, Inc.
-# SPDX-License-Identifier: BSD-3-Clause-Clear
-#
+# SPDX-License-Identifier: BSD-3-Clause#
 # stress-ng validation runner:
 # - Default: auto-sized CPU + VM/HDD sets with strict FAIL criteria
 # - Custom: pass any stress-ng CLI via --stressng-args "…" or after "--"

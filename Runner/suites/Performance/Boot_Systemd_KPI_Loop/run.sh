@@ -1,7 +1,6 @@
 #!/bin/sh
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
-# SPDX-License-Identifier: BSD-3-Clause-Clear
-# Boot KPI multi-boot aggregator / auto-reboot wrapper around Boot_Systemd_Validate.
+# SPDX-License-Identifier: BSD-3-Clause# Boot KPI multi-boot aggregator / auto-reboot wrapper around Boot_Systemd_Validate.
 
 SCRIPT_DIR="$(
   cd "$(dirname "$0")" || exit 1

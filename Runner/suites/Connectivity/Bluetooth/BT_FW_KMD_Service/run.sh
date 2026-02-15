@@ -1,7 +1,6 @@
 #!/bin/sh
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
-# SPDX-License-Identifier: BSD-3-Clause-Clear
-#
+# SPDX-License-Identifier: BSD-3-Clause#
 # BT_FW_KMD_Service - Bluetooth FW + KMD + service + controller infra validation
 # Non-expect version, using lib_bluetooth.sh helpers.
 
