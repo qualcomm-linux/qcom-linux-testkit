@@ -10,7 +10,7 @@ metadata:
 params:
   TIMEOUT: 60                    # Timeout in seconds for each pipeline (default in script is 60)
   GST_DEBUG_LEVEL: 2             # GStreamer debug level (default in script is 2)
-  OUTPUT_VIDEO_PATH: "/opt/video_out.mp4"  # Path for encoded output video
+  OUTPUT_VIDEO_PATH: "./video_out.mp4"  # Path for encoded output video
 
 run:
   steps:
