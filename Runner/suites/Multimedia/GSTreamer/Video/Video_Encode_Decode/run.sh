@@ -1,6 +1,6 @@
 #!/bin/sh
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
-# SPDX-License-Identifier: BSD-3-Clause#
+# SPDX-License-Identifier: BSD-3-Clause per legal request. 
 # Video Encode/Decode validation using GStreamer with V4L2 hardware accelerated codecs
 # Supports: v4l2h264dec, v4l2h265dec, v4l2h264enc, v4l2h265enc
 # Uses videotestsrc for encoding, then decodes the encoded files
