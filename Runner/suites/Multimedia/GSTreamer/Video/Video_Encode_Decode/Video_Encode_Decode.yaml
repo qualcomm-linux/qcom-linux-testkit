@@ -5,7 +5,8 @@ metadata:
     Video encode/decode validation using GStreamer (gst-launch-1.0) with V4L2 hardware-accelerated codecs
     on Qualcomm Linux platforms. Supports v4l2h264enc, v4l2h265enc, v4l2h264dec, v4l2h265dec, v4l2vp9dec.
     Uses videotestsrc to generate test patterns for H.264/H.265 (no external video files needed).
-    For VP9 decode, downloads pre-encoded clips from git repo (requires network connectivity).
+    For VP9 decode, downloads pre-encoded IVF clips from git repo, converts them to WebM container format,
+    then decodes using v4l2vp9dec. Test skips if IVF to WebM conversion fails (no IVF fallback).
     Tests encoding at 480p and 4K resolutions, then decodes the encoded files.
   os:
     - linux
@@ -13,29 +14,35 @@ metadata:
     - functional
 
 params:
-  # Test mode: all (encode+decode), encode (only), decode (only)
+  # Test mode: all (encode+decode), encode (only), decode (only) (default: all)
   VIDEO_TEST_MODE: "all" # all|encode|decode
   
-  # Codecs to test (comma-separated)
-  VIDEO_CODECS: "h264,h265,vp9" # h264,h265,vp9 (VP9 decode only)
+  # Codecs to test (comma-separated) (default: h264,h265,vp9)
+  # Note: VP9 only supports decode (no encode)
+  VIDEO_CODECS: "h264,h265,vp9" # h264,h265,vp9
   
-  # Resolutions to test (comma-separated)
-  VIDEO_RESOLUTIONS: "4k" # 4k (3840x2160)
+  # Resolutions to test (comma-separated) (default: 4k)
+  # Supported: 480p (640x480), 720p (1280x720), 1080p (1920x1080), 4k (3840x2160)
+  VIDEO_RESOLUTIONS: "4k" # 480p,720p,1080p,4k
   
-  # Encoding duration in seconds
+  # Encoding duration in seconds (default: 30)
+  # Priority: VIDEO_DURATION > RUNTIMESEC
   VIDEO_DURATION: "30" # seconds
+  RUNTIMESEC: "" # if set, used as fallback
   
-  # Video framerate
+  # Video framerate (default: 30)
   VIDEO_FRAMERATE: "30" # fps
   
-  # Video stack selection
+  # Video stack selection (default: auto)
   VIDEO_STACK: "auto" # auto|upstream|downstream
   
-  # GStreamer debug level
+  # GStreamer debug level (default: 2)
+  # Priority: VIDEO_GST_DEBUG > GST_DEBUG_LEVEL
   VIDEO_GST_DEBUG: "2" # 1-9
+  GST_DEBUG_LEVEL: "" # if set, used as fallback
   
-  # Alternative duration variable (for compatibility)
-  RUNTIMESEC: "" # if set, overrides VIDEO_DURATION
+  # URL for VP9 clip download (default: GitHub releases)
+  VIDEO_CLIP_URL: "" # if set, overrides default GitHub URL
 
 run:
   steps:
@@ -44,10 +51,24 @@ run:
     # Navigate to test directory
     - cd Runner/suites/Multimedia/GSTreamer/Video/Video_Encode_Decode/
 
-    # Build CLI args only when params are non-empty
+    # Export environment variables (script reads these directly)
+    - export VIDEO_TEST_MODE="${VIDEO_TEST_MODE}"
+    - export VIDEO_CODECS="${VIDEO_CODECS}"
+    - export VIDEO_RESOLUTIONS="${VIDEO_RESOLUTIONS}"
+    - export VIDEO_DURATION="${VIDEO_DURATION}"
+    - export RUNTIMESEC="${RUNTIMESEC}"
+    - export VIDEO_FRAMERATE="${VIDEO_FRAMERATE}"
+    - export VIDEO_STACK="${VIDEO_STACK}"
+    - export VIDEO_GST_DEBUG="${VIDEO_GST_DEBUG}"
+    - export GST_DEBUG_LEVEL="${GST_DEBUG_LEVEL}"
+    - export VIDEO_CLIP_URL="${VIDEO_CLIP_URL}"
+
+    # Build CLI args for overrides (optional - can also rely on env vars)
     - |
       CMD="./run.sh"
 
+      # Use CLI args to override defaults if needed
+      # Note: Script reads env vars by default, CLI args override env vars
       [ -n "${VIDEO_TEST_MODE}" ] && CMD="${CMD} --mode ${VIDEO_TEST_MODE}"
       [ -n "${VIDEO_CODECS}" ] && CMD="${CMD} --codecs ${VIDEO_CODECS}"
       [ -n "${VIDEO_RESOLUTIONS}" ] && CMD="${CMD} --resolutions ${VIDEO_RESOLUTIONS}"
@@ -55,6 +76,7 @@ run:
       [ -n "${VIDEO_FRAMERATE}" ] && CMD="${CMD} --framerate ${VIDEO_FRAMERATE}"
       [ -n "${VIDEO_STACK}" ] && CMD="${CMD} --stack ${VIDEO_STACK}"
       [ -n "${VIDEO_GST_DEBUG}" ] && CMD="${CMD} --gst-debug ${VIDEO_GST_DEBUG}"
+      [ -n "${VIDEO_CLIP_URL}" ] && CMD="${CMD} --clip-url ${VIDEO_CLIP_URL}"
 
       echo "[LAVA] Running: ${CMD}"
       sh -c "${CMD}" || true

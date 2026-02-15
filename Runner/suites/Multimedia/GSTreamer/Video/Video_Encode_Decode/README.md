@@ -5,7 +5,7 @@ This directory contains the **Video_Encode_Decode** validation test for Qualcomm
 It validates video **encoding and decoding** using **GStreamer (`gst-launch-1.0`)** with V4L2 hardware-accelerated codecs:
 - **v4l2h264enc** / **v4l2h264dec** (H.264/AVC)
 - **v4l2h265enc** / **v4l2h265dec** (H.265/HEVC)
-- **v4l2vp9dec** (VP9 decode only - uses pre-downloaded clips)
+- **v4l2vp9dec** (VP9 decode only - uses pre-downloaded clips converted to WebM)
 
 The script is designed to be **CI/LAVA-friendly**:
 - Writes **PASS/FAIL/SKIP** into `Video_Encode_Decode.res`
@@ -63,15 +63,15 @@ At a high level, the test:
 By default, the test runs the following test cases at 4K resolution for H.264/H.265, plus VP9 decode:
 
 ### Encoding Tests
-1. **encode_h264_4k** - Encode H.264 at 3840x2160 resolution
-2. **encode_h265_4k** - Encode H.265 at 3840x2160 resolution
+1. **encode_h264_4k** - Encode H.264 at 3840x2160 resolution for 30 seconds
+2. **encode_h265_4k** - Encode H.265 at 3840x2160 resolution for 30 seconds
 
 **Note:** VP9 encoding is not supported (no v4l2vp9enc available)
 
 ### Decoding Tests
 1. **decode_h264_4k** - Decode H.264 4K encoded file
 2. **decode_h265_4k** - Decode H.265 4K encoded file
-3. **decode_vp9** - Decode VP9 pre-downloaded clip (320_240_10fps.ivf) - **runs by default**
+3. **decode_vp9_320p** - Decode VP9 pre-downloaded clip (converted to WebM: vp9_test_320p.webm) - **runs by default**
 
 ---
 
@@ -91,7 +91,7 @@ By default, the test runs the following test cases at 4K resolution for H.264/H.
 - Missing required tools (`gst-launch-1.0`, `gst-inspect-1.0`)
 - Required V4L2 encoder/decoder elements not available
 - For H.264/H.265 decode tests: corresponding encoded file not found (encode must run first)
-- For VP9 decode tests: network connectivity unavailable or clip download failed
+- For VP9 decode tests: network connectivity unavailable, clip download failed, or IVF to WebM conversion failed
 
 **Note:** The test always exits `0` even for FAIL/SKIP. The `.res` file is the source of truth.
 
@@ -113,13 +113,14 @@ By default, logs are written relative to the script working directory:
   decode_h264_4k.log
   decode_h265_480p.log
   decode_h265_4k.log
-  decode_vp9.log             # VP9 decode test log
+  decode_vp9_320p.log        # VP9 decode test log
   encoded/                   # Encoded video files
-    encode_h264_480p.h264
-    encode_h264_4k.h264
-    encode_h265_480p.h265
-    encode_h265_4k.h265
-  320_240_10fps.ivf          # Downloaded VP9 clip (if network available)
+    encode_h264_480p.mp4
+    encode_h264_4k.mp4
+    encode_h265_480p.mp4
+    encode_h265_4k.mp4
+  320_240_10fps.ivf          # Downloaded VP9 clip (IVF format)
+  vp9_test_320p.webm         # Converted VP9 clip (WebM format - used for decode test)
   dmesg/                     # dmesg scan outputs (if available)
 ```
 
@@ -186,7 +187,7 @@ Help:
 
 - `--duration <seconds>`
   - Duration for encoding (in seconds)
-  - Default: `5`
+  - Default: `30`
   - This determines how many frames are generated (duration × framerate)
 
 - `--framerate <fps>`
@@ -215,11 +216,13 @@ Help:
 
 ## Examples
 
-### 1) Run all tests (default - encode + decode for H.264/H.265 at 4K, plus VP9 decode)
+### 1) Run all tests (default - encode + decode for H.264/H.265/VP9 at 4K for 30 seconds)
 
 ```bash
 ./run.sh
 ```
+
+**Note:** Default behavior runs H.264, H.265, and VP9 tests at 4K resolution with 30 second duration.
 
 ### 2) Run only encoding tests
 
@@ -332,21 +335,38 @@ Where:
 - Parser ensures proper stream format
 - `fakesink` discards output (no display needed for validation)
 
-### Decoding Pipeline (VP9)
+### VP9 Clip Conversion Pipeline
+
+Before decoding, the downloaded IVF file is converted to WebM (Matroska) container:
 
 ```
 filesrc location=320_240_10fps.ivf 
   ! ivfparse 
+  ! matroskamux 
+  ! filesink location=vp9_test_320p.webm
+```
+
+Where:
+- `ivfparse` parses the downloaded IVF container
+- `matroskamux` remuxes to WebM/Matroska container
+- **If conversion fails**: Test is skipped with reason "GST conversion failure"
+- **No IVF fallback**: The test will not use IVF directly if conversion fails
+
+### Decoding Pipeline (VP9)
+
+```
+filesrc location=vp9_test_320p.webm 
+  ! matroskademux 
   ! v4l2vp9dec 
   ! videoconvert 
   ! fakesink
 ```
 
 Where:
-- `ivfparse` parses IVF container format (VP9 native container)
-- No `qtdemux` needed (unlike H.264/H.265 in MP4)
-- Input file is pre-downloaded from git repo
+- `matroskademux` parses WebM/Matroska container format
+- Input file is the converted WebM file (not IVF directly)
 - Resolution: 320x240
+- **Important**: Test skips if WebM conversion failed (no IVF fallback)
 
 ---
 
@@ -414,6 +434,27 @@ Where:
   gst-inspect-1.0 ivfparse
   ```
 - This is typically part of `gst-plugins-bad` package
+
+### J) VP9 test skips with "GST conversion failure"
+- The IVF to WebM conversion failed
+- Check if `matroskamux` plugin is available:
+  ```bash
+  gst-inspect-1.0 matroskamux
+  ```
+- Check if `ivfparse` plugin is available:
+  ```bash
+  gst-inspect-1.0 ivfparse
+  ```
+- Manually test the conversion:
+  ```bash
+  cd logs/Video_Encode_Decode/
+  gst-launch-1.0 filesrc location=320_240_10fps.ivf ! ivfparse ! matroskamux ! filesink location=test.webm
+  ```
+- Check GStreamer debug output for errors:
+  ```bash
+  GST_DEBUG=3 gst-launch-1.0 filesrc location=320_240_10fps.ivf ! ivfparse ! matroskamux ! filesink location=test.webm
+  ```
+- **Note**: The test will NOT fall back to using IVF directly. If conversion fails, the test skips to ensure proper container format validation
 
 ---
 
@@ -579,15 +620,18 @@ This will output example pipelines for various codecs, resolutions, and video st
 
 The test supports these environment variables (can be set in LAVA job definition):
 
-- `VIDEO_TEST_MODE` - Test mode (all/encode/decode)
+- `VIDEO_TEST_MODE` - Test mode (all/encode/decode) (default: all)
 - `VIDEO_CODECS` - Comma-separated codec list (default: `h264,h265,vp9`)
-- `VIDEO_RESOLUTIONS` - Comma-separated resolution list
-- `VIDEO_DURATION` - Encoding duration in seconds
-- `VIDEO_FRAMERATE` - Video framerate
-- `VIDEO_STACK` - Video stack selection
-- `VIDEO_GST_DEBUG` - GStreamer debug level
-- `VIDEO_CLIP_URL` - URL for VP9 clip download (default: GitHub releases)
+- `VIDEO_RESOLUTIONS` - Comma-separated resolution list (default: `4k`)
+- `VIDEO_DURATION` - Encoding duration in seconds (default: 30)
 - `RUNTIMESEC` - Alternative to VIDEO_DURATION
+- `VIDEO_FRAMERATE` - Video framerate (default: 30)
+- `VIDEO_STACK` - Video stack selection (auto/upstream/downstream) (default: auto)
+- `VIDEO_GST_DEBUG` - GStreamer debug level (default: 2)
+- `GST_DEBUG_LEVEL` - Alternative to VIDEO_GST_DEBUG
+- `VIDEO_CLIP_URL` - URL for VP9 clip download (default: GitHub releases)
+
+**Priority order for duration**: `VIDEO_DURATION` > `RUNTIMESEC` > default (30)
 
 ### VP9-Specific Notes for CI/LAVA
 

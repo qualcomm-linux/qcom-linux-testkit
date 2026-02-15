@@ -73,10 +73,11 @@ The script is designed to be **CI/LAVA-friendly**:
 
 ### Options
 
-- `--duration <seconds>` - Playback duration (default: 10)
+- `--resolution <WIDTHxHEIGHT>` - Video resolution (e.g., 1920x1080, 3840x2160) (default: 1920x1080)
+- `--duration <seconds>` - Playback duration (default: 30)
 - `--pattern <smpte|snow|ball|etc>` - videotestsrc pattern (default: smpte)
-- `--width <pixels>` - Video width (default: 1920)
-- `--height <pixels>` - Video height (default: 1080)
+- `--width <pixels>` - Video width (alternative to --resolution) (default: 1920)
+- `--height <pixels>` - Video height (alternative to --resolution) (default: 1080)
 - `--framerate <fps>` - Video framerate (default: 30)
 - `--gst-debug <level>` - GStreamer debug level 1-9 (default: 2)
 
@@ -88,14 +89,23 @@ The script is designed to be **CI/LAVA-friendly**:
 # Run default test (1920x1080 SMPTE for 30s)
 ./run.sh
 
-# Run with 30 second duration
-./run.sh --duration 30
+# Run with custom resolution using --resolution
+./run.sh --resolution 3840x2160
+
+# Run with custom resolution and duration
+./run.sh --resolution 3840x2160 --duration 20
 
 # Run with ball pattern
 ./run.sh --pattern ball
 
-# Run with custom resolution
+# Run with custom resolution using separate width/height
 ./run.sh --width 1280 --height 720
+
+# Run with different framerate
+./run.sh --framerate 60
+
+# Run with higher debug level
+./run.sh --gst-debug 5
 ```
 
 ---
@@ -146,10 +156,15 @@ videotestsrc num-buffers=<N> pattern=<pattern>
 
 ## LAVA Environment Variables
 
-- `VIDEO_DURATION` - Playback duration
-- `VIDEO_PATTERN` - videotestsrc pattern
-- `VIDEO_WIDTH` - Video width
-- `VIDEO_HEIGHT` - Video height
-- `VIDEO_FRAMERATE` - Video framerate
-- `VIDEO_GST_DEBUG` - GStreamer debug level
+The test supports these environment variables (can be set in LAVA job definition):
+
+- `VIDEO_DURATION` - Playback duration in seconds (default: 30)
 - `RUNTIMESEC` - Alternative to VIDEO_DURATION
+- `VIDEO_PATTERN` - videotestsrc pattern (default: smpte)
+- `VIDEO_WIDTH` - Video width (default: 1920)
+- `VIDEO_HEIGHT` - Video height (default: 1080)
+- `VIDEO_FRAMERATE` - Video framerate (default: 30)
+- `VIDEO_GST_DEBUG` - GStreamer debug level (default: 2)
+- `GST_DEBUG_LEVEL` - Alternative to VIDEO_GST_DEBUG
+
+**Priority order for duration**: `VIDEO_DURATION` > `RUNTIMESEC` > default (30)

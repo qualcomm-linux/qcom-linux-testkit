@@ -1,6 +1,6 @@
 #!/bin/sh
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
-# SPDX-License-Identifier: BSD-3-Clause-Clear
+# SPDX-License-Identifier: BSD-3-Clause#
 # Waylandsink Playback validation using GStreamer
 # Tests video playback using waylandsink with videotestsrc
 # Validates Weston/Wayland server and display connectivity
@@ -69,63 +69,83 @@ trap cleanup INT TERM EXIT
 # -------------------- Arg parse --------------------
 while [ $# -gt 0 ]; do
   case "$1" in
-    --duration)
-      if [ $# -lt 2 ] || [ -z "$2" ] || [ "${2#--}" != "$2" ]; then
-        log_warn "Missing/invalid value for --duration"
-        echo "SKIP" >"$RES_FILE"
+    --resolution)
+      if [ $# -lt 2 ] || [ "${2#--}" != "$2" ]; then
+        log_warn "Missing/invalid value for --resolution"
+        echo "$TESTNAME SKIP" >"$RES_FILE"
         exit 0
       fi
-      duration="$2"
+      # Parse WIDTHxHEIGHT format (e.g., 1920x1080)
+      if [ -n "$2" ]; then
+        width="${2%%x*}"
+        height="${2#*x}"
+      fi
+      shift 2
+      ;;
+
+    --duration)
+      if [ $# -lt 2 ] || [ "${2#--}" != "$2" ]; then
+        log_warn "Missing/invalid value for --duration"
+        echo "$TESTNAME SKIP" >"$RES_FILE"
+        exit 0
+      fi
+      # If $2 is empty, keep default and shift 2
+      [ -n "$2" ] && duration="$2"
       shift 2
       ;;
 
     --pattern)
-      if [ $# -lt 2 ] || [ -z "$2" ] || [ "${2#--}" != "$2" ]; then
+      if [ $# -lt 2 ] || [ "${2#--}" != "$2" ]; then
         log_warn "Missing/invalid value for --pattern"
-        echo "SKIP" >"$RES_FILE"
+        echo "$TESTNAME SKIP" >"$RES_FILE"
         exit 0
       fi
-      pattern="$2"
+      # If $2 is empty, keep default and shift 2
+      [ -n "$2" ] && pattern="$2"
       shift 2
       ;;
 
     --width)
-      if [ $# -lt 2 ] || [ -z "$2" ] || [ "${2#--}" != "$2" ]; then
+      if [ $# -lt 2 ] || [ "${2#--}" != "$2" ]; then
         log_warn "Missing/invalid value for --width"
-        echo "SKIP" >"$RES_FILE"
+        echo "$TESTNAME SKIP" >"$RES_FILE"
         exit 0
       fi
-      width="$2"
+      # If $2 is empty, keep default and shift 2
+      [ -n "$2" ] && width="$2"
       shift 2
       ;;
 
     --height)
-      if [ $# -lt 2 ] || [ -z "$2" ] || [ "${2#--}" != "$2" ]; then
+      if [ $# -lt 2 ] || [ "${2#--}" != "$2" ]; then
         log_warn "Missing/invalid value for --height"
-        echo "SKIP" >"$RES_FILE"
+        echo "$TESTNAME SKIP" >"$RES_FILE"
         exit 0
       fi
-      height="$2"
+      # If $2 is empty, keep default and shift 2
+      [ -n "$2" ] && height="$2"
       shift 2
       ;;
 
     --framerate)
-      if [ $# -lt 2 ] || [ -z "$2" ] || [ "${2#--}" != "$2" ]; then
+      if [ $# -lt 2 ] || [ "${2#--}" != "$2" ]; then
         log_warn "Missing/invalid value for --framerate"
-        echo "SKIP" >"$RES_FILE"
+        echo "$TESTNAME SKIP" >"$RES_FILE"
         exit 0
       fi
-      framerate="$2"
+      # If $2 is empty, keep default and shift 2
+      [ -n "$2" ] && framerate="$2"
       shift 2
       ;;
 
     --gst-debug)
-      if [ $# -lt 2 ] || [ -z "$2" ] || [ "${2#--}" != "$2" ]; then
+      if [ $# -lt 2 ] || [ "${2#--}" != "$2" ]; then
         log_warn "Missing/invalid value for --gst-debug"
-        echo "SKIP" >"$RES_FILE"
+        echo "$TESTNAME SKIP" >"$RES_FILE"
         exit 0
       fi
-      gstDebugLevel="$2"
+      # If $2 is empty, keep default and shift 2
+      [ -n "$2" ] && gstDebugLevel="$2"
       shift 2
       ;;
 
@@ -135,6 +155,10 @@ Usage:
   $0 [options]
 
 Options:
+  --resolution <WIDTHxHEIGHT>
+      Video resolution (e.g., 1920x1080, 3840x2160)
+      Default: ${width}x${height}
+
   --duration <seconds>
       Playback duration in seconds
       Default: ${duration}
@@ -144,11 +168,11 @@ Options:
       Default: ${pattern}
 
   --width <pixels>
-      Video width
+      Video width (alternative to --resolution)
       Default: ${width}
 
   --height <pixels>
-      Video height
+      Video height (alternative to --resolution)
       Default: ${height}
 
   --framerate <fps>
@@ -160,32 +184,41 @@ Options:
       Default: ${gstDebugLevel}
 
 Examples:
-  # Run default test (1920x1080 SMPTE pattern for 10s)
+  # Run default test (1920x1080 SMPTE pattern for 30s)
   ./run.sh
 
-  # Run with custom duration
-  ./run.sh --duration 20
+  # Run with custom resolution and duration
+  ./run.sh --resolution 3840x2160 --duration 20
 
   # Run with different pattern
   ./run.sh --pattern ball
 
+  # Run with separate width/height
+  ./run.sh --width 1280 --height 720
+
 EOF
-      echo "SKIP" >"$RES_FILE"
+      echo "$TESTNAME SKIP" >"$RES_FILE"
       exit 0
       ;;
 
     *)
       log_warn "Unknown argument: $1"
-      echo "SKIP" >"$RES_FILE"
+      echo "$TESTNAME SKIP" >"$RES_FILE"
       exit 0
       ;;
   esac
 done
 
 # -------------------- Pre-checks --------------------
-check_dependencies "gst-launch-1.0" "gst-inspect-1.0" >/dev/null 2>&1 || {
+check_dependencies "gst-launch-1.0 gst-inspect-1.0" >/dev/null 2>&1 || {
   log_warn "Missing gstreamer runtime (gst-launch-1.0/gst-inspect-1.0)"
-  echo "SKIP" >"$RES_FILE"
+  echo "$TESTNAME SKIP" >"$RES_FILE"
+  exit 0
+}
+
+check_dependencies "grep head sed" >/dev/null 2>&1 || {
+  log_warn "Missing required tools (grep, head, sed)"
+  echo "$TESTNAME SKIP" >"$RES_FILE"
   exit 0
 }
 
@@ -211,7 +244,7 @@ fi
 
 if [ "$have_connector" -eq 0 ]; then
   log_warn "No connected DRM display found, skipping ${TESTNAME}."
-  echo "SKIP" >"$RES_FILE"
+  echo "$TESTNAME SKIP" >"$RES_FILE"
   exit 0
 fi
 
@@ -236,25 +269,42 @@ if [ -n "$sock" ] && command -v adopt_wayland_env_from_socket >/dev/null 2>&1; t
 fi
 
 # Try starting Weston if no socket found
-if [ -z "$sock" ] && command -v overlay_start_weston_drm >/dev/null 2>&1; then
-  log_info "No usable Wayland socket; trying to start Weston..."
-  if overlay_start_weston_drm; then
-    if command -v discover_wayland_socket_anywhere >/dev/null 2>&1; then
-      sock=$(discover_wayland_socket_anywhere | head -n 1 || true)
+if [ -z "$sock" ]; then
+  if command -v weston_pick_env_or_start >/dev/null 2>&1; then
+    log_info "No usable Wayland socket; trying weston_pick_env_or_start..."
+    if weston_pick_env_or_start "${TESTNAME}"; then
+      # Re-discover socket after Weston start
+      if command -v discover_wayland_socket_anywhere >/dev/null 2>&1; then
+        sock=$(discover_wayland_socket_anywhere | head -n 1 || true)
+      fi
+      if [ -n "$sock" ]; then
+        log_info "Weston started successfully with socket: $sock"
+      fi
+    else
+      log_warn "weston_pick_env_or_start failed"
     fi
-    if [ -n "$sock" ] && command -v adopt_wayland_env_from_socket >/dev/null 2>&1; then
-      log_info "Weston created Wayland socket: $sock"
-      if ! adopt_wayland_env_from_socket "$sock"; then
-        log_warn "Failed to adopt env from $sock"
+  elif command -v overlay_start_weston_drm >/dev/null 2>&1; then
+    log_info "No usable Wayland socket; trying overlay_start_weston_drm (fallback)..."
+    if overlay_start_weston_drm; then
+      if command -v discover_wayland_socket_anywhere >/dev/null 2>&1; then
+        sock=$(discover_wayland_socket_anywhere | head -n 1 || true)
+      fi
+      if [ -n "$sock" ] && command -v adopt_wayland_env_from_socket >/dev/null 2>&1; then
+        log_info "Weston created Wayland socket: $sock"
+        if ! adopt_wayland_env_from_socket "$sock"; then
+          log_warn "Failed to adopt env from $sock"
+        fi
       fi
     fi
+  else
+    log_warn "No Weston startup helper available (weston_pick_env_or_start or overlay_start_weston_drm)"
   fi
 fi
 
 # Final check
 if [ -z "$sock" ]; then
   log_warn "No Wayland socket found; skipping ${TESTNAME}."
-  echo "SKIP" >"$RES_FILE"
+  echo "$TESTNAME SKIP" >"$RES_FILE"
   exit 0
 fi
 
@@ -262,7 +312,7 @@ fi
 if command -v wayland_connection_ok >/dev/null 2>&1; then
   if ! wayland_connection_ok; then
     log_fail "Wayland connection test failed; cannot run ${TESTNAME}."
-    echo "SKIP" >"$RES_FILE"
+    echo "$TESTNAME SKIP" >"$RES_FILE"
     exit 0
   fi
   log_info "Wayland connection test: OK"
@@ -271,7 +321,7 @@ fi
 # -------------------- Check waylandsink element --------------------
 if ! has_element waylandsink; then
   log_warn "waylandsink element not available"
-  echo "SKIP" >"$RES_FILE"
+  echo "$TESTNAME SKIP" >"$RES_FILE"
   exit 0
 fi
 
@@ -328,11 +378,11 @@ fi
 case "$result" in
   PASS)
     log_pass "$TESTNAME $result: $reason"
-    echo "PASS" >"$RES_FILE"
+    echo "$TESTNAME PASS" >"$RES_FILE"
     ;;
   *)
     log_fail "$TESTNAME $result: $reason"
-    echo "FAIL" >"$RES_FILE"
+    echo "$TESTNAME FAIL" >"$RES_FILE"
     ;;
 esac
 

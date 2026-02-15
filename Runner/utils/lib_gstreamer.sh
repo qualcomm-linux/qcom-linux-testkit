@@ -1,7 +1,6 @@
 #!/bin/sh
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
-# SPDX-License-Identifier: BSD-3-Clause-Clear
-#
+# SPDX-License-Identifier: BSD-3-Clause#
 # Runner/utils/lib_gstreamer.sh
 #
 # GStreamer helpers.
@@ -503,23 +502,44 @@ gstreamer_build_playback_pipeline() {
 # gstreamer_check_errors <logfile>
 # Returns: 0 if no critical errors found, 1 if errors found
 # Checks for common GStreamer ERROR patterns that indicate failure
+# Uses severity-based matching to avoid false positives on benign logs
 gstreamer_check_errors() {
   logfile="$1"
   
   [ -f "$logfile" ] || return 0
   
-  # Check for critical ERROR messages
-  if grep -q -E "^ERROR:|ERROR: from element|Internal data stream error|streaming stopped, reason not-negotiated|Could not open|No such file|Permission denied|Failed to|Cannot" "$logfile" 2>/dev/null; then
+  # Check for explicit ERROR: prefixed messages (most reliable)
+  if grep -q -E "^ERROR:|^0:[0-9]+:[0-9]+\.[0-9]+ [0-9]+ [^ ]+ ERROR" "$logfile" 2>/dev/null; then
     return 1
   fi
   
-  # Check for pipeline preroll failures
-  if grep -q -E "pipeline doesn't want to preroll|pipeline doesn't want to play" "$logfile" 2>/dev/null; then
+  # Check for ERROR messages from GStreamer elements
+  if grep -q -E "ERROR: from element|gst.*ERROR" "$logfile" 2>/dev/null; then
     return 1
   fi
   
-  # Check for state change failures
-  if grep -q -E "failed to change state|state change failed" "$logfile" 2>/dev/null; then
+  # Check for critical streaming errors
+  if grep -q -E "Internal data stream error|streaming stopped, reason not-negotiated" "$logfile" 2>/dev/null; then
+    return 1
+  fi
+  
+  # Check for pipeline failures (more specific patterns)
+  if grep -q -E "pipeline doesn't want to preroll|pipeline doesn't want to play|ERROR.*pipeline" "$logfile" 2>/dev/null; then
+    return 1
+  fi
+  
+  # Check for state change failures (require ERROR context)
+  if grep -q -E "ERROR.*failed to change state|ERROR.*state change failed" "$logfile" 2>/dev/null; then
+    return 1
+  fi
+  
+  # Check for critical file/device access errors (require ERROR context or specific patterns)
+  if grep -q -E "ERROR.*(Could not open|No such file|Permission denied|Failed to|Cannot)" "$logfile" 2>/dev/null; then
+    return 1
+  fi
+  
+  # Check for CRITICAL or FATAL level messages
+  if grep -q -E "CRITICAL|FATAL" "$logfile" 2>/dev/null; then
     return 1
   fi
   
@@ -596,6 +616,7 @@ gstreamer_resolution_to_wh() {
 
 # gstreamer_v4l2_encoder_for_codec <codec>
 # Returns the V4L2 encoder element for the given codec
+# Supports: H.264, H.265 (VP9 is decode-only, no encoder support)
 # Prints: encoder element name or empty string if not available
 gstreamer_v4l2_encoder_for_codec() {
   codec="$1"
@@ -611,6 +632,11 @@ gstreamer_v4l2_encoder_for_codec() {
         printf '%s\n' "v4l2h265enc"
         return 0
       fi
+      ;;
+    vp9)
+      # VP9 is decode-only, no encoder support
+      printf '%s\n' ""
+      return 1
       ;;
   esac
   printf '%s\n' ""
@@ -647,16 +673,30 @@ gstreamer_v4l2_decoder_for_codec() {
 }
 
 # gstreamer_container_ext_for_codec <codec>
-# Returns the file extension for the given codec
-# Prints: file extension (without dot)
+# Returns the default container file extension for the given video codec.
+# This standardizes container format selection across encode/decode operations:
+#   - H.264/H.265: mp4 container (ISO BMFF/MP4) - encode & decode supported
+#   - VP9: webm container (WebM) - decode-only
+# 
+# The encode pipeline builders (gstreamer_build_v4l2_encode_pipeline) use
+# appropriate muxers (mp4mux for H.264/H.265). VP9 encoding is not supported.
+# The decode pipeline builders (gstreamer_build_v4l2_decode_pipeline) use
+# appropriate demuxers (qtdemux for MP4, matroskademux for WebM).
+#
+# Prints: file extension (without dot) - "mp4", "webm", etc.
 gstreamer_container_ext_for_codec() {
   codec="$1"
   case "$codec" in
     vp9)
-      printf '%s\n' "ivf"
+      # VP9 uses WebM container format (Matroska-based)
+      printf '%s\n' "webm"
+      ;;
+    h264|h265|hevc)
+      # H.264/H.265 use MP4 container format (ISO BMFF)
+      printf '%s\n' "mp4"
       ;;
     *)
-      # Use mp4 container format for h264/h265
+      # Default to MP4 for unknown codecs
       printf '%s\n' "mp4"
       ;;
   esac
@@ -771,8 +811,8 @@ gstreamer_build_v4l2_decode_pipeline() {
       container="qtdemux"
       ;;
     vp9)
-      parser="ivfparse"
-      container=""
+      parser=""
+      container="matroskademux"
       ;;
     *)
       parser="identity"

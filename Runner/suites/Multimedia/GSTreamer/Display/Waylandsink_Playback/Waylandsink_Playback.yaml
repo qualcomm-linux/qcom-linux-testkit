@@ -12,20 +12,27 @@ metadata:
     - functional
 
 params:
-  # Video resolution (WIDTHxHEIGHT)
-  VIDEO_RESOLUTION: "1920x1080"
+  # Playback duration in seconds (default: 30)
+  # Priority: VIDEO_DURATION > RUNTIMESEC
+  VIDEO_DURATION: "30"
+  RUNTIMESEC: "" # if set, used as fallback
   
-  # Test pattern for videotestsrc
-  VIDEO_PATTERN: "smpte" # smpte|snow|black|white|red|green|blue|checkers-1|checkers-2
+  # Test pattern for videotestsrc (default: smpte)
+  VIDEO_PATTERN: "smpte" # smpte|snow|black|white|red|green|blue|checkers-1|checkers-2|ball
   
-  # Playback duration in seconds
-  PLAYBACK_DURATION: "30"
+  # Video width in pixels (default: 1920)
+  VIDEO_WIDTH: "1920"
   
-  # Frame rate
-  FRAMERATE: "30"
+  # Video height in pixels (default: 1080)
+  VIDEO_HEIGHT: "1080"
   
-  # GStreamer debug level
+  # Frame rate (default: 30)
+  VIDEO_FRAMERATE: "30"
+  
+  # GStreamer debug level (default: 2)
+  # Priority: VIDEO_GST_DEBUG > GST_DEBUG_LEVEL
   VIDEO_GST_DEBUG: "2" # 1-9
+  GST_DEBUG_LEVEL: "" # if set, used as fallback
 
 run:
   steps:
@@ -34,14 +41,26 @@ run:
     # Navigate to test directory
     - cd Runner/suites/Multimedia/GSTreamer/Display/Waylandsink_Playback/
 
-    # Build CLI args only when params are non-empty
+    # Export environment variables (script reads these directly)
+    - export VIDEO_DURATION="${VIDEO_DURATION}"
+    - export RUNTIMESEC="${RUNTIMESEC}"
+    - export VIDEO_PATTERN="${VIDEO_PATTERN}"
+    - export VIDEO_WIDTH="${VIDEO_WIDTH}"
+    - export VIDEO_HEIGHT="${VIDEO_HEIGHT}"
+    - export VIDEO_FRAMERATE="${VIDEO_FRAMERATE}"
+    - export VIDEO_GST_DEBUG="${VIDEO_GST_DEBUG}"
+    - export GST_DEBUG_LEVEL="${GST_DEBUG_LEVEL}"
+
+    # Build CLI args for overrides (optional - can also rely on env vars)
     - |
       CMD="./run.sh"
 
-      [ -n "${VIDEO_RESOLUTION}" ] && CMD="${CMD} --resolution ${VIDEO_RESOLUTION}"
+      # Use CLI args to override defaults if needed
+      # Note: Script reads env vars by default, CLI args override env vars
+      [ -n "${VIDEO_WIDTH}" ] && [ -n "${VIDEO_HEIGHT}" ] && CMD="${CMD} --resolution ${VIDEO_WIDTH}x${VIDEO_HEIGHT}"
       [ -n "${VIDEO_PATTERN}" ] && CMD="${CMD} --pattern ${VIDEO_PATTERN}"
-      [ -n "${PLAYBACK_DURATION}" ] && CMD="${CMD} --duration ${PLAYBACK_DURATION}"
-      [ -n "${FRAMERATE}" ] && CMD="${CMD} --framerate ${FRAMERATE}"
+      [ -n "${VIDEO_DURATION}" ] && CMD="${CMD} --duration ${VIDEO_DURATION}"
+      [ -n "${VIDEO_FRAMERATE}" ] && CMD="${CMD} --framerate ${VIDEO_FRAMERATE}"
       [ -n "${VIDEO_GST_DEBUG}" ] && CMD="${CMD} --gst-debug ${VIDEO_GST_DEBUG}"
 
       echo "[LAVA] Running: ${CMD}"

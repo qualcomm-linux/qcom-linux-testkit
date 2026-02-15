@@ -1,6 +1,6 @@
 #!/bin/sh
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
-# SPDX-License-Identifier: BSD-3-Clause-Clear
+# SPDX-License-Identifier: BSD-3-Clause#
 # Video Encode/Decode validation using GStreamer with V4L2 hardware accelerated codecs
 # Supports: v4l2h264dec, v4l2h265dec, v4l2h264enc, v4l2h265enc
 # Uses videotestsrc for encoding, then decodes the encoded files
@@ -77,82 +77,90 @@ trap cleanup INT TERM EXIT
 while [ $# -gt 0 ]; do
   case "$1" in
     --mode)
-      if [ $# -lt 2 ] || [ -z "$2" ] || [ "${2#--}" != "$2" ]; then
+      if [ $# -lt 2 ] || [ "${2#--}" != "$2" ]; then
         log_warn "Missing/invalid value for --mode"
-        echo "SKIP" >"$RES_FILE"
+        echo "$TESTNAME SKIP" >"$RES_FILE"
         exit 0
       fi
-      testMode="$2"
+      # If empty, keep default; otherwise use provided value
+      [ -n "$2" ] && testMode="$2"
       shift 2
       ;;
 
     --codecs)
-      if [ $# -lt 2 ] || [ -z "$2" ] || [ "${2#--}" != "$2" ]; then
+      if [ $# -lt 2 ] || [ "${2#--}" != "$2" ]; then
         log_warn "Missing/invalid value for --codecs"
-        echo "SKIP" >"$RES_FILE"
+        echo "$TESTNAME SKIP" >"$RES_FILE"
         exit 0
       fi
-      codecList="$2"
+      # If empty, keep default; otherwise use provided value
+      [ -n "$2" ] && codecList="$2"
       shift 2
       ;;
 
   --clip-url)
-      if [ $# -lt 2 ] || [ -z "$2" ] || [ "${2#--}" != "$2" ]; then
+      if [ $# -lt 2 ] || [ "${2#--}" != "$2" ]; then
         log_warn "Missing/invalid value for --clip-url"
-        echo "SKIP" >"$RES_FILE"
+        echo "$TESTNAME SKIP" >"$RES_FILE"
         exit 0
       fi
-      clipUrl="$2"
+      # If empty, keep default; otherwise use provided value
+      [ -n "$2" ] && clipUrl="$2"
       shift 2
       ;;
 
     --resolutions)
-      if [ $# -lt 2 ] || [ -z "$2" ] || [ "${2#--}" != "$2" ]; then
+      if [ $# -lt 2 ] || [ "${2#--}" != "$2" ]; then
         log_warn "Missing/invalid value for --resolutions"
-        echo "SKIP" >"$RES_FILE"
+        echo "$TESTNAME SKIP" >"$RES_FILE"
         exit 0
       fi
-      resolutionList="$2"
+      # If empty, keep default; otherwise use provided value
+      [ -n "$2" ] && resolutionList="$2"
       shift 2
       ;;
 
     --duration)
-      if [ $# -lt 2 ] || [ -z "$2" ] || [ "${2#--}" != "$2" ]; then
+      if [ $# -lt 2 ] || [ "${2#--}" != "$2" ]; then
         log_warn "Missing/invalid value for --duration"
-        echo "SKIP" >"$RES_FILE"
+        echo "$TESTNAME SKIP" >"$RES_FILE"
         exit 0
       fi
-      duration="$2"
+      # If empty, keep default; otherwise use provided value
+      [ -n "$2" ] && duration="$2"
       shift 2
       ;;
 
     --framerate)
-      if [ $# -lt 2 ] || [ -z "$2" ] || [ "${2#--}" != "$2" ]; then
+      if [ $# -lt 2 ] || [ "${2#--}" != "$2" ]; then
         log_warn "Missing/invalid value for --framerate"
-        echo "SKIP" >"$RES_FILE"
+        echo "$TESTNAME SKIP" >"$RES_FILE"
         exit 0
       fi
-      framerate="$2"
+      # If empty, keep default; otherwise use provided value
+      [ -n "$2" ] && framerate="$2"
       shift 2
       ;;
 
     --stack)
-      if [ $# -lt 2 ] || [ -z "$2" ] || [ "${2#--}" != "$2" ]; then
+      if [ $# -lt 2 ] || [ "${2#--}" != "$2" ]; then
         log_warn "Missing/invalid value for --stack"
-        echo "SKIP" >"$RES_FILE"
+        echo "$TESTNAME SKIP" >"$RES_FILE"
         exit 0
       fi
-      videoStack="$2"
+      # If empty, keep default; otherwise use provided value
+      [ -n "$2" ] && videoStack="$2"
       shift 2
       ;;
 
     --gst-debug)
-      if [ $# -lt 2 ] || [ -z "$2" ] || [ "${2#--}" != "$2" ]; then
+      if [ $# -lt 2 ] || [ "${2#--}" != "$2" ]; then
         log_warn "Missing/invalid value for --gst-debug"
-        echo "SKIP" >"$RES_FILE"
+        echo "$TESTNAME SKIP" >"$RES_FILE"
         exit 0
       fi
-      gstDebugLevel="$2"
+      # If empty, keep default; otherwise use provided value
+      [ -n "$2" ] && gstDebugLevel="$2"
       shift 2
       ;;
 
@@ -211,13 +219,13 @@ Examples:
   ./run.sh --mode decode --codecs vp9
 
 EOF
-      echo "SKIP" >"$RES_FILE"
+      echo "$TESTNAME SKIP" >"$RES_FILE"
       exit 0
       ;;
 
     *)
       log_warn "Unknown argument: $1"
-      echo "SKIP" >"$RES_FILE"
+      echo "$TESTNAME SKIP" >"$RES_FILE"
       exit 0
       ;;
   esac
@@ -226,22 +234,28 @@ done
 # -------------------- Validate parsed values --------------------
 case "$testMode" in all|encode|decode) : ;; *)
   log_warn "Invalid --mode '$testMode'"
-  echo "SKIP" >"$RES_FILE"
+  echo "$TESTNAME SKIP" >"$RES_FILE"
   exit 0
   ;;
 esac
 
 case "$gstDebugLevel" in 1|2|3|4|5|6|7|8|9) : ;; *)
   log_warn "Invalid --gst-debug '$gstDebugLevel' (allowed: 1-9)"
-  echo "SKIP" >"$RES_FILE"
+  echo "$TESTNAME SKIP" >"$RES_FILE"
   exit 0
   ;;
 esac
 
 # -------------------- Pre-checks --------------------
-check_dependencies "gst-launch-1.0" "gst-inspect-1.0" >/dev/null 2>&1 || {
+check_dependencies "gst-launch-1.0 gst-inspect-1.0" >/dev/null 2>&1 || {
   log_warn "Missing gstreamer runtime (gst-launch-1.0/gst-inspect-1.0)"
-  echo "SKIP" >"$RES_FILE"
+  echo "$TESTNAME SKIP" >"$RES_FILE"
+  exit 0
+}
+
+check_dependencies "awk grep head sed tr stat" >/dev/null 2>&1 || {
+  log_warn "Missing required tools (awk, grep, head, sed, tr, stat)"
+  echo "$TESTNAME SKIP" >"$RES_FILE"
   exit 0
 }
 
@@ -372,11 +386,11 @@ run_decode_test() {
   
   ext=$(gstreamer_container_ext_for_codec "$codec")
   
-  # For VP9, use pre-downloaded clip; for others, use encoded file
+  # For VP9, use pre-downloaded and converted WebM clip; for others, use encoded file
   if [ "$codec" = "vp9" ]; then
-    input_file="$OUTDIR/320_240_10fps.ivf"
+    input_file="$OUTDIR/vp9_test_320p.webm"
     if [ ! -f "$input_file" ]; then
-      log_warn "VP9 clip not found: $input_file (download may have failed)"
+      log_warn "VP9 WebM clip not found: $input_file (conversion may have failed)"
       skip_count=$((skip_count + 1))
       return 1
     fi
@@ -412,8 +426,15 @@ run_decode_test() {
   
   log_info "Decode exit code: $gstRc"
   
-  # Check for successful completion in log
-  if grep -q "Setting pipeline to NULL" "$test_log" 2>/dev/null || [ "$gstRc" -eq 0 ]; then
+  # Check for GStreamer errors in log
+  if ! gstreamer_validate_log "$test_log" "$testname"; then
+    log_fail "$testname: FAIL (GStreamer errors detected)"
+    fail_count=$((fail_count + 1))
+    return 1
+  fi
+  
+  # Check for successful completion
+  if [ "$gstRc" -eq 0 ]; then
     log_pass "$testname: PASS"
     pass_count=$((pass_count + 1))
     return 0
@@ -444,36 +465,90 @@ done
 
 if [ "$need_vp9_clip" -eq 1 ] && [ "$testMode" != "encode" ]; then
   log_info "=========================================="
-  log_info "VP9 CLIP DOWNLOAD"
+  log_info "VP9 CLIP DOWNLOAD & CONVERSION"
   log_info "=========================================="
   
-  vp9_clip="$OUTDIR/320_240_10fps.ivf"
+  vp9_clip_ivf="$OUTDIR/320_240_10fps.ivf"
+  vp9_clip_webm="$OUTDIR/vp9_test_320p.webm"
   
-  if [ -f "$vp9_clip" ]; then
-    log_info "VP9 clip already exists: $vp9_clip"
+  # Check if WebM file already exists
+  if [ -f "$vp9_clip_webm" ]; then
+    log_info "VP9 WebM clip already exists: $vp9_clip_webm"
   else
-    log_info "Checking network connectivity and downloading VP9 clips..."
-    
-    # Use ensure_network_online from functestlib.sh to bring up connectivity
-    if ensure_network_online; then
-      log_pass "Network connectivity established"
+    # Download IVF file if not present
+    if [ ! -f "$vp9_clip_ivf" ]; then
+      log_info "Checking network connectivity and downloading VP9 clips..."
       
-      # Download and extract clips using functestlib helper
+      # Check network status first
+      net_rc=1
+      if command -v check_network_status_rc >/dev/null 2>&1; then
+        check_network_status_rc
+        net_rc=$?
+      elif command -v check_network_status >/dev/null 2>&1; then
+        check_network_status >/dev/null 2>&1
+        net_rc=$?
+      fi
+      
+      # If offline, try to bring network online
+      if [ "$net_rc" -ne 0 ]; then
+        if command -v bring_network_online >/dev/null 2>&1; then
+          log_info "Attempting to bring network online..."
+          bring_network_online
+          # Stabilization sleep after bringing network up
+          sleep 5
+        else
+          log_warn "Could not establish network connectivity"
+        fi
+      else
+        log_info "Network already online"
+        # Brief stabilization sleep
+        sleep 2
+      fi
+    
+    # Attempt download if we have connectivity
+    if command -v check_network_status_rc >/dev/null 2>&1; then
+      if check_network_status_rc; then
+        log_info "Downloading VP9 clips from: $clipUrl"
+        if extract_tar_from_url "$clipUrl" "$OUTDIR"; then
+          log_pass "VP9 clips downloaded and extracted successfully"
+        else
+          log_warn "Failed to download/extract VP9 clips (network online but download failed)"
+        fi
+      else
+        log_warn "Network still offline after connectivity attempt"
+      fi
+    else
+      # Fallback: attempt download without explicit network check
       log_info "Downloading VP9 clips from: $clipUrl"
       if extract_tar_from_url "$clipUrl" "$OUTDIR"; then
         log_pass "VP9 clips downloaded and extracted successfully"
       else
         log_warn "Failed to download/extract VP9 clips"
       fi
-      
-      # Verify clip exists after download attempt
-      if [ ! -f "$vp9_clip" ]; then
-        log_warn "VP9 clip not found after download attempt: $vp9_clip"
-        log_warn "VP9 decode tests will be skipped"
-      fi
-    else
-      log_warn "Could not establish network connectivity"
+    fi
+    fi
+    
+    # Verify clip exists after download attempt
+    if [ ! -f "$vp9_clip_ivf" ]; then
+      log_warn "VP9 clip not found after download attempt: $vp9_clip_ivf"
       log_warn "VP9 decode tests will be skipped"
+    else
+      # Convert IVF to WebM container using GStreamer for better compatibility
+      if [ ! -f "$vp9_clip_webm" ]; then
+        log_info "Converting IVF to WebM container using GStreamer..."
+        
+        # Use GStreamer pipeline to remux IVF to WebM (Matroska container)
+        if gst-launch-1.0 filesrc location="$vp9_clip_ivf" ! ivfparse ! matroskamux ! filesink location="$vp9_clip_webm" >/dev/null 2>&1; then
+          log_pass "Successfully converted IVF to WebM (320x240)"
+        else
+          log_fail "GStreamer IVF to WebM conversion failed"
+          log_warn "VP9 decode tests will be skipped (reason: GST conversion failure)"
+          rm -f "$vp9_clip_webm" 2>/dev/null || true
+          rm -f "$vp9_clip_ivf" 2>/dev/null || true
+        fi
+      else
+        log_info "WebM file already exists: $vp9_clip_webm"
+      fi
     fi
   fi
 fi
@@ -509,10 +584,10 @@ if [ "$testMode" = "all" ] || [ "$testMode" = "decode" ]; then
   log_info "=========================================="
   
   for codec in $codecs; do
-    # For VP9, only run once (not per resolution, as we use a fixed clip)
+    # For VP9, only run once (not per resolution, as we use a fixed 320p clip)
     if [ "$codec" = "vp9" ]; then
       total_tests=$((total_tests + 1))
-      run_decode_test "$codec" "720p" || true
+      run_decode_test "$codec" "320p" || true
     else
       for res in $resolutions; do
         total_tests=$((total_tests + 1))
@@ -520,6 +595,27 @@ if [ "$testMode" = "all" ] || [ "$testMode" = "decode" ]; then
       done
     fi
   done
+fi
+
+# -------------------- Dmesg error scan --------------------
+log_info "=========================================="
+log_info "DMESG ERROR SCAN"
+log_info "=========================================="
+
+# Scan for video-related errors in dmesg
+module_regex="venus|vcodec|v4l2|video|gstreamer"
+exclude_regex="dummy regulator|supply [^ ]+ not found|using dummy regulator"
+
+if command -v scan_dmesg_errors >/dev/null 2>&1; then
+  scan_dmesg_errors "$DMESG_DIR" "$module_regex" "$exclude_regex" || true
+  
+  if [ -s "$DMESG_DIR/dmesg_errors.log" ]; then
+    log_warn "dmesg scan found video-related warnings or errors in $DMESG_DIR/dmesg_errors.log"
+  else
+    log_info "No relevant video-related errors found in dmesg"
+  fi
+else
+  log_info "scan_dmesg_errors not available, skipping dmesg scan"
 fi
 
 # -------------------- Summary --------------------
@@ -549,15 +645,15 @@ fi
 case "$result" in
   PASS)
     log_pass "$TESTNAME $result: $reason"
-    echo "PASS" >"$RES_FILE"
+    echo "$TESTNAME PASS" >"$RES_FILE"
     ;;
   FAIL)
     log_fail "$TESTNAME $result: $reason"
-    echo "FAIL" >"$RES_FILE"
+    echo "$TESTNAME FAIL" >"$RES_FILE"
     ;;
   *)
     log_warn "$TESTNAME $result: $reason"
-    echo "SKIP" >"$RES_FILE"
+    echo "$TESTNAME SKIP" >"$RES_FILE"
     ;;
 esac
 
