@@ -223,5 +223,5 @@ Auto network starts a local listen thread and chooses a primary IP (falling back
 
 License
 
-The test runner: BSD-3-Clause-Clear (Qualcomm Technologies, Inc. and/or its subsidiaries).
+The test runner: BSD-3-Clause (Qualcomm Technologies, Inc. and/or its subsidiaries).
 stressapptest is licensed by its upstream author; see its repository for details.

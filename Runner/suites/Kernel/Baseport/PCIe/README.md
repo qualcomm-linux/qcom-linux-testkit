@@ -1,7 +1,6 @@
 # PCIe Validation Test
 © Qualcomm Technologies, Inc. and/or its subsidiaries.  
-SPDX-License-Identifier: BSD-3-Clause-Clear
-## Overview
+SPDX-License-Identifier: BSD-3-Clause## Overview
 This test case validates the PCIe interface on the target device by checking for the presence of key PCIe attributes using the `lspci -vvv` command. It ensures that the PCIe subsystem is correctly enumerated and functional
 ### The test checks for:
 - Presence of **Device Tree Node**

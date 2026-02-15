@@ -1,7 +1,6 @@
 #!/bin/sh
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
-# SPDX-License-Identifier: BSD-3-Clause-Clear
-#
+# SPDX-License-Identifier: BSD-3-Clause#
 # stressapptest/run.sh
 # Safe wrapper around stressapptest for embedded/CI use.
 # Memory-safety features: --mem-pct, --mem-cap-mb, --mem-headroom-mb,

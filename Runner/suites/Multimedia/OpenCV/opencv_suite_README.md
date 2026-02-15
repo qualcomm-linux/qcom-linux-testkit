@@ -332,5 +332,5 @@ Run one binary with extra args:
 
 ## License
 
-BSD-3-Clause-Clear (same as the script).
+BSD-3-Clause (same as the script).
 

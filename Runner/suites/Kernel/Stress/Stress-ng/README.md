@@ -287,7 +287,7 @@ Still, run on development hardware or staging boards when possible.
 
 License
 
-The test runner: BSD-3-Clause-Clear (Qualcomm Technologies, Inc. and/or its subsidiaries).
+The test runner: BSD-3-Clause (Qualcomm Technologies, Inc. and/or its subsidiaries).
 
 stress-ng is licensed upstream by its author; see its repository for details.
 

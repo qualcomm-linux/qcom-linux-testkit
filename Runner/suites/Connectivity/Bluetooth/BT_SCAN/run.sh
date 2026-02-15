@@ -1,7 +1,6 @@
 #!/bin/sh
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
-# SPDX-License-Identifier: BSD-3-Clause-Clear
-# BT_SCAN – Bluetooth scanning validation (non-expect version)
+# SPDX-License-Identifier: BSD-3-Clause# BT_SCAN – Bluetooth scanning validation (non-expect version)
 # ---------- Repo env + helpers ----------
 SCRIPT_DIR="$(
   cd "$(dirname "$0")" || exit 1

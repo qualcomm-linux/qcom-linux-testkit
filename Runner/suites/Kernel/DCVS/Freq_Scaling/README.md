@@ -33,5 +33,4 @@ Test result will be saved in `Freq_Scaling.res` as:
 
 ## License
 
-SPDX-License-Identifier: BSD-3-Clause-Clear  
-(C) Qualcomm Technologies, Inc. and/or its subsidiaries.
+SPDX-License-Identifier: BSD-3-Clause(C) Qualcomm Technologies, Inc. and/or its subsidiaries.

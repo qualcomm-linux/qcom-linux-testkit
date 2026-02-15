@@ -1,7 +1,6 @@
 #!/bin/sh
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
-# SPDX-License-Identifier: BSD-3-Clause-Clear
-# BT_ON_OFF - Basic Bluetooth power toggle validation (non-expect version)
+# SPDX-License-Identifier: BSD-3-Clause# BT_ON_OFF - Basic Bluetooth power toggle validation (non-expect version)
 
 # Robustly find and source init_env
 SCRIPT_DIR="$(

@@ -1,7 +1,6 @@
 #!/bin/sh
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
-# SPDX-License-Identifier: BSD-3-Clause-Clear
-#
+# SPDX-License-Identifier: BSD-3-Clause#
 # Validate weston-flower runs under a working Wayland session.
 # - Wayland env resolution (adopts socket & fixes XDG_RUNTIME_DIR perms)
 # - Optional Wayland protocol validation via WAYLAND_DEBUG capture

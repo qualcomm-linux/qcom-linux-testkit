@@ -1,7 +1,6 @@
 #!/bin/sh
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
-# SPDX-License-Identifier: BSD-3-Clause-Clear
-# Geekbench runner with live console progress + CSV dump (summary + workloads)
+# SPDX-License-Identifier: BSD-3-Clause# Geekbench runner with live console progress + CSV dump (summary + workloads)
 # POSIX + LAVA-friendly, always exits 0, writes PASS/FAIL/SKIP to .res
 
 TESTNAME="Geekbench"

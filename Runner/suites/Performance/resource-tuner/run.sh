@@ -1,7 +1,6 @@
 #!/bin/sh
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
-# SPDX-License-Identifier: BSD-3-Clause-Clear
-# resource-tuner test runner (pinned whitelist)
+# SPDX-License-Identifier: BSD-3-Clause# resource-tuner test runner (pinned whitelist)
 
 # ---------- Repo env + helpers ----------
 SCRIPT_DIR="$(

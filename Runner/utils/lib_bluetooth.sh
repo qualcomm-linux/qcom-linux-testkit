@@ -1,8 +1,7 @@
 #!/bin/sh
 # lib_bluetooth.sh - Bluetooth-specific helpers split out from functestlib.sh
 # Copyright (c) Qualcomm Technologies, Inc.
-# SPDX-License-Identifier: BSD-3-Clause-Clear
-#
+# SPDX-License-Identifier: BSD-3-Clause#
 # This file is meant to be sourced *after* init_env and functestlib.sh:
 # . "$TOOLS/functestlib.sh"
 # . "$TOOLS/lib_bluetooth.sh"
