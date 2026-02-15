@@ -1,0 +1,15 @@
+metadata:
+  name: ufs-write-booster
+  format: "Lava-Test Test Definition 1.0"
+  description: "Check whether UFS Write Booster is enabled on UFS writes"
+  os:
+    - linux
+  scope:
+    - functional
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/Storage/ufs_write_booster
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh ufs_write_booster.res || true
