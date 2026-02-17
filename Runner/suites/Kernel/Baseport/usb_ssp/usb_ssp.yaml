@@ -1,0 +1,16 @@
+metadata:
+  name: usb-ssp
+  format: "Lava-Test Test Definition 1.0"
+  description: "This shell script executes on the DUT (Device-Under-Test) and verifies successful enumeration of connected USB Devices in SuperSpeed Plus (SSP)."
+  os:
+    - linux
+  scope:
+    - functional
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/usb_ssp
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh usb_ssp.res || true
+
