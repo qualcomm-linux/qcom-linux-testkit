@@ -452,7 +452,8 @@ gstreamer_run_gstlaunch_timeout() {
   case "$secs" in ''|*[!0-9]*) secs=10 ;; esac
   command -v "$GSTBIN" >/dev/null 2>&1 || return 127
 
-  gstreamer_print_cmd_multiline "$pipe"
+  # gstreamer_print_cmd_multiline "$pipe"
+  log_info "${pipe}"
 
   if [ "$secs" -gt 0 ] 2>/dev/null; then
     if command -v audio_timeout_run >/dev/null 2>&1; then
@@ -514,14 +515,32 @@ download_resource() {
         dest="${dest%/}/${filename}"
     fi
 
-    mkdir -p "$(dirname "${dest}")"
+    # Check if file already exists and is non-empty
+    if [ -f "${dest}" ] && [ -s "${dest}" ]; then
+        if command -v realpath >/dev/null 2>&1; then
+            realpath "${dest}"
+        else
+            case "${dest}" in
+                ./*) echo "${dest#./}" ;;
+                *)   echo "${dest}" ;;
+            esac
+        fi
+        return 0
+    fi
 
+    mkdir -p "$(dirname "${dest}")"
     if command -v curl >/dev/null 2>&1; then
-        curl -fkL "${url}" -o "${dest}"
+        curl -fkL "${url}" -o "${dest}" || { echo "Error: curl failed to download ${url}" >&2; return 1; }
     elif command -v wget >/dev/null 2>&1; then
-        wget -q "${url}" -O "${dest}"
+        wget -q "${url}" -O "${dest}" || { echo "Error: wget failed to download ${url}" >&2; return 1; }
     else
         echo "Error: neither 'curl' nor 'wget' is installed." >&2
+        return 1
+    fi
+
+    # Verify successful download with non-empty file
+    if [ ! -s "${dest}" ]; then
+        echo "Error: downloaded file is empty: ${dest}" >&2
         return 1
     fi
 
@@ -529,8 +548,8 @@ download_resource() {
         realpath "${dest}"
     else
         case "${dest}" in
-            ./*) echo "${dest#./}" ;;
-            *)   echo "${dest}" ;;
+        ./*) echo "${dest#./}" ;;
+        *)   echo "${dest}" ;;
         esac
     fi
 }
@@ -541,19 +560,11 @@ extract_zip_to_dir() {
     zip_path=$1
     dest_dir=$2
 
-    tmp_dir=$(mktemp -d -t "$(basename "${zip_path%.*}")_XXXX")
-
-    if ! unzip -o "${zip_path}" -d "${tmp_dir}" >/dev/null; then
+    mkdir -p "${dest_dir}"
+    if ! unzip -o "${zip_path}" -d "${dest_dir}" >/dev/null; then
         echo "Unzip of ${zip_path} failed" >&2
-        rm -rf "${tmp_dir}"
         return 1
     fi
-
-    mkdir -p "${dest_dir}"
-    cp -r "${tmp_dir}"/* "${dest_dir}/"
-
-    # Clean up the temporary folder;
-    rm -rf "${tmp_dir}" "${zip_path}"
 }
 # -------------------------------------------------------------------------
 # check_pipeline_elements <pipeline-string>
@@ -590,7 +601,7 @@ check_pipeline_elements() {
     # ---------------------------------------------------------
     # Write the token list to a temporary file
     # ---------------------------------------------------------
-    tmpfile=$(mktemp) || exit 1
+    tmpfile=$(mktemp)
     printf '%s' "$pipeline" | tr '!' '\n' >"$tmpfile"
 
     # ---------------------------------------------------------
@@ -600,7 +611,8 @@ check_pipeline_elements() {
     while IFS= read -r element_spec; do
         # ---- NEW ----
         # Strip surrounding whitespace; skip blank lines
-        element_spec=$(printf '%s' "$element_spec" | xargs)
+        # element_spec=$(printf '%s' "$element_spec" | xargs)
+        element_spec=$(printf '%s\n' "$element_spec" | awk '{$1=$1; print}')
         [ -z "$element_spec" ] && continue
         # --------------
 
@@ -645,14 +657,25 @@ run_pipeline_with_logs() {
     timeout=$3
     TIMEOUT=${timeout:-60}   # default 60 seconds
 
-    console_log="${name}_console.log"
-    gst_debug_log="${name}_gst_debug.log"
+    console_log="logs/${name}_console.log"
+    gst_debug_log="logs/${name}_gst_debug.log"
 
     export GST_DEBUG_FILE="${gst_debug_log}"
 
     log_info "Running ${name} (timeout=${TIMEOUT}s)"
-    timeout "${TIMEOUT}" sh -c "$cmd" >"$console_log" 2>&1
-    rc=$?
+    # Check if timeout command is available
+    if command -v timeout >/dev/null 2>&1; then
+        final_command='timeout '"${TIMEOUT}"' gst-launch-1.0 -e '"${cmd}"''
+        sh -c "$final_command" >"$console_log" 2>&1
+        rc=$?
+    else
+        log_warn "timeout command not found, falling back to gstreamer_run_gstlaunch_timeout"
+        # Run with gstreamer_run_gstlaunch_timeout using just the pipeline
+        {
+          gstreamer_run_gstlaunch_timeout "$TIMEOUT" "$cmd"
+          rc=$?
+        } > "$console_log" 2>&1
+    fi
 
     # Look for a successful PLAYING state and the absence of ERROR messages.
     playing=$(grep -c "Setting pipeline to PLAYING" "$console_log" || true)
@@ -709,7 +732,7 @@ check_file_size() {
     fi
 
     # ---- Get the actual size -------------------------------------------------
-    size_in_bytes=$(stat -c %s "$input_file_path" 2>/dev/null) || {
+    size_in_bytes=$(stat -c %s "$input_file_path" 2>/dev/null || wc -c <"$input_file_path" 2>/dev/null) || {
         log_fail "Unable to read size of file: $input_file_path"
         return 1
     }
