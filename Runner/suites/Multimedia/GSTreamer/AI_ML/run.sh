@@ -157,14 +157,23 @@ while [ "$#" -gt 0 ]; do
     case "$1" in
         --timeout)
             shift
+            if [ "$#" -eq 0 ] || [ "${1#-}" != "$1" ]; then
+                usage "Missing value for --timeout"
+            fi
             TIMEOUT=$1
             ;;
         --gstdebug)
             shift
+            if [ "$#" -eq 0 ] || [ "${1#-}" != "$1" ]; then
+                usage "Missing value for --gstdebug"
+            fi
             GST_DEBUG_LEVEL=$1
             ;;
         --output-video)
             shift
+            if [ "$#" -eq 0 ] || [ "${1#-}" != "$1" ]; then
+                usage "Missing value for --output-video"
+            fi
             ENCODED_VIDEO_PATH=$1
             ;;
         -h|--help)
