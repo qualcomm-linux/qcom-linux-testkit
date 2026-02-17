@@ -1,7 +1,10 @@
 #!/bin/sh
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
-# SPDX-License-Identifier: BSD-3-Clause# Robustly find and source init_env
+# SPDX-License-Identifier: BSD-3-Clause
+
+# Robustly find and source init_env
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
 INIT_ENV=""
 SEARCH="$SCRIPT_DIR"
 while [ "$SEARCH" != "/" ]; do
@@ -22,6 +25,7 @@ if [ -z "$__INIT_ENV_LOADED" ]; then
     # shellcheck disable=SC1090
     . "$INIT_ENV"
 fi
+
 # Always source functestlib.sh, using $TOOLS exported by init_env
 # shellcheck disable=SC1090,SC1091
 . "$TOOLS/functestlib.sh"
@@ -44,7 +48,80 @@ POLL_I="${POLL_I:-1}" # state poll interval (s)
 PRE_STOP_DELAY="${PRE_STOP_DELAY:-30}" # FIXED delay before stopping ADSP (seconds)
 FATAL_ON_UNSUSPENDED="${FATAL_ON_UNSUSPENDED:-0}" # 1 = abort if audio not suspended/unsupported after delay
 
+# --- CLI ----------------------------------------------------------------------
+# Default: do NOT do SSR (stop/start). Enable explicitly with --ssr
+DO_SSR=0
+
+usage() {
+    echo "Usage: $0 [--ssr] [--pre-stop-delay SEC] [--fatal-on-unsuspended] [--stop-to SEC] [--start-to SEC] [--poll-i SEC]" >&2
+    echo " --ssr Perform ADSP stop/start (SSR). Default: OFF" >&2
+    echo " --pre-stop-delay SEC Delay before stop when --ssr is used (default: $PRE_STOP_DELAY)" >&2
+    echo " --fatal-on-unsuspended Abort if audio not suspended/unsupported after delay (only meaningful with --ssr)" >&2
+    echo " --stop-to SEC Stop timeout (default: $STOP_TO)" >&2
+    echo " --start-to SEC Start timeout (default: $START_TO)" >&2
+    echo " --poll-i SEC Poll interval (default: $POLL_I)" >&2
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --ssr)
+            DO_SSR=1
+            shift
+            ;;
+        --pre-stop-delay)
+            if [ $# -lt 2 ]; then
+                log_fail "Missing value for --pre-stop-delay"
+                usage
+                exit 2
+            fi
+            PRE_STOP_DELAY="$2"
+            shift 2
+            ;;
+        --fatal-on-unsuspended)
+            FATAL_ON_UNSUSPENDED=1
+            shift
+            ;;
+        --stop-to)
+            if [ $# -lt 2 ]; then
+                log_fail "Missing value for --stop-to"
+                usage
+                exit 2
+            fi
+            STOP_TO="$2"
+            shift 2
+            ;;
+        --start-to)
+            if [ $# -lt 2 ]; then
+                log_fail "Missing value for --start-to"
+                usage
+                exit 2
+            fi
+            START_TO="$2"
+            shift 2
+            ;;
+        --poll-i)
+            if [ $# -lt 2 ]; then
+                log_fail "Missing value for --poll-i"
+                usage
+                exit 2
+            fi
+            POLL_I="$2"
+            shift 2
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            log_warn "Unknown argument: $1"
+            usage
+            exit 2
+            ;;
+    esac
+done
+
 log_info "Tunables: STOP_TO=$STOP_TO START_TO=$START_TO POLL_I=$POLL_I PRE_STOP_DELAY=$PRE_STOP_DELAY FATAL_ON_UNSUSPENDED=$FATAL_ON_UNSUSPENDED"
+log_info "SSR control: DO_SSR=$DO_SSR (0=no stop/start, 1=do stop/start)"
 
 # --- Audio readiness snapshot (no hardcoding, no long wait) -------------------
 # Discovers a bound snd*/snd-soc* driver, logs module once, collects nodes to check.
@@ -58,7 +135,6 @@ discover_audio_stack_and_snapshot() {
 
     platform_drv=""
     platform_mod=""
-
     for drvdir in "$DRIVERS_BASE"/snd-* "$DRIVERS_BASE"/snd-soc-*; do
         [ -d "$drvdir" ] || continue
         [ -L "$drvdir/sound" ] || continue
@@ -91,17 +167,16 @@ discover_audio_stack_and_snapshot() {
     fi
 
     log_info "Using bound audio driver: $platform_drv${platform_mod:+ (module: $platform_mod)}"
-
     TARGET_PATH="$DRIVERS_BASE/$platform_drv/sound"
 
     # 1) Platform sound root + immediate children (collect runtime_status files)
     if [ -d "$TARGET_PATH" ]; then
         _rt_nodes_list="$(mktemp)"
         find "$TARGET_PATH" -maxdepth 2 -type f -path "*/power/runtime_status" \
-            -exec printf '%s\n' {} \; 2>/dev/null > "$_rt_nodes_list"
+            -exec printf '%s\n' {} \; 2>/dev/null >"$_rt_nodes_list"
         while IFS= read -r f; do
             [ -n "$f" ] && CHECK_NODES="$CHECK_NODES $f"
-        done < "$_rt_nodes_list"
+        done <"$_rt_nodes_list"
         rm -f "$_rt_nodes_list"
     fi
 
@@ -196,68 +271,71 @@ while IFS='|' read -r rpath rstate rfirm rname; do
         log_fail "$inst_id: boot check FAIL (state=$rstate)"
         boot_res="FAIL"
         inst_fail=$((inst_fail + 1))
-        RESULT_LINES="$RESULT_LINES
- $inst_id: boot=$boot_res, stop=$stop_res, start=$start_res, ping=$ping_res"
+        RESULT_LINES="$RESULT_LINES $inst_id: boot=$boot_res, stop=$stop_res, start=$start_res, ping=$ping_res"
         continue
     fi
 
-    # ---- Fixed pre-stop delay (always wait PRE_STOP_DELAY seconds) -----------
-    log_info "$inst_id: waiting ${PRE_STOP_DELAY}s before remoteproc stop (fixed delay)"
-    [ "$PRE_STOP_DELAY" -gt 0 ] && sleep "$PRE_STOP_DELAY"
+    if [ "$DO_SSR" -eq 1 ]; then
+        # ---- Fixed pre-stop delay (always wait PRE_STOP_DELAY seconds) -----------
+        log_info "$inst_id: waiting ${PRE_STOP_DELAY}s before remoteproc stop (fixed delay)"
+        [ "$PRE_STOP_DELAY" -gt 0 ] && sleep "$PRE_STOP_DELAY"
 
-    # Optional gating: after the fixed delay, ensure PM is OK before stopping
-    if [ "$FATAL_ON_UNSUSPENDED" -eq 1 ]; then
-        if [ "$(audio_pm_snapshot_ok)" -ne 1 ]; then
-            log_fail "Audio not in suspended/unsupported state after ${PRE_STOP_DELAY}s (FATAL_ON_UNSUSPENDED=1); aborting before stop"
-            log_info "Writing to file $RES_FILE"
-            echo "$TESTNAME FAIL" >"$RES_FILE"
-            exit 1
+        # Optional gating: after the fixed delay, ensure PM is OK before stopping
+        if [ "$FATAL_ON_UNSUSPENDED" -eq 1 ]; then
+            if [ "$(audio_pm_snapshot_ok)" -ne 1 ]; then
+                log_fail "Audio not in suspended/unsupported state after ${PRE_STOP_DELAY}s (FATAL_ON_UNSUSPENDED=1); aborting before stop"
+                log_info "Writing to file $RES_FILE"
+                echo "$TESTNAME FAIL" >"$RES_FILE"
+                exit 1
+            fi
         fi
-    fi
 
-    # Helpful dmesg snapshots
-    dmesg | tail -n 100 > "$test_path/dmesg_before_stop.log"
-    dump_rproc_logs "$rpath" before-stop
+        # Helpful dmesg snapshots
+        dmesg | tail -n 100 >"$test_path/dmesg_before_stop.log"
+        dump_rproc_logs "$rpath" before-stop
 
-    # ---- Stop ADSP -----------------------------------------------------------
-    t0="$(date +%s)"
-    log_info "$inst_id: stopping"
-    if stop_remoteproc "$rpath" && wait_remoteproc_state "$rpath" offline "$STOP_TO" "$POLL_I"; then
-        t1="$(date +%s)"
-        log_pass "$inst_id: stop PASS ($((t1 - t0))s)"
-        stop_res="PASS"
+        # ---- Stop ADSP -----------------------------------------------------------
+        t0="$(date +%s)"
+        log_info "$inst_id: stopping"
+        if stop_remoteproc "$rpath" && wait_remoteproc_state "$rpath" offline "$STOP_TO" "$POLL_I"; then
+            t1="$(date +%s)"
+            log_pass "$inst_id: stop PASS ($((t1 - t0))s)"
+            stop_res="PASS"
+        else
+            dump_rproc_logs "$rpath" after-stop-fail
+            log_fail "$inst_id: stop FAIL"
+            stop_res="FAIL"
+            inst_fail=$((inst_fail + 1))
+            RESULT_LINES="$RESULT_LINES $inst_id: boot=$boot_res, stop=$stop_res, start=$start_res, ping=$ping_res"
+            continue
+        fi
+
+        dump_rproc_logs "$rpath" after-stop
+        dump_rproc_logs "$rpath" before-start
+
+        # ---- Start ADSP ----------------------------------------------------------
+        t2="$(date +%s)"
+        log_info "$inst_id: starting"
+        if start_remoteproc "$rpath" && wait_remoteproc_state "$rpath" running "$START_TO" "$POLL_I"; then
+            t3="$(date +%s)"
+            log_pass "$inst_id: start PASS ($((t3 - t2))s)"
+            start_res="PASS"
+        else
+            dump_rproc_logs "$rpath" after-start-fail
+            log_fail "$inst_id: start FAIL"
+            start_res="FAIL"
+            inst_fail=$((inst_fail + 1))
+            RESULT_LINES="$RESULT_LINES $inst_id: boot=$boot_res, stop=$stop_res, start=$start_res, ping=$ping_res"
+            continue
+        fi
+
+        dump_rproc_logs "$rpath" after-start
+        dmesg | tail -n 100 >"$test_path/dmesg_after_restart.log"
     else
-        dump_rproc_logs "$rpath" after-stop-fail
-        log_fail "$inst_id: stop FAIL"
-        stop_res="FAIL"
-        inst_fail=$((inst_fail + 1))
-        RESULT_LINES="$RESULT_LINES
- $inst_id: boot=$boot_res, stop=$stop_res, start=$start_res, ping=$ping_res"
-        continue
+        log_info "$inst_id: SSR disabled (--ssr not set). Skipping stop/start."
+        stop_res="SKIPPED"
+        start_res="SKIPPED"
     fi
-
-    dump_rproc_logs "$rpath" after-stop
-    dump_rproc_logs "$rpath" before-start
-
-    # ---- Start ADSP ----------------------------------------------------------
-    t2="$(date +%s)"
-    log_info "$inst_id: starting"
-    if start_remoteproc "$rpath" && wait_remoteproc_state "$rpath" running "$START_TO" "$POLL_I"; then
-        t3="$(date +%s)"
-        log_pass "$inst_id: start PASS ($((t3 - t2))s)"
-        start_res="PASS"
-    else
-        dump_rproc_logs "$rpath" after-start-fail
-        log_fail "$inst_id: start FAIL"
-        start_res="FAIL"
-        inst_fail=$((inst_fail + 1))
-        RESULT_LINES="$RESULT_LINES
- $inst_id: boot=$boot_res, stop=$stop_res, start=$start_res, ping=$ping_res"
-        continue
-    fi
-
-    dump_rproc_logs "$rpath" after-start
-    dmesg | tail -n 100 > "$test_path/dmesg_after_restart.log"
 
     # ---- Optional RPMsg sanity ping -----------------------------------------
     if CTRL_DEV="$(find_rpmsg_ctrl_for "$FW")"; then
@@ -274,8 +352,7 @@ while IFS='|' read -r rpath rstate rfirm rname; do
         log_info "$inst_id: no RPMsg channel, skipping ping"
     fi
 
-    RESULT_LINES="$RESULT_LINES
- $inst_id: boot=$boot_res, stop=$stop_res, start=$start_res, ping=$ping_res"
+    RESULT_LINES="$RESULT_LINES $inst_id: boot=$boot_res, stop=$stop_res, start=$start_res, ping=$ping_res"
 done <<__RPROC_LIST__
 $entries
 __RPROC_LIST__
