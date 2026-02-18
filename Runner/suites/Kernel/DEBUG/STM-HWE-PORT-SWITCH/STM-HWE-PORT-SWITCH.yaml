@@ -1,0 +1,13 @@
+metadata:
+  name: STM-HWEvent-Port-Enable-Disable
+  description: "Validates the ability to enable and disable STM Hardware Events and Ports via sysfs."
+
+  os:
+    - linux
+  devices:
+    - qcm6490
+    - qcs9100
+  scope:
+    - coresight
+    - kernel
+  timeout: 60
