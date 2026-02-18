@@ -1,0 +1,16 @@
+metadata:
+  name: STM-HWEvent-Port-Enable-Disable
+  format: "Lava-Test Test Definition 1.0"
+  description: "Validates the ability to enable and disable STM Hardware Events and Ports via sysfs."
+  os:
+    - linux
+  scope:
+    - coresight
+    - kernel
+
+run:
+  steps:
+    - REPO_PATH=$PWD || true
+    - cd Runner/suites/Kernel/DEBUG/STM-HWE-PORT-SWITCH || true
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh STM-HWE-PORT-SWITCH.res || true
