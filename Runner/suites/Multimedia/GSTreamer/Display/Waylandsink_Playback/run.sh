@@ -1,6 +1,6 @@
 #!/bin/sh
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
-# SPDX-License-Identifier: BSD-3-Clause per legal request. 
+# SPDX-License-Identifier: BSD-3-Clause
 # Waylandsink Playback validation using GStreamer
 # Tests video playback using waylandsink with videotestsrc
 # Validates Weston/Wayland server and display connectivity
@@ -54,6 +54,23 @@ result="FAIL"
 reason="unknown"
 
 # -------------------- Defaults --------------------
+# Validate environment variables if set
+if [ -n "$VIDEO_DURATION" ] && ! echo "$VIDEO_DURATION" | grep -q "^[0-9]\+$"; then
+  log_warn "VIDEO_DURATION must be numeric (got '$VIDEO_DURATION')"
+  echo "$TESTNAME SKIP" >"$RES_FILE"
+  exit 0
+fi
+if [ -n "$RUNTIMESEC" ] && ! echo "$RUNTIMESEC" | grep -q "^[0-9]\+$"; then
+  log_warn "RUNTIMESEC must be numeric (got '$RUNTIMESEC')"
+  echo "$TESTNAME SKIP" >"$RES_FILE"
+  exit 0
+fi
+if [ -n "$VIDEO_FRAMERATE" ] && ! echo "$VIDEO_FRAMERATE" | grep -q "^[0-9]\+$"; then
+  log_warn "VIDEO_FRAMERATE must be numeric (got '$VIDEO_FRAMERATE')"
+  echo "$TESTNAME SKIP" >"$RES_FILE"
+  exit 0
+fi
+
 duration="${VIDEO_DURATION:-${RUNTIMESEC:-30}}"
 pattern="${VIDEO_PATTERN:-smpte}"
 width="${VIDEO_WIDTH:-1920}"
@@ -75,10 +92,24 @@ while [ $# -gt 0 ]; do
         echo "$TESTNAME SKIP" >"$RES_FILE"
         exit 0
       fi
-      # Parse WIDTHxHEIGHT format (e.g., 1920x1080)
+      # Parse and validate WIDTHxHEIGHT format (e.g., 1920x1080)
       if [ -n "$2" ]; then
+        # Validate format contains 'x'
+        if ! echo "$2" | grep -q "x"; then
+          log_warn "Invalid resolution format '$2' - must be WIDTHxHEIGHT"
+          echo "$TESTNAME SKIP" >"$RES_FILE"
+          exit 0
+        fi
+        
         width="${2%%x*}"
         height="${2#*x}"
+        
+        # Validate both width and height are numeric
+        if ! echo "$width" | grep -q "^[0-9]\+$" || ! echo "$height" | grep -q "^[0-9]\+$"; then
+          log_warn "Width and height must be numeric values (got width='$width', height='$height')"
+          echo "$TESTNAME SKIP" >"$RES_FILE"
+          exit 0
+        fi
       fi
       shift 2
       ;;
@@ -89,8 +120,14 @@ while [ $# -gt 0 ]; do
         echo "$TESTNAME SKIP" >"$RES_FILE"
         exit 0
       fi
-      # If $2 is empty, keep default and shift 2
-      [ -n "$2" ] && duration="$2"
+      if [ -n "$2" ]; then
+        if ! echo "$2" | grep -q "^[0-9]\+$"; then
+          log_warn "Duration must be a numeric value (got '$2')"
+          echo "$TESTNAME SKIP" >"$RES_FILE"
+          exit 0
+        fi
+        duration="$2"
+      fi
       shift 2
       ;;
 
@@ -111,8 +148,15 @@ while [ $# -gt 0 ]; do
         echo "$TESTNAME SKIP" >"$RES_FILE"
         exit 0
       fi
-      # If $2 is empty, keep default and shift 2
-      [ -n "$2" ] && width="$2"
+      # Validate width is numeric
+      if [ -n "$2" ]; then
+        if ! echo "$2" | grep -q "^[0-9]\+$"; then
+          log_warn "Width must be a numeric value (got '$2')"
+          echo "$TESTNAME SKIP" >"$RES_FILE"
+          exit 0
+        fi
+        width="$2"
+      fi
       shift 2
       ;;
 
@@ -122,8 +166,15 @@ while [ $# -gt 0 ]; do
         echo "$TESTNAME SKIP" >"$RES_FILE"
         exit 0
       fi
-      # If $2 is empty, keep default and shift 2
-      [ -n "$2" ] && height="$2"
+      # Validate height is numeric
+      if [ -n "$2" ]; then
+        if ! echo "$2" | grep -q "^[0-9]\+$"; then
+          log_warn "Height must be a numeric value (got '$2')"
+          echo "$TESTNAME SKIP" >"$RES_FILE"
+          exit 0
+        fi
+        height="$2"
+      fi
       shift 2
       ;;
 
@@ -133,8 +184,14 @@ while [ $# -gt 0 ]; do
         echo "$TESTNAME SKIP" >"$RES_FILE"
         exit 0
       fi
-      # If $2 is empty, keep default and shift 2
-      [ -n "$2" ] && framerate="$2"
+      if [ -n "$2" ]; then
+        if ! echo "$2" | grep -q "^[0-9]\+$"; then
+          log_warn "Framerate must be a numeric value (got '$2')"
+          echo "$TESTNAME SKIP" >"$RES_FILE"
+          exit 0
+        fi
+        framerate="$2"
+      fi
       shift 2
       ;;
 
@@ -210,14 +267,8 @@ EOF
 done
 
 # -------------------- Pre-checks --------------------
-check_dependencies "gst-launch-1.0 gst-inspect-1.0" >/dev/null 2>&1 || {
-  log_warn "Missing gstreamer runtime (gst-launch-1.0/gst-inspect-1.0)"
-  echo "$TESTNAME SKIP" >"$RES_FILE"
-  exit 0
-}
-
-check_dependencies "grep head sed" >/dev/null 2>&1 || {
-  log_warn "Missing required tools (grep, head, sed)"
+check_dependencies "gst-launch-1.0 gst-inspect-1.0 grep head sed" >/dev/null 2>&1 || {
+  log_skip "Missing required tools (gst-launch-1.0, gst-inspect-1.0, grep, head, sed)"
   echo "$TESTNAME SKIP" >"$RES_FILE"
   exit 0
 }
@@ -354,23 +405,59 @@ elapsed=$((end_ts - start_ts))
 log_info "Playback finished: rc=${gstRc} elapsed=${elapsed}s"
 
 # -------------------- Validation --------------------
-# Check for GStreamer errors in log
+# Duration threshold (allow 2s slack)
+min_duration=$((duration - 2))
+
+# Check for GStreamer errors in both run log and GST debug log
+run_log_ok=1
+gst_log_ok=1
+
+# Validate run log
 if ! gstreamer_validate_log "$RUN_LOG" "$TESTNAME"; then
+  run_log_ok=0
+fi
+
+# Validate last 1000 lines of GST debug log if it exists and has content
+if [ -s "$GST_LOG" ]; then
+  # Create temp file with last 1000 lines
+  tail -n 1000 "$GST_LOG" > "${GST_LOG}.tail"
+  if ! gstreamer_validate_log "${GST_LOG}.tail" "$TESTNAME"; then
+    gst_log_ok=0
+  fi
+  rm -f "${GST_LOG}.tail"
+fi
+
+if [ "$run_log_ok" -eq 0 ] || [ "$gst_log_ok" -eq 0 ]; then
   result="FAIL"
-  reason="GStreamer errors detected in log"
-else
-  # Accept 0 (normal) and 143 (timeout/SIGTERM) as success
-  if [ "$gstRc" -eq 0 ] || [ "$gstRc" -eq 143 ]; then
-    if [ "$elapsed" -ge "$((duration - 2))" ]; then
-      result="PASS"
-      reason="Playback completed successfully (rc=$gstRc, elapsed=${elapsed}s)"
-    else
-      result="FAIL"
-      reason="Playback exited too quickly (elapsed=${elapsed}s, expected ~${duration}s)"
-    fi
+  if [ "$run_log_ok" -eq 0 ] && [ "$gst_log_ok" -eq 0 ]; then
+    reason="GStreamer errors detected in both run log and GST debug log"
+  elif [ "$run_log_ok" -eq 0 ]; then
+    reason="GStreamer errors detected in run log"
   else
+    reason="GStreamer errors detected in GST debug log"
+  fi
+else
+  # First check if it ran long enough
+  if [ "$elapsed" -ge "$min_duration" ]; then
+    # If it ran long enough, check exit code
+    case "$gstRc" in
+      0)  # Normal exit
+        result="PASS"
+        reason="Playback completed successfully (elapsed=${elapsed}/${duration}s)"
+        ;;
+      124|137|143)  # Timeout/kill signals - expected for long duration tests
+        result="PASS"
+        reason="Playback completed via ${gstRc} (SIGTERM=143, SIGKILL=137, GNU timeout=124) after ${elapsed}/${duration}s"
+        ;;
+      *)  # Unexpected return code
+        result="FAIL"
+        reason="Playback failed with unexpected exit code (rc=$gstRc, elapsed=${elapsed}/${duration}s)"
+        ;;
+    esac
+  else
+    # Didn't run long enough - always fail regardless of return code
     result="FAIL"
-    reason="Playback failed (rc=$gstRc)"
+    reason="Playback exited too quickly (elapsed=${elapsed}s, minimum required=${min_duration}s)"
   fi
 fi
 

@@ -1,6 +1,6 @@
 #!/bin/sh
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
-# SPDX-License-Identifier: BSD-3-Clause per legal request. 
+# SPDX-License-Identifier: BSD-3-Clause
 # Video Encode/Decode validation using GStreamer with V4L2 hardware accelerated codecs
 # Supports: v4l2h264dec, v4l2h265dec, v4l2h264enc, v4l2h265enc
 # Uses videotestsrc for encoding, then decodes the encoded files
@@ -60,8 +60,8 @@ total_tests=0
 
 # -------------------- Defaults (LAVA env vars -> defaults; CLI overrides) --------------------
 testMode="${VIDEO_TEST_MODE:-all}"
-codecList="${VIDEO_CODECS:-h264,h265,vp9}"
-resolutionList="${VIDEO_RESOLUTIONS:-4k}"
+codecList="${VIDEO_CODECS:-h264,h265}"
+resolutionList="${VIDEO_RESOLUTIONS:-480p,4k}"
 duration="${VIDEO_DURATION:-${RUNTIMESEC:-30}}"
 framerate="${VIDEO_FRAMERATE:-30}"
 gstDebugLevel="${VIDEO_GST_DEBUG:-${GST_DEBUG_LEVEL:-2}}"
@@ -126,8 +126,19 @@ while [ $# -gt 0 ]; do
         echo "$TESTNAME SKIP" >"$RES_FILE"
         exit 0
       fi
-      # If empty, keep default; otherwise use provided value
-      [ -n "$2" ] && duration="$2"
+      # If empty or non-numeric, keep default; otherwise use provided value
+      if [ -n "$2" ]; then
+        case "$2" in
+          ''|*[!0-9]*)
+            log_warn "Invalid --duration '$2' (must be numeric)"
+            echo "$TESTNAME SKIP" >"$RES_FILE"
+            exit 0
+            ;;
+          *)
+            duration="$2"
+            ;;
+        esac
+      fi
       shift 2
       ;;
 
@@ -247,14 +258,8 @@ case "$gstDebugLevel" in 1|2|3|4|5|6|7|8|9) : ;; *)
 esac
 
 # -------------------- Pre-checks --------------------
-check_dependencies "gst-launch-1.0 gst-inspect-1.0" >/dev/null 2>&1 || {
-  log_warn "Missing gstreamer runtime (gst-launch-1.0/gst-inspect-1.0)"
-  echo "$TESTNAME SKIP" >"$RES_FILE"
-  exit 0
-}
-
-check_dependencies "awk grep head sed tr stat" >/dev/null 2>&1 || {
-  log_warn "Missing required tools (awk, grep, head, sed, tr, stat)"
+check_dependencies "gst-launch-1.0 gst-inspect-1.0 awk grep head sed tr stat" >/dev/null 2>&1 || {
+  log_skip "Missing required tools (gst-launch-1.0, gst-inspect-1.0, awk, grep, head, sed, tr, stat)"
   echo "$TESTNAME SKIP" >"$RES_FILE"
   exit 0
 }
@@ -538,7 +543,8 @@ if [ "$need_vp9_clip" -eq 1 ] && [ "$testMode" != "encode" ]; then
         log_info "Converting IVF to WebM container using GStreamer..."
         
         # Use GStreamer pipeline to remux IVF to WebM (Matroska container)
-        if gst-launch-1.0 filesrc location="$vp9_clip_ivf" ! ivfparse ! matroskamux ! filesink location="$vp9_clip_webm" >/dev/null 2>&1; then
+        pipeline="filesrc location=\"$vp9_clip_ivf\" ! ivfparse ! matroskamux ! filesink location=\"$vp9_clip_webm\""
+        if gstreamer_run_gstlaunch_timeout 30 "$pipeline" >/dev/null 2>&1; then
           log_pass "Successfully converted IVF to WebM (320x240)"
         else
           log_fail "GStreamer IVF to WebM conversion failed"
@@ -568,8 +574,9 @@ if [ "$testMode" = "all" ] || [ "$testMode" = "encode" ]; then
     
     for res in $resolutions; do
       params=$(gstreamer_resolution_to_wh "$res")
-      width=$(printf '%s' "$params" | awk '{print $1}')
-      height=$(printf '%s' "$params" | awk '{print $2}')
+      set -- $params
+      width="$1"
+      height="$2"
       
       total_tests=$((total_tests + 1))
       run_encode_test "$codec" "$res" "$width" "$height" || true

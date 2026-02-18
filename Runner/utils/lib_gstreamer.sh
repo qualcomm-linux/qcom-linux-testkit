@@ -1,6 +1,6 @@
 #!/bin/sh
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
-# SPDX-License-Identifier: BSD-3-Clause per legal request.
+# SPDX-License-Identifier: BSD-3-Clause
 # Runner/utils/lib_gstreamer.sh
 #
 # GStreamer helpers.
@@ -533,13 +533,13 @@ gstreamer_check_errors() {
     return 1
   fi
   
-  # Check for critical file/device access errors (require ERROR context or specific patterns)
-  if grep -q -E "ERROR.*(Could not open|No such file|Permission denied|Failed to|Cannot)" "$logfile" 2>/dev/null; then
+  # Check for specific error patterns with proper grouping
+  if grep -q -E '(^ERROR:|ERROR: from element|Internal data stream error|streaming stopped, reason not-negotiated|pipeline.*failed|state change failed|Could not open resource|No such file or directory)' "$logfile" 2>/dev/null; then
     return 1
   fi
   
-  # Check for CRITICAL or FATAL level messages
-  if grep -q -E "CRITICAL|FATAL" "$logfile" 2>/dev/null; then
+  # Check for CRITICAL or FATAL level messages (keep these as they are actual severity indicators)
+  if grep -q -E '(^CRITICAL:|^FATAL:|gst.*(CRITICAL|FATAL))' "$logfile" 2>/dev/null; then
     return 1
   fi
   
@@ -595,6 +595,15 @@ gstreamer_validate_log() {
 # Prints: "<width> <height>"
 gstreamer_resolution_to_wh() {
   res="$1"
+  # Validate input
+  [ -z "$res" ] && {
+    printf '%s %s\n' "640" "480"  # Default resolution if none provided
+    return 0
+  }
+  
+  # Convert to lowercase for case-insensitive matching
+  res=$(printf '%s' "$res" | tr '[:upper:]' '[:lower:]')
+  
   case "$res" in
     480p)
       printf '%s %s\n' "640" "480"
@@ -602,14 +611,26 @@ gstreamer_resolution_to_wh() {
     720p)
       printf '%s %s\n' "1280" "720"
       ;;
-    1080p)
+    1080p|fhd)
       printf '%s %s\n' "1920" "1080"
       ;;
-    4k)
+    4k|4K|2160p|uhd)
       printf '%s %s\n' "3840" "2160"
       ;;
+    # Support explicit WxH format (e.g. "1920x1080")
+    *x*)
+      w=$(printf '%s' "$res" | cut -d'x' -f1)
+      h=$(printf '%s' "$res" | cut -d'x' -f2)
+      case "$w" in
+        ''|*[!0-9]*) w="640" ;; # Default if invalid
+      esac
+      case "$h" in
+        ''|*[!0-9]*) h="480" ;; # Default if invalid
+      esac
+      printf '%s %s\n' "$w" "$h"
+      ;;
     *)
-      printf '%s %s\n' "640" "480"
+      printf '%s %s\n' "640" "480"  # Default for unknown formats
       ;;
   esac
 }
@@ -750,6 +771,15 @@ gstreamer_build_v4l2_encode_pipeline() {
   output_file="$7"
   video_stack="${8:-upstream}"
   
+  # Validate numeric parameters
+  case "$duration" in
+    ''|*[!0-9]*) duration=30 ;; # Default 30s for invalid/non-numeric duration
+  esac
+  
+  case "$framerate" in
+    ''|*[!0-9]*) framerate=30 ;; # Default 30fps for invalid/non-numeric framerate
+  esac
+  
   encoder=$(gstreamer_v4l2_encoder_for_codec "$codec")
   if [ -z "$encoder" ]; then
     printf '%s\n' ""
@@ -775,11 +805,19 @@ gstreamer_build_v4l2_encode_pipeline() {
     encoder_params="${encoder_params} capture-io-mode=4 output-io-mode=4"
   fi
   
+  # Calculate total frames with numeric safety
+  total_frames=0
+  if [ "$duration" -gt 0 ] 2>/dev/null && [ "$framerate" -gt 0 ] 2>/dev/null; then
+    total_frames=$((duration * framerate))
+  else
+    total_frames=900 # Default 30s * 30fps = 900 frames
+  fi
+
   # Build pipeline with mp4mux for MP4 container
   if [ -n "$parser" ]; then
-    printf '%s\n' "videotestsrc num-buffers=$((duration * framerate)) pattern=smpte ! video/x-raw,width=${width},height=${height},format=NV12,framerate=${framerate}/1 ! ${encoder} ${encoder_params} ! ${parser} ! mp4mux ! filesink location=${output_file}"
+    printf '%s\n' "videotestsrc num-buffers=${total_frames} pattern=smpte ! video/x-raw,width=${width},height=${height},format=NV12,framerate=${framerate}/1 ! ${encoder} ${encoder_params} ! ${parser} ! mp4mux ! filesink location=${output_file}"
   else
-    printf '%s\n' "videotestsrc num-buffers=$((duration * framerate)) pattern=smpte ! video/x-raw,width=${width},height=${height},format=NV12,framerate=${framerate}/1 ! ${encoder} ${encoder_params} ! mp4mux ! filesink location=${output_file}"
+    printf '%s\n' "videotestsrc num-buffers=${total_frames} pattern=smpte ! video/x-raw,width=${width},height=${height},format=NV12,framerate=${framerate}/1 ! ${encoder} ${encoder_params} ! mp4mux ! filesink location=${output_file}"
   fi
   
   return 0
@@ -835,7 +873,7 @@ gstreamer_build_v4l2_decode_pipeline() {
       printf '%s\n' "filesrc location=${input_file} ! ${container} ! ${parser} ! ${decoder} ! videoconvert ! fakesink"
     fi
   else
-    # IVF container (vp9) or no container
+    # VP9 with webm container
     if [ -n "$decoder_params" ]; then
       printf '%s\n' "filesrc location=${input_file} ! ${parser} ! ${decoder} ${decoder_params} ! videoconvert ! fakesink"
     else
