@@ -1,6 +1,7 @@
 #!/bin/sh
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # ---- Source init_env & tools ----
@@ -30,7 +31,7 @@ fi
 . "$TOOLS/audio_common.sh"
 
 TESTNAME="AudioRecord"
-RES_SUFFIX=""  # Optional suffix for unique result files (e.g., "Config1")
+RES_SUFFIX="" # Optional suffix for unique result files (e.g., "Config1")
 # RES_FILE will be set after parsing command-line arguments
 
 # Pre-parse --res-suffix for early failure handling
@@ -62,7 +63,7 @@ fi
 # ---------------- Defaults / CLI ----------------
 AUDIO_BACKEND=""
 SRC_CHOICE="${SRC_CHOICE:-mic}" # mic|null
-DURATIONS=""  # Will be set to default only if using legacy mode
+DURATIONS="" # Will be set to default only if using legacy mode
 RECORD_SECONDS="${RECORD_SECONDS:-30s}" # DEFAULT: 30s; 'auto' maps short/med/long
 LOOPS="${LOOPS:-1}"
 TIMEOUT="${TIMEOUT:-0}" # 0 = no watchdog
@@ -72,19 +73,19 @@ VERBOSE=0
 JUNIT_OUT=""
 
 # New config-based testing options
-CONFIG_NAMES=""        # Explicit config names to test (e.g., "record_config1 record_config2")
-CONFIG_FILTER=""       # Filter pattern for configs (e.g., "48KHz" or "2ch")
-USE_CONFIG_DISCOVERY="${USE_CONFIG_DISCOVERY:-auto}"  # auto|true|false
+CONFIG_NAMES="" # Explicit config names to test (e.g., "record_config1 record_config2")
+CONFIG_FILTER="" # Filter pattern for configs (e.g., "48KHz" or "2ch")
+USE_CONFIG_DISCOVERY="${USE_CONFIG_DISCOVERY:-auto}" # auto|true|false
 
 usage() {
   cat <<EOF
 Usage: $0 [options]
   --backend {pipewire|pulseaudio}
   --source {mic|null}
-  --config-name "record_config1"        # Test specific config(s) by name (space-separated)
+  --config-name "record_config1" # Test specific config(s) by name (space-separated)
                                          # Also supports record_config1, record_config2, ..., record_config10
-  --config-filter "48KHz"               # Filter configs by pattern
-  --res-suffix SUFFIX                   # Suffix for unique result file (e.g., "Config1")
+  --config-filter "48KHz" # Filter configs by pattern
+  --res-suffix SUFFIX # Suffix for unique result file (e.g., "Config1")
                                          # Generates AudioRecord_SUFFIX.res instead of AudioRecord.res
   --record-seconds SECS|auto (default: 30s; 'auto' maps short=5s, medium=15s, long=30s)
   --durations "short [medium] [long] [10s] [35secs]" (used when --record-seconds auto)
@@ -137,7 +138,7 @@ while [ $# -gt 0 ]; do
       ;;
     --durations)
       DURATIONS="$2"
-      USE_CONFIG_DISCOVERY=false  # Explicit durations = use old matrix mode
+      USE_CONFIG_DISCOVERY=false # Explicit durations = use old matrix mode
       shift 2
       ;;
     --record-seconds)
@@ -238,7 +239,7 @@ fi
 
 # Set defaults for legacy mode parameters only if using legacy mode
 if [ "$USE_CONFIG_DISCOVERY" = "false" ]; then
-  DURATIONS="${DURATIONS:-short}"  # label set OR numeric tokens when RECORD_SECONDS=auto
+  DURATIONS="${DURATIONS:-short}" # label set OR numeric tokens when RECORD_SECONDS=auto
 fi
 
 # Determine whether to use config discovery or legacy matrix mode
@@ -273,9 +274,15 @@ fi
 log_info "Using backend: $AUDIO_BACKEND"
 
 if ! check_audio_daemon "$AUDIO_BACKEND"; then
-  log_skip "$TESTNAME SKIP - backend not available: $AUDIO_BACKEND"
-  echo "$TESTNAME SKIP" > "$RES_FILE"
-  exit 0
+  log_warn "$TESTNAME: backend not available ($AUDIO_BACKEND) - attempting restart+retry once"
+  audio_restart_services_best_effort >/dev/null 2>&1 || true
+  audio_wait_audio_ready 20 >/dev/null 2>&1 || true
+
+  if ! check_audio_daemon "$AUDIO_BACKEND"; then
+    log_skip "$TESTNAME SKIP - backend not available: $AUDIO_BACKEND"
+    echo "$TESTNAME SKIP" > "$RES_FILE"
+    exit 0
+  fi
 fi
 
 # Dependencies per backend
@@ -290,6 +297,31 @@ else
     log_skip "$TESTNAME SKIP - missing PulseAudio utils"
     echo "$TESTNAME SKIP" > "$RES_FILE"
     exit 0
+  fi
+fi
+
+# ----- Control-plane sanity (prevents wpctl/pactl hangs during source selection) -----
+if [ "$AUDIO_BACKEND" = "pipewire" ]; then
+  if ! audio_pw_ctl_ok 2>/dev/null; then
+    log_warn "$TESTNAME: wpctl not responsive - attempting restart+retry once"
+    audio_restart_services_best_effort >/dev/null 2>&1 || true
+    audio_wait_audio_ready 20 >/dev/null 2>&1 || true
+    if ! audio_pw_ctl_ok 2>/dev/null; then
+      log_skip "$TESTNAME SKIP - PipeWire control-plane not responsive after restart"
+      echo "$TESTNAME SKIP" > "$RES_FILE"
+      exit 0
+    fi
+  fi
+elif [ "$AUDIO_BACKEND" = "pulseaudio" ]; then
+  if ! audio_pa_ctl_ok 2>/dev/null; then
+    log_warn "$TESTNAME: pactl not responsive - attempting restart+retry once"
+    audio_restart_services_best_effort >/dev/null 2>&1 || true
+    audio_wait_audio_ready 20 >/dev/null 2>&1 || true
+    if ! audio_pa_ctl_ok 2>/dev/null; then
+      log_skip "$TESTNAME SKIP - PulseAudio control-plane not responsive after restart"
+      echo "$TESTNAME SKIP" > "$RES_FILE"
+      exit 0
+    fi
   fi
 fi
 
@@ -482,22 +514,6 @@ auto_secs_for() {
   esac
 }
 
-# Prefer virtual capture PCMs (PipeWire/Pulse) over raw hw: when a sound server is present
-alsa_pick_virtual_pcm() {
-  command -v arecord >/dev/null 2>&1 || return 1
-
-  pcs="$(arecord -L 2>/dev/null | sed -n 's/^[[:space:]]*\([[:alnum:]_][[:alnum:]_]*\)[[:space:]]*$/\1/p')"
-
-  for pcm in pipewire pulse default; do
-    if printf '%s\n' "$pcs" | grep -m1 -x "$pcm" >/dev/null 2>&1; then
-      printf '%s\n' "$pcm"
-      return 0
-    fi
-  done
-
-  return 1
-}
-
 # ------------- Test Execution (Matrix or Config Discovery) -------------
 total=0
 pass=0
@@ -508,7 +524,7 @@ suite_rc=0
 if [ "$USE_CONFIG_DISCOVERY" = "true" ]; then
   # ========== NEW: Config Discovery Mode ==========
   log_info "Using config discovery mode"
-  
+ 
   # Discover and filter configs
   if [ -n "$CONFIG_NAMES" ] || [ -n "$CONFIG_FILTER" ]; then
     # Use discover_and_filter_record_configs helper (logs go to stderr automatically)
@@ -527,21 +543,21 @@ if [ "$USE_CONFIG_DISCOVERY" = "true" ]; then
       exit 0
     }
   fi
-  
+ 
   if [ -z "$CONFIGS_TO_TEST" ]; then
     log_skip "$TESTNAME SKIP - No valid record configs found"
     echo "$TESTNAME SKIP" > "$RES_FILE"
     exit 0
   fi
-  
+ 
   # Count configs
   config_count=0
   for config in $CONFIGS_TO_TEST; do
     config_count=$(expr $config_count + 1)
   done
-  
+ 
   log_info "Discovered $config_count configs to test"
-  
+ 
   # Test each config
   for config in $CONFIGS_TO_TEST; do
     # Generate test case name
@@ -549,40 +565,40 @@ if [ "$USE_CONFIG_DISCOVERY" = "true" ]; then
       log_warn "Skipping config with invalid name: $config"
       continue
     }
-    
+   
     # Get recording parameters
     params="$(get_record_config_params "$config")" || {
       log_warn "Skipping config with invalid parameters: $config"
       continue
     }
-    
+   
     rate="$(printf '%s' "$params" | awk '{print $1}')"
     channels="$(printf '%s' "$params" | awk '{print $2}')"
-    
+   
     total=$(expr $total + 1)
     logf="$LOGDIR/${case_name}.log"
     : > "$logf"
     export AUDIO_LOGCTX="$logf"
-    
+   
     log_info "[$case_name] Using config: $config (rate=${rate}Hz channels=$channels)"
-    
+   
     # Determine recording duration
     secs="$RECORD_SECONDS"
     if [ "$secs" = "auto" ]; then
-      secs="5s"  # Default for config discovery mode
+      secs="5s" # Default for config discovery mode
     fi
-    
+   
     i=1
     ok_runs=0
     last_elapsed=0
-    
+   
     while [ "$i" -le "$LOOPS" ]; do
       iso="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
       effective_timeout="$secs"
       if [ -n "$TIMEOUT" ] && [ "$TIMEOUT" != "0" ]; then
         effective_timeout="$TIMEOUT"
       fi
-      
+     
       loop_hdr="source=$SRC_CHOICE"
       if [ "$AUDIO_BACKEND" = "pipewire" ]; then
         if [ -n "$SRC_ID" ]; then
@@ -593,20 +609,33 @@ if [ "$USE_CONFIG_DISCOVERY" = "true" ]; then
       else
         loop_hdr="$loop_hdr($SRC_LABEL)"
       fi
-      
+     
       log_info "[$case_name] loop $i/$LOOPS start=$iso rate=${rate}Hz channels=$channels backend=$AUDIO_BACKEND $loop_hdr"
-      
+     
       out="$LOGDIR/${case_name}.wav"
       : > "$out"
-      
+     
       start_s="$(date +%s 2>/dev/null || echo 0)"
-      
+     
       if [ "$AUDIO_BACKEND" = "pipewire" ]; then
         log_info "[$case_name] exec: pw-record -v --rate=$rate --channels=$channels \"$out\""
         audio_exec_with_timeout "$effective_timeout" pw-record -v --rate="$rate" --channels="$channels" "$out" >> "$logf" 2>&1
         rc=$?
         bytes="$(file_size_bytes "$out" 2>/dev/null || echo 0)"
-        
+
+        # If pw-record failed AND PipeWire control-plane is broken, restart+retry once
+        if [ "$rc" -ne 0 ] && ! audio_pw_ctl_ok 2>/dev/null; then
+          log_warn "[$case_name] pw-record rc=$rc and wpctl not responsive - restarting and retrying once"
+          audio_restart_services_best_effort >/dev/null 2>&1 || true
+          audio_wait_audio_ready 20 >/dev/null 2>&1 || true
+	  out="$LOGDIR/${case_name}.wav"
+          : > "$out"
+          log_info "[$case_name] retry after restart: pw-record -v --rate=$rate --channels=$channels \"$out\""
+          audio_exec_with_timeout "$effective_timeout" pw-record -v --rate="$rate" --channels="$channels" "$out" >> "$logf" 2>&1
+          rc=$?
+          bytes="$(file_size_bytes "$out" 2>/dev/null || echo 0)"
+        fi
+       
         # If we already got real audio, accept and skip fallbacks
         if [ "${bytes:-0}" -gt 1024 ] 2>/dev/null; then
           if [ "$rc" -ne 0 ]; then
@@ -627,7 +656,7 @@ if [ "$USE_CONFIG_DISCOVERY" = "true" ]; then
               bytes="$(file_size_bytes "$out" 2>/dev/null || echo 0)"
             fi
           fi
-          
+         
           # As a last resort, retry pw-record with --target (only if we have a source id)
           if { [ "$rc" -ne 0 ] || [ "${bytes:-0}" -le 1024 ] 2>/dev/null; } && [ -n "$SRC_ID" ]; then
             : > "$out"
@@ -637,7 +666,7 @@ if [ "$USE_CONFIG_DISCOVERY" = "true" ]; then
             bytes="$(file_size_bytes "$out" 2>/dev/null || echo 0)"
           fi
         fi
-        
+       
         # (Optional safety) If nonzero rc but output is clearly valid, accept.
         if [ "$rc" -ne 0 ] && [ "${bytes:-0}" -gt 1024 ] 2>/dev/null; then
           log_warn "[$case_name] nonzero rc==$rc but recording looks valid (bytes=$bytes) - PASS"
@@ -652,14 +681,14 @@ if [ "$USE_CONFIG_DISCOVERY" = "true" ]; then
             arecord -D "$SRC_ID" -f S16_LE -r "$rate" -c "$channels" -d "$secs_int" "$out" >> "$logf" 2>&1
           rc=$?
           bytes="$(file_size_bytes "$out" 2>/dev/null || echo 0)"
-          
+         
           if [ "$rc" -ne 0 ] || [ "${bytes:-0}" -le 1024 ] 2>/dev/null; then
             if printf '%s\n' "$SRC_ID" | grep -q '^hw:'; then
               alt_dev="plughw:${SRC_ID#hw:}"
             else
               alt_dev="$SRC_ID"
             fi
-            
+           
             # Try with the specific config parameters
             : > "$out"
             log_info "[$case_name] retry: arecord -D \"$alt_dev\" -f S16_LE -r $rate -c $channels -d $secs_int \"$out\""
@@ -667,7 +696,7 @@ if [ "$USE_CONFIG_DISCOVERY" = "true" ]; then
               arecord -D "$alt_dev" -f S16_LE -r "$rate" -c "$channels" -d "$secs_int" "$out" >> "$logf" 2>&1
             rc=$?
             bytes="$(file_size_bytes "$out" 2>/dev/null || echo 0)"
-            
+           
             # If still failing, try fallback combinations
             if [ "$rc" -ne 0 ] || [ "${bytes:-0}" -le 1024 ] 2>/dev/null; then
               for combo in "S16_LE 48000 2" "S16_LE 44100 2" "S16_LE 16000 1"; do
@@ -687,7 +716,7 @@ if [ "$USE_CONFIG_DISCOVERY" = "true" ]; then
               done
             fi
           fi
-          
+         
           if [ "$rc" -ne 0 ] && [ "${bytes:-0}" -gt 1024 ] 2>/dev/null; then
             log_warn "[$case_name] nonzero rc=$rc but recording looks valid (bytes=$bytes) - PASS"
             rc=0
@@ -698,34 +727,48 @@ if [ "$USE_CONFIG_DISCOVERY" = "true" ]; then
           audio_exec_with_timeout "$effective_timeout" parecord --rate="$rate" --channels="$channels" --file-format=wav "$out" >> "$logf" 2>&1
           rc=$?
           bytes="$(file_size_bytes "$out" 2>/dev/null || echo 0)"
+
+          # If parecord failed AND PulseAudio control-plane is broken, restart+retry once
+          if [ "$rc" -ne 0 ] && ! audio_pa_ctl_ok 2>/dev/null; then
+            log_warn "[$case_name] parecord rc=$rc and pactl not responsive - restarting and retrying once"
+            audio_restart_services_best_effort >/dev/null 2>&1 || true
+	    audio_wait_audio_ready 20 >/dev/null 2>&1 || true
+	    out="$LOGDIR/${case_name}.wav"
+            : > "$out"
+            log_info "[$case_name] retry after restart: parecord --rate=$rate --channels=$channels --file-format=wav \"$out\""
+            audio_exec_with_timeout "$effective_timeout" parecord --rate="$rate" --channels="$channels" --file-format=wav "$out" >> "$logf" 2>&1
+            rc=$?
+            bytes="$(file_size_bytes "$out" 2>/dev/null || echo 0)"
+          fi
++
           if [ "$rc" -ne 0 ] && [ "${bytes:-0}" -gt 1024 ] 2>/dev/null; then
             log_warn "[$case_name] nonzero rc=$rc but recording looks valid (bytes=$bytes) - PASS"
             rc=0
           fi
         fi
       fi
-      
+     
       end_s="$(date +%s 2>/dev/null || echo 0)"
       last_elapsed=$(expr $end_s - $start_s)
       [ "$last_elapsed" -lt 0 ] && last_elapsed=0
-      
+     
       # Evidence
       pw_ev=$(audio_evidence_pw_streaming || echo 0)
       pa_ev=$(audio_evidence_pa_streaming || echo 0)
-      
+     
       if [ "$AUDIO_BACKEND" = "pulseaudio" ] && [ "$pa_ev" -eq 0 ]; then
         if [ "$rc" -eq 0 ] && [ "${bytes:-0}" -gt 1024 ] 2>/dev/null; then
           pa_ev=1
         fi
       fi
-      
+     
       alsa_ev=$(audio_evidence_alsa_running_any || echo 0)
       asoc_ev=$(audio_evidence_asoc_path_on || echo 0)
       pwlog_ev=$(audio_evidence_pw_log_seen || echo 0)
       if [ "$AUDIO_BACKEND" = "pulseaudio" ]; then
         pwlog_ev=0
       fi
-      
+     
       if [ "$alsa_ev" -eq 0 ]; then
         if [ "$AUDIO_BACKEND" = "pipewire" ] && [ "$pw_ev" -eq 1 ]; then
           alsa_ev=1
@@ -734,31 +777,31 @@ if [ "$USE_CONFIG_DISCOVERY" = "true" ]; then
           alsa_ev=1
         fi
       fi
-      
+     
       if [ "$asoc_ev" -eq 0 ] && [ "$alsa_ev" -eq 1 ]; then
         asoc_ev=1
       fi
-      
+     
       log_info "[$case_name] evidence: pw_streaming=$pw_ev pa_streaming=$pa_ev alsa_running=$alsa_ev asoc_path_on=$asoc_ev bytes=${bytes:-0} pw_log=$pwlog_ev"
-      
+     
       if [ "$rc" -eq 0 ] && [ "${bytes:-0}" -gt 1024 ] 2>/dev/null; then
         log_pass "[$case_name] loop $i OK (rc=0, ${last_elapsed}s, bytes=$bytes)"
         ok_runs=$(expr $ok_runs + 1)
       else
         log_fail "[$case_name] loop $i FAILED (rc=$rc, ${last_elapsed}s, bytes=${bytes:-0}) - see $logf"
       fi
-      
+     
       i=$(expr $i + 1)
     done
-    
+   
     # Aggregate result for this config
     status="FAIL"
     if [ "$ok_runs" -ge 1 ]; then
       status="PASS"
     fi
-    
+   
     append_junit "$case_name" "$last_elapsed" "$status" "$logf"
-    
+   
     case "$status" in
       PASS)
         pass=$(expr $pass + 1)
@@ -830,6 +873,19 @@ else
         audio_exec_with_timeout "$effective_timeout" pw-record -v "$out" >> "$logf" 2>&1
         rc=$?
         bytes="$(file_size_bytes "$out" 2>/dev/null || echo 0)"
+
+        # If pw-record failed AND PipeWire control-plane is broken, restart+retry once
+        if [ "$rc" -ne 0 ] && ! audio_pw_ctl_ok 2>/dev/null; then
+          log_warn "[$case_name] pw-record rc=$rc and wpctl not responsive - restarting and retrying once"
+          audio_restart_services_best_effort >/dev/null 2>&1 || true
+          audio_wait_audio_ready 20 >/dev/null 2>&1 || true
+	  out="$LOGDIR/${case_name}.wav"
+          : > "$out"
+          log_info "[$case_name] retry after restart: pw-record -v \"$out\""
+          audio_exec_with_timeout "$effective_timeout" pw-record -v "$out" >> "$logf" 2>&1
+          rc=$?
+          bytes="$(file_size_bytes "$out" 2>/dev/null || echo 0)"
+        fi
 
         # If we already got real audio, accept and skip fallbacks
         if [ "${bytes:-0}" -gt 1024 ] 2>/dev/null; then
@@ -909,6 +965,20 @@ else
           audio_exec_with_timeout "$effective_timeout" parecord --file-format=wav "$out" >> "$logf" 2>&1
           rc=$?
           bytes="$(file_size_bytes "$out" 2>/dev/null || echo 0)"
+
+          # If parecord failed AND PulseAudio control-plane is broken, restart+retry once
+          if [ "$rc" -ne 0 ] && ! audio_pa_ctl_ok 2>/dev/null; then
+            log_warn "[$case_name] parecord rc=$rc and pactl not responsive - restarting and retrying once"
+            audio_restart_services_best_effort >/dev/null 2>&1 || true
+            audio_wait_audio_ready 20 >/dev/null 2>&1 || true
+	    out="$LOGDIR/${case_name}.wav"
+            : > "$out"
+            log_info "[$case_name] retry after restart: parecord --file-format=wav \"$out\""
+            audio_exec_with_timeout "$effective_timeout" parecord --file-format=wav "$out" >> "$logf" 2>&1
+            rc=$?
+            bytes="$(file_size_bytes "$out" 2>/dev/null || echo 0)"
+          fi
+
           if [ "$rc" -ne 0 ] && [ "${bytes:-0}" -gt 1024 ] 2>/dev/null; then
             log_warn "[$case_name] nonzero rc=$rc but recording looks valid (bytes=$bytes) - PASS"
             rc=0

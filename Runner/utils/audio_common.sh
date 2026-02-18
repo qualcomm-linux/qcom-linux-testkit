@@ -1,6 +1,7 @@
 #!/bin/sh
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
-# SPDX-License-Identifier: BSD-3-Clause# Common audio helpers for PipeWire / PulseAudio runners.
+# SPDX-License-Identifier: BSD-3-Clause
+# Common audio helpers for PipeWire / PulseAudio runners.
 # Requires: functestlib.sh (log_* helpers, extract_tar_from_url, scan_dmesg_errors)
 
 # ---------- Backend detection & daemon checks ----------
@@ -17,6 +18,22 @@ detect_audio_backend() {
   fi
   echo ""
   return 1
+}
+
+audio_proc_running() {
+  name="$1"
+  [ -z "$name" ] && return 1
+
+  if command -v pgrep >/dev/null 2>&1; then
+    pgrep -x "$name" >/dev/null 2>&1; return $?
+  fi
+
+  if command -v pidof >/dev/null 2>&1; then
+    pidof "$name" >/dev/null 2>&1; return $?
+  fi
+
+  # shellcheck disable=SC2009
+  ps 2>/dev/null | grep -w "$name" | grep -v grep >/dev/null 2>&1
 }
 
 check_audio_daemon() {
@@ -134,12 +151,20 @@ dump_mixers() {
   out="$1"
   {
     echo "---- wpctl status ----"
-    command -v wpctl >/dev/null 2>&1 && wpctl status 2>&1 || echo "(wpctl not found)"
+    if command -v wpctl >/dev/null 2>&1; then
+      audio_exec_with_timeout 2s wpctl status 2>&1 || echo "(wpctl status failed/timeout)"
+    else
+      echo "(wpctl not found)"
+    fi
+ 
     echo "---- pactl list ----"
-    command -v pactl >/dev/null 2>&1 && pactl list 2>&1 || echo "(pactl not found)"
+    if command -v pactl >/dev/null 2>&1; then
+      audio_exec_with_timeout 3s pactl list 2>&1 || echo "(pactl list failed/timeout)"
+    else
+      echo "(pactl not found)"
+    fi
   } >"$out" 2>/dev/null
 }
-
 # Returns child exit code (124 when killed by timeout). If tmo<=0, runs the
 # command directly (no watchdog).
 
@@ -183,6 +208,75 @@ audio_timeout_run() {
   wait "$pid"; return $?
 }
 
+audio_restart_services_best_effort() {
+  uid="$(id -u 2>/dev/null || echo 0)"
+  rt="${XDG_RUNTIME_DIR:-/run/user/$uid}"
+ 
+  # Ensure runtime dir exists (some LAVA/minimal images may not have it)
+  if [ ! -d "$rt" ] && [ -n "$rt" ]; then
+    mkdir -p "$rt" 2>/dev/null || true
+    chmod 700 "$rt" 2>/dev/null || true
+  fi
+  [ -d "$rt" ] && export XDG_RUNTIME_DIR="$rt"
+ 
+  # systemd user + system (best effort, bounded time)
+  if command -v systemctl >/dev/null 2>&1; then
+    # optional reloads (some images need this after overlay / unit changes)
+    audio_exec_with_timeout 10s systemctl --user daemon-reload >/dev/null 2>&1 || true
+    audio_exec_with_timeout 10s systemctl daemon-reload >/dev/null 2>&1 || true
+ 
+    audio_exec_with_timeout 10s systemctl --user restart pipewire pipewire-pulse wireplumber pulseaudio >/dev/null 2>&1 || true
+    audio_exec_with_timeout 10s systemctl restart pipewire pipewire-pulse wireplumber pulseaudio >/dev/null 2>&1 || true
+  fi
+ 
+  # If control-plane is OK already, stop here (accept PW or PA)
+  if audio_pw_ctl_ok 2>/dev/null || audio_pa_ctl_ok 2>/dev/null; then
+    return 0
+  fi
+ 
+  # hard reset (works without systemd/user session)
+  if command -v pkill >/dev/null 2>&1; then
+    pkill -x wireplumber >/dev/null 2>&1 || true
+    pkill -x pipewire-pulse >/dev/null 2>&1 || true
+    pkill -x pipewire >/dev/null 2>&1 || true
+    pkill -x pulseaudio >/dev/null 2>&1 || true
+  elif command -v killall >/dev/null 2>&1; then
+    killall -q wireplumber pipewire-pulse pipewire pulseaudio 2>/dev/null || true
+  fi
+ 
+  sleep 1
+ 
+  # stale sockets/locks
+  if [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -d "$XDG_RUNTIME_DIR" ]; then
+    rm -f "$XDG_RUNTIME_DIR/pipewire-0" \
+          "$XDG_RUNTIME_DIR/pipewire-0.lock" \
+          "$XDG_RUNTIME_DIR/pulse/native" \
+          "$XDG_RUNTIME_DIR/pulse/pid" \
+          "$XDG_RUNTIME_DIR/pulse/cookie" \
+          2>/dev/null || true
+  fi
+ 
+  # respawn (best effort, ShellCheck-clean)
+  if command -v pipewire >/dev/null 2>&1; then
+    pipewire >/dev/null 2>&1 &
+  fi
+ 
+  if command -v wireplumber >/dev/null 2>&1; then
+    wireplumber >/dev/null 2>&1 &
+  elif command -v pipewire-media-session >/dev/null 2>&1; then
+    pipewire-media-session >/dev/null 2>&1 &
+  fi
+ 
+  if command -v pipewire-pulse >/dev/null 2>&1; then
+    pipewire-pulse >/dev/null 2>&1 &
+  fi
+ 
+  if command -v pulseaudio >/dev/null 2>&1; then
+    pulseaudio --start >/dev/null 2>&1 || true
+  fi
+ 
+  return 0
+}
 # Function: setup_overlay_audio_environment
 # Purpose: Configure audio environment for overlay builds (audioreach-based)
 # Returns: 0 on success, 1 on failure
@@ -222,7 +316,7 @@ setup_overlay_audio_environment() {
     
     # Restart PipeWire
     log_info "Restarting pipewire service..."
-    if ! systemctl restart pipewire 2>/dev/null; then
+    if ! audio_exec_with_timeout 15s systemctl restart pipewire 2>/dev/null; then
         log_fail "Failed to restart pipewire service"
         return 1
     fi
@@ -237,7 +331,7 @@ setup_overlay_audio_environment() {
         # Check if pipewire process is running
         if pgrep -x pipewire >/dev/null 2>&1; then
             # Verify wpctl can communicate
-            if command -v wpctl >/dev/null 2>&1 && wpctl status >/dev/null 2>&1; then
+	    if command -v audio_pw_ctl_ok >/dev/null 2>&1 && audio_pw_ctl_ok; then
                 log_pass "PipeWire is ready (took ${elapsed}s)"
                 return 0
             fi
@@ -256,10 +350,30 @@ setup_overlay_audio_environment() {
     log_fail "Check 'systemctl status pipewire' and 'journalctl -u pipewire' for details"
     return 1
 }
- 
+
+# ---------- PipeWire control helpers (bounded; never hang) ----------
+pwctl_status_safe() {
+  # Prints wpctl status on stdout; returns nonzero on timeout/failure.
+  command -v wpctl >/dev/null 2>&1 || return 1
+  audio_exec_with_timeout 2s wpctl status 2>/dev/null
+}
+
+pwctl_inspect_safe() {
+  # Prints wpctl inspect <id> on stdout; returns nonzero on timeout/failure.
+  id="$1"
+  [ -n "$id" ] || return 1
+  command -v wpctl >/dev/null 2>&1 || return 1
+  audio_exec_with_timeout 2s wpctl inspect "$id" 2>/dev/null
+}
+
+audio_pw_ctl_ok() {
+  pwctl_status_safe >/dev/null 2>&1
+}
 # ---------- PipeWire: sinks (playback) ----------
 pw_default_speakers() {
-  _block="$(wpctl status 2>/dev/null | sed -n '/Sinks:/,/Sources:/p')"
+  st="$(pwctl_status_safe 2>/dev/null)" || { printf '%s\n' ""; return 0; }
+ 
+  _block="$(printf '%s\n' "$st" | sed -n '/Sinks:/,/Sources:/p')"
   _id="$(printf '%s\n' "$_block" \
         | grep -i -E 'speaker|headphone' \
         | sed -n 's/^[^0-9]*\([0-9][0-9]*\)\..*/\1/p' \
@@ -274,19 +388,24 @@ pw_default_speakers() {
 }
 
 pw_default_null() {
-  wpctl status 2>/dev/null \
-  | sed -n '/Sinks:/,/Sources:/p' \
-  | grep -i -E 'null|dummy|loopback|monitor' \
-  | sed -n 's/^[^0-9]*\([0-9][0-9]*\)\..*/\1/p' \
-  | head -n1
+  st="$(pwctl_status_safe 2>/dev/null)" || return 0
+  printf '%s\n' "$st" \
+    | sed -n '/Sinks:/,/Sources:/p' \
+    | grep -i -E 'null|dummy|loopback|monitor' \
+    | sed -n 's/^[^0-9]*\([0-9][0-9]*\)\..*/\1/p' \
+    | head -n1
 }
 
 pw_sink_name_safe() {
   id="$1"; [ -n "$id" ] || { echo ""; return 1; }
-  name="$(wpctl inspect "$id" 2>/dev/null | grep -m1 'node.description' | cut -d'"' -f2)"
-  [ -n "$name" ] || name="$(wpctl inspect "$id" 2>/dev/null | grep -m1 'node.name' | cut -d'"' -f2)"
+ 
+  ins="$(pwctl_inspect_safe "$id" 2>/dev/null || true)"
+  name="$(printf '%s\n' "$ins" | grep -m1 'node.description' | cut -d'"' -f2)"
+  [ -n "$name" ] || name="$(printf '%s\n' "$ins" | grep -m1 'node.name' | cut -d'"' -f2)"
+ 
   if [ -z "$name" ]; then
-    name="$(wpctl status 2>/dev/null \
+    st="$(pwctl_status_safe 2>/dev/null || true)"
+    name="$(printf '%s\n' "$st" \
       | sed -n '/Sinks:/,/Sources:/p' \
       | grep -E "^[^0-9]*${id}[.][[:space:]]" \
       | sed 's/^[^0-9]*[0-9][0-9]*[.][[:space:]][[:space:]]*//' \
@@ -297,30 +416,44 @@ pw_sink_name_safe() {
 }
 
 pw_sink_name() { pw_sink_name_safe "$@"; } # back-compat alias
-pw_set_default_sink() { [ -n "$1" ] && wpctl set-default "$1" >/dev/null 2>&1; }
+pw_set_default_sink() {
+  [ -n "$1" ] || return 1
+  audio_exec_with_timeout 2s wpctl set-default "$1" >/dev/null 2>&1
+}
 
 # ---------- PipeWire: sources (record) ----------
 pw_default_mic() {
-  blk="$(wpctl status 2>/dev/null | sed -n '/Sources:/,/^$/p')"
+  st="$(pwctl_status_safe 2>/dev/null)" || { printf '%s\n' ""; return 0; }
+ 
+  blk="$(printf '%s\n' "$st" | sed -n '/Sources:/,/^$/p')"
   id="$(printf '%s\n' "$blk" | grep -i 'mic' | sed -n 's/^[^0-9]*\([0-9][0-9]*\)\..*/\1/p' | head -n1)"
   [ -n "$id" ] || id="$(printf '%s\n' "$blk" | sed -n 's/^[^0-9]*\([0-9][0-9]*\)\..*/\1/p' | head -n1)"
   printf '%s\n' "$id"
 }
 
 pw_default_null_source() {
-  blk="$(wpctl status 2>/dev/null | sed -n '/Sources:/,/^$/p')"
+  st="$(pwctl_status_safe 2>/dev/null)" || { printf '%s\n' ""; return 0; }
+ 
+  blk="$(printf '%s\n' "$st" | sed -n '/Sources:/,/^$/p')"
   id="$(printf '%s\n' "$blk" | grep -i 'null\|dummy' | sed -n 's/^[^0-9]*\([0-9][0-9]*\)\..*/\1/p' | head -n1)"
   printf '%s\n' "$id"
 }
 
-pw_set_default_source() { [ -n "$1" ] && wpctl set-default "$1" >/dev/null 2>&1; }
+pw_set_default_source() {
+  [ -n "$1" ] || return 1
+  audio_exec_with_timeout 2s wpctl set-default "$1" >/dev/null 2>&1
+}
 
 pw_source_label_safe() {
   id="$1"; [ -n "$id" ] || { echo ""; return 1; }
-  label="$(wpctl inspect "$id" 2>/dev/null | grep -m1 'node.description' | cut -d'"' -f2)"
-  [ -n "$label" ] || label="$(wpctl inspect "$id" 2>/dev/null | grep -m1 'node.name' | cut -d'"' -f2)"
+ 
+  ins="$(pwctl_inspect_safe "$id" 2>/dev/null || true)"
+  label="$(printf '%s\n' "$ins" | grep -m1 'node.description' | cut -d'"' -f2)"
+  [ -n "$label" ] || label="$(printf '%s\n' "$ins" | grep -m1 'node.name' | cut -d'"' -f2)"
+ 
   if [ -z "$label" ]; then
-    label="$(wpctl status 2>/dev/null \
+    st="$(pwctl_status_safe 2>/dev/null || true)"
+    label="$(printf '%s\n' "$st" \
       | sed -n '/Sources:/,/Filters:/p' \
       | grep -E "^[^0-9]*${id}[.][[:space:]]" \
       | sed 's/^[^0-9]*[0-9][0-9]*[.][[:space:]][[:space:]]*//' \
@@ -329,7 +462,6 @@ pw_source_label_safe() {
   fi
   printf '%s\n' "$label"
 }
-
 # ---------- PulseAudio: sinks (playback) ----------
 pa_default_speakers() {
   def="$(pactl info 2>/dev/null | sed -n 's/^Default Sink:[[:space:]]*//p' | head -n1)"
@@ -407,7 +539,7 @@ audio_evidence_pw_streaming() {
   # Try wpctl (fast); fall back to log scan if AUDIO_LOGCTX is available
   if command -v wpctl >/dev/null 2>&1; then
     # Count Input/Output streams in RUNNING state
-    wpctl status 2>/dev/null | grep -Eq 'RUNNING' && { echo 1; return; }
+    pwctl_status_safe 2>/dev/null | grep -Eq 'RUNNING' && { echo 1; return; }
   fi
   # Fallback to log
   if [ -n "${AUDIO_LOGCTX:-}" ] && [ -r "$AUDIO_LOGCTX" ]; then
@@ -652,40 +784,108 @@ audio_parse_secs() {
 # --- Local watchdog that always honors the first argument (e.g. "15" or "15s") ---
 audio_exec_with_timeout() {
   dur="$1"; shift
+ 
   # normalize: allow "15" or "15s"
   case "$dur" in
     ""|"0") dur_norm=0 ;;
     *s) dur_norm="${dur%s}" ;;
     *) dur_norm="$dur" ;;
   esac
- 
-  # numeric? if not, treat as no-timeout
   case "$dur_norm" in *[!0-9]*|"") dur_norm=0 ;; esac
  
-  if [ "$dur_norm" -gt 0 ] 2>/dev/null && command -v timeout >/dev/null 2>&1; then
-    timeout "$dur_norm" "$@"; return $?
+  # no watchdog
+  if [ "$dur_norm" -le 0 ] 2>/dev/null; then
+    "$@"
+    return $?
   fi
  
-  if [ "$dur_norm" -gt 0 ] 2>/dev/null; then
-    # portable fallback watchdog
-    "$@" &
-    pid=$!
-    (
-      sleep "$dur_norm"
-      kill -TERM "$pid" 2>/dev/null || true
+  # Run in background and enforce our own bounded timeout (don't rely on external timeout)
+  "$@" &
+  pid=$!
+ 
+  start="$(date +%s 2>/dev/null || echo 0)"
+  deadline="$(expr "$start" + "$dur_norm" 2>/dev/null || echo 0)"
+ 
+  # Wait until exit or deadline
+  while kill -0 "$pid" 2>/dev/null; do
+    now="$(date +%s 2>/dev/null || echo 0)"
+    if [ "$now" -ge "$deadline" ] 2>/dev/null; then
+      break
+    fi
+    sleep 1
+  done
+ 
+  # Timed out: try terminate/kill, but never block forever
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -TERM "$pid" 2>/dev/null || true
+    sleep 1
+    kill -KILL "$pid" 2>/dev/null || true
+ 
+    # bounded grace wait (handles normal killable cases)
+    grace=0
+    while kill -0 "$pid" 2>/dev/null && [ "$grace" -lt 3 ]; do
       sleep 1
-      kill -KILL "$pid" 2>/dev/null || true
-    ) &
-    w=$!
-    wait "$pid"; rc=$?
-    kill -TERM "$w" 2>/dev/null || true
-    # map "killed by watchdog" to 124 (GNU timeout convention)
-    [ "$rc" -eq 143 ] && rc=124
+      grace="$(expr "$grace" + 1)"
+    done
+ 
+    # Still alive -> likely D-state. Do NOT wait forever.
+    if kill -0 "$pid" 2>/dev/null; then
+      return 124
+    fi
+ 
+    wait "$pid" 2>/dev/null
+    rc=$?
+    [ "$rc" -eq 143 ] 2>/dev/null && rc=124
     return "$rc"
   fi
  
-  # no timeout
-  "$@"
+  # Exited naturally before timeout
+  wait "$pid" 2>/dev/null
+  return $?
+}
+
+audio_wait_audio_ready() {
+  max_s="${1:-20}"
+  i=0
+
+  while [ "$i" -lt "$max_s" ] 2>/dev/null; do
+    if command -v wpctl >/dev/null 2>&1 && audio_pw_ctl_ok; then
+      return 0
+    fi
+    if command -v pactl >/dev/null 2>&1 && audio_pa_ctl_ok; then
+      return 0
+    fi
+    if [ -d /dev/snd ] || [ -e /proc/asound/cards ]; then
+      return 0
+    fi
+    sleep 1
+    i="$(expr "$i" + 1)"
+  done
+
+  return 1
+}
+# --- bounded wpctl helpers (never hang) ---
+pwctl_status_safe() {
+  # Prints wpctl status to stdout on success, returns nonzero on failure/timeout.
+  out="$(audio_exec_with_timeout 2s wpctl status 2>/dev/null)"
+  rc=$?
+  [ "$rc" -eq 0 ] || return 1
+  printf '%s\n' "$out"
+}
+ 
+audio_pw_ctl_ok() {
+  pwctl_status_safe >/dev/null 2>&1
+}
+
+audio_pa_ctl_ok() {
+  command -v pactl >/dev/null 2>&1 || return 1
+  audio_exec_with_timeout 2s pactl info >/dev/null 2>&1
+}
+# If you have an existing pw_set_default_source(), replace it with this bounded version.
+pw_set_default_source() {
+  id="$1"
+  [ -n "$id" ] || return 1
+  audio_exec_with_timeout 2s wpctl set-default "$id" >/dev/null 2>&1
 }
 
 # --------------------------------------------------------------------
