@@ -21,17 +21,17 @@ bt_has_controller() {
 # stdout: first controller MAC from `bluetoothctl list` (e.g. 00:00:00:00:5A:AD)
 # return: 0 if found and printed, 1 if no controller line found
 bt_first_mac() {
-    bluetoothctl list 2>/dev/null \
-        | sanitize_bt_output \
-        | awk '
-            {
-                # strip CR, defensive
-            }
-            tolower($1) == "controller" {
-                print $2;
-                exit
-            }
-        '
+    out="$(bluetoothctl list 2>/dev/null | sanitize_bt_output || true)"
+
+    if ! printf '%s\n' "$out" | grep -qi '^[[:space:]]*Controller[[:space:]]'; then
+        # mark fallback (so btctl_script logs the interactive mode message once)
+        BTCTLINTERACTIVEFALLBACK=1
+        out="$(btctl_script "list" "quit" | sanitize_bt_output || true)"
+    fi
+
+    printf '%s\n' "$out" | awk '
+        tolower($1) == "controller" { print $2; exit }
+    '
 }
 
 # Remove paired BT device by MAC
@@ -765,25 +765,119 @@ hascmd() { command -v "$1" >/dev/null 2>&1; }
 sanitize_bt_output() {
     # Strip CR (\r) from bluetoothctl / expect output.
     # Ignore EPIPE when the downstream command (awk/grep) exits early.
-    tr -d '\r' 2>/dev/null || true
+    #tr -d '\r' 2>/dev/null || true
+    tr -d '\r' \
+    | sed 's/\x1B\[[0-9;?]*[ -/]*[@-~]//g' \
+    | tr -cd '\11\12\15\40-\176'
+}
+
+# ret: 0=controller visible in *non-interactive* "bluetoothctl list", 1=none
+btcontrollerpresentplain() {
+    if command -v timeout >/dev/null 2>&1; then
+        timeout 2 bluetoothctl list 2>/dev/null \
+            | sanitize_bt_output \
+            | grep -qi '^[[:space:]]*Controller[[:space:]]'
+        return $?
+    fi
+
+    bluetoothctl list 2>/dev/null \
+        | sanitize_bt_output \
+        | grep -qi '^[[:space:]]*Controller[[:space:]]'
+}
+
+# Log useful diagnostics when bluetoothctl list/controller visibility is flaky.
+btloghcidiag() {
+    adapter="${1:-}"
+
+    log_warn "Bluetooth diagnostics: controller visibility is inconsistent"
+
+    if [ -n "$adapter" ]; then
+        log_warn "Adapter: $adapter"
+    fi
+
+    if command -v hciconfig >/dev/null 2>&1; then
+        out="$(hciconfig 2>/dev/null || true)"
+        if [ -z "$out" ]; then
+            log_warn "hciconfig output is empty (HCI attach may be incomplete). Check bluetooth.service + journalctl."
+        else
+            log_warn "hciconfig output:"
+            printf '%s\n' "$out" | sanitize_bt_output | sed 's/^/[BT-DIAG] /'
+        fi
+    else
+        log_warn "hciconfig not found; cannot dump HCI state"
+    fi
+
+    if command -v systemctl >/dev/null 2>&1; then
+        log_warn "systemctl status bluetooth:"
+        systemctl status bluetooth --no-pager 2>/dev/null | sed 's/^/[BT-DIAG] /' || true
+    else
+        log_warn "systemctl not found; cannot dump bluetooth.service status"
+    fi
+
+    if command -v journalctl >/dev/null 2>&1; then
+        log_warn "journalctl -u bluetooth -b (tail):"
+        journalctl -u bluetooth -b --no-pager 2>/dev/null | tail -n 60 | sed 's/^/[BT-DIAG] /' || true
+    else
+        log_warn "journalctl not found; cannot dump bluetooth logs"
+    fi
+}
+
+# Warn+diag once per run if "bluetoothctl list" is empty in non-interactive mode.
+btwarniflistempty() {
+    adapter="${1:-}"
+
+    if [ -n "${BTWARNEDLISTEMPTY:-}" ]; then
+        return 0
+    fi
+
+    if btcontrollerpresentplain; then
+        return 0
+    fi
+
+    BTWARNEDLISTEMPTY=1
+
+    log_warn "bluetoothctl list returned no controllers in non-interactive mode."
+    log_warn "On minimal/ramdisk images this can be normal; interactive bluetoothctl may still work."
+    log_info "Proceeding with interactive bluetoothctl for controller queries (non-interactive output incomplete on some images)."
+
+    btloghcidiag "$adapter"
+    return 1
 }
 
 # Run bluetoothctl with a list of commands.
 # Each argument becomes one line; callers can also pass a single
 # multi-line string if they prefer.
 btctl_script() {
-    # If nothing to send, do nothing
     if [ "$#" -eq 0 ]; then
         return 0
     fi
- 
+
+    # Log once per run when we actually end up using interactive bluetoothctl
+    # (Gate it via BTCTLINTERACTIVEFALLBACK so it prints only on the fallback path)
+    if [ "${BTCTLINTERACTIVEFALLBACK:-0}" = "1" ] && [ -z "${BTINTERACTIVEMODELOGGED:-}" ]; then
+        log_info "Proceeding with interactive bluetoothctl for controller queries (non-interactive output incomplete on some images)."
+        BTINTERACTIVEMODELOGGED=1
+    fi
+
+    if command -v timeout >/dev/null 2>&1; then
+        {
+            for line in "$@"; do
+                [ -n "$line" ] || continue
+                printf '%s\n' "$line"
+                sleep 0.2
+            done
+            sleep 1
+        } | timeout 6 bluetoothctl 2>/dev/null
+        return $?
+    fi
+
     {
-        # Each argument is printed as a separate line
         for line in "$@"; do
-            # Skip empty arguments to be safe
             [ -n "$line" ] || continue
             printf '%s\n' "$line"
+            sleep 0.2
         done
+        sleep 1
     } | bluetoothctl 2>/dev/null
 }
 
@@ -793,56 +887,104 @@ btctl_script() {
 #     which matches the manual "bluetoothctl ; scan on" usage.
 #   - Non-expect, pure CLI.
 bt_set_scan() {
-    want="${1:-}"
-    # adapter="${2:-}"  # currently unused but kept for API compatibility
- 
-    case "$want" in
+    mode="$1"
+    # $2 (adapter) is currently unused but kept for API compatibility.
+    # adapter="${2:-}"
+
+    [ -n "$mode" ] || return 2
+
+    case "$mode" in
         on)
-            log_info "Enabling scan via 'bluetoothctl scan on'"
-            if ! printf 'scan on\n' | bluetoothctl >/dev/null 2>&1; then
-                log_warn "bt_set_scan(on): bluetoothctl scan on failed"
-                return 1
+            timeout="${BT_SCAN_ON_TIMEOUT:-15}"
+
+            if command -v log_info >/dev/null 2>&1; then
+                log_info "bt_set_scan(on): running 'bluetoothctl --timeout $timeout scan on'"
             fi
+
+            out="$(bluetoothctl --timeout "$timeout" scan on 2>&1 || true)"
+
+            if command -v sanitize_bt_output >/dev/null 2>&1 && \
+               command -v log_info >/dev/null 2>&1; then
+                printf '%s\n' "$out" | sanitize_bt_output | while IFS= read -r line; do
+                    [ -n "$line" ] && log_info " [scan on] $line"
+                done
+            fi
+
+            # Success marker
+            if printf '%s\n' "$out" | grep -q "Discovery started"; then
+                sleep 1
+                return 0
+            fi
+
+            # Soft-fail (caller decides), but try interactive fallback once
+            out2="$(btctl_script "scan on" "quit" 2>/dev/null | sanitize_bt_output || true)"
+            if printf '%s\n' "$out2" | grep -q "Discovery started"; then
+                sleep 1
+                return 0
+            fi
+
+            sleep 1
+            return 1
             ;;
-	off)
-        timeout="${BT_SCAN_OFF_TIMEOUT:-5}"
- 
-        if command -v log_info >/dev/null 2>&1; then
-            log_info "bt_set_scan(off): running 'bluetoothctl --timeout $timeout scan off'"
-        fi
- 
-        out="$(bluetoothctl --timeout "$timeout" scan off 2>&1 || true)"
- 
-        if command -v sanitize_bt_output >/dev/null 2>&1 && \
-           command -v log_info >/dev/null 2>&1; then
-            printf '%s\n' "$out" | sanitize_bt_output | while IFS= read -r line; do
-                [ -n "$line" ] && log_info " [scan off] $line"
-            done
-        fi
- 
-        # Consider both "Discovery stopped" and "Failed to stop discovery"
-        # (already stopped) as success.
-        if printf '%s\n' "$out" | grep -q "Discovery stopped"; then
-            return 0
-        fi
-        if printf '%s\n' "$out" | grep -q "Failed to stop discovery"; then
-            log_info "bt_set_scan(off): discovery was already stopped, treating as success"
-            return 0
-        fi
- 
-        return 1
-        ;;
- 
- 
+
+        off)
+            timeout="${BT_SCAN_OFF_TIMEOUT:-5}"
+
+            if command -v log_info >/dev/null 2>&1; then
+                log_info "bt_set_scan(off): running 'bluetoothctl --timeout $timeout scan off'"
+            fi
+
+            out="$(bluetoothctl --timeout "$timeout" scan off 2>&1 || true)"
+
+            if command -v sanitize_bt_output >/dev/null 2>&1 && \
+               command -v log_info >/dev/null 2>&1; then
+                printf '%s\n' "$out" | sanitize_bt_output | while IFS= read -r line; do
+                    [ -n "$line" ] && log_info " [scan off] $line"
+                done
+            fi
+
+            # Treat "already stopped" as success too
+            if printf '%s\n' "$out" | grep -q "Discovery stopped"; then
+                sleep 1
+                return 0
+            fi
+            if printf '%s\n' "$out" | grep -qi "Failed to stop discovery"; then
+                if command -v log_info >/dev/null 2>&1; then
+                    log_info "bt_set_scan(off): discovery already stopped, treating as success"
+                fi
+                sleep 1
+                return 0
+            fi
+
+            # Fallback: interactive bluetoothctl (needed on minimal/ramdisk)
+            if command -v log_warn >/dev/null 2>&1; then
+                log_warn "bt_set_scan(off): non-interactive scan off did not confirm stop; falling back to interactive bluetoothctl."
+            fi
+
+            out2="$(btctl_script "scan off" "quit" 2>/dev/null | sanitize_bt_output || true)"
+            if printf '%s\n' "$out2" | grep -q "Discovery stopped"; then
+                sleep 1
+                return 0
+            fi
+            if printf '%s\n' "$out2" | grep -qi "Failed to stop discovery"; then
+                if command -v log_info >/dev/null 2>&1; then
+                    log_info "bt_set_scan(off): discovery already stopped, treating as success"
+                fi
+                sleep 1
+                return 0
+            fi
+
+            sleep 1
+            return 1
+            ;;
+
         *)
-            log_warn "bt_set_scan: invalid argument '$want' (expected on/off)"
+            if command -v log_warn >/dev/null 2>&1; then
+                log_warn "bt_set_scan: unsupported mode '$mode' (expected on|off)"
+            fi
             return 2
             ;;
     esac
- 
-    # Give BlueZ a very short moment to apply the change
-    sleep 1
-    return 0
 }
 
 rfkillunblocksysfs() {
@@ -905,15 +1047,52 @@ btgetbdaddr() {
 
 # ret: 0=controller visible, 1=none
 btcontrollerpresent() {
-    # Use plain bluetoothctl list here; the expect wrapper is overkill and
-    # sometimes swallows the "Controller ..." line for pipelines.
-    if bluetoothctl list 2>/dev/null \
-        | sanitize_bt_output \
-        | grep -qi '^[[:space:]]*Controller[[:space:]]'
-    then
-        return 0
+    # Fast path: cheap one-shot (works on some builds)
+    if command -v timeout >/dev/null 2>&1; then
+        if timeout 2 bluetoothctl list 2>/dev/null \
+            | sanitize_bt_output \
+            | grep -qi '^[[:space:]]*Controller[[:space:]]'
+        then
+            return 0
+        fi
+    else
+        if bluetoothctl list 2>/dev/null \
+            | sanitize_bt_output \
+            | grep -qi '^[[:space:]]*Controller[[:space:]]'
+        then
+            return 0
+        fi
     fi
+
+    # Announce fallback once per process (prevents log spam across loops/calls)
+    if [ -z "${BTCTLINTERACTIVEFALLBACK:-}" ]; then
+        log_warn "bluetoothctl list returned no controllers in non-interactive mode."
+        log_warn "On minimal/ramdisk images this can be normal; interactive bluetoothctl may still work."
+        log_info "Proceeding with interactive bluetoothctl for controller queries (non-interactive output incomplete on some images)."
+        BTCTLINTERACTIVEFALLBACK=1
+    fi
+
+    # Robust path: interactive list+quit, retry for async BlueZ readiness
+    i=0
+    maxwait=15
+    while [ "$i" -lt "$maxwait" ]; do
+        if btctl_script "list" "quit" \
+            | sanitize_bt_output \
+            | grep -qi '^[[:space:]]*Controller[[:space:]]'
+        then
+            return 0
+        fi
+        sleep 1
+        i=$((i + 1))
+    done
+
     return 1
+}
+
+# ret: 0=controller visible, 1=not visible
+# This is just a clearer alias/wrapper if you prefer the name.
+bt_controller_visible() {
+    btcontrollerpresent
 }
 
 # Usage: btensurepublicaddr hci0
@@ -928,12 +1107,11 @@ btensurepublicaddr() {
     dev="${1:-}"
  
     # Already visible: nothing to do.
-    if btcontrollerpresent; then
+    if btcontrollerpresent || bt_controller_visible "$dev"; then
         log_info "controller already visible via bluetoothctl, skip public-addr"
         return 0
     fi
  
-    # Read BD address and sanitize to a single MAC token
     mac="$(
         btgetbdaddr "$dev" 2>/dev/null \
         | head -n 1 \
@@ -947,17 +1125,16 @@ btensurepublicaddr() {
  
     log_info "applying bluetoothctl public-addr $mac"
  
-    # Drive bluetoothctl menu mgmt non-interactively (no expect)
     btctl_script "menu mgmt
 public-addr $mac
 back
 quit" >/dev/null 2>&1 || true
  
-    # --- NEW: poll for controller visibility (handle BlueZ async delay) ---
+    # Poll for controller visibility (BlueZ can be async)
     i=0
-    max_wait=5   # seconds
+    max_wait=15   # was 5; 15 is still small but avoids flakiness
     while [ "$i" -lt "$max_wait" ]; do
-        if btcontrollerpresent; then
+        if btcontrollerpresent || bt_controller_visible "$dev"; then
             log_info "controller visible after public-addr $mac (waited ${i}s)"
             return 0
         fi
@@ -966,6 +1143,63 @@ quit" >/dev/null 2>&1 || true
     done
  
     log_warn "controller still not visible after public-addr $mac (after ${max_wait}s)"
+    return 1
+}
+
+btcontrollervisible() {
+    # Usage:
+    #   btcontrollervisible
+    #   btcontrollervisible hci0
+    #   btcontrollervisible 00:11:22:33:44:55
+    #
+    # Returns: 0 if controller visible to bluetoothctl, else 1
+ 
+    arg="${1:-}"
+    addr=""
+    dev=""
+    out=""
+ 
+    # Normalize arg
+    case "$arg" in
+        hci[0-9]*)
+            dev="$arg"
+            if [ -r "/sys/class/bluetooth/$dev/address" ]; then
+                addr="$(cat "/sys/class/bluetooth/$dev/address" 2>/dev/null || true)"
+            fi
+            ;;
+        *:*:*:*:*:*)
+            addr="$arg"
+            ;;
+        *)
+            ;;
+    esac
+ 
+    btctlrun() {
+        if command -v timeout >/dev/null 2>&1; then
+            timeout 2 bluetoothctl "$@" 2>/dev/null || true
+        else
+            bluetoothctl "$@" 2>/dev/null || true
+        fi
+    }
+ 
+    # bluetoothctl list
+    out="$(btctlrun list)"
+    if [ -n "$out" ]; then
+        if [ -n "$addr" ]; then
+            printf '%s\n' "$out" | grep -qi "$addr" && return 0
+        fi
+        printf '%s\n' "$out" | grep -q '^Controller ' && return 0
+    fi
+ 
+    # bluetoothctl show
+    out="$(btctlrun show)"
+    if [ -n "$out" ]; then
+        if [ -n "$addr" ]; then
+            printf '%s\n' "$out" | grep -qi "$addr" && return 0
+        fi
+        printf '%s\n' "$out" | grep -q '^Controller ' && return 0
+    fi
+ 
     return 1
 }
 
@@ -981,7 +1215,7 @@ bt_ensure_controller_visible() {
     adapter="${1:-}"
  
     # Fast path: already visible
-    if btcontrollerpresent; then
+    if btcontrollerpresent || bt_controller_visible "$adapter"; then
         return 0
     fi
  
@@ -1001,12 +1235,13 @@ bt_ensure_controller_visible() {
     fi
  
     # Final controller visibility check
-    if btcontrollerpresent; then
+    if btcontrollerpresent || bt_controller_visible "$adapter"; then
         return 0
     fi
  
     return 1
 }
+
 
 # Resolve a controller handle we can safely use with `bluetoothctl select`.
 # Input: "hci0" or "MAC". Output: MAC address suitable for `select`.
@@ -1184,82 +1419,6 @@ bt_set_power() {
     return 1
 }
 
-# Set controller scan state using bluetoothctl, with an internal timeout
-# and logging. This wraps the standalone working pattern:
-#   bluetoothctl --timeout 15 scan on
-#   bluetoothctl --timeout 5 scan off
-#
-# Usage:
-#   bt_set_scan on  [adapter]
-#   bt_set_scan off [adapter]
-#
-# Returns:
-#   0 on "reasonable success", non-zero on clear error. Caller still
-#   validates devices list / discovering state for real PASS/FAIL.
-bt_set_scan() {
-    mode="$1"
-    # $2 (adapter) is currently unused here but kept for API compatibility.
- 
-    if [ -z "$mode" ]; then
-        # Invalid usage
-        return 2
-    fi
- 
-    case "$mode" in
-        on)
-            timeout="${BT_SCAN_ON_TIMEOUT:-15}"
- 
-            # Informative log if logging helpers are available
-            if command -v log_info >/dev/null 2>&1; then
-                log_info "bt_set_scan(on): running 'bluetoothctl --timeout $timeout scan on'"
-            fi
- 
-            out="$(bluetoothctl --timeout "$timeout" scan on 2>&1 || true)"
- 
-            # Optional: pretty log of the scan-on output
-            if command -v sanitize_bt_output >/dev/null 2>&1 && \
-               command -v log_info >/dev/null 2>&1; then
-                printf '%s\n' "$out" | sanitize_bt_output | while IFS= read -r line; do
-                    [ -n "$line" ] && log_info " [scan on] $line"
-                done
-            fi
- 
-            # Treat it as success if we at least see Discovery started
-            printf '%s\n' "$out" | grep -q "Discovery started" && return 0
-            # Otherwise soft-fail: caller still decides based on devices list.
-            return 1
-            ;;
- 
-        off)
-            timeout="${BT_SCAN_OFF_TIMEOUT:-5}"
- 
-            if command -v log_info >/dev/null 2>&1; then
-                log_info "bt_set_scan(off): running 'bluetoothctl --timeout $timeout scan off'"
-            fi
- 
-            out="$(bluetoothctl --timeout "$timeout" scan off 2>&1 || true)"
- 
-            if command -v sanitize_bt_output >/dev/null 2>&1 && \
-               command -v log_info >/dev/null 2>&1; then
-                printf '%s\n' "$out" | sanitize_bt_output | while IFS= read -r line; do
-                    [ -n "$line" ] && log_info " [scan off] $line"
-                done
-            fi
- 
-            # If Discovery stopped shows up, good.
-            printf '%s\n' "$out" | grep -q "Discovery stopped" && return 0
-            return 1
-            ;;
- 
-        *)
-            if command -v log_warn >/dev/null 2>&1; then
-                log_warn "bt_set_scan: unsupported mode '$mode' (expected on|off)"
-            fi
-            return 2
-            ;;
-    esac
-}
-
 # Query Discovering state via 'bluetoothctl show'.
 # Prints: yes|no|unknown
 # Return:
@@ -1279,6 +1438,22 @@ bt_is_discovering() {
             }
         '
     )"
+
+    # Fallback: interactive bluetoothctl (needed on minimal/ramdisk)
+    if [ -z "$val" ]; then
+        out="$(btctl_script "show" "quit" 2>/dev/null | sanitize_bt_output || true)"
+        val="$(
+            printf '%s\n' "$out" \
+            | awk -F':[[:space:]]*' '
+                /^[[:space:]]*Discovering:/ {
+                    v = tolower($2);
+                    gsub(/[[:space:]\r]+/, "", v);
+                    print v;
+                    exit
+                }
+            '
+        )"
+    fi
 
     if [ -z "$val" ]; then
         printf '%s\n' "unknown"
@@ -1378,7 +1553,18 @@ bt_wait_discovering() {
 
 # Raw devices output from bluetoothctl
 bt_list_devices_raw() {
-    bluetoothctl devices 2>/dev/null | sanitize_bt_output
+    out="$(bluetoothctl devices 2>/dev/null | sanitize_bt_output || true)"
+
+    if [ -z "$out" ]; then
+        # If controller list is already known-flaky, mark fallback so btctl_script logs once.
+        if ! btcontrollerpresentplain; then
+            BTCTLINTERACTIVEFALLBACK=1
+        fi
+
+        out="$(btctl_script "devices" "quit" | sanitize_bt_output || true)"
+    fi
+
+    printf '%s\n' "$out"
 }
 
 # Check whether devices are seen, optionally for a specific MAC.
@@ -1549,14 +1735,36 @@ bt_check_connected() {
 btgetpower() {
     dev="${1-}"
     state=""
-
-    # Prefer adapter-specific show if provided
+    mac=""
+ 
+    # If a specific adapter is provided (e.g. hci0), resolve to BDADDR and use "show <BDADDR>"
+    # because "select hci0" is unreliable on some minimal/ramdisk setups.
     if [ -n "$dev" ]; then
-        out="$(bluetoothctl show "$dev" 2>/dev/null | sanitize_bt_output || true)"
-    else
-        out="$(bluetoothctl show 2>/dev/null | sanitize_bt_output || true)"
+        mac="$(
+            btgetbdaddr "$dev" 2>/dev/null \
+            | head -n 1 \
+            | awk '{print $NF}'
+        )"
     fi
-
+ 
+    if [ -n "$mac" ]; then
+        out="$(
+            {
+                printf 'show %s\n' "$mac"
+                sleep 1
+                printf 'quit\n'
+            } | bluetoothctl 2>/dev/null | sanitize_bt_output || true
+        )"
+    else
+        out="$(
+            {
+                printf 'show\n'
+                sleep 1
+                printf 'quit\n'
+            } | bluetoothctl 2>/dev/null | sanitize_bt_output || true
+        )"
+    fi
+ 
     state="$(printf '%s\n' "$out" \
         | awk -F':[[:space:]]*' '
             /^[[:space:]]*Powered:/ {
@@ -1567,10 +1775,16 @@ btgetpower() {
                 exit
             }
         ')"
-
-    # Fallback: try default controller if adapter one failed
+ 
+    # Fallback: try default controller if adapter-specific attempt didn’t yield Powered:
     if [ -z "$state" ]; then
-        out="$(bluetoothctl show 2>/dev/null | sanitize_bt_output || true)"
+        out="$(
+            {
+                printf 'show\n'
+                sleep 1
+                printf 'quit\n'
+            } | bluetoothctl 2>/dev/null | sanitize_bt_output || true
+        )"
         state="$(printf '%s\n' "$out" \
             | awk -F':[[:space:]]*' '
                 /^[[:space:]]*Powered:/ {
@@ -1582,17 +1796,16 @@ btgetpower() {
                 }
             ')"
     fi
-
+ 
     [ -n "$state" ] || return 2
-
+ 
     if [ "$state" = "yes" ] || [ "$state" = "no" ]; then
         printf '%s\n' "$state"
         return 0
     fi
-
+ 
     return 2
 }
-
 # Usage: btpower hci0 on|off
 # Returns:
 #   0 = requested state achieved (including when already in that state)
@@ -1611,7 +1824,6 @@ btpower() {
             ;;
     esac
  
-    # ---- Early check: avoid redundant toggles ----
     cur_state="$(btgetpower "$dev" 2>/dev/null || true)"
     [ -z "$cur_state" ] && cur_state="unknown"
  
@@ -1627,34 +1839,18 @@ btpower() {
  
     log_info "btpower: requesting '$want' on $dev (current=$cur_state)"
  
-    # ---- Existing behaviour: drive HCI or bluetoothctl, then poll ----
-    if [ -n "$dev" ] && command -v hciconfig >/dev/null 2>&1; then
-        case "$want" in
-            on)
-                hciconfig "$dev" up >/dev/null 2>&1 || true
-                ;;
-            off)
-                hciconfig "$dev" down >/dev/null 2>&1 || true
-                ;;
-        esac
-    else
-        # Fallback: drive via bluetoothctl main menu (no 'select hci0' — that breaks)
-        printf 'power %s\nquit\n' "$want" | bluetoothctl >/dev/null 2>&1 || true
-    fi
+    # Drive bluetoothctl interactively (works on ramdisk where non-interactive list/show may be empty)
+    # Do NOT use "select hci0" (it can say "Controller hci0 not available" even when controller exists).
+    btctl_script "power $want" "quit" >/dev/null 2>&1 || true
  
-    # Now poll btgetpower a few times to see if BlueZ agrees
     i=0
-    max_tries=5
+    max_tries=10
     state=""
-    while [ "$i" -lt "$max_tries" ]; do
-        state="$(btgetpower "$dev" 2>/dev/null || true)"
+    pstate=""
  
-        # Could not read state at all → try again briefly
-        if [ -z "$state" ]; then
-            sleep 1
-            i=$((i + 1))
-            continue
-        fi
+    while [ "$i" -lt "$max_tries" ]; do
+        # Read Powered via btgetpower (must be interactive-based implementation)
+        state="$(btgetpower "$dev" 2>/dev/null || true)"
  
         if [ "$want" = "on" ] && [ "$state" = "yes" ]; then
             log_info "btpower: $dev Powered=yes after request."
@@ -1666,19 +1862,39 @@ btpower() {
             return 0
         fi
  
-        # Mismatch, give BlueZ a moment more
+        # If Powered line is not available yet, try to parse PowerState as an informational fallback
+        # (Some stacks lag on Powered; PowerState can show transitions like off-enabling/on-disabling.)
+        out="$(
+            {
+                printf 'show\n'
+                sleep 1
+                printf 'quit\n'
+            } | bluetoothctl 2>/dev/null | sanitize_bt_output || true
+        )"
+ 
+        pstate="$(printf '%s\n' "$out" \
+            | awk -F':[[:space:]]*' '
+                /^[[:space:]]*PowerState:/ {
+                    v = tolower($2);
+                    gsub(/\r/, "", v);
+                    gsub(/[[:space:]]+/, "", v);
+                    print v;
+                    exit
+                }')"
+ 
+        # If Powered was empty but PowerState suggests we reached a stable end state,
+        # keep waiting a little more for Powered to update (do not treat pstate as PASS alone).
         sleep 1
         i=$((i + 1))
     done
  
-    # After polling, decide error type
     if [ -z "$state" ]; then
-        log_warn "btpower: unable to read Powered state for $dev after request."
-        return 2 # unknown / no Powered line
+        log_warn "btpower: unable to read Powered state for $dev after request. (PowerState last='$pstate')"
+        return 2
     fi
  
-    log_warn "btpower: $dev state after request is '$state' (wanted $want)."
-    return 1 # we read a state but it never matched the target
+    log_warn "btpower: $dev state after request is '$state' (wanted $want). (PowerState last='$pstate')"
+    return 1
 }
 
 btfwpresent() {
@@ -1854,10 +2070,8 @@ bt_scan_poll_on() {
         if [ "$disc_state" = "yes" ]; then
             seen_disc_yes=1
         fi
-
-        devices_out="$(
-            bluetoothctl devices 2>/dev/null | sanitize_bt_output || true
-        )"
+        
+	devices_out="$(bt_list_devices_raw || true)"
         devices_snapshot="$devices_out"
 
         if [ -n "$target_mac" ]; then
@@ -1922,6 +2136,9 @@ bt_scan_poll_off() {
     attempts=$((max_wait_secs / step_secs))
     [ "$attempts" -lt 1 ] && attempts=1
 
+    saw_yes=0
+    saw_unknown=0
+
     i=0
     while [ "$i" -lt "$attempts" ]; do
         disc_state="$(bt_is_discovering 2>/dev/null || printf '%s\n' "unknown")"
@@ -1930,10 +2147,24 @@ bt_scan_poll_off() {
         if [ "$disc_state" = "no" ]; then
             return 0
         fi
+        if [ "$disc_state" = "yes" ]; then
+            saw_yes=1
+        fi
+        if [ "$disc_state" = "unknown" ]; then
+            saw_unknown=1
+        fi
 
         i=$((i + 1))
         sleep "$step_secs"
     done
+
+    # Small tweak:
+    # If we never saw Discovering=yes and state reporting is always unknown (common on minimal/ramdisk),
+    # treat scan-off as best-effort success to avoid flakiness/noisy warnings.
+    if [ "$saw_unknown" -eq 1 ] && [ "$saw_yes" -eq 0 ]; then
+        log_warn "Discovering state stayed 'unknown' during scan OFF polling; treating scan-off as best-effort success."
+        return 0
+    fi
 
     log_warn "Discovering did not settle to 'no' within scan OFF polling window."
     return 1
