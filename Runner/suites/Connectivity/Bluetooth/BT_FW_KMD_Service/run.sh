@@ -209,7 +209,18 @@ else
 fi
 
 log_info "=== bluetoothctl list (controllers) ==="
-bluetoothctl list 2>/dev/null || true
+
+out="$(bluetoothctl list 2>/dev/null | sanitize_bt_output || true)"
+if printf '%s\n' "$out" | grep -qi '^[[:space:]]*Controller[[:space:]]'; then
+    # Non-interactive worked print what we got
+    printf '%s\n' "$out"
+else
+    # Non-interactive printed no controllers → retry using interactive method
+    log_warn "bluetoothctl list returned no controllers in non-interactive mode, retrying interactive list."
+
+    log_info "=== bluetoothctl list (controllers) ==="
+    btctl_script "list" "quit" | sanitize_bt_output || true
+fi
 
 log_info "=== lsmod (subset: BT stack) ==="
 lsmod 2>/dev/null | grep -E '^(bluetooth|hci_uart|btqca|btbcm|rfkill|cfg80211)\b' || true
