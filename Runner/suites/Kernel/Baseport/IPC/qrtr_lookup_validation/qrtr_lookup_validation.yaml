@@ -1,0 +1,14 @@
+metadata:
+  name: qrtr_lookup_validation
+  format: "Lava-Test Test Definition 1.0"
+  description: "Validates existence of QRTR services for various subsystems"
+  os:
+    - linux
+  scope:
+    - functional
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/IPC/qrtr_lookup_validation
+    - ./run.sh -t adsp || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh qrtr_lookup_validation.res || true
