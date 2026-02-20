@@ -1,0 +1,13 @@
+metadata:
+  name: Sink-Status-STM-Toggle
+  description: "Verifies that Coresight sinks maintain correct enabled/disabled states when sources (STM/ETM) are toggled."
+
+  os:
+    - linux
+  devices:
+    - qcm6490
+    - qcs9100
+  scope:
+    - coresight
+    - kernel
+  timeout: 60

@@ -1,0 +1,13 @@
+metadata:
+  name: ETM-Test-Mode
+  description: "Validates ETM functionality by setting the 'mode' attribute to high (0xFFFFFFF) and enabling the cores."
+
+  os:
+    - linux
+  devices:
+    - qcm6490
+    - qcs9100
+  scope:
+    - coresight
+    - kernel
+  timeout: 60
