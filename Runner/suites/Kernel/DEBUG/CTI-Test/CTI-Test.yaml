@@ -1,0 +1,20 @@
+metadata:
+  name: CTI-Trigger-Map
+  description: "Validates Coresight Cross Trigger Interface (CTI) by mapping and unmapping triggers to channels."
+
+  os:
+    - linux
+  devices:
+    - qcm6490
+    - qcs9100
+  scope:
+    - coresight
+    - kernel
+  timeout: 120
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/DEBUG/CTI-Test
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh CTI-Test.res || true
