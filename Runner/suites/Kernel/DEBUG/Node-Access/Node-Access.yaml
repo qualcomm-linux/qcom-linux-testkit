@@ -1,0 +1,13 @@
+metadata:
+  name: Sysfs-Node-Access
+  description: "Iterates through all Coresight sysfs nodes (excluding TPDM) and attempts to read them to ensure stability and permission correctness."
+
+  os:
+    - linux
+  devices:
+    - qcm6490
+    - qcs9100
+  scope:
+    - coresight
+    - kernel
+  timeout: 120

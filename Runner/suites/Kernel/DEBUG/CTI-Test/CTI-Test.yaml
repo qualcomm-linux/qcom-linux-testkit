@@ -1,0 +1,13 @@
+metadata:
+  name: CTI-Trigger-Map
+  description: "Validates Coresight Cross Trigger Interface (CTI) by mapping and unmapping triggers to channels."
+
+  os:
+    - linux
+  devices:
+    - qcm6490
+    - qcs9100
+  scope:
+    - coresight
+    - kernel
+  timeout: 120
