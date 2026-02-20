@@ -1,0 +1,19 @@
+metadata:
+  name: ETM-Enable-Disable
+  format: "Lava-Test Test Definition 1.0"
+  description: "Verifies the activation and deactivation functionality of Embedded 
+    Trace Macrocell (ETM) devices. This test individually enables and disables 
+    each ETM via its sysfs 'enable_source' node, followed by testing bulk enable 
+    and disable operations across all cores simultaneously."
+  os:
+    - linux
+  scope:
+    - coresight
+    - kernel
+
+run:
+  steps:
+    - REPO_PATH=$PWD || true
+    - cd Runner/suites/Kernel/DEBUG/ETM-Enable-Disable || true
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh ETM-Enable-Disable.res || true

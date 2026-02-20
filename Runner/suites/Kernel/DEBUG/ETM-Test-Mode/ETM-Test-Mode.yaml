@@ -1,0 +1,16 @@
+metadata:
+  name: ETM-Test-Mode
+  format: "Lava-Test Test Definition 1.0"
+  description: "Validates ETM functionality by setting the 'mode' attribute to high (0xFFFFFFF) and enabling the cores."
+  os:
+    - linux
+  scope:
+    - coresight
+    - kernel
+
+run:
+  steps:
+    - REPO_PATH=$PWD || true
+    - cd Runner/suites/Kernel/DEBUG/ETM-Test-Mode || true
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh ETM-Test-Mode.res || true
