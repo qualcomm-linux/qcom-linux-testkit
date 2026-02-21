@@ -21,5 +21,3 @@ jobs:
       enable-copyright-license-check: true
       enable-commit-email-check: true
       enable-commit-msg-check: false
-    secrets:
-      SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
