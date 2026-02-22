@@ -1,0 +1,13 @@
+metadata:
+  name: ETM-Trace-Enable-Disable
+  description: "Validates the stability of enabling and disabling ETM sources repeatedly and verifies trace data generation."
+
+  os:
+    - linux
+  devices:
+    - qcm6490
+    - qcs9100
+  scope:
+    - coresight
+    - kernel
+  timeout: 300

@@ -1,0 +1,13 @@
+metadata:
+  name: STM-Source-Enable-Disable
+  description: "Stress test that toggles the STM source enablement 50 times to ensure stability."
+
+  os:
+    - linux
+  devices:
+    - qcm6490
+    - qcs9100
+  scope:
+    - coresight
+    - kernel
+  timeout: 300
