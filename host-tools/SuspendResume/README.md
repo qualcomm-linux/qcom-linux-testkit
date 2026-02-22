@@ -6,8 +6,15 @@ SPDX-License-Identifier: BSD-3-Clause-Clear
 This test case validates the system suspend/resume functionality on the target device using ADB-based remote control. It triggers a suspend cycle, waits for the device to resume, and validates the suspend/resume operation through multiple checks including suspend statistics, kernel logs, and Qualcomm-specific power management statistics.
 
 ## Test Performs:
-1. Connects to device via ADB and obtains root access
-2. Remounts filesystems as read-write
+1. Performs device reboot to ensure adb functionality after Renesas firmware flash
+   - Syncs filesystem
+   - Executes reboot
+   - Waits for device to complete reboot (30s)
+2. Waits for adb device detection (30s timeout)
+   - Uses non-blocking checks
+   - Skips test if device not detected within timeout
+3. Connects to device via ADB and obtains root access
+4. Remounts filesystems as read-write
 3. Mounts debugfs for accessing kernel statistics
 4. Captures initial suspend count from `/sys/power/suspend_stats/success`
 5. Triggers suspend using `rtcwake` (30-second timer) and `systemctl suspend`
@@ -143,9 +150,10 @@ The test collects comprehensive power management statistics:
 ## Skip Criteria
 The test will be skipped if:
 1. `adb` command is not found on the host machine
-2. No ADB devices are connected
-3. Multiple ADB devices are connected (only one device is allowed)
-4. Device is not responding to ADB commands
+2. Device not detected within 30s timeout after reboot
+3. No ADB devices are connected
+4. Multiple ADB devices are connected (only one device is allowed)
+5. Device is not responding to ADB commands
 
 ## Failure Criteria
 The test will fail if:
@@ -226,9 +234,9 @@ DEF987654321    device
 [INFO] 2026-02-01 20:30:00 - -----------------------------------------------------------------------------------------
 [INFO] 2026-02-01 20:30:00 - -------------------Starting SuspendResume Testcase (ADB-based)----------------------------
 [INFO] 2026-02-01 20:30:00 - === Test Initialization ===
-[INFO] 2026-02-01 20:30:00 - Checking for connected ADB devices...
-[INFO] 2026-02-01 20:30:01 - Detected 0 device(s)
-[FAIL] 2026-02-01 20:30:01 - No ADB devices connected - please connect a device
+[INFO] 2026-02-01 20:30:00 - Rebooting device to ensure adb functionality...
+[INFO] 2026-02-01 20:30:33 - Waiting for device to be detected by adb (timeout: 30s)...
+[WARN] 2026-02-01 20:31:03 - SuspendResume SKIP: Device not detected by adb within timeout
 ```
 
 ## Integration with LAVA

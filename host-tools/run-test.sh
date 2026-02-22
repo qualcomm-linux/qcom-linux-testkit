@@ -33,6 +33,38 @@ export TOOLS
 export __RUNNER_SUITES_DIR
 export __RUNNER_UTILS_BIN_DIR
 
+# Reboot device to ensure adb functionality after Renesas firmware flash
+log_info "Rebooting device to ensure adb functionality..."
+sync
+sleep 2
+reboot -f
+sleep 30
+
+# Wait for adb to detect the device (non-blocking, 30s timeout)
+log_info "Waiting for device to be detected by adb (timeout: 30s)..."
+WAIT_COUNT=0
+DEVICE_DETECTED=0
+while [ $WAIT_COUNT -lt 30 ]; do
+    if adb get-state >/dev/null 2>&1; then
+        DEVICE_DETECTED=1
+        log_info "Device detected by adb after ${WAIT_COUNT}s"
+        break
+    fi
+    sleep 1
+    WAIT_COUNT=$((WAIT_COUNT + 1))
+done
+
+if [ $DEVICE_DETECTED -eq 0 ]; then
+    if [ "$1" = "all" ]; then
+        log_warn "ALL_TESTS SKIP: Device not detected by adb within timeout"
+        echo "SKIP" > "ALL_TESTS.res"
+    else
+        log_warn "$1 SKIP: Device not detected by adb within timeout"
+        echo "SKIP" > "$1.res"
+    fi
+    exit 0
+fi
+
 # Set host-tools specific suites directory
 HOST_TOOLS_DIR="$SCRIPT_DIR"
 export HOST_TOOLS_DIR

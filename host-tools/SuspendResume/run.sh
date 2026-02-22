@@ -30,6 +30,33 @@ TESTNAME="SuspendResume"
 # shellcheck disable=SC2034
 res_file="./$TESTNAME.res"
 
+# Reboot device to ensure adb functionality after Renesas firmware flash
+log_info "Rebooting device to ensure adb functionality..."
+sync
+sleep 2
+reboot -f
+sleep 30
+
+# Wait for adb to detect the device (non-blocking, 30s timeout)
+log_info "Waiting for device to be detected by adb (timeout: 30s)..."
+WAIT_COUNT=0
+DEVICE_DETECTED=0
+while [ $WAIT_COUNT -lt 30 ]; do
+    if adb get-state >/dev/null 2>&1; then
+        DEVICE_DETECTED=1
+        log_info "Device detected by adb after ${WAIT_COUNT}s"
+        break
+    fi
+    sleep 1
+    WAIT_COUNT=$((WAIT_COUNT + 1))
+done
+
+if [ $DEVICE_DETECTED -eq 0 ]; then
+    log_warn "$TESTNAME SKIP: Device not detected by adb within timeout"
+    echo "SKIP" > "$res_file"
+    exit 0
+fi
+
 log_info "-----------------------------------------------------------------------------------------"
 log_info "-------------------Starting $TESTNAME Testcase (ADB-based)----------------------------"
 log_info "=== Test Initialization ==="
