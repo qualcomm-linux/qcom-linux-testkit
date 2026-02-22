@@ -34,22 +34,26 @@ res_file="./$TESTNAME.res"
 log_info "Rebooting device to ensure adb functionality..."
 sync
 sleep 2
-reboot -f
+reboot
 sleep 30
+
+# Restart adb server
+log_info "Restarting adb server..."
+adb kill-server
+sleep 2
+adb start-server
+sleep 2
 
 # Wait for adb to detect the device (non-blocking, 30s timeout)
 log_info "Waiting for device to be detected by adb (timeout: 30s)..."
-WAIT_COUNT=0
-DEVICE_DETECTED=0
-while [ $WAIT_COUNT -lt 30 ]; do
-    if adb get-state >/dev/null 2>&1; then
-        DEVICE_DETECTED=1
-        log_info "Device detected by adb after ${WAIT_COUNT}s"
-        break
-    fi
-    sleep 1
-    WAIT_COUNT=$((WAIT_COUNT + 1))
-done
+
+if timeout 30s adb wait-for-device >/dev/null 2>&1; then
+    log_info "Device detected by adb"
+else
+    log_warn "$TESTNAME SKIP: Device not detected by adb within timeout"
+    echo "SKIP" > "$res_file"
+    exit 0
+fi
 
 if [ $DEVICE_DETECTED -eq 0 ]; then
     log_warn "$TESTNAME SKIP: Device not detected by adb within timeout"
