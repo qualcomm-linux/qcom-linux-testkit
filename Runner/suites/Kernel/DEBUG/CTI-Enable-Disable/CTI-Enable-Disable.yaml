@@ -1,0 +1,13 @@
+metadata:
+  name: CTI-Enable-Disable
+  description: "Verifies that all Coresight CTI devices can be successfully enabled and disabled via sysfs."
+ 
+  os:
+    - linux
+  devices:
+    - qcm6490
+    - qcs9100
+  scope:
+    - coresight
+    - kernel
+  timeout: 60
