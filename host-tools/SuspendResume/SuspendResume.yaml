@@ -1,0 +1,15 @@
+metadata:
+  name: SuspendResume
+  format: "Lava-Test Test Definition 1.0"
+  description: "ADB-based Suspend/Resume validation with kernel debug stats collection"
+  os:
+    - linux
+  scope:
+    - functional
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd host-tools/SuspendResume
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh SuspendResume.res || true
