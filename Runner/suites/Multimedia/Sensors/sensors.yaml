@@ -1,0 +1,16 @@
+metadata:
+  name: Sensors
+  format: "Lava-Test Test Definition 1.0"
+  description: "Dynamic Sensors validation (DT-free): auto-detect sensors via ssc_sensor_info and validate using see_workhorse/ssc_drva_test."
+  os:
+    - linux
+  scope:
+    - functional
+    - multimedia
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Multimedia/Sensors
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh Sensors.res || true
