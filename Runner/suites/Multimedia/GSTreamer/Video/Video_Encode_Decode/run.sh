@@ -12,6 +12,18 @@ SCRIPT_DIR="$(
   pwd
 )"
 
+TESTNAME="Video_Encode_Decode"
+RES_FILE="${SCRIPT_DIR}/${TESTNAME}.res"
+LOG_DIR="${SCRIPT_DIR}/logs"
+OUTDIR="$LOG_DIR/$TESTNAME"
+GST_LOG="$OUTDIR/gst.log"
+DMESG_DIR="$OUTDIR/dmesg"
+ENCODED_DIR="$OUTDIR/encoded"
+
+mkdir -p "$OUTDIR" "$DMESG_DIR" "$ENCODED_DIR" >/dev/null 2>&1 || true
+: >"$RES_FILE"
+: >"$GST_LOG"
+
 INIT_ENV=""
 SEARCH="$SCRIPT_DIR"
 while [ "$SEARCH" != "/" ]; do
@@ -39,18 +51,6 @@ fi
 # shellcheck disable=SC1091
 [ -f "$TOOLS/lib_video.sh" ] && . "$TOOLS/lib_video.sh"
 
-TESTNAME="Video_Encode_Decode"
-RES_FILE="${SCRIPT_DIR}/${TESTNAME}.res"
-LOG_DIR="${SCRIPT_DIR}/logs"
-OUTDIR="$LOG_DIR/$TESTNAME"
-GST_LOG="$OUTDIR/gst.log"
-DMESG_DIR="$OUTDIR/dmesg"
-ENCODED_DIR="$OUTDIR/encoded"
-
-mkdir -p "$OUTDIR" "$DMESG_DIR" "$ENCODED_DIR" >/dev/null 2>&1 || true
-: >"$RES_FILE"
-: >"$GST_LOG"
-
 result="FAIL"
 reason="unknown"
 pass_count=0
@@ -67,6 +67,28 @@ framerate="${VIDEO_FRAMERATE:-30}"
 gstDebugLevel="${VIDEO_GST_DEBUG:-${GST_DEBUG_LEVEL:-2}}"
 videoStack="${VIDEO_STACK:-auto}"
 clipUrl="${VIDEO_CLIP_URL:-https://github.com/qualcomm-linux/qcom-linux-testkit/releases/download/IRIS-Video-Files-v1.0/video_clips_iris.tar.gz}"
+
+# Validate environment variables if set
+# Validate numeric parameters
+for param in VIDEO_DURATION RUNTIMESEC VIDEO_FRAMERATE VIDEO_GST_DEBUG GST_DEBUG_LEVEL; do
+  val="${!param:-}"
+  if [ -n "$val" ]; then
+    case "$val" in
+      ''|*[!0-9]*) 
+        log_warn "$param must be numeric (got '$val')"
+        echo "$TESTNAME SKIP" >"$RES_FILE"
+        exit 0
+        ;;
+      *)
+        if [ "$val" -le 0 ] 2>/dev/null; then
+          log_warn "$param must be positive (got '$val')"
+          echo "$TESTNAME SKIP" >"$RES_FILE"
+          exit 0
+        fi
+        ;;
+    esac
+  fi
+done
 
 cleanup() {
   pkill -x gst-launch-1.0 >/dev/null 2>&1 || true
@@ -95,17 +117,6 @@ while [ $# -gt 0 ]; do
       fi
       # If empty, keep default; otherwise use provided value
       [ -n "$2" ] && codecList="$2"
-      shift 2
-      ;;
-
-  --clip-url)
-      if [ $# -lt 2 ] || [ "${2#--}" != "$2" ]; then
-        log_warn "Missing/invalid value for --clip-url"
-        echo "$TESTNAME SKIP" >"$RES_FILE"
-        exit 0
-      fi
-      # If empty, keep default; otherwise use provided value
-      [ -n "$2" ] && clipUrl="$2"
       shift 2
       ;;
 
@@ -148,6 +159,11 @@ while [ $# -gt 0 ]; do
         echo "$TESTNAME SKIP" >"$RES_FILE"
         exit 0
       fi
+      if [ -n "$2" ] && ! is_u32 "$2"; then
+        log_warn "Invalid --framerate '$2' (must be numeric)"
+        echo "$TESTNAME SKIP" >"$RES_FILE"
+        exit 0
+      fi
       # If empty, keep default; otherwise use provided value
       [ -n "$2" ] && framerate="$2"
       shift 2
@@ -175,6 +191,17 @@ while [ $# -gt 0 ]; do
       shift 2
       ;;
 
+    --clip-url)
+      if [ $# -lt 2 ] || [ "${2#--}" != "$2" ]; then
+        log_warn "Missing/invalid value for --clip-url"
+        echo "$TESTNAME SKIP" >"$RES_FILE"
+        exit 0
+      fi
+      # If empty, keep default; otherwise use provided value
+      [ -n "$2" ] && clipUrl="$2"
+      shift 2
+      ;;
+
     -h|--help)
       cat <<EOF
 Usage:
@@ -186,7 +213,7 @@ Options:
 
   --codecs <h264,h265,vp9>
       Comma-separated list of codecs to test
-      Default: h264,h265
+      Default: h264,h265,vp9
       Note: VP9 only supports decode mode with pre-existing clips
 
   --resolutions <480p,4k>
@@ -205,11 +232,11 @@ Options:
       Video stack selection
       Default: auto
 
-  --gst-debug <level>
+    --gst-debug <level>
       Sets GST_DEBUG=<level> (1-9)
       Default: ${gstDebugLevel}
 
-  --clip-url <url>
+    --clip-url <url>
       URL to download video clips for VP9 decode tests
       Default: ${clipUrl}
 
@@ -257,9 +284,39 @@ case "$gstDebugLevel" in 1|2|3|4|5|6|7|8|9) : ;; *)
   ;;
 esac
 
+case "$duration" in
+  ''|*[!0-9]*) 
+    log_warn "Invalid duration '$duration' (must be numeric)"
+    echo "$TESTNAME SKIP" >"$RES_FILE"
+    exit 0
+    ;;
+  *)
+    if [ "$duration" -le 0 ] 2>/dev/null; then
+      log_warn "Duration must be positive (got '$duration')"
+      echo "$TESTNAME SKIP" >"$RES_FILE"
+      exit 0
+    fi
+    ;;
+esac
+
+case "$framerate" in
+  ''|*[!0-9]*) 
+    log_warn "Invalid framerate '$framerate' (must be numeric)"
+    echo "$TESTNAME SKIP" >"$RES_FILE"
+    exit 0
+    ;;
+  *)
+    if [ "$framerate" -le 0 ] 2>/dev/null; then
+      log_warn "Framerate must be positive (got '$framerate')"
+      echo "$TESTNAME SKIP" >"$RES_FILE"
+      exit 0
+    fi
+    ;;
+esac
+
 # -------------------- Pre-checks --------------------
-check_dependencies "gst-launch-1.0 gst-inspect-1.0 awk grep head sed tr stat" >/dev/null 2>&1 || {
-  log_skip "Missing required tools (gst-launch-1.0, gst-inspect-1.0, awk, grep, head, sed, tr, stat)"
+check_dependencies "gst-launch-1.0 gst-inspect-1.0 awk grep head sed tr stat find curl" >/dev/null 2>&1 || {
+  log_skip "Missing required tools (gst-launch-1.0, gst-inspect-1.0, awk, grep, head, sed, tr, stat, find, curl)"
   echo "$TESTNAME SKIP" >"$RES_FILE"
   exit 0
 }
@@ -510,47 +567,70 @@ if [ "$need_vp9_clip" -eq 1 ] && [ "$testMode" != "encode" ]; then
         sleep 2
       fi
     
-    # Attempt download if we have connectivity
-    if command -v check_network_status_rc >/dev/null 2>&1; then
-      if check_network_status_rc; then
+      # Attempt download if we have connectivity
+      if command -v check_network_status_rc >/dev/null 2>&1; then
+        if check_network_status_rc; then
+          log_info "Downloading VP9 clips from: $clipUrl"
+          if extract_tar_from_url "$clipUrl" "$OUTDIR"; then
+            log_pass "VP9 clips downloaded and extracted successfully"
+          else
+            log_warn "Failed to download/extract VP9 clips (network online but download failed)"
+          fi
+        else
+          log_warn "Network still offline after connectivity attempt"
+        fi
+      else
+        # Fallback: attempt download without explicit network check
         log_info "Downloading VP9 clips from: $clipUrl"
         if extract_tar_from_url "$clipUrl" "$OUTDIR"; then
           log_pass "VP9 clips downloaded and extracted successfully"
         else
-          log_warn "Failed to download/extract VP9 clips (network online but download failed)"
+          log_warn "Failed to download/extract VP9 clips"
         fi
-      else
-        log_warn "Network still offline after connectivity attempt"
       fi
-    else
-      # Fallback: attempt download without explicit network check
-      log_info "Downloading VP9 clips from: $clipUrl"
-      if extract_tar_from_url "$clipUrl" "$OUTDIR"; then
-        log_pass "VP9 clips downloaded and extracted successfully"
-      else
-        log_warn "Failed to download/extract VP9 clips"
-      fi
-    fi
     fi
     
-    # Verify clip exists after download attempt
+    # Verify clip exists after download attempt (robust: locate *.ivf if tar has subdirs)
+    if [ ! -f "$vp9_clip_ivf" ]; then
+      found_ivf=$(find "$OUTDIR" -type f -name '*.ivf' 2>/dev/null | head -n 1 || true)
+      if [ -n "$found_ivf" ]; then
+        log_info "Found IVF clip: $found_ivf"
+        cp "$found_ivf" "$vp9_clip_ivf" 2>/dev/null || true
+      fi
+    fi
+
     if [ ! -f "$vp9_clip_ivf" ]; then
       log_warn "VP9 clip not found after download attempt: $vp9_clip_ivf"
       log_warn "VP9 decode tests will be skipped"
+      skip_count=$((skip_count + 1))
     else
       # Convert IVF to WebM container using GStreamer for better compatibility
       if [ ! -f "$vp9_clip_webm" ]; then
         log_info "Converting IVF to WebM container using GStreamer..."
-        
-        # Use GStreamer pipeline to remux IVF to WebM (Matroska container)
-        pipeline="filesrc location=\"$vp9_clip_ivf\" ! ivfparse ! matroskamux ! filesink location=\"$vp9_clip_webm\""
-        if gstreamer_run_gstlaunch_timeout 30 "$pipeline" >/dev/null 2>&1; then
-          log_pass "Successfully converted IVF to WebM (320x240)"
-        else
-          log_fail "GStreamer IVF to WebM conversion failed"
-          log_warn "VP9 decode tests will be skipped (reason: GST conversion failure)"
+
+        mux=""
+        if has_element webmmux; then
+          mux="webmmux"
+        elif has_element matroskamux; then
+          mux="matroskamux"
+        fi
+
+        if ! has_element ivfparse || [ -z "$mux" ]; then
+          log_warn "Missing ivfparse or muxer (webmmux/matroskamux); VP9 decode tests will be skipped"
           rm -f "$vp9_clip_webm" 2>/dev/null || true
-          rm -f "$vp9_clip_ivf" 2>/dev/null || true
+          skip_count=$((skip_count + 1))
+        else
+          # Use GStreamer pipeline to remux IVF to WebM/Matroska container
+          pipeline="filesrc location=\"$vp9_clip_ivf\" ! ivfparse ! $mux ! filesink location=\"$vp9_clip_webm\""
+          if gstreamer_run_gstlaunch_timeout 30 "$pipeline" >/dev/null 2>&1; then
+            log_pass "Successfully converted IVF to WebM (320x240)"
+          else
+            log_fail "GStreamer IVF to WebM conversion failed"
+            log_warn "VP9 decode tests will be skipped (reason: GST conversion failure)"
+            rm -f "$vp9_clip_webm" 2>/dev/null || true
+            rm -f "$vp9_clip_ivf" 2>/dev/null || true
+            skip_count=$((skip_count + 1))
+          fi
         fi
       else
         log_info "WebM file already exists: $vp9_clip_webm"
@@ -568,6 +648,10 @@ if [ "$testMode" = "all" ] || [ "$testMode" = "encode" ]; then
   for codec in $codecs; do
     # Skip VP9 for encode tests (no v4l2vp9enc support in this test)
     if [ "$codec" = "vp9" ]; then
+      for res in $resolutions; do
+        total_tests=$((total_tests + 1))
+        skip_count=$((skip_count + 1))
+      done
       log_info "Skipping VP9 encode (not supported in this test suite)"
       continue
     fi
@@ -629,7 +713,9 @@ fi
 log_info "=========================================="
 log_info "TEST SUMMARY"
 log_info "=========================================="
-log_info "Total tests: $total_tests"
+# Calculate actual total for display (sum of pass/fail/skip)
+actual_total=$((pass_count + fail_count + skip_count))
+log_info "Total tests executed: $actual_total"
 log_info "Passed: $pass_count"
 log_info "Failed: $fail_count"
 log_info "Skipped: $skip_count"
@@ -637,13 +723,13 @@ log_info "Skipped: $skip_count"
 # -------------------- Emit result --------------------
 if [ "$pass_count" -gt 0 ] && [ "$fail_count" -eq 0 ]; then
   result="PASS"
-  reason="All tests passed ($pass_count/$total_tests)"
+  reason="All tests passed ($pass_count/$actual_total)"
 elif [ "$pass_count" -gt 0 ] && [ "$fail_count" -gt 0 ]; then
   result="FAIL"
-  reason="Some tests failed (passed: $pass_count, failed: $fail_count)"
+  reason="Some tests failed (passed: $pass_count, failed: $fail_count, total: $actual_total)"
 elif [ "$fail_count" -gt 0 ]; then
   result="FAIL"
-  reason="All tests failed ($fail_count/$total_tests)"
+  reason="All tests failed ($fail_count/$actual_total)"
 else
   result="SKIP"
   reason="No tests executed or all skipped"

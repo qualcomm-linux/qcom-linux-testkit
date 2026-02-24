@@ -1,5 +1,5 @@
 metadata:
-  name: gstreamer-waylandsink-playback
+  name: Waylandsink_Playback
   format: "Lava-Test Test Definition 1.0"
   description: >
     GStreamer waylandsink playback validation with Weston/Wayland server checks
@@ -15,8 +15,8 @@ params:
   # Playback duration in seconds (default: 30)
   # Priority: VIDEO_DURATION > RUNTIMESEC
   VIDEO_DURATION: "30"
-  RUNTIMESEC: "" # if set, used as fallback
-  
+  RUNTIMESEC: "" # fallback if VIDEO_DURATION is empty
+
   # Test pattern for videotestsrc (default: smpte)
   VIDEO_PATTERN: "smpte" # smpte|snow|black|white|red|green|blue|checkers-1|checkers-2|ball
   
@@ -32,39 +32,42 @@ params:
   # GStreamer debug level (default: 2)
   # Priority: VIDEO_GST_DEBUG > GST_DEBUG_LEVEL
   VIDEO_GST_DEBUG: "2" # 1-9
-  GST_DEBUG_LEVEL: "" # if set, used as fallback
+  GST_DEBUG_LEVEL: "" # fallback if VIDEO_GST_DEBUG is empty
 
 run:
   steps:
     - REPO_PATH="$PWD"
+    - TESTNAME="Waylandsink_Playback"
+    - TEST_DIR="${REPO_PATH}/Runner/suites/Multimedia/GStreamer/Display/${TESTNAME}"
 
-    # Navigate to test directory
-    - cd Runner/suites/Multimedia/GSTreamer/Display/Waylandsink_Playback/
+    - cd "${TEST_DIR}"
 
-    # Export environment variables (script reads these directly)
-    - export VIDEO_DURATION="${VIDEO_DURATION}"
-    - export RUNTIMESEC="${RUNTIMESEC}"
-    - export VIDEO_PATTERN="${VIDEO_PATTERN}"
-    - export VIDEO_WIDTH="${VIDEO_WIDTH}"
-    - export VIDEO_HEIGHT="${VIDEO_HEIGHT}"
-    - export VIDEO_FRAMERATE="${VIDEO_FRAMERATE}"
-    - export VIDEO_GST_DEBUG="${VIDEO_GST_DEBUG}"
-    - export GST_DEBUG_LEVEL="${GST_DEBUG_LEVEL}"
-
-    # Build CLI args for overrides (optional - can also rely on env vars)
+    # Build CLI args with the same priority rules as run.sh defaults.
     - |
       CMD="./run.sh"
 
-      # Use CLI args to override defaults if needed
-      # Note: Script reads env vars by default, CLI args override env vars
-      [ -n "${VIDEO_WIDTH}" ] && [ -n "${VIDEO_HEIGHT}" ] && CMD="${CMD} --resolution ${VIDEO_WIDTH}x${VIDEO_HEIGHT}"
+      # Resolution
+      if [ -n "${VIDEO_WIDTH}" ] && [ -n "${VIDEO_HEIGHT}" ]; then
+        CMD="${CMD} --resolution ${VIDEO_WIDTH}x${VIDEO_HEIGHT}"
+      fi
+
+      # Pattern
       [ -n "${VIDEO_PATTERN}" ] && CMD="${CMD} --pattern ${VIDEO_PATTERN}"
-      [ -n "${VIDEO_DURATION}" ] && CMD="${CMD} --duration ${VIDEO_DURATION}"
+
+      # Duration (VIDEO_DURATION > RUNTIMESEC)
+      DUR="${VIDEO_DURATION}"
+      [ -z "${DUR}" ] && DUR="${RUNTIMESEC}"
+      [ -n "${DUR}" ] && CMD="${CMD} --duration ${DUR}"
+
+      # Framerate
       [ -n "${VIDEO_FRAMERATE}" ] && CMD="${CMD} --framerate ${VIDEO_FRAMERATE}"
-      [ -n "${VIDEO_GST_DEBUG}" ] && CMD="${CMD} --gst-debug ${VIDEO_GST_DEBUG}"
+
+      # GST debug (VIDEO_GST_DEBUG > GST_DEBUG_LEVEL)
+      DBG="${VIDEO_GST_DEBUG}"
+      [ -z "${DBG}" ] && DBG="${GST_DEBUG_LEVEL}"
+      [ -n "${DBG}" ] && CMD="${CMD} --gst-debug ${DBG}"
 
       echo "[LAVA] Running: ${CMD}"
       sh -c "${CMD}" || true
 
-    # Send result to LAVA
-    - "${REPO_PATH}/Runner/utils/send-to-lava.sh Waylandsink_Playback.res || true"
+    - Runner/utils/send-to-lava.sh ${TESTNAME}.res

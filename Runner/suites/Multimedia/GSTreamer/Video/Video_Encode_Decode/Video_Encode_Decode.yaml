@@ -82,4 +82,4 @@ run:
       sh -c "${CMD}" || true
 
     # Send result to LAVA
-    - "${REPO_PATH}/Runner/utils/send-to-lava.sh Video_Encode_Decode.res || true"
+    - Runner/utils/send-to-lava.sh Video_Encode_Decode.res

@@ -11,6 +11,18 @@ SCRIPT_DIR="$(
   pwd
 )"
 
+TESTNAME="Waylandsink_Playback"
+RES_FILE="${SCRIPT_DIR}/${TESTNAME}.res"
+LOG_DIR="${SCRIPT_DIR}/logs"
+OUTDIR="$LOG_DIR/$TESTNAME"
+GST_LOG="$OUTDIR/gst.log"
+RUN_LOG="$OUTDIR/run.log"
+
+mkdir -p "$OUTDIR" >/dev/null 2>&1 || true
+: >"$RES_FILE"
+: >"$GST_LOG"
+: >"$RUN_LOG"
+
 INIT_ENV=""
 SEARCH="$SCRIPT_DIR"
 while [ "$SEARCH" != "/" ]; do
@@ -38,35 +50,28 @@ fi
 # shellcheck disable=SC1091
 [ -f "$TOOLS/lib_display.sh" ] && . "$TOOLS/lib_display.sh"
 
-TESTNAME="Waylandsink_Playback"
-RES_FILE="${SCRIPT_DIR}/${TESTNAME}.res"
-LOG_DIR="${SCRIPT_DIR}/logs"
-OUTDIR="$LOG_DIR/$TESTNAME"
-GST_LOG="$OUTDIR/gst.log"
-RUN_LOG="$OUTDIR/run.log"
-
-mkdir -p "$OUTDIR" >/dev/null 2>&1 || true
-: >"$RES_FILE"
-: >"$GST_LOG"
-: >"$RUN_LOG"
-
 result="FAIL"
 reason="unknown"
 
 # -------------------- Defaults --------------------
 # Validate environment variables if set
-if [ -n "$VIDEO_DURATION" ] && ! echo "$VIDEO_DURATION" | grep -q "^[0-9]\+$"; then
+if [ -n "${VIDEO_DURATION:-}" ] && ! echo "$VIDEO_DURATION" | grep -q "^[0-9]\+$"; then
   log_warn "VIDEO_DURATION must be numeric (got '$VIDEO_DURATION')"
   echo "$TESTNAME SKIP" >"$RES_FILE"
   exit 0
 fi
-if [ -n "$RUNTIMESEC" ] && ! echo "$RUNTIMESEC" | grep -q "^[0-9]\+$"; then
+if [ -n "${RUNTIMESEC:-}" ] && ! echo "$RUNTIMESEC" | grep -q "^[0-9]\+$"; then
   log_warn "RUNTIMESEC must be numeric (got '$RUNTIMESEC')"
   echo "$TESTNAME SKIP" >"$RES_FILE"
   exit 0
 fi
-if [ -n "$VIDEO_FRAMERATE" ] && ! echo "$VIDEO_FRAMERATE" | grep -q "^[0-9]\+$"; then
+if [ -n "${VIDEO_FRAMERATE:-}" ] && ! echo "$VIDEO_FRAMERATE" | grep -q "^[0-9]\+$"; then
   log_warn "VIDEO_FRAMERATE must be numeric (got '$VIDEO_FRAMERATE')"
+  echo "$TESTNAME SKIP" >"$RES_FILE"
+  exit 0
+fi
+if [ -n "${VIDEO_GST_DEBUG:-${GST_DEBUG_LEVEL:-}}" ] && ! echo "${VIDEO_GST_DEBUG:-${GST_DEBUG_LEVEL:-}}" | grep -q "^[0-9]\+$"; then
+  log_warn "GST debug level must be numeric (got '${VIDEO_GST_DEBUG:-${GST_DEBUG_LEVEL:-}}')"
   echo "$TESTNAME SKIP" >"$RES_FILE"
   exit 0
 fi
@@ -79,7 +84,10 @@ framerate="${VIDEO_FRAMERATE:-30}"
 gstDebugLevel="${VIDEO_GST_DEBUG:-${GST_DEBUG_LEVEL:-2}}"
 
 cleanup() {
-  pkill -x gst-launch-1.0 >/dev/null 2>&1 || true
+  # Best-effort: try to kill only children first; fall back to name-based kill
+  if ! pkill -P "$$" -x gst-launch-1.0 >/dev/null 2>&1; then
+    pkill -x gst-launch-1.0 >/dev/null 2>&1 || true
+  fi
 }
 trap cleanup INT TERM EXIT
 
@@ -201,8 +209,12 @@ while [ $# -gt 0 ]; do
         echo "$TESTNAME SKIP" >"$RES_FILE"
         exit 0
       fi
-      # If $2 is empty, keep default and shift 2
-      [ -n "$2" ] && gstDebugLevel="$2"
+      if ! echo "$2" | grep -q "^[0-9]\+$"; then
+        log_warn "GST debug level must be numeric (got '$2')"
+        echo "$TESTNAME SKIP" >"$RES_FILE"
+        exit 0
+      fi
+      gstDebugLevel="$2"
       shift 2
       ;;
 
@@ -266,9 +278,16 @@ EOF
   esac
 done
 
+# Basic sanity
+if [ "$duration" -le 0 ] || [ "$width" -le 0 ] || [ "$height" -le 0 ] || [ "$framerate" -le 0 ]; then
+  log_warn "Invalid parameters: duration=$duration width=$width height=$height framerate=$framerate"
+  echo "$TESTNAME SKIP" >"$RES_FILE"
+  exit 0
+fi
+
 # -------------------- Pre-checks --------------------
-check_dependencies "gst-launch-1.0 gst-inspect-1.0 grep head sed" >/dev/null 2>&1 || {
-  log_skip "Missing required tools (gst-launch-1.0, gst-inspect-1.0, grep, head, sed)"
+check_dependencies "gst-launch-1.0 gst-inspect-1.0 grep head sed tail date mktemp" >/dev/null 2>&1 || {
+  log_skip "Missing required tools (gst-launch-1.0, gst-inspect-1.0, grep, head, sed, tail, date, mktemp)"
   echo "$TESTNAME SKIP" >"$RES_FILE"
   exit 0
 }
@@ -290,6 +309,22 @@ if command -v display_connected_summary >/dev/null 2>&1; then
   if [ -n "$sysfs_summary" ] && [ "$sysfs_summary" != "none" ]; then
     have_connector=1
     log_info "Connected display (sysfs): $sysfs_summary"
+  fi
+fi
+
+# Fallback: check /sys/class/drm/*/status
+if [ "$have_connector" -eq 0 ]; then
+  drm_connected=""
+  for st in /sys/class/drm/card*-*/status; do
+    [ -f "$st" ] || continue
+    if grep -qi "connected" "$st"; then
+      conn=$(basename "$(dirname "$st")")
+      drm_connected="${drm_connected}${drm_connected:+,}${conn}"
+    fi
+  done
+  if [ -n "$drm_connected" ]; then
+    have_connector=1
+    log_info "Connected display (drm sysfs): $drm_connected"
   fi
 fi
 
@@ -330,6 +365,9 @@ if [ -z "$sock" ]; then
       fi
       if [ -n "$sock" ]; then
         log_info "Weston started successfully with socket: $sock"
+        if command -v adopt_wayland_env_from_socket >/dev/null 2>&1; then
+          adopt_wayland_env_from_socket "$sock" >/dev/null 2>&1 || true
+        fi
       fi
     else
       log_warn "weston_pick_env_or_start failed"
@@ -340,10 +378,10 @@ if [ -z "$sock" ]; then
       if command -v discover_wayland_socket_anywhere >/dev/null 2>&1; then
         sock=$(discover_wayland_socket_anywhere | head -n 1 || true)
       fi
-      if [ -n "$sock" ] && command -v adopt_wayland_env_from_socket >/dev/null 2>&1; then
+      if [ -n "$sock" ]; then
         log_info "Weston created Wayland socket: $sock"
-        if ! adopt_wayland_env_from_socket "$sock"; then
-          log_warn "Failed to adopt env from $sock"
+        if command -v adopt_wayland_env_from_socket >/dev/null 2>&1; then
+          adopt_wayland_env_from_socket "$sock" >/dev/null 2>&1 || true
         fi
       fi
     fi
@@ -362,7 +400,7 @@ fi
 # Verify Wayland connection
 if command -v wayland_connection_ok >/dev/null 2>&1; then
   if ! wayland_connection_ok; then
-    log_fail "Wayland connection test failed; cannot run ${TESTNAME}."
+    log_warn "Wayland connection test failed; skipping ${TESTNAME}."
     echo "$TESTNAME SKIP" >"$RES_FILE"
     exit 0
   fi
@@ -384,16 +422,20 @@ export GST_DEBUG="$gstDebugLevel"
 export GST_DEBUG_FILE="$GST_LOG"
 
 # -------------------- Build and run pipeline --------------------
+# Make source real-time to match duration validation.
 num_buffers=$((duration * framerate))
 
-pipeline="videotestsrc num-buffers=${num_buffers} pattern=${pattern} ! video/x-raw,width=${width},height=${height},framerate=${framerate}/1 ! videoconvert ! waylandsink"
+pipeline="videotestsrc is-live=true num-buffers=${num_buffers} pattern=${pattern} ! video/x-raw,width=${width},height=${height},framerate=${framerate}/1 ! videoconvert ! waylandsink"
 
 log_info "Pipeline: $pipeline"
 
 # Run with timeout
 start_ts=$(date +%s)
 
-if gstreamer_run_gstlaunch_timeout "$((duration + 10))" "$pipeline" >>"$RUN_LOG" 2>&1; then
+# Give some slack, but timeout should still be treated as a real failure for this test
+timeout_sec=$((duration + 15))
+
+if gstreamer_run_gstlaunch_timeout "$timeout_sec" "$pipeline" >>"$RUN_LOG" 2>&1; then
   gstRc=0
 else
   gstRc=$?
@@ -405,8 +447,11 @@ elapsed=$((end_ts - start_ts))
 log_info "Playback finished: rc=${gstRc} elapsed=${elapsed}s"
 
 # -------------------- Validation --------------------
-# Duration threshold (allow 2s slack)
-min_duration=$((duration - 2))
+if [ "$duration" -gt 2 ]; then
+  min_duration=$((duration - 2))
+else
+  min_duration=0
+fi
 
 # Check for GStreamer errors in both run log and GST debug log
 run_log_ok=1
@@ -419,10 +464,18 @@ fi
 
 # Validate last 1000 lines of GST debug log if it exists and has content
 if [ -s "$GST_LOG" ]; then
-  # Create temp file with last 1000 lines
-  tail -n 1000 "$GST_LOG" > "${GST_LOG}.tail"
-  if ! gstreamer_validate_log "${GST_LOG}.tail" "$TESTNAME"; then
-    gst_log_ok=0
+  tmp_tail=$(mktemp "${OUTDIR}/gst.tail.XXXXXX" 2>/dev/null || mktemp) || tmp_tail=""
+  if [ -n "$tmp_tail" ]; then
+    tail -n 1000 "$GST_LOG" >"$tmp_tail" 2>/dev/null || true
+    if ! gstreamer_validate_log "$tmp_tail" "$TESTNAME"; then
+      gst_log_ok=0
+    fi
+    rm -f "$tmp_tail" >/dev/null 2>&1 || true
+  else
+    # If mktemp failed, fall back to validating the full GST log
+    if ! gstreamer_validate_log "$GST_LOG" "$TESTNAME"; then
+      gst_log_ok=0
+    fi
   fi
   rm -f "${GST_LOG}.tail"
 fi
@@ -445,9 +498,13 @@ else
         result="PASS"
         reason="Playback completed successfully (elapsed=${elapsed}/${duration}s)"
         ;;
-      124|137|143)  # Timeout/kill signals - expected for long duration tests
-        result="PASS"
-        reason="Playback completed via ${gstRc} (SIGTERM=143, SIGKILL=137, GNU timeout=124) after ${elapsed}/${duration}s"
+      124)
+        result="FAIL"
+        reason="Playback timed out (timeout=${timeout_sec}s, elapsed=${elapsed}s) - pipeline did not exit cleanly"
+        ;;
+      137|143)
+        result="FAIL"
+        reason="Playback killed by signal (rc=$gstRc, elapsed=${elapsed}s) - unexpected termination"
         ;;
       *)  # Unexpected return code
         result="FAIL"
@@ -458,6 +515,16 @@ else
     # Didn't run long enough - always fail regardless of return code
     result="FAIL"
     reason="Playback exited too quickly (elapsed=${elapsed}s, minimum required=${min_duration}s)"
+  fi
+fi
+
+# Helpful tails on failure (stdout visibility in CI)
+if [ "$result" != "PASS" ]; then
+  log_info "---- gst-launch output (tail) ----"
+  tail -n 120 "$RUN_LOG" 2>/dev/null || true
+  if [ -s "$GST_LOG" ]; then
+    log_info "---- GST debug log (tail) ----"
+    tail -n 120 "$GST_LOG" 2>/dev/null || true
   fi
 fi
 

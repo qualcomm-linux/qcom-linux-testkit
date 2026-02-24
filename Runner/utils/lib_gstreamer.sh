@@ -849,12 +849,13 @@ gstreamer_build_v4l2_decode_pipeline() {
       container="qtdemux"
       ;;
     vp9)
-      parser=""
+      # Try to use vp9parse if available, otherwise skip parser
+      if has_element vp9parse; then
+        parser="vp9parse"
+      else
+        parser=""
+      fi
       container="matroskademux"
-      ;;
-    *)
-      parser="identity"
-      container=""
       ;;
   esac
   
@@ -864,20 +865,21 @@ gstreamer_build_v4l2_decode_pipeline() {
     decoder_params="capture-io-mode=4 output-io-mode=4"
   fi
   
-  # Build pipeline based on container format
-  if [ -n "$container" ]; then
-    # MP4 container (h264/h265)
+  # Build pipeline based on parser availability
+  # All supported formats (h264, h265, vp9) have containers (MP4 or WebM)
+  if [ -n "$parser" ]; then
+    # Use parser if available
     if [ -n "$decoder_params" ]; then
       printf '%s\n' "filesrc location=${input_file} ! ${container} ! ${parser} ! ${decoder} ${decoder_params} ! videoconvert ! fakesink"
     else
       printf '%s\n' "filesrc location=${input_file} ! ${container} ! ${parser} ! ${decoder} ! videoconvert ! fakesink"
     fi
   else
-    # VP9 with webm container
+    # Skip parser if not available (e.g. VP9 without vp9parse)
     if [ -n "$decoder_params" ]; then
-      printf '%s\n' "filesrc location=${input_file} ! ${parser} ! ${decoder} ${decoder_params} ! videoconvert ! fakesink"
+      printf '%s\n' "filesrc location=${input_file} ! ${container} ! ${decoder} ${decoder_params} ! videoconvert ! fakesink"
     else
-      printf '%s\n' "filesrc location=${input_file} ! ${parser} ! ${decoder} ! videoconvert ! fakesink"
+      printf '%s\n' "filesrc location=${input_file} ! ${container} ! ${decoder} ! videoconvert ! fakesink"
     fi
   fi
   
