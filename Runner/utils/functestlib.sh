@@ -4343,34 +4343,68 @@ sanitize_pid() {
       | awk '{print $1; exit}'
 }
 
-# Get a single PID (first match) for a given process name.
-# Prefer pgrep, then get_pid, then a ps fallback.
+get_pids_by_name() {
+    name="$1"
+ 
+    if [ -z "$name" ]; then
+        return 1
+    fi
+ 
+    # Print one PID per line (sanitized), for all processes whose basename matches $name
+    ps -ef 2>/dev/null | awk -v n="$name" '
+        NR==1 { next }
+        {
+            cmd=$8
+            sub(".*/", "", cmd)
+            if (cmd == n) { print $2 }
+        }' | while IFS= read -r p; do
+            p_clean=$(sanitize_pid "$p")
+            if [ -n "$p_clean" ]; then
+                printf '%s\n' "$p_clean"
+            fi
+        done
+}
+ 
+# Backward-compatible wrapper:
+#   get_one_pid_by_name <name>        -> first PID
+#   get_one_pid_by_name <name> all    -> all PIDs (newline-separated)
 get_one_pid_by_name() {
     name="$1"
-    [ -z "$name" ] && return 1
-
-    pid=""
-
-    # Prefer pgrep
-    if command -v pgrep >/dev/null 2>&1; then
-        pid=$(pgrep -x "$name" 2>/dev/null | awk 'NR==1{print; exit}')
-        pid=$(sanitize_pid "$pid")
-        [ -n "$pid" ] && { printf '%s\n' "$pid"; return 0; }
+    mode="${2:-}"
+ 
+    pids=""
+    first_pid=""
+ 
+    for d in /proc/[0-9]*; do
+        [ -r "$d/comm" ] || continue
+        comm=$(tr -d '\r\n' <"$d/comm" 2>/dev/null)
+        [ "$comm" = "$name" ] || continue
+ 
+        pid=${d#/proc/}
+        case "$pid" in
+            ''|*[!0-9]*)
+                continue
+                ;;
+        esac
+ 
+        if [ -z "$first_pid" ] || [ "$pid" -lt "$first_pid" ]; then
+            first_pid="$pid"
+        fi
+ 
+        if [ -z "$pids" ]; then
+            pids="$pid"
+        else
+            pids="$pids $pid"
+        fi
+    done
+ 
+    [ -n "$pids" ] || return 1
+ 
+    if [ "$mode" = "all" ]; then
+        printf '%s\n' "$pids"
+    else
+        printf '%s\n' "$first_pid"
     fi
-
-    # Fallback to get_pid (should already return first PID after your update)
-    if command -v get_pid >/dev/null 2>&1; then
-        pid=$(get_pid "$name" 2>/dev/null)
-        pid=$(sanitize_pid "$pid")
-        [ -n "$pid" ] && { printf '%s\n' "$pid"; return 0; }
-    fi
-
-    # Final fallback: ps
-    pid=$(ps -e 2>/dev/null | awk -v n="$name" '$NF==n {print $1; exit}')
-    pid=$(sanitize_pid "$pid")
-    [ -n "$pid" ] && { printf '%s\n' "$pid"; return 0; }
-
-    return 1
 }
 
 # Wait until PID is alive (kill -0 succeeds) or timeout seconds elapse.
@@ -4441,52 +4475,49 @@ kill_process() {
 }
 
 is_process_running() {
-    if [ -z "$1" ]; then
-        log_info "Usage: is_running <process_name_or_pid>"
+    name="$1"
+ 
+    pids=$(get_one_pid_by_name "$name" all 2>/dev/null) || {
+        log_info "Process '$name' is not running."
         return 1
-    fi
+    }
  
-    input="$1"
-    case "$input" in
-    ''|*[!0-9]*)
-        # Non-numeric input: treat as process name
-        found=0
+    log_info "Process '$name' is running."
  
-        # Prefer pgrep if available (ShellCheck-friendly, efficient)
-        if command -v pgrep >/dev/null 2>&1; then
-            if pgrep -x "$input" >/dev/null 2>&1; then
-                found=1
-            fi
-        else
-            # POSIX fallback: avoid 'ps | grep' to silence SC2009
-            # Match as a separate word to mimic 'grep -w'
-            if ps -e 2>/dev/null | awk -v name="$input" '
-                $0 ~ ("(^|[[:space:]])" name "([[:space:]]|$)") { exit 0 }
-                END { exit 1 }
-            '; then
-                found=1
-            fi
-        fi
- 
-        if [ "$found" -eq 1 ]; then
-            log_info "Process '$input' is running."
+    # Only add extra debug if multiple instances exist
+    case "$pids" in
+        *" "*)
+            log_info "Process '$name' instances: $pids"
+            ;;
+        *)
             return 0
-        else
-            log_info "Process '$input' is not running."
-            return 1
-        fi
-        ;;
-    *)
-        # Numeric input: treat as PID
-        if kill -0 "$input" 2>/dev/null; then
-            log_info "Process with PID $input is running."
-            return 0
-        else
-            log_info "Process with PID $input is not running."
-            return 1
-        fi
-        ;;
+            ;;
     esac
+ 
+    for pid in $pids; do
+        case "$pid" in
+            ''|*[!0-9]*)
+                continue
+                ;;
+        esac
+ 
+        cmd=""
+        if [ -r "/proc/$pid/cmdline" ]; then
+            cmd=$(tr '\000' ' ' <"/proc/$pid/cmdline" 2>/dev/null)
+        fi
+ 
+        if [ -n "$cmd" ]; then
+            log_info "Process '$name' PID $pid cmdline: $cmd"
+        else
+            comm=""
+            if [ -r "/proc/$pid/comm" ]; then
+                comm=$(tr -d '\r\n' <"/proc/$pid/comm" 2>/dev/null)
+            fi
+            log_info "Process '$name' PID $pid comm: ${comm:-unknown}"
+        fi
+    done
+ 
+    return 0
 }
 
 get_pid() {
