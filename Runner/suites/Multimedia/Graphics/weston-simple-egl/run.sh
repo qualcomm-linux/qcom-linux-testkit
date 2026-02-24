@@ -56,30 +56,38 @@ EXPECT_FPS="${EXPECT_FPS:-60}"
 FPS_TOL_PCT="${FPS_TOL_PCT:-10}"
 REQUIRE_FPS="${REQUIRE_FPS:-1}"
 
-# Detect overlay by presence of any *EGL_adreno.json (e.g., 10_EGL_adreno.json)
+# Detect overlay by presence of Adreno GLVND vendor JSON
 BUILD_FLAVOUR="base"
 EGL_VENDOR_JSON=""
-for f in /usr/share/glvnd/egl_vendor.d/*EGL_adreno.json; do
-  if [ -f "$f" ]; then
-    EGL_VENDOR_JSON="$f"
-    BUILD_FLAVOUR="overlay"
-    break
-  fi
+ 
+# Check common vendor JSON locations and filename patterns
+for d in /usr/share/glvnd/egl_vendor.d /etc/glvnd/egl_vendor.d; do
+  [ -d "$d" ] || continue
+ 
+  # Try both naming styles: 10_adreno.json and 10_EGL_adreno.json
+  for f in "$d"/*adreno*.json "$d"/*EGL_adreno*.json; do
+    [ -e "$f" ] || continue
+    if [ -f "$f" ]; then
+      EGL_VENDOR_JSON="$f"
+      BUILD_FLAVOUR="overlay"
+      break 2
+    fi
+  done
 done
-
+ 
 log_info "Weston log directory: $SCRIPT_DIR"
 log_info "--------------------------------------------------------------------------"
 log_info "------------------- Starting ${TESTNAME} Testcase --------------------------"
-
+ 
 # Optional platform details (helper from functestlib)
 if command -v detect_platform >/dev/null 2>&1; then
   detect_platform
 fi
-
+ 
 if [ "$BUILD_FLAVOUR" = "overlay" ]; then
   log_info "Build flavor: overlay (EGL vendor JSON present: ${EGL_VENDOR_JSON})"
 else
-  log_info "Build flavor: base (no *EGL_adreno.json overlay)"
+  log_info "Build flavor: base (no Adreno EGL vendor JSON found)"
 fi
 
 log_info "Config: DURATION=${DURATION} STOP_GRACE=${STOP_GRACE} EXPECT_FPS=${EXPECT_FPS}+/-${FPS_TOL_PCT}% REQUIRE_FPS=${REQUIRE_FPS} BUILD_FLAVOUR=${BUILD_FLAVOUR}"
