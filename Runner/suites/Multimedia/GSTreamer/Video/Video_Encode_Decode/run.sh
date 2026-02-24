@@ -24,6 +24,11 @@ mkdir -p "$OUTDIR" "$DMESG_DIR" "$ENCODED_DIR" >/dev/null 2>&1 || true
 : >"$RES_FILE"
 : >"$GST_LOG"
 
+SCRIPT_DIR="$(
+  cd "$(dirname "$0")" || exit 1
+  pwd
+)"
+ 
 INIT_ENV=""
 SEARCH="$SCRIPT_DIR"
 while [ "$SEARCH" != "/" ]; do
@@ -33,14 +38,20 @@ while [ "$SEARCH" != "/" ]; do
   fi
   SEARCH=$(dirname "$SEARCH")
 done
-
-if [ -z "$INIT_ENV" ]; then
+ 
+RES_FILE="$SCRIPT_DIR/${TESTNAME}.res"
+ 
+if [ -z "${INIT_ENV:-}" ]; then
   echo "[ERROR] Could not find init_env (starting at $SCRIPT_DIR)" >&2
+  echo "$TESTNAME SKIP" >"$RES_FILE" 2>/dev/null || true
   exit 0
 fi
-
-# shellcheck disable=SC1090
-. "$INIT_ENV"
+ 
+if [ -z "${__INIT_ENV_LOADED:-}" ]; then
+  # shellcheck disable=SC1090
+  . "$INIT_ENV"
+  __INIT_ENV_LOADED=1
+fi
 
 # shellcheck disable=SC1091
 . "$TOOLS/functestlib.sh"
