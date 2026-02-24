@@ -170,10 +170,21 @@ while [ $# -gt 0 ]; do
         echo "$TESTNAME SKIP" >"$RES_FILE"
         exit 0
       fi
-      if [ -n "$2" ] && ! is_u32 "$2"; then
-        log_warn "Invalid --framerate '$2' (must be numeric)"
-        echo "$TESTNAME SKIP" >"$RES_FILE"
-        exit 0
+      if [ -n "$2" ]; then
+        case "$2" in
+          ''|*[!0-9]*) 
+            log_warn "Invalid --framerate '$2' (must be numeric)"
+            echo "$TESTNAME SKIP" >"$RES_FILE"
+            exit 0
+            ;;
+          *)
+            if [ "$2" -le 0 ] 2>/dev/null; then
+              log_warn "Framerate must be positive (got '$2')"
+              echo "$TESTNAME SKIP" >"$RES_FILE"
+              exit 0
+            fi
+            ;;
+        esac
       fi
       # If empty, keep default; otherwise use provided value
       [ -n "$2" ] && framerate="$2"
