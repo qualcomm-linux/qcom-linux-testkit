@@ -1,7 +1,6 @@
 #!/bin/sh
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
-# SPDX-License-Identifier: BSD-3-Clause-Clear
-# Common, POSIX-compliant helpers for Qualcomm video stack selection and V4L2 testing.
+# SPDX-License-Identifier: BSD-3-Clause# Common, POSIX-compliant helpers for Qualcomm video stack selection and V4L2 testing.
 # Requires functestlib.sh: log_info/log_warn/log_pass/log_fail/log_skip,
 # check_dependencies, extract_tar_from_url, (optional) run_with_timeout, ensure_network_online.
 

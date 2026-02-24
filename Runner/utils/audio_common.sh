@@ -1,7 +1,6 @@
 #!/bin/sh
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
-# SPDX-License-Identifier: BSD-3-Clause-Clear
-# Common audio helpers for PipeWire / PulseAudio runners.
+# SPDX-License-Identifier: BSD-3-Clause# Common audio helpers for PipeWire / PulseAudio runners.
 # Requires: functestlib.sh (log_* helpers, extract_tar_from_url, scan_dmesg_errors)
 
 # ---------- Backend detection & daemon checks ----------

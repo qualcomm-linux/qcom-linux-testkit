@@ -1,7 +1,6 @@
 #!/bin/sh
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
-# SPDX-License-Identifier: BSD-3-Clause-Clear
-# Shared libcamera helpers
+# SPDX-License-Identifier: BSD-3-Clause# Shared libcamera helpers
 # ---------- Sensor & index helpers ----------
 
 # Return the number of sensors visible in `cam -l`

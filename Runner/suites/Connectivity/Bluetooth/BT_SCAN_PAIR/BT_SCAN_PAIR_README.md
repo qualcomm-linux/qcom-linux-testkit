@@ -121,5 +121,4 @@ When a whitelist is specified (CLI or `BT_WHITELIST_ENV`), only devices whose MA
 
 ## License
 
-SPDX-License-Identifier: BSD-3-Clause-Clear  
-© Qualcomm Technologies, Inc. and/or its subsidiaries.
+SPDX-License-Identifier: BSD-3-Clause© Qualcomm Technologies, Inc. and/or its subsidiaries.

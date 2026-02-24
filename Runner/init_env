@@ -1,8 +1,7 @@
 #!/bin/sh
 
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
-# SPDX-License-Identifier: BSD-3-Clause-Clear
-
+# SPDX-License-Identifier: BSD-3-Clause
 # Idempotency guard: only initialize ONCE per shell session
 [ -n "$__INIT_ENV_LOADED" ] && return
 __INIT_ENV_LOADED=1

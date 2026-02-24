@@ -55,4 +55,4 @@ The script is tested with `shellcheck` and disables SC2039 and SC1091 where sour
 ## License
 
 Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
-SPDX-License-Identifier: BSD-3-Clause-Clear
+SPDX-License-Identifier: BSD-3-Clause

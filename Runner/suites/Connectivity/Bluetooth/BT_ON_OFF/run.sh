@@ -1,7 +1,6 @@
 #!/bin/sh
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
-# SPDX-License-Identifier: BSD-3-Clause-Clear
-# BT_ON_OFF - Basic Bluetooth power toggle validation (non-expect version)
+# SPDX-License-Identifier: BSD-3-Clause# BT_ON_OFF - Basic Bluetooth power toggle validation (non-expect version)
 
 # Robustly find and source init_env
 SCRIPT_DIR="$(
@@ -103,7 +102,7 @@ elif findhcisysfs >/dev/null 2>&1; then
 else
     ADAPTER=""
 fi
- 
+
 if [ -n "$ADAPTER" ]; then
     log_info "Using adapter: $ADAPTER"
 else
@@ -112,8 +111,13 @@ else
     exit 0
 fi
 
+# --- NEW: warn/diag if non-interactive "bluetoothctl list" is empty (non-fatal) ---
+btwarniflistempty "$ADAPTER" || true
+
 # Ensure controller is visible to bluetoothctl (try public-addr if needed)
 if ! bt_ensure_controller_visible "$ADAPTER"; then
+    # --- NEW: print diagnostics before skipping ---
+    btloghcidiag "$ADAPTER"
     log_warn "SKIP — no controller visible to bluetoothctl (HCI RAW/DOWN or attach incomplete)."
     echo "$TESTNAME SKIP" > "$res_file"
     exit 0
@@ -155,6 +159,9 @@ after_on="$(btgetpower "$ADAPTER" 2>/dev/null || true)"
 [ -z "$after_on" ] && after_on="unknown"
 
 if [ "$after_on" = "yes" ]; then
+    # --- NEW: post-check (covers your "list is empty after run" symptom) ---
+    btwarniflistempty "$ADAPTER" || true
+
     log_pass "Post-ON verification: Powered=yes (as expected)."
     echo "$TESTNAME PASS" > "$res_file"
     exit 0

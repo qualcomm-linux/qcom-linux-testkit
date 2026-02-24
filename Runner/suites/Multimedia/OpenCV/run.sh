@@ -1,7 +1,6 @@
 #!/bin/sh
 # OpenCV test/perf suite runner (auto-discovery; per-binary skip; summary; proper exit codes)
-# SPDX-License-Identifier: BSD-3-Clause-Clear
-
+# SPDX-License-Identifier: BSD-3-Clause
 # ----- locate and source init_env -----
 SCRIPT_DIR="$(
   cd "$(dirname "$0")" || exit 1

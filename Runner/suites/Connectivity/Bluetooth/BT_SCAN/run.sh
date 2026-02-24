@@ -1,7 +1,8 @@
 #!/bin/sh
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
-# SPDX-License-Identifier: BSD-3-Clause-Clear
+# SPDX-License-Identifier: BSD-3-Clause#
 # BT_SCAN – Bluetooth scanning validation (non-expect version)
+
 # ---------- Repo env + helpers ----------
 SCRIPT_DIR="$(
   cd "$(dirname "$0")" || exit 1
@@ -69,9 +70,12 @@ rm -f "$res_file"
 
 log_info "------------------------------------------------------------"
 log_info "Starting $TESTNAME Testcase"
-log_info "Checking dependency: bluetoothctl"
+log_info "Checking dependencies: bluetoothctl pgrep"
 
-check_dependencies bluetoothctl pgrep
+if ! check_dependencies bluetoothctl pgrep; then
+    echo "$TESTNAME SKIP" > "$res_file"
+    exit 0
+fi
 
 # -----------------------------
 # 1. Ensure bluetoothd is running
@@ -168,10 +172,12 @@ log_info "Discovering state after scan ON window: $dstate_on"
 
 # -----------------------------
 # 7. Get devices list after scan ON
+# - Try non-interactive bluetoothctl first
+# - If empty/flaky, fallback to btctl_script "devices" "quit"
 # -----------------------------
 devices_out="$(
-    bluetoothctl devices 2>/dev/null \
-        | sanitize_bt_output
+    bt_list_devices_raw 2>/dev/null \
+        | grep '^Device ' || true
 )"
 
 if [ -n "$TARGET_MAC" ]; then
@@ -205,31 +211,17 @@ fi
 # -----------------------------
 log_info "Testing scan OFF..."
 if ! bt_set_scan off "$ADAPTER"; then
-    log_warn "bt_set_scan(off) returned non-zero continuing with Discovering check."
+    # bt_set_scan(off) can be flaky on minimal images; rely on poll helper
+    log_warn "bt_set_scan(off) returned non-zero; continuing with scan-off polling."
 fi
 
-SCAN_OFF_OK=0
-ITER=10
-i=1
-while [ "$i" -le "$ITER" ]; do
-    dstate_off="$(bt_get_discovering 2>/dev/null || true)"
-    [ -z "$dstate_off" ] && dstate_off="unknown"
-
-    log_info "Discovering state during scan OFF wait (iteration $i/$ITER): $dstate_off"
-
-    if [ "$dstate_off" = "no" ]; then
-        SCAN_OFF_OK=1
-        break
-    fi
-
-    sleep 2
-    i=$((i + 1))
-done
-
-if [ "$SCAN_OFF_OK" -eq 1 ]; then
-    log_pass "Discovering=no observed after scan OFF polling."
+# Use lib helper to avoid repetitive log spam and handle 'unknown' cleanly.
+if bt_scan_poll_off 10 1; then
+    # On minimal/ramdisk images bt_scan_poll_off may treat persistent 'unknown' as non-fatal.
+    log_pass "Scan OFF cleanup completed."
 else
-    log_warn "Discovering did not transition to 'no' after scan OFF window."
+    # If you keep bt_scan_poll_off strict, this may still warn; not a test failure.
+    log_warn "Scan OFF cleanup did not confirm Discovering=no (non-fatal)."
 fi
 
 echo "$TESTNAME PASS" > "$res_file"

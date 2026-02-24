@@ -1,8 +1,7 @@
 #!/bin/sh
 
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
-# SPDX-License-Identifier: BSD-3-Clause-Clear
-#
+# SPDX-License-Identifier: BSD-3-Clause#
 # Test for IPA driver: skip if CONFIG_QCOM_IPA not enabled, then
 # builtin vs module, verify /dev/ipa, functional sysfs & dmesg checks.
 
