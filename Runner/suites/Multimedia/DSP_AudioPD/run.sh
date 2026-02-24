@@ -67,6 +67,7 @@ fi
 
 STARTED_BY_TEST=0
 PID=""
+PIDS=""
 
 check_adsprpcd_wait_state() {
     pid="$1"
@@ -112,9 +113,17 @@ check_adsprpcd_wait_state() {
 }
 
 if is_process_running "adsprpcd"; then
-    log_info "adsprpcd is running"
-    PID=$(get_one_pid_by_name "adsprpcd" 2>/dev/null || true)
-    PID=$(sanitize_pid "$PID")
+    # is_process_running already prints instances/cmdline (for CI debug)
+    PIDS=$(get_one_pid_by_name "adsprpcd" all 2>/dev/null || true)
+
+    # Pick a primary PID for legacy logging (first valid numeric PID)
+    for p in $PIDS; do
+        p_clean=$(sanitize_pid "$p")
+        if [ -n "$p_clean" ]; then
+            PID="$p_clean"
+            break
+        fi
+    done
 else
     log_info "adsprpcd is not running"
     log_info "Manually starting adsprpcd daemon"
@@ -130,47 +139,102 @@ else
         PID=$(get_one_pid_by_name "adsprpcd" 2>/dev/null || true)
         PID=$(sanitize_pid "$PID")
     fi
+
+    # After start, gather all adsprpcd PIDs (if helper supports it)
+    PIDS=$(get_one_pid_by_name "adsprpcd" all 2>/dev/null || true)
+fi
+
+# Fallback if helper returned nothing
+if [ -z "$PIDS" ] && [ -n "$PID" ]; then
+    PIDS="$PID"
 fi
 
 log_info "PID is $PID"
 
-if [ -z "$PID" ] || ! wait_pid_alive "$PID" 10; then
-    log_fail "Failed to start adsprpcd or PID did not become alive"
+# Build an "alive" PID list (avoid false failures if a PID disappears)
+PIDS_ALIVE=""
+alive_count=0
+dead_seen=0
+for p in $PIDS; do
+    p_clean=$(sanitize_pid "$p")
+    if [ -z "$p_clean" ]; then
+        continue
+    fi
+
+    if wait_pid_alive "$p_clean" 10; then
+        alive_count=$((alive_count + 1))
+        if [ -z "$PIDS_ALIVE" ]; then
+            PIDS_ALIVE="$p_clean"
+        else
+            PIDS_ALIVE="$PIDS_ALIVE $p_clean"
+        fi
+    else
+        dead_seen=1
+        log_warn "adsprpcd PID $p_clean did not become alive"
+    fi
+done
+
+# Only print alive list if something was dropped (avoids duplicate info in normal case)
+if [ "$dead_seen" -eq 1 ]; then
+    log_info "Alive adsprpcd PIDs: $PIDS_ALIVE"
+fi
+
+if [ "$alive_count" -le 0 ]; then
+    log_fail "Failed to start adsprpcd or no alive PID found"
     echo "$TESTNAME FAIL" >"$res_file"
 
     # Kill only if we started it and PID is valid
     if [ "$STARTED_BY_TEST" -eq 1 ]; then
-        PID_CLEAN=$(sanitize_pid "$PID")
-        if [ -n "$PID_CLEAN" ]; then
-            kill_process "$PID_CLEAN" || true
-        fi
+        for p in $PIDS; do
+            p_clean=$(sanitize_pid "$p")
+            if [ -n "$p_clean" ]; then
+                kill_process "$p_clean" || true
+            fi
+        done
     fi
     exit 0
 fi
 
-# Evaluate
-check_adsprpcd_wait_state "$PID"
-rc=$?
+# Evaluate all alive PIDs
+fail_seen=0
+skip_seen=0
 
-if [ "$rc" -eq 0 ]; then
-    log_pass "$TESTNAME : Test Passed"
-    echo "$TESTNAME PASS" >"$res_file"
-elif [ "$rc" -eq 2 ]; then
+for p in $PIDS_ALIVE; do
+    check_adsprpcd_wait_state "$p"
+    rc=$?
+
+    if [ "$rc" -eq 2 ]; then
+        skip_seen=1
+        break
+    fi
+    if [ "$rc" -ne 0 ]; then
+        fail_seen=1
+    fi
+done
+
+if [ "$skip_seen" -eq 1 ]; then
     # SKIP already written by the function
     :
 else
-    log_fail "$TESTNAME : Test Failed"
-    echo "$TESTNAME FAIL" >"$res_file"
+    if [ "$fail_seen" -eq 0 ]; then
+        log_pass "$TESTNAME : Test Passed"
+        echo "$TESTNAME PASS" >"$res_file"
+    else
+        log_fail "$TESTNAME : Test Failed"
+        echo "$TESTNAME FAIL" >"$res_file"
+    fi
 fi
 
 log_info "-------------------Completed $TESTNAME Testcase----------------------------"
 
 # Kill only if we started it
 if [ "$STARTED_BY_TEST" -eq 1 ]; then
-    PID_CLEAN=$(sanitize_pid "$PID")
-    if [ -n "$PID_CLEAN" ]; then
-        kill_process "$PID_CLEAN" || true
-    fi
+    for p in $PIDS; do
+        p_clean=$(sanitize_pid "$p")
+        if [ -n "$p_clean" ]; then
+            kill_process "$p_clean" || true
+        fi
+    done
 fi
 
 exit 0
