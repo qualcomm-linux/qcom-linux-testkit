@@ -2,6 +2,9 @@
 
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause
+
+TESTNAME="DSP_AudioPD"
+
 # Robustly find and source init_env
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 INIT_ENV=""
@@ -14,23 +17,38 @@ while [ "$SEARCH" != "/" ]; do
     SEARCH=$(dirname "$SEARCH")
 done
 
+RES_FALLBACK="$SCRIPT_DIR/${TESTNAME}.res"
+
 if [ -z "$INIT_ENV" ]; then
     echo "[ERROR] Could not find init_env (starting at $SCRIPT_DIR)" >&2
-    exit 1
+    echo "$TESTNAME SKIP" >"$RES_FALLBACK" 2>/dev/null || true
+    exit 0
 fi
 
 # Only source if not already loaded (idempotent)
-if [ -z "$__INIT_ENV_LOADED" ]; then
+if [ -z "${__INIT_ENV_LOADED:-}" ]; then
     # shellcheck disable=SC1090
     . "$INIT_ENV"
+    export __INIT_ENV_LOADED=1
 fi
+
 # Always source functestlib.sh, using $TOOLS exported by init_env
 # shellcheck disable=SC1090,SC1091
 . "$TOOLS/functestlib.sh"
 
-TESTNAME="DSP_AudioPD"
 test_path=$(find_test_case_by_name "$TESTNAME")
-cd "$test_path" || exit 1
+if [ -z "$test_path" ] || [ ! -d "$test_path" ]; then
+    log_skip "$TESTNAME SKIP - test path not found"
+    echo "$TESTNAME SKIP" >"$RES_FALLBACK" 2>/dev/null || true
+    exit 0
+fi
+
+if ! cd "$test_path"; then
+    log_skip "$TESTNAME SKIP - cannot cd into $test_path"
+    echo "$TESTNAME SKIP" >"$RES_FALLBACK" 2>/dev/null || true
+    exit 0
+fi
+
 # shellcheck disable=SC2034
 res_file="./$TESTNAME.res"
 
@@ -38,47 +56,121 @@ log_info "----------------------------------------------------------------------
 log_info "-------------------Starting $TESTNAME Testcase----------------------------"
 log_info "=== Test Initialization ==="
 
-log_info "Checking if dependency binary is available"
-check_dependencies adsprpcd
+# Dependencies (single call; log list; SKIP if missing)
+deps_list="adsprpcd tr awk grep sleep"
+log_info "Checking dependencies: ""$deps_list"""
+if ! check_dependencies "$deps_list"; then
+    log_skip "$TESTNAME SKIP - missing one or more dependencies: $deps_list"
+    echo "$TESTNAME SKIP" >"$res_file"
+    exit 0
+fi
 
-if is_process_running  "adsprpcd"; then
+STARTED_BY_TEST=0
+PID=""
+
+check_adsprpcd_wait_state() {
+    pid="$1"
+    pid=$(sanitize_pid "$pid")
+
+    case "$pid" in
+        ''|*[!0-9]*)
+            return 1
+            ;;
+    esac
+
+    # Prefer /proc/<pid>/wchan (more commonly available)
+    if [ -r "/proc/$pid/wchan" ]; then
+        wchan=$(tr -d '\r\n' <"/proc/$pid/wchan" 2>/dev/null)
+
+        # Accept suffixes like ".constprop.0"
+        case "$wchan" in
+            do_sys_poll*|ep_poll*|do_epoll_wait*|poll_schedule_timeout*)
+                log_info "adsprpcd PID $pid wchan='$wchan' (accepted)"
+                return 0
+                ;;
+            *)
+                log_info "adsprpcd PID $pid wchan='$wchan' (not in expected set)"
+                return 1
+                ;;
+        esac
+    fi
+
+    # Fallback: /proc/<pid>/stack (may be missing depending on kernel config)
+    if [ -r "/proc/$pid/stack" ]; then
+        if grep -qE "(do_sys_poll|ep_poll|do_epoll_wait|poll_schedule_timeout)" "/proc/$pid/stack" 2>/dev/null; then
+            log_info "adsprpcd PID $pid stack contains expected wait symbol"
+            return 0
+        fi
+        log_info "adsprpcd PID $pid stack does not contain expected wait symbols"
+        return 1
+    fi
+
+    # Neither interface is available -> SKIP
+    log_skip "Kernel does not expose /proc/$pid/(wchan|stack); cannot validate adsprpcd wait state"
+    echo "$TESTNAME SKIP" >"$res_file"
+    return 2
+}
+
+if is_process_running "adsprpcd"; then
     log_info "adsprpcd is running"
-    PID=$(get_pid "adsprpcd")
+    PID=$(get_one_pid_by_name "adsprpcd" 2>/dev/null || true)
+    PID=$(sanitize_pid "$PID")
 else
     log_info "adsprpcd is not running"
     log_info "Manually starting adsprpcd daemon"
-    adsprpcd &
-    PID=$!
-fi
-log_info "PID is $PID"
-sleep 5
+    adsprpcd >/dev/null 2>&1 &
+    PID=$(sanitize_pid "$!")
+    STARTED_BY_TEST=1
 
-if [ -z "$PID" ]; then
-    log_info "Failed to start the binary"
-    exit 1
-else
-    log_info "Binary is running successfully"
-fi
-
-check_stack_trace() {
-    pid=$1
-    if grep -q "do_sys_poll" < "/proc/$pid/stack" 2>/dev/null; then
-        return 0
-    else
-        return 1
+    # adsprpcd might daemonize/fork; if $! isn't alive, discover PID by name
+    if [ -n "$PID" ] && ! wait_pid_alive "$PID" 2; then
+        PID=""
     fi
-}
+    if [ -z "$PID" ]; then
+        PID=$(get_one_pid_by_name "adsprpcd" 2>/dev/null || true)
+        PID=$(sanitize_pid "$PID")
+    fi
+fi
 
-# Print overall test result
-if check_stack_trace "$PID"; then
-    log_pass "$TESTNAME : Test Passed"
-    echo "$TESTNAME PASS" > "$res_file"
-    kill_process "$PID"
+log_info "PID is $PID"
+
+if [ -z "$PID" ] || ! wait_pid_alive "$PID" 10; then
+    log_fail "Failed to start adsprpcd or PID did not become alive"
+    echo "$TESTNAME FAIL" >"$res_file"
+
+    # Kill only if we started it and PID is valid
+    if [ "$STARTED_BY_TEST" -eq 1 ]; then
+        PID_CLEAN=$(sanitize_pid "$PID")
+        if [ -n "$PID_CLEAN" ]; then
+            kill_process "$PID_CLEAN" || true
+        fi
+    fi
     exit 0
+fi
+
+# Evaluate
+check_adsprpcd_wait_state "$PID"
+rc=$?
+
+if [ "$rc" -eq 0 ]; then
+    log_pass "$TESTNAME : Test Passed"
+    echo "$TESTNAME PASS" >"$res_file"
+elif [ "$rc" -eq 2 ]; then
+    # SKIP already written by the function
+    :
 else
     log_fail "$TESTNAME : Test Failed"
-    echo "$TESTNAME FAIL" > "$res_file"
-    kill_process "$PID"
-    exit 1
+    echo "$TESTNAME FAIL" >"$res_file"
 fi
+
 log_info "-------------------Completed $TESTNAME Testcase----------------------------"
+
+# Kill only if we started it
+if [ "$STARTED_BY_TEST" -eq 1 ]; then
+    PID_CLEAN=$(sanitize_pid "$PID")
+    if [ -n "$PID_CLEAN" ]; then
+        kill_process "$PID_CLEAN" || true
+    fi
+fi
+
+exit 0

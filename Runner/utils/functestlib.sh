@@ -4334,42 +4334,110 @@ ensure_network_online() {
     return 1
 }
 
+# Return the first numeric token found in input (helps when tools return multi-PID / noisy output)
+sanitize_pid() {
+    # Return first numeric token from input (single PID) or empty
+    printf '%s' "$1" \
+      | tr -d '\r' \
+      | tr -c '0-9 \n' ' ' \
+      | awk '{print $1; exit}'
+}
+
+# Get a single PID (first match) for a given process name.
+# Prefer pgrep, then get_pid, then a ps fallback.
+get_one_pid_by_name() {
+    name="$1"
+    [ -z "$name" ] && return 1
+
+    pid=""
+
+    # Prefer pgrep
+    if command -v pgrep >/dev/null 2>&1; then
+        pid=$(pgrep -x "$name" 2>/dev/null | awk 'NR==1{print; exit}')
+        pid=$(sanitize_pid "$pid")
+        [ -n "$pid" ] && { printf '%s\n' "$pid"; return 0; }
+    fi
+
+    # Fallback to get_pid (should already return first PID after your update)
+    if command -v get_pid >/dev/null 2>&1; then
+        pid=$(get_pid "$name" 2>/dev/null)
+        pid=$(sanitize_pid "$pid")
+        [ -n "$pid" ] && { printf '%s\n' "$pid"; return 0; }
+    fi
+
+    # Final fallback: ps
+    pid=$(ps -e 2>/dev/null | awk -v n="$name" '$NF==n {print $1; exit}')
+    pid=$(sanitize_pid "$pid")
+    [ -n "$pid" ] && { printf '%s\n' "$pid"; return 0; }
+
+    return 1
+}
+
+# Wait until PID is alive (kill -0 succeeds) or timeout seconds elapse.
+wait_pid_alive() {
+    pid="$1"
+    timeout="${2:-10}"
+ 
+    pid=$(sanitize_pid "$pid")
+    case "$pid" in
+        ''|*[!0-9]*)
+            return 1
+            ;;
+    esac
+ 
+    i=0
+    while [ "$i" -lt "$timeout" ]; do
+        if kill -0 "$pid" 2>/dev/null; then
+            return 0
+        fi
+        sleep 1
+        i=$((i + 1))
+    done
+    return 1
+}
+
+# Kill process for the given PID
 kill_process() {
     PID="$1"
     KILL_TERM_GRACE="${KILL_TERM_GRACE:-5}"
     KILL_KILL_GRACE="${KILL_KILL_GRACE:-5}"
     SELF_PID="$$"
-
+ 
+    case "$PID" in
+        ''|*[!0-9]*)
+            log_warn "Refusing to kill non-numeric PID '$PID'"
+            return 1
+            ;;
+    esac
+ 
     # Safety checks
     if [ "$PID" -eq 1 ] || [ "$PID" -eq "$SELF_PID" ]; then
         log_warn "Refusing to kill PID $PID (init or self)"
         return 1
     fi
-
-    # Check if process exists
+ 
     if ! kill -0 "$PID" 2>/dev/null; then
         log_info "Process $PID not running"
         return 0
     fi
-
+ 
     log_info "Sending SIGTERM to PID $PID"
     kill -TERM "$PID" 2>/dev/null
     sleep "$KILL_TERM_GRACE"
-
+ 
     if kill -0 "$PID" 2>/dev/null; then
         log_info "Sending SIGKILL to PID $PID"
         kill -KILL "$PID" 2>/dev/null
         sleep "$KILL_KILL_GRACE"
     fi
-
-    # Final check
+ 
     if kill -0 "$PID" 2>/dev/null; then
         log_warn "Failed to kill process $PID"
         return 1
-    else
-        log_info "Process $PID terminated successfully"
-        return 0
     fi
+ 
+    log_info "Process $PID terminated successfully"
+    return 0
 }
 
 is_process_running() {
@@ -4426,20 +4494,25 @@ get_pid() {
         log_info "Usage: get_pid <process_name>"
         return 1
     fi
-    
+
     process_name="$1"
-    
-    # Try multiple ps variants for compatibility
-    pid=$(ps -e | awk -v name="$process_name" '$NF == name { print $1 }')
-    [ -z "$pid" ] && pid=$(ps -A | awk -v name="$process_name" '$NF == name { print $1 }')
-    [ -z "$pid" ] && pid=$(ps -aux | awk -v name="$process_name" '$11 == name { print $2 }')
-    [ -z "$pid" ] && pid=$(ps -ef | awk -v name="$process_name" '$NF == name { print $2 }')
-    
-    if [ -n "$pid" ]; then
-        echo "$pid"
-        return 0
-    else
-        log_info "Process '$process_name' not found."
-        return 1
+    pid=""
+
+    # Prefer pgrep if available (fast + clean)
+    if command -v pgrep >/dev/null 2>&1; then
+        pid=$(pgrep -x "$process_name" 2>/dev/null | awk 'NR==1 {print; exit}')
     fi
+
+    # POSIX fallback: ps
+    if [ -z "$pid" ]; then
+        pid=$(ps -e 2>/dev/null | awk -v name="$process_name" '$NF == name { print $1; exit }')
+    fi
+
+    if [ -n "$pid" ]; then
+        printf '%s\n' "$pid"
+        return 0
+    fi
+
+    log_info "Process '$process_name' not found."
+    return 1
 }
