@@ -4547,3 +4547,291 @@ get_pid() {
     log_info "Process '$process_name' not found."
     return 1
 }
+
+# UFS precheck function - validates common UFS requirements
+# Exports the UFS Block Device
+# Returns 0 if mandatory ufs configurations are enabled else returns 1 
+ufs_precheck_common() {
+    MANDATORY_CONFIGS="CONFIG_SCSI_UFSHCD CONFIG_SCSI_UFS_QCOM"
+    OPTIONAL_CONFIGS="CONFIG_SCSI_UFSHCD_PLATFORM CONFIG_SCSI_UFSHCD_PCI CONFIG_SCSI_UFS_CDNS_PLATFORM CONFIG_SCSI_UFS_HISI CONFIG_SCSI_UFS_EXYNOS CONFIG_SCSI_UFS_ROCKCHIP CONFIG_SCSI_UFS_BSG"
+    
+    log_info "Checking mandatory kernel configs for UFS..."
+    if ! check_kernel_config "$MANDATORY_CONFIGS" 2>/dev/null; then
+        log_skip "Missing mandatory UFS kernel configs: $MANDATORY_CONFIGS"
+        return 1
+    fi
+    
+    log_info "Checking optional kernel configs for UFS..."
+    missing_optional=""
+    for cfg in $OPTIONAL_CONFIGS; do
+        if ! check_kernel_config "$cfg" 2>/dev/null; then
+            log_info "[OPTIONAL] $cfg is not enabled"
+            missing_optional="$missing_optional $cfg"
+        fi
+    done
+    [ -n "$missing_optional" ] && log_info "Optional configs not present but continuing:$missing_optional"
+    
+    if ! check_dt_nodes "/sys/bus/platform/devices/*ufs*"; then
+        log_skip "UFS Device Tree nodes not found"
+        return 1
+    fi
+    
+    block_dev=$(detect_ufs_partition_block)
+    if [ -z "$block_dev" ]; then
+        log_skip "No UFS block device found."
+        return 1
+    fi
+    log_info "Detected UFS block: $block_dev"
+    
+    # Export block_dev for use by calling script
+    export UFS_BLOCK_DEV="$block_dev"
+
+    return 0
+}
+
+# Find the matching dt node
+ufs_get_dt_node_path() {
+    pattern=$1
+    found_node=""
+
+    # Store the default IFS
+    old_ifs=$IFS
+    IFS='
+'
+
+    case $pattern in
+        *\**|*?*|*\[*)
+            is_pattern=1
+            ;;
+        *)
+            is_pattern=0
+            ;;
+    esac
+
+    # shellcheck disable=SC2086
+    set -- $pattern
+
+    for node in "$@"; do
+        # Skip if pattern didn't expand
+        if [ "$is_pattern" = 1 ] && [ "$node" = "$pattern" ] \
+           && [ ! -f "$node" ] && [ ! -d "$node" ] && [ ! -L "$node" ] \
+           && [ ! -c "$node" ] && [ ! -b "$node" ]; then
+            continue
+        fi
+
+        # Check if the node is a file/directory/link/block device
+        if [ -f "$node" ] || [ -d "$node" ] || [ -L "$node" ] \
+           || [ -c "$node" ] || [ -b "$node" ]; then
+            found_node=$node
+            printf '%s' "$found_node"
+            IFS=$old_ifs
+            return 0
+        fi
+    done
+
+    IFS=$old_ifs
+    printf '%s' "$found_node"
+    return 1
+}
+
+# Function to check node status with retries by reading from a file
+ufs_check_node_status() {
+    node_name="$1"
+    expected_status="$2"
+    retries="$3"
+    delay="$4"
+    
+    # Default values if not provided
+    [ -z "$retries" ] && retries=5
+    [ -z "$delay" ] && delay=1
+    
+    attempt=1
+    sync_pid=""
+    
+    log_info "Checking status of node '$node_name', expecting: '$expected_status'"
+    log_info "Will retry up to $retries times with $delay second(s) delay between attempts"
+    
+    # Start background sync process to flush the storage requests to disk
+    log_info "Starting continuous sync in background..."
+    (
+        while :; do
+            sync
+            sleep 0.2
+        done
+    ) &
+    sync_pid=$!
+    
+    while [ "$attempt" -le "$retries" ]; do
+        log_info "Attempt $attempt of $retries..."
+        
+        # Get node status by directly reading from the file with the node's name
+        # shellcheck disable=SC2002
+        status=$(cat "$node_name" 2>/dev/null | tr -d '\n' | tr -d '\r')
+        
+        if [ "$status" = "$expected_status" ]; then
+            log_pass "Success! Node '$node_name' has status: '$status'"
+            # Cleanup background sync process
+            if [ -n "$sync_pid" ]; then
+                kill "$sync_pid" 2>/dev/null || true
+                wait "$sync_pid" 2>/dev/null || true
+            fi
+            log_info "Stopped background sync process"
+            return 0
+        elif [ -z "$status" ]; then
+            log_fail "Failed to read the node $node_name"
+            # Cleanup background sync process
+            if [ -n "$sync_pid" ]; then
+                kill "$sync_pid" 2>/dev/null || true
+                wait "$sync_pid" 2>/dev/null || true
+            fi
+            log_info "Stopped background sync process"
+            return 1
+        else
+            log_info "Current status: '$status', waiting for: '$expected_status'"
+            
+            if [ "$attempt" -lt "$retries" ]; then
+                log_info "Retrying in $delay second(s)..."
+                sleep "$delay"
+            fi
+        fi
+        
+        attempt=$((attempt + 1))
+    done
+    
+    log_fail "Failed after $retries attempts. Last status: '$status', expected: '$expected_status'"
+    # Cleanup background sync process
+    if [ -n "$sync_pid" ]; then
+        kill "$sync_pid" 2>/dev/null || true
+        wait "$sync_pid" 2>/dev/null || true
+    fi
+    log_info "Stopped background sync process"
+    return 1
+}
+
+
+# Check a node's status until it matches the expected value or timeout expires.
+ufs_check_node_status_with_timeout() {
+    node_name="$1"
+    expected_status="$2"
+    timeout="$3"
+    interval="$4"
+
+    # Validate required parameters
+    if [ -z "$node_name" ] || [ -z "$expected_status" ] || [ -z "$timeout" ]; then
+        log_error "check_node_status_with_timeout: missing required parameters"
+        return 1
+    fi
+
+    # Default interval = 1s
+    [ -z "$interval" ] && interval=1
+
+    log_info "Watching node '$node_name' for status '$expected_status' up to ${timeout}s (poll ${interval}s)"
+
+    remaining="$timeout"
+    while :; do
+        # Read the node's status and strip CR/LF; suppress read errors
+        # shellcheck disable=SC2002
+        status=$(cat "$node_name" 2>/dev/null | tr -d '\n' | tr -d '\r')
+
+        if [ "$status" = "$expected_status" ]; then
+            lapsed_time=$((timeout - remaining))
+            log_pass "Node '$node_name' reached expected status: '$status' after $lapsed_time(s)"
+            return 0
+        fi
+
+        # If out of time, report failure
+        if [ "$remaining" -le 0 ]; then
+            log_fail "Timeout ${timeout}s waiting for node '$node_name' to reach '$expected_status'. Last status: '${status}'"
+            return 1
+        fi
+
+        # Sleep and decrement remaining time
+        sleep "$interval"
+        remaining=$((remaining - interval))
+        # Clamp negative value to zero if interval > remaining
+        if [ "$remaining" -lt 0 ]; then
+            remaining=0
+        fi
+    done
+}
+
+get_primary_ufs_controller() {
+    user_partition=$1
+
+    if [ -z "$user_partition" ]; then
+        log_error 'usage: get_primary_ufs_controller MOUNT_POINT\n' >&2
+        return 2
+    fi
+
+    dev=$(mount | awk -v mp="$user_partition" '
+        $2=="on" && $3==mp { print $1; exit }')
+
+    if [ -z "$dev" ]; then
+        log_error 'could not find device for mount point "%s"\n' "$user_partition" >&2
+        return 1
+    fi
+
+    name=${dev##*/}
+
+    # Get the base block device:
+    case "$name" in
+        *p[0-9]*)
+            block=${name%p[0-9]*}
+            ;;
+        *[0-9])
+            block=${name%[0-9]*}
+            ;;
+        *)
+            block=$name
+            ;;
+    esac
+
+    if [ ! -e "/sys/block/$block" ]; then
+        log_error 'sysfs node /sys/block/%s not found\n' "$block" >&2
+        return 1
+    fi
+
+    # Resolve the symlink to the physical sysfs path
+    sys_path=$(
+        cd -P "/sys/block/$block" 2>/dev/null && pwd -P
+    )
+
+    if [ -z "$sys_path" ]; then
+        log_error 'failed to resolve /sys/block/%s\n' "$block" >&2
+        return 1
+    fi
+
+    # Extract the controller from symlink "ufs" or "ufshc"
+    controller=$(printf '%s\n' "$sys_path" | awk -F/ '
+        {
+            for (i=1; i<=NF; i++) {
+                # Match either "*.ufs" or "*.ufshc"
+                if ($i ~ /(^|[[:alnum:]_:-]+)\.ufs(hc)?$/) { print $i; exit }
+            }
+        }')
+
+    if [ -z "$controller" ]; then
+        linkline=$(ls -ld "/sys/block/$block" 2>/dev/null)
+        target=$(printf '%s\n' "$linkline" | awk '{
+            for (i=1; i<=NF; i++) if ($i=="->") {
+                start=index($0, "->"); print substr($0, start+3); exit
+            }
+        }')
+        if [ -n "$target" ]; then
+            controller=$(printf '%s\n' "$target" | awk -F/ '
+                {
+                    for (i=1; i<=NF; i++) {
+                        if ($i ~ /(^|[[:alnum:]_:-]+)\.ufs(hc)?$/) { print $i; exit }
+                    }
+                }')
+        fi
+    fi
+
+    if [ -z "$controller" ]; then
+        log_error 'could not locate UFS controller (*.ufs or *.ufshc) in sysfs for %s\n' "$block" >&2
+        return 1
+    fi
+
+    printf '%s\n' "$controller"
+    return 0
+}

@@ -1,0 +1,15 @@
+metadata:
+  name: ufs-clock-scaling
+  format: "Lava-Test Test Definition 1.0"
+  description: "Check whether UFS clock is scaled when load is applied"
+  os:
+    - linux
+  scope:
+    - functional
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/Storage/ufs_clock_scaling
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh ufs_clock_scaling.res || true

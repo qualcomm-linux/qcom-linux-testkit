@@ -1,7 +1,8 @@
 #!/bin/sh
 
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
-# SPDX-License-Identifier: BSD-3-Clause
+# SPDX-License-Identifier: BSD-3-Clause-Clear
+
 # Robustly find and source init_env
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 INIT_ENV=""
@@ -30,7 +31,7 @@ fi
 # shellcheck disable=SC1090,SC1091
 . "$TOOLS/functestlib.sh"
 
-TESTNAME="UFS_Validation"
+TESTNAME="ufs_read_writes"
 test_path=$(find_test_case_by_name "$TESTNAME")
 cd "$test_path" || exit 0
 res_file="./$TESTNAME.res"
@@ -38,35 +39,17 @@ res_file="./$TESTNAME.res"
 log_info "--------------------------------------------------"
 log_info "------------- Starting $TESTNAME Test ------------"
 
-check_dependencies dd
+check_dependencies dd awk readlink sed
 
-MANDATORY_CONFIGS="CONFIG_SCSI_UFSHCD CONFIG_SCSI_UFS_QCOM"
-OPTIONAL_CONFIGS="CONFIG_SCSI_UFSHCD_PLATFORM CONFIG_SCSI_UFSHCD_PCI CONFIG_SCSI_UFS_CDNS_PLATFORM CONFIG_SCSI_UFS_HISI CONFIG_SCSI_UFS_EXYNOS CONFIG_SCSI_UFS_ROCKCHIP CONFIG_SCSI_UFS_BSG"
-
-log_info "Checking mandatory kernel configs for UFS..."
-if ! check_kernel_config "$MANDATORY_CONFIGS" 2>/dev/null; then
-    log_skip "Missing mandatory UFS kernel configs: $MANDATORY_CONFIGS"
+# Run common UFS prechecks
+if ! ufs_precheck_common; then
+    log_skip "Required UFS configurations are not available"
     echo "$TESTNAME SKIP" > "$res_file"
     exit 0
 fi
+log_info "UFS prechecks successful"
 
-log_info "Checking optional kernel configs for UFS..."
-missing_optional=""
-for cfg in $OPTIONAL_CONFIGS; do
-    if ! check_kernel_config "$cfg" 2>/dev/null; then
-        log_info "[OPTIONAL] $cfg is not enabled"
-        missing_optional="$missing_optional $cfg"
-    fi
-done
-[ -n "$missing_optional" ] && log_info "Optional configs not present but continuing:$missing_optional"
-
-check_dt_nodes "/sys/bus/platform/devices/*ufs*" || {
-    echo "$TESTNAME SKIP" > "$res_file"
-    log_skip "UFS Device Tree nodes not found"
-    exit 0
-}
-
-block_dev=$(detect_ufs_partition_block)
+block_dev="$UFS_BLOCK_DEV"
 if [ -z "$block_dev" ]; then
     log_skip "No UFS block device found."
     echo "$TESTNAME SKIP" > "$res_file"
@@ -108,7 +91,7 @@ else
 fi
 
 log_info "Running I/O stress test (64MB read+write on tmpfile)..."
-tmpfile="$test_path/ufs_test.img"
+tmpfile="$test_path/${TESTNAME}.tmp"
 
 if echo | dd of=/dev/null conv=fsync 2>/dev/null; then
     DD_WRITE="dd if=/dev/zero of=$tmpfile bs=1M count=64 conv=fsync"
@@ -122,8 +105,12 @@ if $DD_WRITE >/dev/null 2>&1 &&
     log_pass "UFS I/O stress test passed"
     if command -v stat >/dev/null 2>&1; then
         stat --format="[INFO] Size: %s bytes File: %n" "$tmpfile"
+    elif command -v wc >/dev/null 2>&1; then
+        size=$(wc -c < "$tmpfile")
+        echo "[INFO] Size: $size bytes File: $tmpfile"
     else
-        find "$tmpfile" -printf "[INFO] Size: %s bytes File: %p\n"
+        # shellcheck disable=SC2012
+        ls -l "$tmpfile" | awk '{print "[INFO] Size: " $5 " bytes File: " $9}'
     fi
     rm -f "$tmpfile"
 else
@@ -132,8 +119,12 @@ else
     if [ -f "$tmpfile" ]; then
         if command -v stat >/dev/null 2>&1; then
             stat --format="[INFO] Size: %s bytes File: %n" "$tmpfile"
+        elif command -v wc >/dev/null 2>&1; then
+            size=$(wc -c < "$tmpfile")
+            echo "[INFO] Size: $size bytes File: $tmpfile"
         else
-            find "$tmpfile" -printf "[INFO] Size: %s bytes File: %p\n"
+            # shellcheck disable=SC2012
+            ls -l "$tmpfile" | awk '{print "[INFO] Size: " $5 " bytes File: " $9}'
         fi
         rm -f "$tmpfile"
     fi
