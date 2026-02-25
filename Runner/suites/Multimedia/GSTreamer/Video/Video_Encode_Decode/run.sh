@@ -671,10 +671,6 @@ if [ "$testMode" = "all" ] || [ "$testMode" = "encode" ]; then
   for codec in $codecs; do
     # Skip VP9 for encode tests (no v4l2vp9enc support in this test)
     if [ "$codec" = "vp9" ]; then
-      for res in $resolutions; do
-        total_tests=$((total_tests + 1))
-        skip_count=$((skip_count + 1))
-      done
       log_info "Skipping VP9 encode (not supported in this test suite)"
       continue
     fi
