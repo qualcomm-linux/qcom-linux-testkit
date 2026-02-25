@@ -1,0 +1,21 @@
+metadata:
+    format: Lava-Test Test Definition 1.0
+    name: dmabuf_config
+    description: "DMA-BUF kernel configuration and device tree validation"
+    maintainer:
+        - vnarapar@qti.qualcomm.com
+    os:
+        - openembedded
+    scope:
+        - functional
+    devices:
+        - rb3gen2
+        - qcs6490
+        - qcs8300
+        - qcs9100
+        - sa8775p
+
+run:
+    steps:
+        - cd $PWD/suites/Kernel/Baseport/dmabuf
+        - ./run.sh
