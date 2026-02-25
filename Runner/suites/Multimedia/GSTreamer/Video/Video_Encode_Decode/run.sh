@@ -554,10 +554,12 @@ if [ "$need_vp9_clip" -eq 1 ] && [ "$testMode" != "encode" ]; then
   
   vp9_clip_ivf="$OUTDIR/320_240_10fps.ivf"
   vp9_clip_webm="$OUTDIR/vp9_test_320p.webm"
+  vp9_decode_ready=0
   
   # Check if WebM file already exists
   if [ -f "$vp9_clip_webm" ]; then
     log_info "VP9 WebM clip already exists: $vp9_clip_webm"
+    vp9_decode_ready=1
   else
     # Download IVF file if not present
     if [ ! -f "$vp9_clip_ivf" ]; then
@@ -624,7 +626,6 @@ if [ "$need_vp9_clip" -eq 1 ] && [ "$testMode" != "encode" ]; then
     if [ ! -f "$vp9_clip_ivf" ]; then
       log_warn "VP9 clip not found after download attempt: $vp9_clip_ivf"
       log_warn "VP9 decode tests will be skipped"
-      skip_count=$((skip_count + 1))
     else
       # Convert IVF to WebM container using GStreamer for better compatibility
       if [ ! -f "$vp9_clip_webm" ]; then
@@ -640,22 +641,22 @@ if [ "$need_vp9_clip" -eq 1 ] && [ "$testMode" != "encode" ]; then
         if ! has_element ivfparse || [ -z "$mux" ]; then
           log_warn "Missing ivfparse or muxer (webmmux/matroskamux); VP9 decode tests will be skipped"
           rm -f "$vp9_clip_webm" 2>/dev/null || true
-          skip_count=$((skip_count + 1))
         else
           # Use GStreamer pipeline to remux IVF to WebM/Matroska container
           pipeline="filesrc location=\"$vp9_clip_ivf\" ! ivfparse ! $mux ! filesink location=\"$vp9_clip_webm\""
           if gstreamer_run_gstlaunch_timeout 30 "$pipeline" >/dev/null 2>&1; then
             log_pass "Successfully converted IVF to WebM (320x240)"
+            vp9_decode_ready=1
           else
             log_fail "GStreamer IVF to WebM conversion failed"
             log_warn "VP9 decode tests will be skipped (reason: GST conversion failure)"
             rm -f "$vp9_clip_webm" 2>/dev/null || true
             rm -f "$vp9_clip_ivf" 2>/dev/null || true
-            skip_count=$((skip_count + 1))
           fi
         fi
       else
         log_info "WebM file already exists: $vp9_clip_webm"
+        vp9_decode_ready=1
       fi
     fi
   fi
@@ -700,7 +701,12 @@ if [ "$testMode" = "all" ] || [ "$testMode" = "decode" ]; then
     # For VP9, only run once (not per resolution, as we use a fixed 320p clip)
     if [ "$codec" = "vp9" ]; then
       total_tests=$((total_tests + 1))
-      run_decode_test "$codec" "320p" || true
+      if [ "$vp9_decode_ready" -eq 1 ]; then
+        run_decode_test "$codec" "320p" || true
+      else
+        log_warn "Skipping VP9 decode test (clip not ready)"
+        skip_count=$((skip_count + 1))
+      fi
     else
       for res in $resolutions; do
         total_tests=$((total_tests + 1))
@@ -743,18 +749,19 @@ log_info "Failed: $fail_count"
 log_info "Skipped: $skip_count"
 
 # -------------------- Emit result --------------------
-if [ "$pass_count" -gt 0 ] && [ "$fail_count" -eq 0 ]; then
+if [ "$fail_count" -eq 0 ] && [ "$pass_count" -gt 0 ]; then
   result="PASS"
-  reason="All tests passed ($pass_count/$actual_total)"
-elif [ "$pass_count" -gt 0 ] && [ "$fail_count" -gt 0 ]; then
-  result="FAIL"
-  reason="Some tests failed (passed: $pass_count, failed: $fail_count, total: $actual_total)"
+  if [ "$skip_count" -gt 0 ]; then
+    reason="No failures (passed: $pass_count, skipped: $skip_count, total: $actual_total)"
+  else
+    reason="All tests passed ($pass_count/$actual_total)"
+  fi
 elif [ "$fail_count" -gt 0 ]; then
   result="FAIL"
-  reason="All tests failed ($fail_count/$actual_total)"
+  reason="Some tests failed (passed: $pass_count, failed: $fail_count, skipped: $skip_count, total: $actual_total)"
 else
   result="SKIP"
-  reason="No tests executed or all skipped"
+  reason="No tests passed (skipped: $skip_count, total: $actual_total)"
 fi
 
 case "$result" in
