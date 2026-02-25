@@ -26,7 +26,7 @@
                     {"Id": "PrefixHeaderMode", "Vtype": "String", "Value": "JOINED"},
                 ],
                     "DynamicControls": [],
-                    "MemoryType": "MMAP"
+					"MemoryType": "MMAP"
             }
         }
     ]
