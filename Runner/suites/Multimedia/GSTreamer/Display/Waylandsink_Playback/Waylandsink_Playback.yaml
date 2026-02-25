@@ -10,65 +10,40 @@ metadata:
     - linux
   scope:
     - functional
-
 params:
-  # Playback duration in seconds (default: 30)
-  # Priority: VIDEO_DURATION > RUNTIMESEC
-  VIDEO_DURATION: "30"
-  RUNTIMESEC: "" # fallback if VIDEO_DURATION is empty
-
-  # Test pattern for videotestsrc (default: smpte)
+  VIDEO_DURATION: "30" # seconds
   VIDEO_PATTERN: "smpte" # smpte|snow|black|white|red|green|blue|checkers-1|checkers-2|ball
-  
-  # Video width in pixels (default: 1920)
-  VIDEO_WIDTH: "1920"
-  
-  # Video height in pixels (default: 1080)
-  VIDEO_HEIGHT: "1080"
-  
-  # Frame rate (default: 30)
-  VIDEO_FRAMERATE: "30"
-  
-  # GStreamer debug level (default: 2)
-  # Priority: VIDEO_GST_DEBUG > GST_DEBUG_LEVEL
+  VIDEO_WIDTH: "1920" # pixels
+  VIDEO_HEIGHT: "1080" # pixels
+  VIDEO_FRAMERATE: "30" # fps
   VIDEO_GST_DEBUG: "2" # 1-9
-  GST_DEBUG_LEVEL: "" # fallback if VIDEO_GST_DEBUG is empty
-
 run:
   steps:
-    - REPO_PATH="$PWD"
-    - TESTNAME="Waylandsink_Playback"
-    - TEST_DIR="${REPO_PATH}/Runner/suites/Multimedia/GStreamer/Display/${TESTNAME}"
-
-    - cd "${TEST_DIR}"
-
-    # Build CLI args with the same priority rules as run.sh defaults.
     - |
-      CMD="./run.sh"
+        REPO_PATH=$PWD
+        cd Runner/suites/Multimedia/GSTreamer/Display/Waylandsink_Playback || exit 0
 
-      # Resolution
-      if [ -n "${VIDEO_WIDTH}" ] && [ -n "${VIDEO_HEIGHT}" ]; then
-        CMD="${CMD} --resolution ${VIDEO_WIDTH}x${VIDEO_HEIGHT}"
-      fi
+        CMD="./run.sh"
 
-      # Pattern
-      [ -n "${VIDEO_PATTERN}" ] && CMD="${CMD} --pattern ${VIDEO_PATTERN}"
+        # Use CLI args only (no exports). Script defaults apply if params are empty.
+        if [ -n "${VIDEO_WIDTH}" ] && [ -n "${VIDEO_HEIGHT}" ]; then
+          CMD="${CMD} --resolution ${VIDEO_WIDTH}x${VIDEO_HEIGHT}"
+        fi
+        if [ -n "${VIDEO_PATTERN}" ]; then
+          CMD="${CMD} --pattern ${VIDEO_PATTERN}"
+        fi
+        if [ -n "${VIDEO_DURATION}" ]; then
+          CMD="${CMD} --duration ${VIDEO_DURATION}"
+        fi
+        if [ -n "${VIDEO_FRAMERATE}" ]; then
+          CMD="${CMD} --framerate ${VIDEO_FRAMERATE}"
+        fi
+        if [ -n "${VIDEO_GST_DEBUG}" ]; then
+          CMD="${CMD} --gst-debug ${VIDEO_GST_DEBUG}"
+        fi
 
-      # Duration (VIDEO_DURATION > RUNTIMESEC)
-      DUR="${VIDEO_DURATION}"
-      [ -z "${DUR}" ] && DUR="${RUNTIMESEC}"
-      [ -n "${DUR}" ] && CMD="${CMD} --duration ${DUR}"
+        echo "[LAVA] Running: ${CMD}"
+        sh -c "${CMD}" || true
 
-      # Framerate
-      [ -n "${VIDEO_FRAMERATE}" ] && CMD="${CMD} --framerate ${VIDEO_FRAMERATE}"
-
-      # GST debug (VIDEO_GST_DEBUG > GST_DEBUG_LEVEL)
-      DBG="${VIDEO_GST_DEBUG}"
-      [ -z "${DBG}" ] && DBG="${GST_DEBUG_LEVEL}"
-      [ -n "${DBG}" ] && CMD="${CMD} --gst-debug ${DBG}"
-
-      echo "[LAVA] Running: ${CMD}"
-      sh -c "${CMD}" || true
-
-    # Send result to LAVA
-    - "${REPO_PATH}/Runner/utils/send-to-lava.sh" "${TESTNAME}.res" || true
+        # Send result to LAVA (single command line to avoid YAML parsing issues)
+        ${REPO_PATH}/Runner/utils/send-to-lava.sh Waylandsink_Playback.res
