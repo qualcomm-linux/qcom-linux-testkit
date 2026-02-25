@@ -4365,45 +4365,44 @@ get_pids_by_name() {
         done
 }
  
-# Backward-compatible wrapper:
-#   get_one_pid_by_name <name>        -> first PID
-#   get_one_pid_by_name <name> all    -> all PIDs (newline-separated)
+# get_one_pid_by_name <name> [all]
+#
+# Without 'all': prints the lowest (oldest) matching PID, returns 1 if none found.
+# With 'all':    prints all matching PIDs space-separated, returns 1 if none found.
+#
+# Note: /proc/<pid>/comm is truncated to 15 chars by the kernel.
 get_one_pid_by_name() {
-    name="$1"
-    mode="${2:-}"
+    gopn_name="$1"
+    gopn_mode="${2:-}"
+    gopn_pids=""
+    gopn_first_pid=""
  
-    pids=""
-    first_pid=""
+    for gopn_d in /proc/[0-9]*; do
+        [ -r "$gopn_d/comm" ] || continue
+        gopn_comm=$(tr -d '\r\n' <"$gopn_d/comm" 2>/dev/null)
+        [ "$gopn_comm" = "$gopn_name" ] || continue
  
-    for d in /proc/[0-9]*; do
-        [ -r "$d/comm" ] || continue
-        comm=$(tr -d '\r\n' <"$d/comm" 2>/dev/null)
-        [ "$comm" = "$name" ] || continue
+        gopn_pid=${gopn_d#/proc/}
+        gopn_pid=$(sanitize_pid "$gopn_pid")
+        [ -n "$gopn_pid" ] || continue
  
-        pid=${d#/proc/}
-        case "$pid" in
-            ''|*[!0-9]*)
-                continue
-                ;;
-        esac
- 
-        if [ -z "$first_pid" ] || [ "$pid" -lt "$first_pid" ]; then
-            first_pid="$pid"
+        if [ -z "$gopn_first_pid" ] || [ "$gopn_pid" -lt "$gopn_first_pid" ]; then
+            gopn_first_pid="$gopn_pid"
         fi
  
-        if [ -z "$pids" ]; then
-            pids="$pid"
+        if [ -z "$gopn_pids" ]; then
+            gopn_pids="$gopn_pid"
         else
-            pids="$pids $pid"
+            gopn_pids="$gopn_pids $gopn_pid"
         fi
     done
  
-    [ -n "$pids" ] || return 1
+    [ -n "$gopn_pids" ] || return 1
  
-    if [ "$mode" = "all" ]; then
-        printf '%s\n' "$pids"
+    if [ "$gopn_mode" = "all" ]; then
+        printf '%s\n' "$gopn_pids"
     else
-        printf '%s\n' "$first_pid"
+        printf '%s\n' "$gopn_first_pid"
     fi
 }
 
@@ -4474,46 +4473,58 @@ kill_process() {
     return 0
 }
 
+# is_process_running <name>
+#
+# Checks whether a process with the given <name> is currently running.
+#
+# Behavior:
+#  - Returns 0 if at least one matching process exists; returns 1 otherwise.
+#  - Logs a clear status line:
+#       "Process '<name>' is running."  OR  "Process '<name>' is not running."
+#  - Uses get_one_pid_by_name "<name>" all to gather *all* matching PIDs.
+#  - If multiple instances exist, logs the PID list as a summary.
 is_process_running() {
-    name="$1"
+    ipr_name="$1"
  
-    pids=$(get_one_pid_by_name "$name" all 2>/dev/null) || {
-        log_info "Process '$name' is not running."
+    ipr_pids=$(get_one_pid_by_name "$ipr_name" all 2>/dev/null) || {
+        log_info "Process '$ipr_name' is not running."
         return 1
     }
  
-    log_info "Process '$name' is running."
+    log_info "Process '$ipr_name' is running."
  
-    # Only add extra debug if multiple instances exist
-    case "$pids" in
+    # Extra summary only if multiple instances exist
+    case "$ipr_pids" in
         *" "*)
-            log_info "Process '$name' instances: $pids"
-            ;;
-        *)
-            return 0
+            log_info "Process '$ipr_name' instances: $ipr_pids"
             ;;
     esac
  
-    for pid in $pids; do
-        case "$pid" in
-            ''|*[!0-9]*)
-                continue
-                ;;
-        esac
+    # Always print PID -> cmdline/comm for CI debug (single or multiple)
+    # ShellCheck-safe iteration: split spaces to newlines.
+    printf '%s\n' "$ipr_pids" | tr ' ' '\n' | while IFS= read -r ipr_pid; do
+        ipr_pid=$(sanitize_pid "$ipr_pid")
+        [ -n "$ipr_pid" ] || continue
  
-        cmd=""
-        if [ -r "/proc/$pid/cmdline" ]; then
-            cmd=$(tr '\000' ' ' <"/proc/$pid/cmdline" 2>/dev/null)
+        # PID may have exited between collection and inspection
+        if [ ! -d "/proc/$ipr_pid" ]; then
+            log_info "Process '$ipr_name' PID $ipr_pid is no longer present in /proc"
+            continue
         fi
  
-        if [ -n "$cmd" ]; then
-            log_info "Process '$name' PID $pid cmdline: $cmd"
+        ipr_cmd=""
+        if [ -r "/proc/$ipr_pid/cmdline" ]; then
+            ipr_cmd=$(tr '\000' ' ' <"/proc/$ipr_pid/cmdline" 2>/dev/null)
+        fi
+ 
+        if [ -n "$ipr_cmd" ]; then
+            log_info "Process '$ipr_name' PID $ipr_pid cmdline: $ipr_cmd"
         else
-            comm=""
-            if [ -r "/proc/$pid/comm" ]; then
-                comm=$(tr -d '\r\n' <"/proc/$pid/comm" 2>/dev/null)
+            ipr_comm=""
+            if [ -r "/proc/$ipr_pid/comm" ]; then
+                ipr_comm=$(tr -d '\r\n' <"/proc/$ipr_pid/comm" 2>/dev/null)
             fi
-            log_info "Process '$name' PID $pid comm: ${comm:-unknown}"
+            log_info "Process '$ipr_name' PID $ipr_pid comm: ${ipr_comm:-unknown}"
         fi
     done
  
