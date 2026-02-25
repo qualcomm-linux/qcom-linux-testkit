@@ -63,23 +63,20 @@ run:
     - export GST_DEBUG_LEVEL="${GST_DEBUG_LEVEL}"
     - export VIDEO_CLIP_URL="${VIDEO_CLIP_URL}"
 
-    # Build CLI args for overrides (optional - can also rely on env vars)
     - |
-        CMD="./run.sh"
+      CMD="./run.sh"
 
-        # Use CLI args to override defaults if needed
-        # Note: Script reads env vars by default, CLI args override env vars
-        [ -n "${VIDEO_TEST_MODE}" ] && CMD="${CMD} --mode ${VIDEO_TEST_MODE}"
-        [ -n "${VIDEO_CODECS}" ] && CMD="${CMD} --codecs ${VIDEO_CODECS}"
-        [ -n "${VIDEO_RESOLUTIONS}" ] && CMD="${CMD} --resolutions ${VIDEO_RESOLUTIONS}"
-        [ -n "${VIDEO_DURATION}" ] && CMD="${CMD} --duration ${VIDEO_DURATION}"
-        [ -n "${VIDEO_FRAMERATE}" ] && CMD="${CMD} --framerate ${VIDEO_FRAMERATE}"
-        [ -n "${VIDEO_STACK}" ] && CMD="${CMD} --stack ${VIDEO_STACK}"
-        [ -n "${VIDEO_GST_DEBUG}" ] && CMD="${CMD} --gst-debug ${VIDEO_GST_DEBUG}"
-        [ -n "${VIDEO_CLIP_URL}" ] && CMD="${CMD} --clip-url ${VIDEO_CLIP_URL}"
+      [ -n "${VIDEO_TEST_MODE}" ] && CMD="${CMD} --mode ${VIDEO_TEST_MODE}"
+      [ -n "${VIDEO_CODECS}" ] && CMD="${CMD} --codecs ${VIDEO_CODECS}"
+      [ -n "${VIDEO_RESOLUTIONS}" ] && CMD="${CMD} --resolutions ${VIDEO_RESOLUTIONS}"
+      [ -n "${VIDEO_DURATION}" ] && CMD="${CMD} --duration ${VIDEO_DURATION}"
+      [ -n "${VIDEO_FRAMERATE}" ] && CMD="${CMD} --framerate ${VIDEO_FRAMERATE}"
+      [ -n "${VIDEO_STACK}" ] && CMD="${CMD} --stack ${VIDEO_STACK}"
+      [ -n "${VIDEO_GST_DEBUG}" ] && CMD="${CMD} --gst-debug ${VIDEO_GST_DEBUG}"
+      [ -n "${VIDEO_CLIP_URL}" ] && CMD="${CMD} --clip-url ${VIDEO_CLIP_URL}"
 
-        echo "[LAVA] Running: ${CMD}"
-        sh -c "${CMD}" || true
+      echo "[LAVA] Running: ${CMD}"
+      sh -c "${CMD}" || true
 
     # Send result to LAVA
-    - "${REPO_PATH}/Runner/utils/send-to-lava.sh" Video_Encode_Decode.res
+    - "${REPO_PATH}/Runner/utils/send-to-lava.sh" Video_Encode_Decode.res || true

@@ -44,30 +44,31 @@ run:
 
     # Build CLI args with the same priority rules as run.sh defaults.
     - |
-        CMD="./run.sh"
+      CMD="./run.sh"
 
-        # Resolution
-        if [ -n "${VIDEO_WIDTH}" ] && [ -n "${VIDEO_HEIGHT}" ]; then
-          CMD="${CMD} --resolution ${VIDEO_WIDTH}x${VIDEO_HEIGHT}"
-        fi
+      # Resolution
+      if [ -n "${VIDEO_WIDTH}" ] && [ -n "${VIDEO_HEIGHT}" ]; then
+        CMD="${CMD} --resolution ${VIDEO_WIDTH}x${VIDEO_HEIGHT}"
+      fi
 
-        # Pattern
-        [ -n "${VIDEO_PATTERN}" ] && CMD="${CMD} --pattern ${VIDEO_PATTERN}"
+      # Pattern
+      [ -n "${VIDEO_PATTERN}" ] && CMD="${CMD} --pattern ${VIDEO_PATTERN}"
 
-        # Duration (VIDEO_DURATION > RUNTIMESEC)
-        DUR="${VIDEO_DURATION}"
-        [ -z "${DUR}" ] && DUR="${RUNTIMESEC}"
-        [ -n "${DUR}" ] && CMD="${CMD} --duration ${DUR}"
+      # Duration (VIDEO_DURATION > RUNTIMESEC)
+      DUR="${VIDEO_DURATION}"
+      [ -z "${DUR}" ] && DUR="${RUNTIMESEC}"
+      [ -n "${DUR}" ] && CMD="${CMD} --duration ${DUR}"
 
-        # Framerate
-        [ -n "${VIDEO_FRAMERATE}" ] && CMD="${CMD} --framerate ${VIDEO_FRAMERATE}"
+      # Framerate
+      [ -n "${VIDEO_FRAMERATE}" ] && CMD="${CMD} --framerate ${VIDEO_FRAMERATE}"
 
-        # GST debug (VIDEO_GST_DEBUG > GST_DEBUG_LEVEL)
-        DBG="${VIDEO_GST_DEBUG}"
-        [ -z "${DBG}" ] && DBG="${GST_DEBUG_LEVEL}"
-        [ -n "${DBG}" ] && CMD="${CMD} --gst-debug ${DBG}"
+      # GST debug (VIDEO_GST_DEBUG > GST_DEBUG_LEVEL)
+      DBG="${VIDEO_GST_DEBUG}"
+      [ -z "${DBG}" ] && DBG="${GST_DEBUG_LEVEL}"
+      [ -n "${DBG}" ] && CMD="${CMD} --gst-debug ${DBG}"
 
-        echo "[LAVA] Running: ${CMD}"
-        sh -c "${CMD}" || true
+      echo "[LAVA] Running: ${CMD}"
+      sh -c "${CMD}" || true
 
-    - "${REPO_PATH}/Runner/utils/send-to-lava.sh" "${TESTNAME}.res"
+    # Send result to LAVA
+    - "${REPO_PATH}/Runner/utils/send-to-lava.sh" "${TESTNAME}.res" || true
