@@ -70,4 +70,4 @@ run:
       echo "[LAVA] Running: ${CMD}"
       sh -c "${CMD}" || true
 
-    - Runner/utils/send-to-lava.sh ${TESTNAME}.res
+    - "${REPO_PATH}/Runner/utils/send-to-lava.sh" "${TESTNAME}.res"
