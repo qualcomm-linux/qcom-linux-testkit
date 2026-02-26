@@ -10,40 +10,19 @@ metadata:
     - linux
   scope:
     - functional
+
 params:
-  VIDEO_DURATION: "30" # seconds
-  VIDEO_PATTERN: "smpte" # smpte|snow|black|white|red|green|blue|checkers-1|checkers-2|ball
-  VIDEO_WIDTH: "1920" # pixels
-  VIDEO_HEIGHT: "1080" # pixels
-  VIDEO_FRAMERATE: "30" # fps
-  VIDEO_GST_DEBUG: "2" # 1-9
+  VIDEO_DURATION: "30"    # seconds
+  VIDEO_PATTERN: "smpte"  # smpte|snow|black|white|red|green|blue|checkers-1|checkers-2|ball
+  VIDEO_WIDTH: "1920"     # pixels
+  VIDEO_HEIGHT: "1080"    # pixels
+  VIDEO_FRAMERATE: "30"   # fps
+  VIDEO_GST_DEBUG: "2"    # 1-9
+
 run:
   steps:
-    - |
-        REPO_PATH=$PWD
-        cd Runner/suites/Multimedia/GSTreamer/Display/Waylandsink_Playback || exit 0
-
-        CMD="./run.sh"
-
-        # Use CLI args only (no exports). Script defaults apply if params are empty.
-        if [ -n "${VIDEO_WIDTH}" ] && [ -n "${VIDEO_HEIGHT}" ]; then
-          CMD="${CMD} --resolution ${VIDEO_WIDTH}x${VIDEO_HEIGHT}"
-        fi
-        if [ -n "${VIDEO_PATTERN}" ]; then
-          CMD="${CMD} --pattern ${VIDEO_PATTERN}"
-        fi
-        if [ -n "${VIDEO_DURATION}" ]; then
-          CMD="${CMD} --duration ${VIDEO_DURATION}"
-        fi
-        if [ -n "${VIDEO_FRAMERATE}" ]; then
-          CMD="${CMD} --framerate ${VIDEO_FRAMERATE}"
-        fi
-        if [ -n "${VIDEO_GST_DEBUG}" ]; then
-          CMD="${CMD} --gst-debug ${VIDEO_GST_DEBUG}"
-        fi
-
-        echo "[LAVA] Running: ${CMD}"
-        sh -c "${CMD}" || true
-
-        # Send result to LAVA (single command line to avoid YAML parsing issues)
-        ${REPO_PATH}/Runner/utils/send-to-lava.sh Waylandsink_Playback.res
+    - REPO_PATH="$PWD"
+    - cd Runner/suites/Multimedia/GSTreamer/Display/Waylandsink_Playback/
+    - export VIDEO_DURATION VIDEO_PATTERN VIDEO_WIDTH VIDEO_HEIGHT VIDEO_FRAMERATE VIDEO_GST_DEBUG
+    - ./run.sh --resolution "${VIDEO_WIDTH}x${VIDEO_HEIGHT}" --pattern "${VIDEO_PATTERN}" --duration "${VIDEO_DURATION}" --framerate "${VIDEO_FRAMERATE}" --gst-debug "${VIDEO_GST_DEBUG}" || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh Waylandsink_Playback.res || true

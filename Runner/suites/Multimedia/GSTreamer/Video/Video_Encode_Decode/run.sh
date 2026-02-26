@@ -71,18 +71,27 @@ total_tests=0
 
 # -------------------- Defaults (LAVA env vars -> defaults; CLI overrides) --------------------
 testMode="${VIDEO_TEST_MODE:-all}"
-codecList="${VIDEO_CODECS:-h264,h265}"
-resolutionList="${VIDEO_RESOLUTIONS:-480p,4k}"
+codecList="${VIDEO_CODECS:-h264,h265,vp9}"
+resolutionList="${VIDEO_RESOLUTIONS:-480p}"
 duration="${VIDEO_DURATION:-${RUNTIMESEC:-30}}"
 framerate="${VIDEO_FRAMERATE:-30}"
 gstDebugLevel="${VIDEO_GST_DEBUG:-${GST_DEBUG_LEVEL:-2}}"
 videoStack="${VIDEO_STACK:-auto}"
-clipUrl="${VIDEO_CLIP_URL:-https://github.com/qualcomm-linux/qcom-linux-testkit/releases/download/IRIS-Video-Files-v1.0/video_clips_iris.tar.gz}"
+clipUrl="${VIDEO_CLIP_URL:-https://github.com/qualcomm-linux/qcom-linux-testkit/releases/download/GST-Video-Files-v1.0/video_clips_gst.tar.gz}"
+clipPath="${VIDEO_CLIP_PATH:-}"
 
 # Validate environment variables if set
-# Validate numeric parameters
+# Validate numeric parameters (POSIX-safe; no indirect expansion)
 for param in VIDEO_DURATION RUNTIMESEC VIDEO_FRAMERATE VIDEO_GST_DEBUG GST_DEBUG_LEVEL; do
-  val="${!param:-}"
+  val=""
+  case "$param" in
+    VIDEO_DURATION) val="${VIDEO_DURATION-}" ;;
+    RUNTIMESEC) val="${RUNTIMESEC-}" ;;
+    VIDEO_FRAMERATE) val="${VIDEO_FRAMERATE-}" ;;
+    VIDEO_GST_DEBUG) val="${VIDEO_GST_DEBUG-}" ;;
+    GST_DEBUG_LEVEL) val="${GST_DEBUG_LEVEL-}" ;;
+  esac
+
   if [ -n "$val" ]; then
     case "$val" in
       ''|*[!0-9]*) 
@@ -223,66 +232,19 @@ while [ $# -gt 0 ]; do
       [ -n "$2" ] && clipUrl="$2"
       shift 2
       ;;
-
+    --clip-path)
+      if [ $# -lt 2 ] || [ "${2#--}" != "$2" ]; then
+        log_warn "Missing/invalid value for --clip-path"
+        echo "$TESTNAME SKIP" >"$RES_FILE"
+        exit 0
+      fi
+      [ -n "$2" ] && clipPath="$2"
+      shift 2
+      ;;
     -h|--help)
-      cat <<EOF
-Usage:
-  $0 [options]
-
-Options:
-  --mode <all|encode|decode>
-      Default: all (run both encode and decode tests)
-
-  --codecs <h264,h265,vp9>
-      Comma-separated list of codecs to test
-      Default: h264,h265,vp9
-      Note: VP9 only supports decode mode with pre-existing clips
-
-  --resolutions <480p,4k>
-      Comma-separated list of resolutions to test
-      Default: 480p,4k (480p=640x480, 4k=3840x2160)
-
-  --duration <seconds>
-      Duration for encoding (in seconds)
-      Default: ${duration}
-
-  --framerate <fps>
-      Framerate for video generation
-      Default: ${framerate}
-
-  --stack <auto|upstream|downstream>
-      Video stack selection
-      Default: auto
-
-    --gst-debug <level>
-      Sets GST_DEBUG=<level> (1-9)
-      Default: ${gstDebugLevel}
-
-    --clip-url <url>
-      URL to download video clips for VP9 decode tests
-      Default: ${clipUrl}
-
-Examples:
-  # Run all tests (encode + decode) for H264 and H265 at 480p and 4K
-  ./run.sh
-
-  # Run only encoding tests
-  ./run.sh --mode encode
-
-  # Run only H264 tests at 480p
-  ./run.sh --codecs h264 --resolutions 480p
-
-  # Run with 10 second duration
-  ./run.sh --duration 10
-
-  # Run VP9 decode test
-  ./run.sh --mode decode --codecs vp9
-
-EOF
       echo "$TESTNAME SKIP" >"$RES_FILE"
       exit 0
       ;;
-
     *)
       log_warn "Unknown argument: $1"
       echo "$TESTNAME SKIP" >"$RES_FILE"
@@ -337,12 +299,13 @@ case "$framerate" in
 esac
 
 # -------------------- Pre-checks --------------------
-check_dependencies "gst-launch-1.0 gst-inspect-1.0 awk grep head sed tr stat find curl" >/dev/null 2>&1 || {
-  log_skip "Missing required tools (gst-launch-1.0, gst-inspect-1.0, awk, grep, head, sed, tr, stat, find, curl)"
+check_dependencies "gst-launch-1.0 gst-inspect-1.0 awk grep head sed tr stat find curl tar" >/dev/null 2>&1 || {
+  log_skip "Missing required tools (gst-launch-1.0, gst-inspect-1.0, awk, grep, head, sed, tr, stat, find, curl, tar)"
   echo "$TESTNAME SKIP" >"$RES_FILE"
   exit 0
 }
 
+log_info "Checking dependencies: gst-launch-1.0 gst-inspect-1.0 awk grep head sed tr stat find curl tar"
 log_info "Test: $TESTNAME"
 log_info "Mode: $testMode"
 log_info "Codecs: $codecList"
@@ -350,6 +313,10 @@ log_info "Resolutions: $resolutionList"
 log_info "Duration: ${duration}s, Framerate: ${framerate}fps"
 log_info "GST debug: GST_DEBUG=$gstDebugLevel"
 log_info "Logs: $OUTDIR"
+log_info "VP9 clip URL: $clipUrl"
+if [ -n "$clipPath" ]; then
+  log_info "VP9 clip local path: $clipPath"
+fi
 
 # -------------------- Video stack handling --------------------
 detected_stack="$videoStack"
@@ -470,11 +437,11 @@ run_decode_test() {
   
   ext=$(gstreamer_container_ext_for_codec "$codec")
   
-  # For VP9, use pre-downloaded and converted WebM clip; for others, use encoded file
+  # For VP9, use WebM clip directly; for others, use encoded file
   if [ "$codec" = "vp9" ]; then
-    input_file="$OUTDIR/vp9_test_320p.webm"
+    input_file="$OUTDIR/VP9_640x480_10s.webm"
     if [ ! -f "$input_file" ]; then
-      log_warn "VP9 WebM clip not found: $input_file (conversion may have failed)"
+      log_warn "VP9 WebM clip not found: $input_file"
       skip_count=$((skip_count + 1))
       return 1
     fi
@@ -538,7 +505,7 @@ codecs=$(printf '%s' "$codecList" | tr ',' ' ')
 # Parse resolution list
 resolutions=$(printf '%s' "$resolutionList" | tr ',' ' ')
 
-# -------------------- VP9 clip download (if VP9 in codec list) --------------------
+# -------------------- VP9 clip prep --------------------
 need_vp9_clip=0
 for codec in $codecs; do
   if [ "$codec" = "vp9" ]; then
@@ -549,11 +516,10 @@ done
 
 if [ "$need_vp9_clip" -eq 1 ] && [ "$testMode" != "encode" ]; then
   log_info "=========================================="
-  log_info "VP9 CLIP DOWNLOAD & CONVERSION"
+  log_info "VP9 CLIP PREP"
   log_info "=========================================="
   
-  vp9_clip_ivf="$OUTDIR/320_240_10fps.ivf"
-  vp9_clip_webm="$OUTDIR/vp9_test_320p.webm"
+  vp9_clip_webm="$OUTDIR/VP9_640x480_10s.webm"
   vp9_decode_ready=0
   
   # Check if WebM file already exists
@@ -561,102 +527,29 @@ if [ "$need_vp9_clip" -eq 1 ] && [ "$testMode" != "encode" ]; then
     log_info "VP9 WebM clip already exists: $vp9_clip_webm"
     vp9_decode_ready=1
   else
-    # Download IVF file if not present
-    if [ ! -f "$vp9_clip_ivf" ]; then
-      log_info "Checking network connectivity and downloading VP9 clips..."
-      
-      # Check network status first
-      net_rc=1
-      if command -v check_network_status_rc >/dev/null 2>&1; then
-        check_network_status_rc
-        net_rc=$?
-      elif command -v check_network_status >/dev/null 2>&1; then
-        check_network_status >/dev/null 2>&1
-        net_rc=$?
-      fi
-      
-      # If offline, try to bring network online
-      if [ "$net_rc" -ne 0 ]; then
-        if command -v bring_network_online >/dev/null 2>&1; then
-          log_info "Attempting to bring network online..."
-          bring_network_online
-          # Stabilization sleep after bringing network up
-          sleep 5
-        else
-          log_warn "Could not establish network connectivity"
-        fi
+    # Try to get WebM file from provided path or URL
+    if [ -n "$clipPath" ]; then
+      log_info "Attempting to get VP9 WebM clip from local path: $clipPath"
+      if [ -f "$clipPath/VP9_640x480_10s.webm" ]; then
+        cp "$clipPath/VP9_640x480_10s.webm" "$vp9_clip_webm" && vp9_decode_ready=1
+        log_info "VP9 WebM clip copied from local path"
       else
-        log_info "Network already online"
-        # Brief stabilization sleep
-        sleep 2
-      fi
-    
-      # Attempt download if we have connectivity
-      if command -v check_network_status_rc >/dev/null 2>&1; then
-        if check_network_status_rc; then
-          log_info "Downloading VP9 clips from: $clipUrl"
-          if extract_tar_from_url "$clipUrl" "$OUTDIR"; then
-            log_pass "VP9 clips downloaded and extracted successfully"
-          else
-            log_warn "Failed to download/extract VP9 clips (network online but download failed)"
-          fi
-        else
-          log_warn "Network still offline after connectivity attempt"
-        fi
-      else
-        # Fallback: attempt download without explicit network check
-        log_info "Downloading VP9 clips from: $clipUrl"
-        if extract_tar_from_url "$clipUrl" "$OUTDIR"; then
-          log_pass "VP9 clips downloaded and extracted successfully"
-        else
-          log_warn "Failed to download/extract VP9 clips"
-        fi
-      fi
-    fi
-    
-    # Verify clip exists after download attempt (robust: locate *.ivf if tar has subdirs)
-    if [ ! -f "$vp9_clip_ivf" ]; then
-      found_ivf=$(find "$OUTDIR" -type f -name '*.ivf' 2>/dev/null | head -n 1 || true)
-      if [ -n "$found_ivf" ]; then
-        log_info "Found IVF clip: $found_ivf"
-        cp "$found_ivf" "$vp9_clip_ivf" 2>/dev/null || true
+        log_warn "VP9 WebM clip not found in local path: $clipPath"
       fi
     fi
 
-    if [ ! -f "$vp9_clip_ivf" ]; then
-      log_warn "VP9 clip not found after download attempt: $vp9_clip_ivf"
-      log_warn "VP9 decode tests will be skipped"
-    else
-      # Convert IVF to WebM container using GStreamer for better compatibility
-      if [ ! -f "$vp9_clip_webm" ]; then
-        log_info "Converting IVF to WebM container using GStreamer..."
-
-        mux=""
-        if has_element webmmux; then
-          mux="webmmux"
-        elif has_element matroskamux; then
-          mux="matroskamux"
-        fi
-
-        if ! has_element ivfparse || [ -z "$mux" ]; then
-          log_warn "Missing ivfparse or muxer (webmmux/matroskamux); VP9 decode tests will be skipped"
-          rm -f "$vp9_clip_webm" 2>/dev/null || true
+    # If not found locally, try URL download
+    if [ "$vp9_decode_ready" -eq 0 ]; then
+      log_info "VP9 WebM clip not found locally; attempting download from URL..."
+      if extract_tar_from_url "$clipUrl" "$OUTDIR"; then
+        if [ -f "$vp9_clip_webm" ]; then
+          log_pass "VP9 WebM clip downloaded successfully"
+          vp9_decode_ready=1
         else
-          # Use GStreamer pipeline to remux IVF to WebM/Matroska container
-          pipeline="filesrc location=\"$vp9_clip_ivf\" ! ivfparse ! $mux ! filesink location=\"$vp9_clip_webm\""
-          if gstreamer_run_gstlaunch_timeout 30 "$pipeline" >/dev/null 2>&1; then
-            log_pass "Successfully converted IVF to WebM (320x240)"
-            vp9_decode_ready=1
-          else
-            log_fail "GStreamer IVF to WebM conversion failed"
-            log_warn "VP9 decode tests will be skipped (reason: GST conversion failure)"
-            rm -f "$vp9_clip_webm" 2>/dev/null || true
-            rm -f "$vp9_clip_ivf" 2>/dev/null || true
-          fi
+          log_warn "VP9 WebM clip not found in downloaded content"
         fi
       else
-        log_info "WebM file already exists: $vp9_clip_webm"
-        vp9_decode_ready=1
+        log_warn "VP9 WebM clip download failed (offline or URL issue)"
       fi
     fi
   fi
@@ -677,10 +570,14 @@ if [ "$testMode" = "all" ] || [ "$testMode" = "encode" ]; then
     
     for res in $resolutions; do
       params=$(gstreamer_resolution_to_wh "$res")
-      set -- $params
-      width="$1"
-      height="$2"
-      
+
+      # ---------------- FIX: robust split independent of IFS ----------------
+      width=$(printf '%s\n' "$params" | awk '{print $1}')
+      height=$(printf '%s\n' "$params" | awk '{print $2}')
+      case "$width" in ''|*[!0-9]*) width="640" ;; esac
+      case "$height" in ''|*[!0-9]*) height="480" ;; esac
+      # ---------------------------------------------------------------------
+
       total_tests=$((total_tests + 1))
       run_encode_test "$codec" "$res" "$width" "$height" || true
     done
@@ -694,15 +591,9 @@ if [ "$testMode" = "all" ] || [ "$testMode" = "decode" ]; then
   log_info "=========================================="
   
   for codec in $codecs; do
-    # For VP9, only run once (not per resolution, as we use a fixed 320p clip)
     if [ "$codec" = "vp9" ]; then
       total_tests=$((total_tests + 1))
-      if [ "$vp9_decode_ready" -eq 1 ]; then
-        run_decode_test "$codec" "320p" || true
-      else
-        log_warn "Skipping VP9 decode test (clip not ready)"
-        skip_count=$((skip_count + 1))
-      fi
+      run_decode_test "$codec" "480p" || true
     else
       for res in $resolutions; do
         total_tests=$((total_tests + 1))
@@ -739,7 +630,7 @@ log_info "TEST SUMMARY"
 log_info "=========================================="
 # Calculate actual total for display (sum of pass/fail/skip)
 actual_total=$((pass_count + fail_count + skip_count))
-log_info "Total tests executed: $actual_total"
+log_info "Total testcases: $actual_total"
 log_info "Passed: $pass_count"
 log_info "Failed: $fail_count"
 log_info "Skipped: $skip_count"

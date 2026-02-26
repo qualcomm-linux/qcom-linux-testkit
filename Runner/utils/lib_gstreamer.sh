@@ -885,3 +885,81 @@ gstreamer_build_v4l2_decode_pipeline() {
   
   return 0
 }
+
+prepare_vp9_from_local_path() {
+  src="$1"
+  outdir="$2"
+  ivf_out="$3"
+  webm_out="$4"
+
+  [ -n "$src" ] || return 1
+  [ -e "$src" ] || return 1
+
+  # If directory: search inside for clips
+  if [ -d "$src" ]; then
+    found_webm=$(find "$src" -type f -name '*.webm' 2>/dev/null | head -n 1 || true)
+    found_ivf=$(find "$src" -type f -name '*.ivf' 2>/dev/null | head -n 1 || true)
+
+    if [ -n "$found_webm" ] && [ ! -f "$webm_out" ]; then
+      cp "$found_webm" "$webm_out" 2>/dev/null || true
+    fi
+    if [ -n "$found_ivf" ] && [ ! -f "$ivf_out" ]; then
+      cp "$found_ivf" "$ivf_out" 2>/dev/null || true
+    fi
+
+    [ -f "$webm_out" ] || [ -f "$ivf_out" ]
+    return $?
+  fi
+
+  # If file: extract to a staging dir (tar/tar.gz/tgz/tar.xz/txz supported)
+  if [ -f "$src" ]; then
+    stage="$outdir/local_clip_stage"
+    mkdir -p "$stage" >/dev/null 2>&1 || true
+
+    case "$src" in
+      *.tar)
+        tar -xf "$src" -C "$stage" >/dev/null 2>&1 || return 1
+        ;;
+      *.tar.gz|*.tgz)
+        tar -xzf "$src" -C "$stage" >/dev/null 2>&1 || return 1
+        ;;
+      *.tar.xz|*.txz)
+        tar -xJf "$src" -C "$stage" >/dev/null 2>&1 || return 1
+        ;;
+      *.xz)
+        # Could be .tar.xz already handled above, else try decompressing single file
+        if command -v xz >/dev/null 2>&1; then
+          base=$(basename "$src" .xz)
+          out="$stage/$base"
+          xz -dc "$src" >"$out" 2>/dev/null || return 1
+          case "$out" in
+            *.tar)
+              tar -xf "$out" -C "$stage" >/dev/null 2>&1 || return 1
+              ;;
+          esac
+        else
+          return 1
+        fi
+        ;;
+      *)
+        # Unknown file type; still try as a direct clip file
+        stage="$src"
+        ;;
+    esac
+
+    found_webm=$(find "$stage" -type f -name '*.webm' 2>/dev/null | head -n 1 || true)
+    found_ivf=$(find "$stage" -type f -name '*.ivf' 2>/dev/null | head -n 1 || true)
+
+    if [ -n "$found_webm" ] && [ ! -f "$webm_out" ]; then
+      cp "$found_webm" "$webm_out" 2>/dev/null || true
+    fi
+    if [ -n "$found_ivf" ] && [ ! -f "$ivf_out" ]; then
+      cp "$found_ivf" "$ivf_out" 2>/dev/null || true
+    fi
+
+    [ -f "$webm_out" ] || [ -f "$ivf_out" ]
+    return $?
+  fi
+
+  return 1
+}

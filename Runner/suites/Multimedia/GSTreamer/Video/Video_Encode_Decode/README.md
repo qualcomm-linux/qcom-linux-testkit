@@ -5,14 +5,14 @@ This directory contains the **Video_Encode_Decode** validation test for Qualcomm
 It validates video **encoding and decoding** using **GStreamer (`gst-launch-1.0`)** with V4L2 hardware-accelerated codecs:
 - **v4l2h264enc** / **v4l2h264dec** (H.264/AVC)
 - **v4l2h265enc** / **v4l2h265dec** (H.265/HEVC)
-- **v4l2vp9dec** (VP9 decode only - uses pre-downloaded clips converted to WebM)
+- **v4l2vp9dec** (VP9 decode only - uses pre-downloaded WebM clips)
 
 The script is designed to be **CI/LAVA-friendly**:
 - Writes **PASS/FAIL/SKIP** into `Video_Encode_Decode.res`
 - Always **exits 0** (even on FAIL/SKIP) to avoid terminating LAVA jobs early
 - Logs the **final `gst-launch-1.0` command** to console and to log files
 - Uses **videotestsrc** plugin to generate test patterns for H.264/H.265 (no external video files needed)
-- For VP9: Downloads pre-encoded clips from git repo (requires network connectivity)
+- For VP9: Downloads WebM clips from git repo (requires network connectivity)
 
 ---
 
@@ -113,14 +113,13 @@ By default, logs are written relative to the script working directory:
   decode_h264_4k.log
   decode_h265_480p.log
   decode_h265_4k.log
-  decode_vp9_320p.log        # VP9 decode test log
+  decode_vp9_480p.log        # VP9 decode test log
   encoded/                   # Encoded video files
     encode_h264_480p.mp4
     encode_h264_4k.mp4
     encode_h265_480p.mp4
     encode_h265_4k.mp4
-  320_240_10fps.ivf          # Downloaded VP9 clip (IVF format)
-  vp9_test_320p.webm         # Converted VP9 clip (WebM format - used for decode test)
+  VP9_640x480_10s.webm      # Downloaded VP9 clip (WebM format)
   dmesg/                     # dmesg scan outputs (if available)
 ```
 
@@ -144,7 +143,7 @@ By default, logs are written relative to the script working directory:
 ### Parser Elements
 - `h264parse` - H.264 stream parser
 - `h265parse` - H.265 stream parser
-- `ivfparse` - IVF container parser (for VP9)
+- `matroskademux` - WebM/Matroska container demuxer (for VP9)
 
 ### Network Requirements (for VP9)
 - Network connectivity (Ethernet or WiFi)
@@ -335,27 +334,10 @@ Where:
 - Parser ensures proper stream format
 - `fakesink` discards output (no display needed for validation)
 
-### VP9 Clip Conversion Pipeline
-
-Before decoding, the downloaded IVF file is converted to WebM (Matroska) container:
-
-```
-filesrc location=320_240_10fps.ivf 
-  ! ivfparse 
-  ! matroskamux 
-  ! filesink location=vp9_test_320p.webm
-```
-
-Where:
-- `ivfparse` parses the downloaded IVF container
-- `matroskamux` remuxes to WebM/Matroska container
-- **If conversion fails**: Test is skipped with reason "GST conversion failure"
-- **No IVF fallback**: The test will not use IVF directly if conversion fails
-
 ### Decoding Pipeline (VP9)
 
 ```
-filesrc location=vp9_test_320p.webm 
+filesrc location=VP9_640x480_10s.webm 
   ! matroskademux 
   ! v4l2vp9dec 
   ! videoconvert 
@@ -364,9 +346,8 @@ filesrc location=vp9_test_320p.webm
 
 Where:
 - `matroskademux` parses WebM/Matroska container format
-- Input file is the converted WebM file (not IVF directly)
-- Resolution: 320x240
-- **Important**: Test skips if WebM conversion failed (no IVF fallback)
+- Input file is the downloaded WebM file
+- Resolution: 640x480
 
 ---
 
@@ -416,45 +397,19 @@ Where:
 
 ### H) VP9 decode fails with "Input file not found"
 - Ensure network connectivity is available
-- Check if clip was downloaded: `ls -l logs/Video_Encode_Decode/320_240_10fps.ivf`
+- Check if clip was downloaded: `ls -l logs/Video_Encode_Decode/VP9_640x480_10s.webm`
 - Manually download if needed:
   ```bash
   cd logs/Video_Encode_Decode/
-  wget https://github.com/qualcomm-linux/qcom-linux-testkit/releases/download/IRIS-Video-Files-v1.0/video_clips_iris.tar.gz
-  tar -xzf video_clips_iris.tar.gz
+  wget https://github.com/qualcomm-linux/qcom-linux-testkit/releases/download/GST-Video-Files-v1.0/video_clips_gst.tar.gz
+  tar -xzf video_clips_gst.tar.gz
   ```
-- Check network connectivity:
+### I) VP9 decode fails with "matroskademux not found"
+- Ensure `matroskademux` GStreamer plugin is installed:
   ```bash
-  ping -c 3 github.com
+  gst-inspect-1.0 matroskademux
   ```
-
-### I) VP9 decode fails with "ivfparse not found"
-- Ensure `ivfparse` GStreamer plugin is installed:
-  ```bash
-  gst-inspect-1.0 ivfparse
-  ```
-- This is typically part of `gst-plugins-bad` package
-
-### J) VP9 test skips with "GST conversion failure"
-- The IVF to WebM conversion failed
-- Check if `matroskamux` plugin is available:
-  ```bash
-  gst-inspect-1.0 matroskamux
-  ```
-- Check if `ivfparse` plugin is available:
-  ```bash
-  gst-inspect-1.0 ivfparse
-  ```
-- Manually test the conversion:
-  ```bash
-  cd logs/Video_Encode_Decode/
-  gst-launch-1.0 filesrc location=320_240_10fps.ivf ! ivfparse ! matroskamux ! filesink location=test.webm
-  ```
-- Check GStreamer debug output for errors:
-  ```bash
-  GST_DEBUG=3 gst-launch-1.0 filesrc location=320_240_10fps.ivf ! ivfparse ! matroskamux ! filesink location=test.webm
-  ```
-- **Note**: The test will NOT fall back to using IVF directly. If conversion fails, the test skips to ensure proper container format validation
+- This is typically part of `gst-plugins-good` package
 
 ---
 
@@ -639,6 +594,6 @@ The test supports these environment variables (can be set in LAVA job definition
 - The test uses `ensure_network_online()` to establish connectivity automatically
 - If network is unavailable, VP9 tests will SKIP (not FAIL)
 - Downloaded clips are cached in the output directory for subsequent runs
-- VP9 clip: 320_240_10fps.ivf (320x240 resolution, IVF container)
+- VP9 clip: VP9_640x480_10s.webm (640x480 resolution, WebM container)
 
 ---
