@@ -638,7 +638,7 @@ log_info "Skipped: $skip_count"
 if [ "$fail_count" -eq 0 ] && [ "$pass_count" -gt 0 ]; then
   result="PASS"
   if [ "$skip_count" -gt 0 ]; then
-    reason="No failures (passed: $pass_count, skipped: $skip_count, total: $actual_total)"
+    reason="No failures (passed: $pass_count, failed: $fail_count, skipped: $skip_count, total: $actual_total)"
   else
     reason="All tests passed ($pass_count/$actual_total)"
   fi
