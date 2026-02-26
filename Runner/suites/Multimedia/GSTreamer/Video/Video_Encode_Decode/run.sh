@@ -520,18 +520,16 @@ if [ "$need_vp9_clip" -eq 1 ] && [ "$testMode" != "encode" ]; then
   log_info "=========================================="
   
   vp9_clip_webm="$OUTDIR/VP9_640x480_10s.webm"
-  vp9_decode_ready=0
   
   # Check if WebM file already exists
   if [ -f "$vp9_clip_webm" ]; then
     log_info "VP9 WebM clip already exists: $vp9_clip_webm"
-    vp9_decode_ready=1
   else
     # Try to get WebM file from provided path or URL
     if [ -n "$clipPath" ]; then
       log_info "Attempting to get VP9 WebM clip from local path: $clipPath"
       if [ -f "$clipPath/VP9_640x480_10s.webm" ]; then
-        cp "$clipPath/VP9_640x480_10s.webm" "$vp9_clip_webm" && vp9_decode_ready=1
+        cp "$clipPath/VP9_640x480_10s.webm" "$vp9_clip_webm"
         log_info "VP9 WebM clip copied from local path"
       else
         log_warn "VP9 WebM clip not found in local path: $clipPath"
@@ -539,12 +537,13 @@ if [ "$need_vp9_clip" -eq 1 ] && [ "$testMode" != "encode" ]; then
     fi
 
     # If not found locally, try URL download
-    if [ "$vp9_decode_ready" -eq 0 ]; then
+    if [ ! -f "$vp9_clip_webm" ]; then
       log_info "VP9 WebM clip not found locally; attempting download from URL..."
       if extract_tar_from_url "$clipUrl" "$OUTDIR"; then
-        if [ -f "$vp9_clip_webm" ]; then
-          log_pass "VP9 WebM clip downloaded successfully"
-          vp9_decode_ready=1
+        # Move the extracted file from current directory to OUTDIR
+        if [ -f "VP9_640x480_10s.webm" ]; then
+          mv "VP9_640x480_10s.webm" "$vp9_clip_webm"
+          log_pass "VP9 WebM clip downloaded and moved successfully"
         else
           log_warn "VP9 WebM clip not found in downloaded content"
         fi
@@ -564,7 +563,7 @@ if [ "$testMode" = "all" ] || [ "$testMode" = "encode" ]; then
   for codec in $codecs; do
     # Skip VP9 for encode tests (no v4l2vp9enc support in this test)
     if [ "$codec" = "vp9" ]; then
-      log_info "Skipping VP9 encode (not supported in this test suite)"
+      log_info "Skipping VP9 encode (not supported)"
       continue
     fi
     
