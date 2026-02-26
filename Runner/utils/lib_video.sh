@@ -1137,32 +1137,73 @@ video_block_upstream_strict() {
 # udev refresh + prune stale /dev/video* and /dev/media* nodes
 # -----------------------------------------------------------------------------
 video_clean_and_refresh_v4l() {
+    # Refresh udev-managed nodes (best-effort). Do NOT prune/delete anything.
     if video_exist_cmd udevadm; then
         log_info "udev trigger: video4linux/media"
         udevadm trigger --subsystem-match=video4linux --action=change 2>/dev/null || true
         udevadm trigger --subsystem-match=media --action=change 2>/dev/null || true
         udevadm settle 2>/dev/null || true
     fi
-
-    for n in /dev/video*; do
-        [ -e "$n" ] || continue
-        bn=$(basename "$n")
-        if [ ! -e "/sys/class/video4linux/$bn" ]; then
-            log_info "Pruning stale node: $n"
-            rm -f "$n" 2>/dev/null || true
-        fi
-    done
-
-    for n in /dev/media*; do
-        [ -e "$n" ] || continue
-        bn=$(basename "$n")
-        if [ ! -e "/sys/class/media/$bn" ]; then
-            log_info "Pruning stale node: $n"
-            rm -f "$n" 2>/dev/null || true
-        fi
+ 
+    # Recreate missing /dev nodes using /sys/dev/char mapping.
+    # Additive-only: never modify existing nodes (no chmod/chgrp on existing).
+    for sysdev in /sys/dev/char/*; do
+        [ -e "$sysdev" ] || continue
+ 
+        majmin=$(basename "$sysdev")
+        case "$majmin" in
+            *:*)
+                major=${majmin%:*}
+                minor=${majmin#*:}
+                ;;
+            *)
+                continue
+                ;;
+        esac
+ 
+        case "$major" in ''|*[!0-9]*) continue ;; esac
+        case "$minor" in ''|*[!0-9]*) continue ;; esac
+ 
+        tgt=$(readlink -f "$sysdev" 2>/dev/null || true)
+        [ -n "$tgt" ] || continue
+ 
+        # Media controller nodes
+        case "$tgt" in
+            */media[0-9]*)
+                bn=$(basename "$tgt")   # e.g. media0
+                devnode="/dev/$bn"
+ 
+                # Never touch if it already exists
+                if [ -e "$devnode" ]; then
+                    continue
+                fi
+ 
+                log_info "Recreating missing node: $devnode (c $major $minor)"
+                mknod "$devnode" c "$major" "$minor" 2>/dev/null || true
+                chgrp video "$devnode" 2>/dev/null || true
+                chmod 660 "$devnode" 2>/dev/null || true
+                ;;
+        esac
+ 
+        # V4L2 video nodes
+        case "$tgt" in
+            */video4linux/video[0-9]*)
+                bn=$(basename "$tgt")   # e.g. video0
+                devnode="/dev/$bn"
+ 
+                # Never touch if it already exists
+                if [ -e "$devnode" ]; then
+                    continue
+                fi
+ 
+                log_info "Recreating missing node: $devnode (c $major $minor)"
+                mknod "$devnode" c "$major" "$minor" 2>/dev/null || true
+                chgrp video "$devnode" 2>/dev/null || true
+                chmod 660 "$devnode" 2>/dev/null || true
+                ;;
+        esac
     done
 }
-
 # -----------------------------------------------------------------------------
 # DMESG triage
 # -----------------------------------------------------------------------------
