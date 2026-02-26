@@ -1,0 +1,22 @@
+{
+    "ExecutionMode": "Sequential",
+    "TestCases": [
+        {
+            "Name" : "H264 Decoder Testcase",
+            "TestConfigs" : {
+                "Domain": "Decoder",
+                "InputPath": "./256_144p_h264.h264",
+                "NumFrames": -1,
+                "CodecName": "AVC",
+                "PixelFormat": "NV12",
+                "Width": 256,
+                "Height": 144,
+                "Outputpath": "",
+                "_Outputpath_original": "./output_256_144p_h264.yuv",
+                "InputBufferCount": 16,
+                "OutputBufferCount": 16,
+				"MemoryType": "MMAP"
+            }
+        }
+    ]
+}

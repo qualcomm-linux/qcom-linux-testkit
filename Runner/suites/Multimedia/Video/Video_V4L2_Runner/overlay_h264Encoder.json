@@ -1,0 +1,32 @@
+{
+    "ExecutionMode": "Sequential",
+    "TestCases": [
+        {
+            "Name" : "Encoder Testcase",
+            "TestConfigs" : {
+                "Domain": "Encoder",
+                "InputPath": "./Animation_144p.yuv",
+                "NumFrames": -1,
+                "CodecName": "AVC",
+                "PixelFormat": "NV12",
+                "Width": 256,
+                "Height": 144,
+                "Outputpath": "",
+                "_Outputpath_original": "./Output_Animation_144p.h264",
+                "InputBufferCount": 32,
+                "OutputBufferCount": 32,
+                "OperatingRate": 10,
+                "FrameRate": 10,
+                "StaticControls": [
+                    {"Id": "Profile",          "Vtype": "String", "Value": "BASELINE"},
+                    {"Id": "Level",            "Vtype": "String", "Value": "5.0"},
+                    {"Id": "FrameRC",          "Vtype": "Int",    "Value": 1},
+                    {"Id": "BitRate",          "Vtype": "Int",    "Value": 18000000},
+                    {"Id": "BitRateMode",      "Vtype": "String", "Value": "CBR"},
+                    {"Id": "PrefixHeaderMode", "Vtype": "String", "Value": "JOINED"},
+                ],
+                    "DynamicControls": []
+            }
+        }
+    ]
+}

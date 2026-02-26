@@ -62,7 +62,7 @@
                     }
                 ],
                 "DynamicControls": [],
-                "MemoryType": "MMAP"
+				"MemoryType": "MMAP"
             }
         }
     ]
