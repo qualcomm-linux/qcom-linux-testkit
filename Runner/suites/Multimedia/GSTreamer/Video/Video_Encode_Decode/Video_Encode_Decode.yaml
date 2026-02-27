@@ -1,0 +1,30 @@
+metadata:
+  name: gstreamer-video-encode-decode
+  format: "Lava-Test Test Definition 1.0"
+  description: >
+    Video encode/decode validation using GStreamer (gst-launch-1.0) with V4L2 hardware-accelerated codecs.
+    VP9 clips can be provided via VIDEO_CLIP_PATH (local dir/file/archive) or downloaded via VIDEO_CLIP_URL.
+  os:
+    - linux
+  scope:
+    - functional
+ 
+params:
+  VIDEO_TEST_MODE: "all"
+  VIDEO_CODECS: "h264,h265,vp9"
+  VIDEO_RESOLUTIONS: "480p"
+  VIDEO_DURATION: "30"
+  VIDEO_FRAMERATE: "30"
+  VIDEO_STACK: "auto"
+  VIDEO_GST_DEBUG: "2"
+  VIDEO_CLIP_URL: ""
+  VIDEO_CLIP_PATH: ""   # dir/file/archive (tar/tar.gz/tar.xz/xz)
+
+run:
+  steps:
+    - REPO_PATH="$PWD"
+    - cd Runner/suites/Multimedia/GSTreamer/Video/Video_Encode_Decode/
+    - export VIDEO_TEST_MODE VIDEO_CODECS VIDEO_RESOLUTIONS VIDEO_DURATION VIDEO_FRAMERATE
+    - export VIDEO_STACK VIDEO_GST_DEBUG VIDEO_CLIP_URL VIDEO_CLIP_PATH
+    - ./run.sh --mode "${VIDEO_TEST_MODE}" --codecs "${VIDEO_CODECS}" --resolutions "${VIDEO_RESOLUTIONS}" --duration "${VIDEO_DURATION}" --framerate "${VIDEO_FRAMERATE}" --stack "${VIDEO_STACK}" --gst-debug "${VIDEO_GST_DEBUG}" --clip-url "${VIDEO_CLIP_URL}" --clip-path "${VIDEO_CLIP_PATH}" || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh Video_Encode_Decode.res || true

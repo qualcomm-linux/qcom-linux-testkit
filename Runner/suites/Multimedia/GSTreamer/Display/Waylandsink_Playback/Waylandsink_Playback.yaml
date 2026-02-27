@@ -1,0 +1,28 @@
+metadata:
+  name: Waylandsink_Playback
+  format: "Lava-Test Test Definition 1.0"
+  description: >
+    GStreamer waylandsink playback validation with Weston/Wayland server checks
+    on Qualcomm Linux platforms. Uses videotestsrc to generate test patterns
+    and displays them via waylandsink. Validates display connectivity and
+    Wayland compositor functionality.
+  os:
+    - linux
+  scope:
+    - functional
+
+params:
+  VIDEO_DURATION: "30"    # seconds
+  VIDEO_PATTERN: "smpte"  # smpte|snow|black|white|red|green|blue|checkers-1|checkers-2|ball
+  VIDEO_WIDTH: "1920"     # pixels
+  VIDEO_HEIGHT: "1080"    # pixels
+  VIDEO_FRAMERATE: "30"   # fps
+  VIDEO_GST_DEBUG: "2"    # 1-9
+
+run:
+  steps:
+    - REPO_PATH="$PWD"
+    - cd Runner/suites/Multimedia/GSTreamer/Display/Waylandsink_Playback/
+    - export VIDEO_DURATION VIDEO_PATTERN VIDEO_WIDTH VIDEO_HEIGHT VIDEO_FRAMERATE VIDEO_GST_DEBUG
+    - ./run.sh --resolution "${VIDEO_WIDTH}x${VIDEO_HEIGHT}" --pattern "${VIDEO_PATTERN}" --duration "${VIDEO_DURATION}" --framerate "${VIDEO_FRAMERATE}" --gst-debug "${VIDEO_GST_DEBUG}" || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh Waylandsink_Playback.res || true
