@@ -1,0 +1,20 @@
+metadata:
+  name: gstreamer-ai-ml
+  format: "Lava-Test Test Definition 1.0"
+  description: "Validates AI/ML inference pipelines using GStreamer (gst-launch-1.0) with Qualcomm AI RT (QAIRT) runtime components for image classification and object detection use cases."
+  os:
+    - linux
+  scope:
+    - functional
+
+params:
+  TIMEOUT: 60                    # Timeout in seconds for each pipeline (default in script is 60)
+  GST_DEBUG_LEVEL: 2             # GStreamer debug level (default in script is 2)
+  OUTPUT_VIDEO_PATH: "./video_out.mp4"  # Path for encoded output video
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Multimedia/GSTreamer/AI_ML/
+    - ./run.sh --timeout "${TIMEOUT}" --gstdebug "${GST_DEBUG_LEVEL}" --output-video "${OUTPUT_VIDEO_PATH}" || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh AI_ML.res || true
