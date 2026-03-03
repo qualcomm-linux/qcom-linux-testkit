@@ -1,7 +1,6 @@
 #!/bin/sh
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
-# SPDX-License-Identifier: BSD-3-Clause-Clear
-# Probe failure / deferred probe detector using kernel logs + devices_deferred
+# SPDX-License-Identifier: BSD-3-Clause# Probe failure / deferred probe detector using kernel logs + devices_deferred
 
 # ---------- Repo env + helpers ----------
 SCRIPT_DIR="$(

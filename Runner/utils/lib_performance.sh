@@ -1,7 +1,6 @@
 #!/bin/sh
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
-# SPDX-License-Identifier: BSD-3-Clause-Clear
-# Common performance-related helpers for KPI-style tests.
+# SPDX-License-Identifier: BSD-3-Clause# Common performance-related helpers for KPI-style tests.
 
 # ---------------------------------------------------------------------------
 # Logging fallback (avoid repeated command -v checks)

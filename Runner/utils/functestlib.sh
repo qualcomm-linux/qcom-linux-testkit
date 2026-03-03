@@ -1,7 +1,6 @@
 #!/bin/sh
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
-# SPDX-License-Identifier: BSD-3-Clause-Clear
-
+# SPDX-License-Identifier: BSD-3-Clause
 # --- Logging helpers ---
 log() {
     level=$1
@@ -4335,91 +4334,201 @@ ensure_network_online() {
     return 1
 }
 
+# Return the first numeric token found in input (helps when tools return multi-PID / noisy output)
+sanitize_pid() {
+    # Return first numeric token from input (single PID) or empty
+    printf '%s' "$1" \
+      | tr -d '\r' \
+      | tr -c '0-9 \n' ' ' \
+      | awk '{print $1; exit}'
+}
+
+get_pids_by_name() {
+    name="$1"
+ 
+    if [ -z "$name" ]; then
+        return 1
+    fi
+ 
+    # Print one PID per line (sanitized), for all processes whose basename matches $name
+    ps -ef 2>/dev/null | awk -v n="$name" '
+        NR==1 { next }
+        {
+            cmd=$8
+            sub(".*/", "", cmd)
+            if (cmd == n) { print $2 }
+        }' | while IFS= read -r p; do
+            p_clean=$(sanitize_pid "$p")
+            if [ -n "$p_clean" ]; then
+                printf '%s\n' "$p_clean"
+            fi
+        done
+}
+ 
+# get_one_pid_by_name <name> [all]
+#
+# Without 'all': prints the lowest (oldest) matching PID, returns 1 if none found.
+# With 'all':    prints all matching PIDs space-separated, returns 1 if none found.
+#
+# Note: /proc/<pid>/comm is truncated to 15 chars by the kernel.
+get_one_pid_by_name() {
+    gopn_name="$1"
+    gopn_mode="${2:-}"
+    gopn_pids=""
+    gopn_first_pid=""
+ 
+    for gopn_d in /proc/[0-9]*; do
+        [ -r "$gopn_d/comm" ] || continue
+        gopn_comm=$(tr -d '\r\n' <"$gopn_d/comm" 2>/dev/null)
+        [ "$gopn_comm" = "$gopn_name" ] || continue
+ 
+        gopn_pid=${gopn_d#/proc/}
+        gopn_pid=$(sanitize_pid "$gopn_pid")
+        [ -n "$gopn_pid" ] || continue
+ 
+        if [ -z "$gopn_first_pid" ] || [ "$gopn_pid" -lt "$gopn_first_pid" ]; then
+            gopn_first_pid="$gopn_pid"
+        fi
+ 
+        if [ -z "$gopn_pids" ]; then
+            gopn_pids="$gopn_pid"
+        else
+            gopn_pids="$gopn_pids $gopn_pid"
+        fi
+    done
+ 
+    [ -n "$gopn_pids" ] || return 1
+ 
+    if [ "$gopn_mode" = "all" ]; then
+        printf '%s\n' "$gopn_pids"
+    else
+        printf '%s\n' "$gopn_first_pid"
+    fi
+}
+
+# Wait until PID is alive (kill -0 succeeds) or timeout seconds elapse.
+wait_pid_alive() {
+    pid="$1"
+    timeout="${2:-10}"
+ 
+    pid=$(sanitize_pid "$pid")
+    case "$pid" in
+        ''|*[!0-9]*)
+            return 1
+            ;;
+    esac
+ 
+    i=0
+    while [ "$i" -lt "$timeout" ]; do
+        if kill -0 "$pid" 2>/dev/null; then
+            return 0
+        fi
+        sleep 1
+        i=$((i + 1))
+    done
+    return 1
+}
+
+# Kill process for the given PID
 kill_process() {
     PID="$1"
     KILL_TERM_GRACE="${KILL_TERM_GRACE:-5}"
     KILL_KILL_GRACE="${KILL_KILL_GRACE:-5}"
     SELF_PID="$$"
-
+ 
+    case "$PID" in
+        ''|*[!0-9]*)
+            log_warn "Refusing to kill non-numeric PID '$PID'"
+            return 1
+            ;;
+    esac
+ 
     # Safety checks
     if [ "$PID" -eq 1 ] || [ "$PID" -eq "$SELF_PID" ]; then
         log_warn "Refusing to kill PID $PID (init or self)"
         return 1
     fi
-
-    # Check if process exists
+ 
     if ! kill -0 "$PID" 2>/dev/null; then
         log_info "Process $PID not running"
         return 0
     fi
-
+ 
     log_info "Sending SIGTERM to PID $PID"
     kill -TERM "$PID" 2>/dev/null
     sleep "$KILL_TERM_GRACE"
-
+ 
     if kill -0 "$PID" 2>/dev/null; then
         log_info "Sending SIGKILL to PID $PID"
         kill -KILL "$PID" 2>/dev/null
         sleep "$KILL_KILL_GRACE"
     fi
-
-    # Final check
+ 
     if kill -0 "$PID" 2>/dev/null; then
         log_warn "Failed to kill process $PID"
         return 1
-    else
-        log_info "Process $PID terminated successfully"
-        return 0
     fi
+ 
+    log_info "Process $PID terminated successfully"
+    return 0
 }
 
+# is_process_running <name>
+#
+# Checks whether a process with the given <name> is currently running.
+#
+# Behavior:
+#  - Returns 0 if at least one matching process exists; returns 1 otherwise.
+#  - Logs a clear status line:
+#       "Process '<name>' is running."  OR  "Process '<name>' is not running."
+#  - Uses get_one_pid_by_name "<name>" all to gather *all* matching PIDs.
+#  - If multiple instances exist, logs the PID list as a summary.
 is_process_running() {
-    if [ -z "$1" ]; then
-        log_info "Usage: is_running <process_name_or_pid>"
+    ipr_name="$1"
+ 
+    ipr_pids=$(get_one_pid_by_name "$ipr_name" all 2>/dev/null) || {
+        log_info "Process '$ipr_name' is not running."
         return 1
-    fi
+    }
  
-    input="$1"
-    case "$input" in
-    ''|*[!0-9]*)
-        # Non-numeric input: treat as process name
-        found=0
+    log_info "Process '$ipr_name' is running."
  
-        # Prefer pgrep if available (ShellCheck-friendly, efficient)
-        if command -v pgrep >/dev/null 2>&1; then
-            if pgrep -x "$input" >/dev/null 2>&1; then
-                found=1
-            fi
-        else
-            # POSIX fallback: avoid 'ps | grep' to silence SC2009
-            # Match as a separate word to mimic 'grep -w'
-            if ps -e 2>/dev/null | awk -v name="$input" '
-                $0 ~ ("(^|[[:space:]])" name "([[:space:]]|$)") { exit 0 }
-                END { exit 1 }
-            '; then
-                found=1
-            fi
-        fi
- 
-        if [ "$found" -eq 1 ]; then
-            log_info "Process '$input' is running."
-            return 0
-        else
-            log_info "Process '$input' is not running."
-            return 1
-        fi
-        ;;
-    *)
-        # Numeric input: treat as PID
-        if kill -0 "$input" 2>/dev/null; then
-            log_info "Process with PID $input is running."
-            return 0
-        else
-            log_info "Process with PID $input is not running."
-            return 1
-        fi
-        ;;
+    # Extra summary only if multiple instances exist
+    case "$ipr_pids" in
+        *" "*)
+            log_info "Process '$ipr_name' instances: $ipr_pids"
+            ;;
     esac
+ 
+    # Always print PID -> cmdline/comm for CI debug (single or multiple)
+    # ShellCheck-safe iteration: split spaces to newlines.
+    printf '%s\n' "$ipr_pids" | tr ' ' '\n' | while IFS= read -r ipr_pid; do
+        ipr_pid=$(sanitize_pid "$ipr_pid")
+        [ -n "$ipr_pid" ] || continue
+ 
+        # PID may have exited between collection and inspection
+        if [ ! -d "/proc/$ipr_pid" ]; then
+            log_info "Process '$ipr_name' PID $ipr_pid is no longer present in /proc"
+            continue
+        fi
+ 
+        ipr_cmd=""
+        if [ -r "/proc/$ipr_pid/cmdline" ]; then
+            ipr_cmd=$(tr '\000' ' ' <"/proc/$ipr_pid/cmdline" 2>/dev/null)
+        fi
+ 
+        if [ -n "$ipr_cmd" ]; then
+            log_info "Process '$ipr_name' PID $ipr_pid cmdline: $ipr_cmd"
+        else
+            ipr_comm=""
+            if [ -r "/proc/$ipr_pid/comm" ]; then
+                ipr_comm=$(tr -d '\r\n' <"/proc/$ipr_pid/comm" 2>/dev/null)
+            fi
+            log_info "Process '$ipr_name' PID $ipr_pid comm: ${ipr_comm:-unknown}"
+        fi
+    done
+ 
+    return 0
 }
 
 get_pid() {
@@ -4427,20 +4536,25 @@ get_pid() {
         log_info "Usage: get_pid <process_name>"
         return 1
     fi
-    
+
     process_name="$1"
-    
-    # Try multiple ps variants for compatibility
-    pid=$(ps -e | awk -v name="$process_name" '$NF == name { print $1 }')
-    [ -z "$pid" ] && pid=$(ps -A | awk -v name="$process_name" '$NF == name { print $1 }')
-    [ -z "$pid" ] && pid=$(ps -aux | awk -v name="$process_name" '$11 == name { print $2 }')
-    [ -z "$pid" ] && pid=$(ps -ef | awk -v name="$process_name" '$NF == name { print $2 }')
-    
-    if [ -n "$pid" ]; then
-        echo "$pid"
-        return 0
-    else
-        log_info "Process '$process_name' not found."
-        return 1
+    pid=""
+
+    # Prefer pgrep if available (fast + clean)
+    if command -v pgrep >/dev/null 2>&1; then
+        pid=$(pgrep -x "$process_name" 2>/dev/null | awk 'NR==1 {print; exit}')
     fi
+
+    # POSIX fallback: ps
+    if [ -z "$pid" ]; then
+        pid=$(ps -e 2>/dev/null | awk -v name="$process_name" '$NF == name { print $1; exit }')
+    fi
+
+    if [ -n "$pid" ]; then
+        printf '%s\n' "$pid"
+        return 0
+    fi
+
+    log_info "Process '$process_name' not found."
+    return 1
 }

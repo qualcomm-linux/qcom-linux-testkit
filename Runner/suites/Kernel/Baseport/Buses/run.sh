@@ -1,8 +1,7 @@
 #!/bin/sh
 
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
-# SPDX-License-Identifier: BSD-3-Clause-Clear
-# Robustly find and source init_env
+# SPDX-License-Identifier: BSD-3-Clause# Robustly find and source init_env
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 INIT_ENV=""
 SEARCH="$SCRIPT_DIR"

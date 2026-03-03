@@ -1,30 +1,23 @@
 metadata:
-  name: libcamera-cam
+  name: Libcamera_cam
   format: "Lava-Test Test Definition 1.0"
-  description: "This repository contains a **POSIX shell** test harness for exercising `libcamera` via its `cam` utility, with robust post‑capture validation and device‑tree (DT) checks. It is designed to run on embedded Linux targets (BusyBox-friendly), including Qualcomm RB platforms."
+  description: "Run libcamera 'cam' capture with post-capture validation and DT checks (non-strict)."
   os:
     - linux
   scope:
     - functional
 
 params:
-
-  INDEX: ""  # Camera index (default: auto from `cam -l`; `all` = run on every camera)
-  COUNT: 10  # Frames to capture (default: 10)
-  OUT_DIR: "./cam_out"  # Output directory (default: ./cam_out)
-  SAVE_AS_PPM: "yes"  # Save frames as ppm or bin, default: ppm
-  ARGS: ""  # Extra args passed to `cam`
-  STRICT: "yes"  # Enforce strict validation (default)
-  DUP_MAX_RATIO: 0.5  # Fail if max duplicate bucket/total > R (default: 0.5)
-  BIN_TOL_PCT: 5  # BIN size tolerance vs bytesused in % (default: 5)
+  INDEX: "auto"
+  COUNT: "10"
+  OUT_DIR: "./cam_out"
+  DUP_MAX_RATIO: "0.5"
+  BIN_TOL_PCT: "5"
+  ARGS: "" # optional; keep empty by default
 
 run:
   steps:
-    - REPO_PATH=$PWD
+    - REPO_PATH="$PWD"
     - cd Runner/suites/Multimedia/Camera/Libcamera_cam
-    - PPM_OPTION="--ppm"
-    - if [ "${SAVE_AS_PPM}" != "yes" ]; then PPM_OPTION="--bin"; fi
-    - STRICT_OPTION="--strict"
-    - if [ "${STRICT}" != "yes" ]; then STRICT_OPTION="--no-strict"; fi
-    - ./run.sh --index "${INDEX}" --count "${COUNT}" --out "${OUT_DIR}" --dup-max-ratio "${DUP_MAX_RATIO}" --bin-tol-pct "${BIN_TOL_PCT}" "${PPM_OPTION}" "${STRICT_OPTION}" || true
-    - $REPO_PATH/Runner/utils/send-to-lava.sh Libcamera_cam.res || true
+    - ./run.sh --index "${INDEX}" --count "${COUNT}" --out "${OUT_DIR}" --dup-max-ratio "${DUP_MAX_RATIO}" --bin-tol-pct "${BIN_TOL_PCT}" --args "${ARGS}" --bin --no-strict || true
+    - ${REPO_PATH}/Runner/utils/send-to-lava.sh Libcamera_cam.res

@@ -1,7 +1,6 @@
 #!/bin/sh
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
-# SPDX-License-Identifier: BSD-3-Clause-Clear
-
+# SPDX-License-Identifier: BSD-3-Clause
 # KMSCube Validator Script (Yocto-Compatible, POSIX sh)
 
 # --- Robustly find and source init_env ---------------------------------------

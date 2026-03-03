@@ -1,8 +1,7 @@
 #!/bin/sh
 
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
-# SPDX-License-Identifier: BSD-3-Clause-Clear
-
+# SPDX-License-Identifier: BSD-3-Clause
 # Validate USB HID device detection
 # Requires at least one USB HID peripheral (keyboard/mouse, etc.) connected to a USB Host port.
 

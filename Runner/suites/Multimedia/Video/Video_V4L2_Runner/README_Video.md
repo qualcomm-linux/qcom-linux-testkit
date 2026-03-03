@@ -1,7 +1,7 @@
 # Iris V4L2 Video Test Scripts for Qualcomm Linux (Yocto)
 
 **Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.**  
-**SPDX-License-Identifier: BSD-3-Clause-Clear**
+**SPDX-License-Identifier: BSD-3-Clause**
 
 ---
 

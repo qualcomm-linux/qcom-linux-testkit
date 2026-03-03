@@ -224,4 +224,4 @@ Keep `CSV_FILE` empty by default (to avoid extra artifacts) and enable only when
 ## License
 
 Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.  
-SPDX-License-Identifier: BSD-3-Clause-Clear
+SPDX-License-Identifier: BSD-3-Clause

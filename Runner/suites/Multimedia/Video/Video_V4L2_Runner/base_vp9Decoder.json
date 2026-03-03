@@ -1,0 +1,23 @@
+{
+    "ExecutionMode": "Sequential",
+    "TestCases": [
+        {
+            "Name": "VP9 Decode TestCase",
+            "TestConfigs": {
+                "Domain": "Decoder",
+                "InputPath": "./320_240_10fps.ivf",
+                "NumFrames": -1,
+                "CodecName": "VP9",
+                "PixelFormat": "NV12",
+                "Width": 320,
+                "Height": 240,
+		        "Outputpath": "",
+                "_Outputpath_original": "./320_240_10fps_vp9.yuv",
+                "InputBufferCount": 16,
+                "OutputBufferCount": 16,
+                "UseMinBufferCtrl": false,
+				"MemoryType": "MMAP"
+            }
+        }
+    ]
+}

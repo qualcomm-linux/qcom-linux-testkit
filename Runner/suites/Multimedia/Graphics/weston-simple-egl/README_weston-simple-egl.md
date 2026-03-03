@@ -1,7 +1,6 @@
 Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 
-SPDX-License-Identifier: BSD-3-Clause-Clear
-# weston-simple-egl GraphicsTest Scripts for Qualcomm Linux based platform (Yocto)
+SPDX-License-Identifier: BSD-3-Clause# weston-simple-egl GraphicsTest Scripts for Qualcomm Linux based platform (Yocto)
 # Overview
 
 Graphics scripts automates the validation of Graphics OpenGL ES 2.0 capabilities on the Qualcomm RB3 Gen2 platform running a Yocto-based Linux system. It utilizes Weston-Simple-EGL test app which is publicly available at https://github.com/krh/weston

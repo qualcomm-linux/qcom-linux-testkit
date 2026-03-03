@@ -155,5 +155,4 @@ FASTRPC_DOMAIN=2 FASTRPC_USER_PD=1 ./run.sh
 
 ## License
 
-SPDX-License-Identifier: BSD-3-Clause-Clear  
-Copyright (c) Qualcomm Technologies, Inc.
+SPDX-License-Identifier: BSD-3-ClauseCopyright (c) Qualcomm Technologies, Inc.

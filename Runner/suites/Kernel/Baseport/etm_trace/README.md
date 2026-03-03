@@ -1,7 +1,6 @@
 # ETM_Trace  Validation test
 Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.  
-SPDX-License-Identifier: BSD-3-Clause-Clear
-
+SPDX-License-Identifier: BSD-3-Clause
 ## Overview
 This test case validates the CoreSight Embedded Trace Macrocell (ETM) trace capture functionality on the target device. It ensures that the ETM source and TMC sink are properly enabled and that trace data can be successfully captured and validated.
 

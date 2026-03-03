@@ -1,7 +1,6 @@
 #!/bin/sh
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
-# SPDX-License-Identifier: BSD-3-Clause-Clear
-###############################################################################
+# SPDX-License-Identifier: BSD-3-Clause###############################################################################
 # DRM display + Weston + Wayland helpers
 # (assumes log_info/log_warn/log_error and run_with_timeout from functestlib.sh)
 ###############################################################################

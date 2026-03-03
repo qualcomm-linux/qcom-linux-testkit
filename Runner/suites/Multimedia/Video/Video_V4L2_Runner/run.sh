@@ -1,7 +1,6 @@
 #!/bin/sh
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
-# SPDX-License-Identifier: BSD-3-Clause-Clear
-# IRIS Video V4L2 runner with stack selection via utils/lib_video.sh
+# SPDX-License-Identifier: BSD-3-Clause# IRIS Video V4L2 runner with stack selection via utils/lib_video.sh
 
 # ---------- Repo env + helpers ----------
 SCRIPT_DIR="$(

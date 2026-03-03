@@ -1,7 +1,6 @@
 # STM CPU Trace  Validation test
 Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.  
-SPDX-License-Identifier: BSD-3-Clause-Clear
-
+SPDX-License-Identifier: BSD-3-Clause
 ## Overview
 This test case validates the System Trace Macrocell (STM) functionality on the target device by configuring the STM source, enabling tracing, and capturing trace data. It ensures that the STM infrastructure is correctly initialized and capable of generating trace output.
 

@@ -1,8 +1,7 @@
 #!/bin/sh
 
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
-# SPDX-License-Identifier: BSD-3-Clause-Clear
-#
+# SPDX-License-Identifier: BSD-3-Clause#
 # Robustly find and source init_env
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 INIT_ENV=""
@@ -48,6 +47,66 @@ STOP_TO="${STOP_TO:-10}"
 START_TO="${START_TO:-10}"
 POLL_I="${POLL_I:-1}"
 
+# --- CLI ----------------------------------------------------------------------
+# Default: do NOT do SSR (stop/start). Enable explicitly with --ssr
+DO_SSR=0
+
+usage() {
+    echo "Usage: $0 [--ssr] [--stop-to SEC] [--start-to SEC] [--poll-i SEC]" >&2
+    echo " --ssr Perform WPSS stop/start (SSR). Default: OFF" >&2
+    echo " --stop-to SEC Stop timeout (default: $STOP_TO)" >&2
+    echo " --start-to SEC Start timeout (default: $START_TO)" >&2
+    echo " --poll-i SEC Poll interval (default: $POLL_I)" >&2
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --ssr)
+            DO_SSR=1
+            shift
+            ;;
+        --stop-to)
+            if [ $# -lt 2 ]; then
+                log_fail "Missing value for --stop-to"
+                usage
+                exit 2
+            fi
+            STOP_TO="$2"
+            shift 2
+            ;;
+        --start-to)
+            if [ $# -lt 2 ]; then
+                log_fail "Missing value for --start-to"
+                usage
+                exit 2
+            fi
+            START_TO="$2"
+            shift 2
+            ;;
+        --poll-i)
+            if [ $# -lt 2 ]; then
+                log_fail "Missing value for --poll-i"
+                usage
+                exit 2
+            fi
+            POLL_I="$2"
+            shift 2
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            log_warn "Unknown argument: $1"
+            usage
+            exit 2
+            ;;
+    esac
+done
+
+log_info "Tunables: STOP_TO=$STOP_TO START_TO=$START_TO POLL_I=$POLL_I"
+log_info "SSR control: DO_SSR=$DO_SSR (0=no stop/start, 1=do stop/start)"
+
 # ---------- Try remoteproc path ----------
 rp_entries=""
 dt_says_present=0
@@ -92,43 +151,49 @@ if [ -n "$rp_entries" ]; then
             continue
         fi
 
-        # Stop
-        dump_rproc_logs "$rpath" before-stop
-        t0=$(date +%s)
-        log_info "$inst: stopping"
-        if stop_remoteproc "$rpath" && wait_remoteproc_state "$rpath" offline "$STOP_TO" "$POLL_I"; then
-            t1=$(date +%s)
-            log_pass "$inst: stop PASS ($((t1 - t0))s)"
-            stop_res="PASS"
-        else
-            dump_rproc_logs "$rpath" after-stop-fail
-            log_fail "$inst: stop FAIL"
-            stop_res="FAIL"
-            inst_fail=$((inst_fail + 1))
-            RESULT_LINES="$RESULT_LINES
+        if [ "$DO_SSR" -eq 1 ]; then
+            # Stop
+            dump_rproc_logs "$rpath" before-stop
+            t0=$(date +%s)
+            log_info "$inst: stopping"
+            if stop_remoteproc "$rpath" && wait_remoteproc_state "$rpath" offline "$STOP_TO" "$POLL_I"; then
+                t1=$(date +%s)
+                log_pass "$inst: stop PASS ($((t1 - t0))s)"
+                stop_res="PASS"
+            else
+                dump_rproc_logs "$rpath" after-stop-fail
+                log_fail "$inst: stop FAIL"
+                stop_res="FAIL"
+                inst_fail=$((inst_fail + 1))
+                RESULT_LINES="$RESULT_LINES
  $inst: boot=$boot_res, stop=$stop_res, start=$start_res, ping=$ping_res"
-            continue
-        fi
-        dump_rproc_logs "$rpath" after-stop
+                continue
+            fi
+            dump_rproc_logs "$rpath" after-stop
 
-        # Start
-        dump_rproc_logs "$rpath" before-start
-        t2=$(date +%s)
-        log_info "$inst: starting"
-        if start_remoteproc "$rpath" && wait_remoteproc_state "$rpath" running "$START_TO" "$POLL_I"; then
-            t3=$(date +%s)
-            log_pass "$inst: start PASS ($((t3 - t2))s)"
-            start_res="PASS"
-        else
-            dump_rproc_logs "$rpath" after-start-fail
-            log_fail "$inst: start FAIL"
-            start_res="FAIL"
-            inst_fail=$((inst_fail + 1))
-            RESULT_LINES="$RESULT_LINES
+            # Start
+            dump_rproc_logs "$rpath" before-start
+            t2=$(date +%s)
+            log_info "$inst: starting"
+            if start_remoteproc "$rpath" && wait_remoteproc_state "$rpath" running "$START_TO" "$POLL_I"; then
+                t3=$(date +%s)
+                log_pass "$inst: start PASS ($((t3 - t2))s)"
+                start_res="PASS"
+            else
+                dump_rproc_logs "$rpath" after-start-fail
+                log_fail "$inst: start FAIL"
+                start_res="FAIL"
+                inst_fail=$((inst_fail + 1))
+                RESULT_LINES="$RESULT_LINES
  $inst: boot=$boot_res, stop=$stop_res, start=$start_res, ping=$ping_res"
-            continue
+                continue
+            fi
+            dump_rproc_logs "$rpath" after-start
+        else
+            log_info "$inst: SSR disabled (--ssr not set). Skipping stop/start."
+            stop_res="SKIPPED"
+            start_res="SKIPPED"
         fi
-        dump_rproc_logs "$rpath" after-start
 
         # RPMsg ping (optional)
         if CTRL_DEV=$(find_rpmsg_ctrl_for "$FW"); then
@@ -203,7 +268,7 @@ scan_dmesg_errors "ath11k|wpss" "." "crash|timeout|fail" "fw_version|firmware"
 # (Return codes from scan_dmesg_errors are informational; it logs itself)
 
 # Net interface presence is informative
-set -- /sys/class/net/wlan[0-9]* 2>/dev/null
+set -- /sys/class/net/wlan[0-9]*
 if [ -e "$1" ]; then
     log_info "wlan interface present (ath11k up)"
 else
