@@ -1,7 +1,7 @@
 metadata:
-  name: resource-tuner
+  name: userspace-resource-manager
   format: "Lava-Test Test Definition 1.0"
-  description: "A pinned **whitelist** test runner for `resource-tuner` that produces per-suite logs and an overall gating result for CI."
+  description: "A pinned **whitelist** test runner for `userspace-resource-manager` that produces per-suite logs and an overall gating result for CI."
   os:
     - linux
   scope:
@@ -14,8 +14,8 @@ params:
 run:
   steps:
     - REPO_PATH=$PWD
-    - cd Runner/suites/Performance/resource-tuner
+    - cd Runner/suites/Performance/userspace-resource-manager
     - RUN_OPTIONS="--all"
     - if [ -n "${BIN_NAME}" ]; then RUN_OPTIONS="--bin ${BIN_NAME}"; fi
     - ./run.sh --timeout "${TIMEOUT}" ${RUN_OPTIONS} || true
-    - $REPO_PATH/Runner/utils/send-to-lava.sh resource-tuner.res || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh userspace-resource-manager.res || true
