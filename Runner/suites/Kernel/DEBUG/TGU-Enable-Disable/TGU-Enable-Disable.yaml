@@ -1,0 +1,20 @@
+metadata:
+  name: TGU-Enable-Disable
+  description: "Verifies Trace Generation Unit (TGU) functionality by enabling and disabling TGUs while routing to ETR and ETF sinks."
+ 
+  os:
+    - linux
+  devices:
+    - qcm6490
+    - qcs9100
+  scope:
+    - coresight
+    - kernel
+  timeout: 60
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/DEBUG/TGU-Enable-Disable
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh TGU-Enable-Disable.res || true
