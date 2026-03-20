@@ -1,0 +1,24 @@
+metadata:
+  name: AudioPlayback minimal build
+  format: "Lava-Test Test Definition 1.0"
+  description: "AudioPlayback on minimal build using direct ALSA path"
+  maintainer:
+    - srikanth kumar
+  os:
+    - linux
+  scope:
+    - functional
+
+params:
+  CLIPS_PATH: "/home/AudioClips"
+  BACKEND: "alsa"
+  SINK: "speakers"
+  LOOPS: "1"
+  TIMEOUT: "0"
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Multimedia/Audio/AudioPlayback/
+    - ./run.sh --backend "${BACKEND}" --sink "${SINK}" --audio-clips-path "${CLIPS_PATH}" --loops "${LOOPS}" --timeout "${TIMEOUT}" --audio-bootstrap false || true
+    - ./send-to-lava.sh AudioPlayback.res
