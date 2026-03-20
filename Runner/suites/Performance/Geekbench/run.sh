@@ -297,6 +297,7 @@ if [ "$SET_PERF_GOV" = "1" ]; then
   set_performance_governor || true
 fi
 
+# shellcheck disable=SC2317  # cleanup is invoked via trap
 cleanup() {
   if [ "$SET_PERF_GOV" = "1" ]; then
     restore_governor || true

@@ -864,16 +864,6 @@ perf_kpi_check_previous_reboot() {
     perf_kpi_reboot_state_save "$state_file" "$PERF_KPI_BOOT_ID" "$PERF_KPI_UPTIME_SEC" "0" "$PERF_KPI_STATE_ITER_DONE"
 }
 
-# ---------------------------------------------------------------------------
-# Small math / parsing helpers (POSIX)
-# ---------------------------------------------------------------------------
-perf_is_number() {
-    printf '%s\n' "$1" | awk '
-      BEGIN{ok=0}
-      /^[0-9]+(\.[0-9]+)?$/ {ok=1}
-      END{exit(ok?0:1)}'
-}
-
 perf_avg_file() {
     f=$1
     [ -s "$f" ] || { echo ""; return 0; }
@@ -987,56 +977,6 @@ perf_baseline_get() {
 # ---------------------------------------------------------------------------
 # Sysbench helpers (run + parse + average + optional CSV)
 # ---------------------------------------------------------------------------
-
-# Run a command and stream output to console while also writing to a logfile.
-# POSIX-safe: uses mkfifo + tee to preserve command exit code.
-# Usage: perf_run_cmd_tee /path/to/log -- cmd args...
-perf_run_cmd_tee() {
-    log_file=$1
-    shift
- 
-    [ -n "$log_file" ] || return 1
- 
-    dir=$(dirname "$log_file")
-    mkdir -p "$dir" 2>/dev/null || true
- 
-    fifo="${log_file}.fifo.$$"
-    rm -f "$fifo" 2>/dev/null || true
- 
-    if ! mkfifo "$fifo" 2>/dev/null; then
-        # Fallback: no fifo support → just log (no live console)
-        "$@" >"$log_file" 2>&1
-        return $?
-    fi
- 
-    # Start tee first (reader)
-    tee "$log_file" <"$fifo" &
-    tee_pid=$!
- 
-    # Run command, write both stdout+stderr into FIFO (writer)
-    "$@" >"$fifo" 2>&1
-    rc=$?
- 
-    # Give tee a short window to drain+exit; then kill if still alive (avoid hangs)
-    i=0
-    while kill -0 "$tee_pid" 2>/dev/null; do
-        i=$((i + 1))
-        [ "$i" -ge 5 ] && break
-        sleep 1
-    done
- 
-    if kill -0 "$tee_pid" 2>/dev/null; then
-        # tee is still alive unexpectedly → terminate and move on
-        kill "$tee_pid" 2>/dev/null || true
-        wait "$tee_pid" 2>/dev/null || true
-    else
-        wait "$tee_pid" 2>/dev/null || true
-    fi
- 
-    rm -f "$fifo" 2>/dev/null || true
-    return $rc
-}
-
 # Parse total time (sec) from sysbench 1.0+ output.
 # Supports both:
 #   "total time: 30.0009s"
@@ -1090,44 +1030,6 @@ perf_values_avg() {
       $1 ~ /^[0-9.]+$/ { s += $1; n++ }
       END { if (n > 0) printf("%.3f\n", s/n); }
     ' "$values_file" 2>/dev/null
-}
-
-# Optional CSV append (only if CSV_FILE is non-empty).
-# CSV format:
-# timestamp,test,threads,metric,iteration,value
-perf_sysbench_csv_append() {
-    csv=$1
-    test=$2
-    threads=$3
-    metric=$4
-    iteration=$5
-    value=$6
-    status=${7:-}
-    baseline=${8:-}
-    goal=${9:-}
-    op=${10:-}
-    score_pct=${11:-}
-    delta=${12:-}
- 
-    [ -n "$csv" ] || return 0
-    [ -n "$value" ] || return 0
- 
-    dir=$(dirname "$csv")
-    mkdir -p "$dir" 2>/dev/null || true
- 
-    if [ ! -f "$csv" ] || [ ! -s "$csv" ]; then
-        # Backward-compatible: old columns first, new columns appended.
-        echo "timestamp,test,threads,metric,iteration,value,status,baseline,goal,op,score_pct,delta" >"$csv"
-    fi
- 
-    if command -v nowstamp >/dev/null 2>&1; then
-        ts=$(nowstamp)
-    else
-        ts=$(date "+%Y-%m-%d %H:%M:%S" 2>/dev/null || echo "unknown")
-    fi
- 
-    # Always write all columns; empty fields are OK.
-    echo "$ts,$test,$threads,$metric,$iteration,$value,$status,$baseline,$goal,$op,$score_pct,$delta" >>"$csv" 2>/dev/null || true
 }
 
 # ---------------------------------------------------------------------------

@@ -227,6 +227,7 @@ if [ -n "$BASELINE_FILE" ] && [ ! -f "$BASELINE_FILE" ]; then
   BASELINE_FILE=""
 fi
 
+# shellcheck disable=SC2317  # cleanup is invoked via trap
 cleanup() {
   restore_governor 2>/dev/null || true
 }

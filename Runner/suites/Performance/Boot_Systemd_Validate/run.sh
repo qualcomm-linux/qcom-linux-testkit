@@ -257,6 +257,7 @@ check_dependencies systemctl systemd-analyze uname sed awk grep find sort || {
 
 # --- ensure CPU governors restored on exit (only if we changed it) ---
 GOV_CHANGED=0
+# shellcheck disable=SC2317  # cleanup is invoked via trap
 cleanup() {
   if [ "$GOV_CHANGED" -eq 1 ] 2>/dev/null; then
     restore_governor
