@@ -19,8 +19,7 @@ if [ -z "$INIT_ENV" ]; then
     exit 1
 fi
 
-# Only source if not already loaded (idempotent)
-if [ -z "$__INIT_ENV_LOADED" ]; then
+if [ -z "${__INIT_ENV_LOADED:-}" ]; then
     # shellcheck disable=SC1090
     . "$INIT_ENV"
     __INIT_ENV_LOADED=1
