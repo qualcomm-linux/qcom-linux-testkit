@@ -85,25 +85,6 @@ retry_command_bt() {
     return 1
 }
 
-# Check if a device (MAC or Name) is in the whitelist
-bt_in_whitelist() {
-    device_name="$1"
-    device_mac="$2"
-
-    whitelist_value="${WHITELIST:-}"
-    log_info "Checking if MAC='$device_mac' or NAME='$device_name' is in whitelist: '$whitelist_value'"
-
-    echo "$whitelist_value" | tr -s ' ' '\n' | while IFS= read -r allowed; do
-        if [ "$allowed" = "$device_mac" ] || [ "$allowed" = "$device_name" ]; then
-            log_info "MAC or NAME matched and allowed: $allowed"
-            return 0
-        fi
-    done
-
-    log_info "MAC matched but neither MAC nor NAME in whitelist"
-    return 1
-}
-
 # bt_parse_whitelist <whitelist_file>
 # Reads a whitelist file where each line has:
 bt_parse_whitelist() {

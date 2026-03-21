@@ -1,5 +1,4 @@
 #!/bin/sh
-
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause
 # Robustly find and source init_env
@@ -107,6 +106,7 @@ check_dependencies bluetoothctl rfkill expect hciconfig || {
     exit 0
 }
 
+# shellcheck disable=SC2317  # cleanup is invoked via trap
 cleanup_bt_test() {
     # Cleanup only the primary MAC we worked with (if any)
     [ -n "$BT_MAC" ] && bt_cleanup_paired_device "$BT_MAC"
