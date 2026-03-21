@@ -1080,17 +1080,6 @@ egli_glvnd_icd_from_json() {
   # Keep it resilient to whitespace.
   sed -n 's/.*"library_path"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$f" | head -n 1
 }
-
-egli_glvnd_icd_from_json() {
-  # Extract ICD library_path from a GLVND EGL vendor JSON (no jq).
-  # Prints the value (e.g., libEGL_adreno.so.1) or empty on failure.
-  f="$1"
-  [ -r "$f" ] || { printf '%s\n' ""; return 0; }
- 
-  # Match a line containing "library_path" : "...."
-  # Keep it resilient to whitespace.
-  sed -n 's/.*"library_path"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$f" | head -n 1
-}
  
 egli_derive_driver_name() {
   # Best-effort for log readability only.

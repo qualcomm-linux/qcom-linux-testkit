@@ -1606,10 +1606,6 @@ video_run_once() {
 # -----------------------------------------------------------------------------
 # Kodiak firmware swap + live reload (no reboot)
 # -----------------------------------------------------------------------------
-video_kodiak_fw_basename() {
-    printf '%s\n' "vpu20_p1_gen2.mbn"
-}
-
 video_kodiak_install_fw() {
     # usage: video_kodiak_install_fw /path/to/vpuw20_1v.mbn
     src="$1"
