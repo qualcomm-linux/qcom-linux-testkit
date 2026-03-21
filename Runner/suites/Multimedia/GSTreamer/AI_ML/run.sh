@@ -87,53 +87,66 @@ EOF
 #  Pull all required TFLite models / assets.
 # ----------------------------------------------------------------------
 download_model_artifacts() {
-    # ------------------------------------------------------------------
-    # Optional: make sure we have network connectivity (kept from the
-    # original script)
-    # ------------------------------------------------------------------
-    if command -v ensure_network_online >/dev/null 2>&1; then
-        if ! ensure_network_online; then
-            log_skip "Network offline/limited; cannot fetch assets"
-            return 1
-        fi
-    fi
-
-    log_info "Network is online, proceed to download!"
     out=''"${test_path}"'/assets'
     mkdir -p "${out}"
-
-    # ------------------------------------------------------------------
-    # Download the regular (non-zip) assets with download_resource
-    # ------------------------------------------------------------------
-    log_info "Downloading Inception-v3 model..."
-    download_resource \
+    log_info "Checking Inception-v3 model..."
+    inception_path=$(download_resource \
         "https://huggingface.co/qualcomm/Inception-v3/resolve/ba8121b0a74c7e28b45b250064c26efc7e7da29e/Inception-v3_w8a8.tflite" \
-        "${out}/inception_v3_quantized.tflite" >/dev/null
-
+        "${out}/inception_v3_quantized.tflite")
+    if [ $? -ne 0 ] || [ -z "$inception_path" ]; then
+        log_skip "Failed to download Inception-v3 model"
+        return 1
+    fi
+    log_info "Inception-v3 model saved!"
     log_info "Downloading YoloX model..."
-    download_resource \
+    yolox_path=$(download_resource \
         "https://huggingface.co/qualcomm/Yolo-X/resolve/v0.30.5/Yolo-X_w8a8.tflite" \
-        "${out}/yolox_quantized.tflite" >/dev/null
+        "${out}/yolox_quantized.tflite")
+    if [ $? -ne 0 ] || [ -z "$yolox_path" ]; then
+        log_fail "Failed to download YoloX model"
+        return 1
+    fi
+    log_info "YoloX model saved to: ${yolox_path}"
 
     log_info "Downloading sample video..."
-    download_resource \
+    video_path=$(download_resource \
         "https://raw.githubusercontent.com/quic/sample-apps-for-qualcomm-linux/refs/heads/main/artifacts/videos/video.mp4" \
-        "${out}/video.mp4" >/dev/null
+        "${out}/video.mp4")
+    if [ $? -ne 0 ] || [ -z "$video_path" ]; then
+        log_fail "Failed to download sample video"
+        return 1
+    fi
+    log_info "Sample video saved to: ${video_path}"
 
-    # ------------------------------------------------------------------
-    # Download zip-files (labels) and extract them
-    # ------------------------------------------------------------------
-    log_info "Downloading labels (set 1)…"
+    log_info "Downloading labels (set 1)..."
     zip_path=$(download_resource \
         "https://github.com/quic/sample-apps-for-qualcomm-linux/releases/download/GA1.5-rel/labels.zip" \
-        "${out}/labels_ga15.zip")   
-    extract_zip_to_dir "${zip_path}" "${out}/labels_ga15"
+        "${out}/labels_ga15.zip")
+    if [ $? -ne 0 ] || [ -z "$zip_path" ]; then
+        log_fail "Failed to download labels (set 1)"
+        return 1
+    fi
+    log_info "Labels (set 1) zip saved to: ${zip_path}"
+    if ! extract_zip_to_dir "${zip_path}" "${out}/labels_ga15"; then
+        log_fail "Failed to extract labels (set 1) from: ${zip_path}"
+        return 1
+    fi
+    log_info "Labels (set 1) extracted to: ${out}/labels_ga15"
 
-    log_info "Downloading labels (set 2)…"
+    log_info "Downloading labels (set 2)..."
     zip_path=$(download_resource \
         "https://github.com/quic/sample-apps-for-qualcomm-linux/releases/download/GA1.6-labels/labels.zip" \
         "${out}/labels_ga16.zip")
-    extract_zip_to_dir "${zip_path}" "${out}/labels_ga16"
+    if [ $? -ne 0 ] || [ -z "$zip_path" ]; then
+        log_fail "Failed to download labels (set 2)"
+        return 1
+    fi
+    log_info "Labels (set 2) zip saved to: ${zip_path}"
+    if ! extract_zip_to_dir "${zip_path}" "${out}/labels_ga16"; then
+        log_fail "Failed to extract labels (set 2) from: ${zip_path}"
+        return 1
+    fi
+    log_info "Labels (set 2) extracted to: ${out}/labels_ga16"
 }
 
 # ----------------------------------------------------------------------

@@ -1078,6 +1078,12 @@ download_resource() {
         fi
         return 0
     fi
+    if command -v ensure_network_online >/dev/null 2>&1; then
+        if ! ensure_network_online; then
+            echo "Network offline/limited; cannot fetch assets"
+            return 1
+        fi
+    fi
 
     mkdir -p "$(dirname "${dest}")"
     if command -v curl >/dev/null 2>&1; then
@@ -1177,13 +1183,10 @@ check_pipeline_elements() {
                             log_info "Skipping caps filter: $element_name" ; continue ;;
             *)
                 total_elements=$(( total_elements + 1 ))
-                log_info "Checking element: $element_name"
                 if ! has_element "$element_name"; then
                     missing_count=$(( missing_count + 1 ))
                     missing_list="${missing_list}${element_name} "
                     log_error "Required element missing: $element_name"
-                else
-                    log_info "Element found: $element_name"
                 fi
                 ;;
         esac
