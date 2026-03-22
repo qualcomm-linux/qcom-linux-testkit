@@ -55,4 +55,3 @@ else
     echo "$TESTNAME PASS" > "$res_file"
     exit 0
 fi
-log_info "-------------------Completed $TESTNAME Testcase----------------------------"

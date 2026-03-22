@@ -99,4 +99,3 @@ else
     echo "$TESTNAME FAIL" > "$res_file"
     exit 1
 fi
-log_info "-------------------Completed $TESTNAME Testcase----------------------------"

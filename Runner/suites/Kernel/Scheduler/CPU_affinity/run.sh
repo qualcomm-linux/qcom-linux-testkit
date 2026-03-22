@@ -91,4 +91,3 @@ fi
 
 kill $TASK_PID
 echo "$TESTNAME PASS" > $test_path/$TESTNAME.res
-log_info "-------- Completed $TESTNAME Functional Test --------"
