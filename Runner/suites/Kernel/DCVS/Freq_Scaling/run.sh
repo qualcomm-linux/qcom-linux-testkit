@@ -92,4 +92,3 @@ else
     exit 1
 fi
 
-log_info "----------- Completed $TESTNAME Test ------------"
