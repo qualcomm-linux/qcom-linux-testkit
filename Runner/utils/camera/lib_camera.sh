@@ -416,3 +416,223 @@ libcam_scan_errors() {
     rm -f "$tmpf"
     return 0
 }
+
+# Camera common helpers (Downstream CAMX/NHX)
+# Keep generic helpers only. Policy and gating belongs in run.sh.
+
+# -----------------------------------------------------------------------------
+# SoC id helper
+# -----------------------------------------------------------------------------
+# Return SoC id token used in firmware paths
+# Prefer /sys/devices/soc0/soc_id. Normalize to lowercase and trim.
+camx_read_soc_id() {
+  soc=""
+ 
+  if [ -r /sys/devices/soc0/soc_id ]; then
+    soc="$(tr -d '\r\n[:space:]' </sys/devices/soc0/soc_id 2>/dev/null | tr '[:upper:]' '[:lower:]')"
+  fi
+ 
+  [ -n "$soc" ] || return 1
+  echo "$soc"
+  return 0
+}
+
+# -----------------------------------------------------------------------------
+# Firmware helpers
+# -----------------------------------------------------------------------------
+# Find ICP camera firmware ELF (CAMERA_ICP_*.elf)
+# Prints first match path on stdout.
+camx_find_icp_firmware() {
+  soc="$(camx_read_soc_id 2>/dev/null || true)"
+
+  # First try soc-specific canonical path
+  for root in /usr/lib/firmware /lib/firmware; do
+    if [ -n "$soc" ] && [ -d "$root/qcom/$soc" ]; then
+      p="$(find "$root/qcom/$soc" -maxdepth 1 -type f -name 'CAMERA_ICP_*.elf' 2>/dev/null | head -n 1)"
+      [ -n "$p" ] && echo "$p" && return 0
+    fi
+  done
+
+  # Fallback bounded search
+  for root in /usr/lib/firmware /lib/firmware; do
+    if [ -d "$root/qcom" ]; then
+      p="$(find "$root/qcom" -maxdepth 2 -type f -name 'CAMERA_ICP_*.elf' 2>/dev/null | head -n 1)"
+      [ -n "$p" ] && echo "$p" && return 0
+    fi
+  done
+
+  return 1
+}
+
+# -----------------------------------------------------------------------------
+# Package helpers (Yocto/QLI proprietary builds)
+# -----------------------------------------------------------------------------
+camx_opkg_list_camx() {
+  command -v opkg >/dev/null 2>&1 || return 1
+  out="$(opkg list-installed 2>/dev/null | grep -i '^camx' || true)"
+  [ -n "$out" ] || return 1
+  printf '%s\n' "$out"
+  return 0
+}
+
+# -----------------------------------------------------------------------------
+# DT camera nodes sample using fdtdump
+# -----------------------------------------------------------------------------
+camx_fdtdump_has_cam_nodes() {
+  command -v fdtdump >/dev/null 2>&1 || return 2
+  [ -r /sys/firmware/fdt ] || return 1
+
+  out="$(fdtdump /sys/firmware/fdt 2>/dev/null \
+    | grep -i 'cam' \
+    | grep -Ei 'qcom,cam|qcom,camera|camera@|cam-req|cam-cpas|cam-jpeg|cam-ife|cam-icp|cam-sensor|camera0-thermal' || true)"
+
+  [ -n "$out" ] || return 1
+  printf '%s\n' "$out" | head -n 20
+  return 0
+}
+
+# ---- NHX dump + checksum validation helpers (POSIX) ----
+
+nhx_pick_cksum_tool() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    echo "sha256sum"
+  elif command -v md5sum >/dev/null 2>&1; then
+    echo "md5sum"
+  else
+    echo ""
+  fi
+}
+
+nhx_collect_new_dumps() {
+  # $1 = dump_dir, $2 = marker_file, $3 = output_list_file
+  # Collect NHX yuvs created after marker. Fallback to any *.yuv if none match.
+  ddir="$1"
+  marker="$2"
+  out="$3"
+
+  : >"$out"
+
+  # Prefer NHX-tagged files (matches your observed names)
+  find "$ddir" -maxdepth 1 -type f \
+    \( -name '*NHX*.yuv' -o -name '*NHX*.raw' -o -name '*NHX*.bin' \) \
+    -newer "$marker" 2>/dev/null | sort >"$out"
+
+  if [ ! -s "$out" ]; then
+    # Fallback: any yuv created after marker
+    find "$ddir" -maxdepth 1 -type f -name '*.yuv' -newer "$marker" 2>/dev/null | sort >"$out"
+  fi
+}
+
+nhx_validate_dumps_and_checksums() {
+  # $1 = dump_dir, $2 = marker_file, $3 = log_dir
+  ddir="$1"
+  marker="$2"
+  ldir="$3"
+
+  list="$ldir/nhx_dumps.list"
+  sumfile="$ldir/nhx_checksums.txt"
+  prevsum="$ldir/nhx_checksums.prev.txt"
+  tool="$(nhx_pick_cksum_tool)"
+
+  if [ ! -d "$ddir" ]; then
+    log_fail "DUMP_DIR does not exist: $ddir"
+    return 1
+  fi
+
+  if [ -z "$tool" ]; then
+    log_skip "No checksum tool found (sha256sum/md5sum). Skipping dump checksum validation."
+    return 0
+  fi
+
+  nhx_collect_new_dumps "$ddir" "$marker" "$list"
+
+  if [ ! -s "$list" ]; then
+    log_fail "No NHX dump files found in $ddir (after marker). Dump/checksum validation not exercised."
+    return 1
+  fi
+
+  # Basic sanity: non-empty, not all identical checksum
+  : >"$sumfile"
+  first_sum=""
+  all_same="1"
+  count="0"
+
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+
+    if [ ! -s "$f" ]; then
+      log_fail "Dump file is empty: $f"
+      return 1
+    fi
+
+    # Produce "HASH FILE" lines, same as sha256sum/md5sum
+    line="$($tool "$f" 2>/dev/null)"
+    if [ -z "$line" ]; then
+      log_fail "Checksum tool failed for: $f"
+      return 1
+    fi
+    echo "$line" >>"$sumfile"
+
+    cur_sum=$(echo "$line" | awk '{print $1}')
+    if [ -z "$first_sum" ]; then
+      first_sum="$cur_sum"
+    else
+      if [ "$cur_sum" != "$first_sum" ]; then
+        all_same="0"
+      fi
+    fi
+
+    count=$((count + 1))
+  done <"$list"
+
+  log_info "Dump files detected: $count (list: $list)"
+  log_info "Checksums written: $sumfile (tool=$tool)"
+
+  if [ "$count" -lt 1 ]; then
+    log_fail "Internal error: dump count computed as 0"
+    return 1
+  fi
+
+  if [ "$all_same" = "1" ] && [ "$count" -gt 1 ]; then
+    log_fail "All dump checksums are identical across $count files (suspicious: repeated/blank frames)"
+    return 1
+  fi
+
+  # Optional drift check: compare against previous run (same log dir)
+  if [ -f "$prevsum" ]; then
+    if ! diff -q "$prevsum" "$sumfile" >/dev/null 2>&1; then
+      log_warn "Dump checksums changed vs previous run ($prevsum). This may be expected; keeping as WARN."
+    else
+      log_info "Dump checksums match previous run ($prevsum)"
+    fi
+  fi
+
+  # Save current as previous for next run
+  cp -f "$sumfile" "$prevsum" 2>/dev/null || true
+
+  log_pass "NHX dump checksum validation exercised ($count files)"
+  return 0
+}
+
+# POSIX way to tee live output while preserving exit code
+run_cmd_live_to_log() {
+  # $1 = logfile, $2... = command
+  logf="$1"
+  shift
+
+  fifo="$logf.fifo.$$"
+  rm -f "$fifo"
+  mkfifo "$fifo" || return 1
+
+  # tee runs in background, command writes into fifo
+  tee -a "$logf" <"$fifo" &
+  teepid=$!
+
+  "$@" >"$fifo" 2>&1
+  rc=$?
+
+  # close fifo and wait tee
+  rm -f "$fifo"
+  wait "$teepid" 2>/dev/null || true
+  return "$rc"
+}
