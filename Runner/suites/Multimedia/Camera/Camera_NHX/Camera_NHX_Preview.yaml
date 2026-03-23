@@ -1,0 +1,15 @@
+metadata:
+  name: camera_nhx
+  format: "Lava-Test Test Definition 1.0"
+  description: "Camera NHX preview validation"
+  os:
+    - yocto
+  scope:
+    - functional
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Multimedia/Camera/Camera_NHX
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh Camera_NHX.res
