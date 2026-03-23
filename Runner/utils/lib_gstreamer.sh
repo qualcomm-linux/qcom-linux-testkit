@@ -1076,3 +1076,127 @@ prepare_vp9_from_local_path() {
 
   return 1
 }
+
+# ==================== Camera Pipeline Builders ====================
+
+# -------------------- Camera format helpers --------------------
+# camera_format_to_gst_string <format>
+# Converts camera format name to GStreamer format string
+# Prints: GStreamer format string (NV12 or NV12_Q08C)
+camera_format_to_gst_string() {
+  format="$1"
+  case "$format" in
+    nv12) printf '%s\n' "NV12" ;;
+    ubwc) printf '%s\n' "NV12_Q08C" ;;
+    *) printf '%s\n' "" ;;
+  esac
+}
+
+# -------------------- qtiqmmfsrc pipeline builders --------------------
+# camera_build_qtiqmmfsrc_fakesink_pipeline <camera_id> <format> <width> <height> <framerate> <duration>
+# Builds qtiqmmfsrc fakesink test pipeline with num-buffers to ensure pipeline stops
+# Prints: pipeline string
+camera_build_qtiqmmfsrc_fakesink_pipeline() {
+  camera_id="$1"
+  format="$2"
+  width="$3"
+  height="$4"
+  framerate="$5"
+  duration="${6:-10}"
+  
+  gst_format=$(camera_format_to_gst_string "$format")
+  [ -z "$gst_format" ] && return 1
+  
+  # Calculate num-buffers based on duration and framerate
+  num_buffers=$((duration * framerate))
+  
+  if [ "$format" = "ubwc" ]; then
+    printf '%s\n' "qtiqmmfsrc camera=${camera_id} name=camsrc num-buffers=${num_buffers} video_0::type=preview ! video/x-raw,format=${gst_format},width=${width},height=${height},framerate=${framerate}/1,interlace-mode=progressive,colorimetry=bt601 ! queue ! fakesink"
+  else
+    printf '%s\n' "qtiqmmfsrc camera=${camera_id} name=camsrc num-buffers=${num_buffers} ! video/x-raw,format=${gst_format},width=${width},height=${height},framerate=${framerate}/1,interlace-mode=progressive,colorimetry=bt601 ! queue ! fakesink"
+  fi
+}
+
+# camera_build_qtiqmmfsrc_preview_pipeline <camera_id> <format> <width> <height> <framerate>
+# Builds qtiqmmfsrc preview pipeline with waylandsink
+# Prints: pipeline string
+camera_build_qtiqmmfsrc_preview_pipeline() {
+  camera_id="$1"
+  format="$2"
+  width="$3"
+  height="$4"
+  framerate="$5"
+  
+  gst_format=$(camera_format_to_gst_string "$format")
+  [ -z "$gst_format" ] && return 1
+  
+  if [ "$format" = "ubwc" ]; then
+    printf '%s\n' "qtiqmmfsrc camera=${camera_id} name=camsrc video_0::type=preview ! video/x-raw,format=${gst_format},width=${width},height=${height},framerate=${framerate}/1 ! waylandsink fullscreen=true async=true sync=false"
+  else
+    printf '%s\n' "qtiqmmfsrc camera=${camera_id} name=camsrc ! video/x-raw,format=${gst_format},width=${width},height=${height},framerate=${framerate}/1 ! waylandsink fullscreen=true async=true sync=false"
+  fi
+}
+
+# camera_build_qtiqmmfsrc_encode_pipeline <camera_id> <format> <width> <height> <framerate> <output_file>
+# Builds qtiqmmfsrc encode pipeline with v4l2h264enc
+# Prints: pipeline string
+camera_build_qtiqmmfsrc_encode_pipeline() {
+  camera_id="$1"
+  format="$2"
+  width="$3"
+  height="$4"
+  framerate="$5"
+  output_file="$6"
+  
+  gst_format=$(camera_format_to_gst_string "$format")
+  [ -z "$gst_format" ] && return 1
+  
+  if [ "$format" = "ubwc" ]; then
+    printf '%s\n' "qtiqmmfsrc camera=${camera_id} name=camsrc video_0::type=preview ! video/x-raw,format=${gst_format},width=${width},height=${height},framerate=${framerate}/1,interlace-mode=progressive,colorimetry=bt601 ! queue ! v4l2h264enc capture-io-mode=4 output-io-mode=5 ! h264parse ! mp4mux ! queue ! filesink location=${output_file}"
+  else
+    printf '%s\n' "qtiqmmfsrc camera=${camera_id} name=camsrc ! video/x-raw,format=${gst_format},width=${width},height=${height},framerate=${framerate}/1,interlace-mode=progressive,colorimetry=bt601 ! queue ! v4l2h264enc capture-io-mode=4 output-io-mode=5 ! h264parse ! mp4mux ! queue ! filesink location=${output_file}"
+  fi
+}
+
+# camera_build_qtiqmmfsrc_snapshot_pipeline <camera_id> <width> <height> <framerate> <video_output> <snapshot_path>
+# Builds qtiqmmfsrc snapshot pipeline (video + JPEG snapshots)
+# Note: Requires gst-pipeline-app instead of gst-launch-1.0
+# Prints: pipeline string
+camera_build_qtiqmmfsrc_snapshot_pipeline() {
+  camera_id="$1"
+  width="$2"
+  height="$3"
+  framerate="$4"
+  video_output="$5"
+  snapshot_path="$6"
+  
+  printf '%s\n' "qtiqmmfsrc name=camsrc camera=${camera_id} ! video/x-raw,format=NV12,width=${width},height=${height},framerate=${framerate}/1,interlace-mode=progressive,colorimetry=bt601 ! v4l2h264enc capture-io-mode=4 output-io-mode=5 ! h264parse ! mp4mux ! filesink location=${video_output} camsrc.image_1 ! \"image/jpeg,width=${width},height=${height},framerate=${framerate}/1\" ! multifilesink location=${snapshot_path} async=false sync=true enable-last-sample=false"
+}
+
+# -------------------- libcamerasrc pipeline builders --------------------
+# camera_build_libcamera_preview_pipeline <duration> <framerate>
+# Builds libcamerasrc preview pipeline with videoconvert and waylandsink
+# Prints: pipeline string
+camera_build_libcamera_preview_pipeline() {
+  duration="${1:-10}"
+  framerate="${2:-30}"
+  
+  # Calculate num-buffers to ensure pipeline stops
+  num_buffers=$((duration * framerate))
+  
+  printf '%s\n' "libcamerasrc num-buffers=${num_buffers} ! videoconvert ! waylandsink fullscreen=true"
+}
+
+# camera_build_libcamera_encode_pipeline <output_file> <duration> <framerate>
+# Builds libcamerasrc encode pipeline with videoconvert and v4l2h264enc
+# Prints: pipeline string
+camera_build_libcamera_encode_pipeline() {
+  output_file="$1"
+  duration="${2:-10}"
+  framerate="${3:-30}"
+  
+  # Calculate num-buffers to ensure pipeline stops
+  num_buffers=$((duration * framerate))
+  
+  printf '%s\n' "libcamerasrc num-buffers=${num_buffers} ! videoconvert ! v4l2h264enc ! h264parse ! mp4mux ! filesink location=${output_file}"
+}
