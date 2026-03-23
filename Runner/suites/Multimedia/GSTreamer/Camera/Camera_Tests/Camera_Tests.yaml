@@ -1,0 +1,28 @@
+metadata:
+  name: gstreamer-camera-tests
+  format: "Lava-Test Test Definition 1.0"
+  description: >
+    Comprehensive camera validation using GStreamer with qtiqmmfsrc.
+    Tests run in sequence: Fakesink -> Preview -> Encode -> Encode+Snapshot.
+    Supports both NV12 (linear) and UBWC (NV12_Q08C compressed) formats.
+  os:
+    - linux
+  scope:
+    - functional
+ 
+params:
+  CAMERA_ID: "0"
+  CAMERA_TEST_MODES: "fakesink,preview,encode,snapshot"
+  CAMERA_FORMATS: "nv12,ubwc"
+  CAMERA_RESOLUTIONS: "720p,1080p,4k"
+  CAMERA_FRAMERATE: "30"
+  CAMERA_DURATION: "10"
+  CAMERA_GST_DEBUG: "2"
+
+run:
+  steps:
+    - REPO_PATH="$PWD"
+    - cd Runner/suites/Multimedia/GSTreamer/Camera/Camera_Tests/
+    - export CAMERA_ID CAMERA_TEST_MODES CAMERA_FORMATS CAMERA_RESOLUTIONS CAMERA_FRAMERATE CAMERA_DURATION CAMERA_GST_DEBUG
+    - ./run.sh --camera-id "${CAMERA_ID}" --test-modes "${CAMERA_TEST_MODES}" --formats "${CAMERA_FORMATS}" --resolutions "${CAMERA_RESOLUTIONS}" --framerate "${CAMERA_FRAMERATE}" --duration "${CAMERA_DURATION}" --gst-debug "${CAMERA_GST_DEBUG}" || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh Camera_Tests.res
