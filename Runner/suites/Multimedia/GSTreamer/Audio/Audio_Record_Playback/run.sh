@@ -46,9 +46,22 @@ LOG_DIR="${SCRIPT_DIR}/logs"
 OUTDIR="$LOG_DIR/$TESTNAME"
 GST_LOG="$OUTDIR/gst.log"
 DMESG_DIR="$OUTDIR/dmesg"
-RECORDED_DIR="$OUTDIR/recorded"
 
-mkdir -p "$OUTDIR" "$DMESG_DIR" "$RECORDED_DIR" >/dev/null 2>&1 || true
+# Use the shared recorded directory if supported; otherwise default to $OUTDIR/recorded.
+if command -v gstreamer_shared_recorded_dir >/dev/null 2>&1; then
+    RECORDED_DIR="$(gstreamer_shared_recorded_dir "$SCRIPT_DIR" "$OUTDIR")"
+else
+    RECORDED_DIR="$OUTDIR/recorded"
+fi
+
+if ! mkdir -p "$OUTDIR" "$DMESG_DIR" "$RECORDED_DIR"; then
+  log_error "Failed to create required directories:"
+  log_error "  OUTDIR=$OUTDIR"
+  log_error "  DMESG_DIR=$DMESG_DIR"
+  log_error "  RECORDED_DIR=$RECORDED_DIR"
+  echo "$TESTNAME FAIL" >"$RES_FILE" 2>/dev/null || true
+  exit 0
+fi
 : >"$RES_FILE"
 : >"$GST_LOG"
  
@@ -339,6 +352,7 @@ log_info "Audio params: sample_rate=${SAMPLE_RATE}Hz, samples_per_buffer=${SAMPL
 log_info "Calculated num_buffers: $NUM_BUFFERS (for ${duration}s duration)"
 log_info "GST debug: GST_DEBUG=$gstDebugLevel"
 log_info "Logs: $OUTDIR"
+log_info "Recorded artifact dir: $RECORDED_DIR"
 
 # -------------------- Required element validation --------------------
 check_required_elements() {

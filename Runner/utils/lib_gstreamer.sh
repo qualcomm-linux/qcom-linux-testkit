@@ -20,9 +20,53 @@ GSTLAUNCHFLAGS="${GSTLAUNCHFLAGS:--e -v -m}"
 # GST_ALSA_PLAYBACK_DEVICE=hw:0,0
 # GST_ALSA_CAPTURE_DEVICE=hw:0,1
 
-# -------------------- Shared encoded-artifact directory --------------------
+# -------------------- Shared artifact directory (generic) --------------------
+# gstreamer_shared_artifact_dir <env_var_name> <shared_subdir> <local_subdir> <script_dir> <outdir>
+# Generic function to get shared artifact directory for any test type.
+# Priority:
+# 1. Environment variable if explicitly provided (e.g., VIDEO_SHARED_ENCODE_DIR, AUDIO_SHARED_ENCODE_DIR)
+# 2. A job-shared path derived from the common LAVA prefix before /tests/
+# 3. Fallback to <outdir>/<local_subdir> for local/manual runs
+#
+# Parameters:
+#   env_var_name: Name of environment variable to check (e.g., "VIDEO_SHARED_ENCODE_DIR")
+#   shared_subdir: Subdirectory name for shared path (e.g., "video-encode-decode", "audio-record-playback")
+#   local_subdir: Subdirectory name for local fallback (e.g., "encoded", "recorded")
+#   script_dir: Script directory path
+#   outdir: Output directory path
+#
+# Example usage:
+#   gstreamer_shared_artifact_dir "VIDEO_SHARED_ENCODE_DIR" "video-encode-decode" "encoded" "$SCRIPT_DIR" "$OUTDIR"
+#   gstreamer_shared_artifact_dir "AUDIO_SHARED_ENCODE_DIR" "audio-record-playback" "recorded" "$SCRIPT_DIR" "$OUTDIR"
+gstreamer_shared_artifact_dir() {
+    env_var_name="$1"
+    shared_subdir="$2"
+    local_subdir="$3"
+    script_dir="$4"
+    outdir="$5"
+
+    # Check if environment variable is set (using eval for dynamic variable name)
+    env_value=$(eval "printf '%s' \"\${${env_var_name}:-}\"")
+    if [ -n "$env_value" ]; then
+        printf '%s\n' "$env_value"
+        return 0
+    fi
+
+    # Check if we're in a LAVA test structure (contains /tests/)
+    case "$script_dir" in
+        */tests/*)
+            printf '%s/shared/%s\n' "${script_dir%%/tests/*}" "$shared_subdir"
+            ;;
+        *)
+            printf '%s/%s\n' "$outdir" "$local_subdir"
+            ;;
+    esac
+}
+
+# -------------------- Shared encoded-artifact directory (video) --------------------
 # gstreamer_shared_encoded_dir <script_dir> <outdir>
 # Prints a directory path to use for encoded video artifacts.
+# This is a wrapper around gstreamer_shared_artifact_dir for backward compatibility.
 # Priority:
 # 1. VIDEO_SHARED_ENCODE_DIR if explicitly provided
 # 2. A job-shared path derived from the common LAVA prefix before /tests/
@@ -30,20 +74,22 @@ GSTLAUNCHFLAGS="${GSTLAUNCHFLAGS:--e -v -m}"
 gstreamer_shared_encoded_dir() {
     script_dir="$1"
     outdir="$2"
+    
+    gstreamer_shared_artifact_dir "VIDEO_SHARED_ENCODE_DIR" "video-encode-decode" "encoded" "$script_dir" "$outdir"
+}
 
-    if [ -n "${VIDEO_SHARED_ENCODE_DIR:-}" ]; then
-        printf '%s\n' "$VIDEO_SHARED_ENCODE_DIR"
-        return 0
-    fi
-
-    case "$script_dir" in
-        */tests/*)
-            printf '%s/shared/video-encode-decode\n' "${script_dir%%/tests/*}"
-            ;;
-        *)
-            printf '%s/encoded\n' "$outdir"
-            ;;
-    esac
+# -------------------- Shared recorded-artifact directory (audio) --------------------
+# gstreamer_shared_recorded_dir <script_dir> <outdir>
+# Prints a directory path to use for recorded audio artifacts.
+# Priority:
+# 1. AUDIO_SHARED_ENCODE_DIR if explicitly provided
+# 2. A job-shared path derived from the common LAVA prefix before /tests/
+# 3. Fallback to <outdir>/recorded for local/manual runs
+gstreamer_shared_recorded_dir() {
+    script_dir="$1"
+    outdir="$2"
+    
+    gstreamer_shared_artifact_dir "AUDIO_SHARED_ENCODE_DIR" "audio-record-playback" "recorded" "$script_dir" "$outdir"
 }
 # -------------------- Element check --------------------
 has_element() {

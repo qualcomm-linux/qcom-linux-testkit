@@ -21,6 +21,7 @@ run:
   steps:
     - REPO_PATH="$PWD"
     - cd Runner/suites/Multimedia/GSTreamer/Audio/Audio_Record_Playback/
-    - export AUDIO_TEST_MODE AUDIO_FORMATS AUDIO_DURATION AUDIO_GST_DEBUG
+    - AUDIO_SHARED_ENCODE_DIR="${REPO_PATH%%/tests/*}/shared/audio-record-playback"
+    - export AUDIO_TEST_MODE AUDIO_FORMATS AUDIO_DURATION AUDIO_GST_DEBUG AUDIO_SHARED_ENCODE_DIR
     - ./run.sh --mode "${AUDIO_TEST_MODE}" --formats "${AUDIO_FORMATS}" --duration "${AUDIO_DURATION}" --gst-debug "${AUDIO_GST_DEBUG}" || true
     - $REPO_PATH/Runner/utils/send-to-lava.sh Audio_Record_Playback.res
