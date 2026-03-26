@@ -140,23 +140,37 @@ unload_kernel_module() {
 
 # --- Dependency check ---
 check_dependencies() {
+    # Support both:
+    #   check_dependencies date awk sed
+    #   check_dependencies "$deps"   where deps="date awk sed"
+    if [ "$#" -eq 1 ]; then
+        # Split the single string into args
+        # shellcheck disable=SC2086
+        set -- $1
+    fi
+ 
     missing=0
     missing_cmds=""
+ 
     for cmd in "$@"; do
+        [ -n "$cmd" ] || continue
         if ! command -v "$cmd" >/dev/null 2>&1; then
             log_warn "Required command '$cmd' not found in PATH."
             missing=1
             missing_cmds="$missing_cmds $cmd"
         fi
     done
+ 
     if [ "$missing" -ne 0 ]; then
-        testname="${TESTNAME:-}"
-        log_skip "${testname:-UnknownTest} SKIP: missing dependencies:$missing_cmds"
-        if [ -n "$testname" ]; then
-            echo "$testname SKIP" > "./$testname.res"
+        testname="${TESTNAME:-UnknownTest}"
+        log_skip "$testname SKIP missing dependencies$missing_cmds"
+        if [ -n "${TESTNAME:-}" ]; then
+            echo "$TESTNAME SKIP" > "./$TESTNAME.res" 2>/dev/null || true
         fi
         exit 0
     fi
+ 
+    return 0
 }
 
 # --- Test case directory lookup ---
@@ -3299,35 +3313,69 @@ detect_ufs_partition_block() {
 ###############################################################################
 scan_dmesg_errors() {
     prefix="$1"
-    module_regex="$2"   # e.g. 'qcom_camss|camss|isp'
+    module_regex="$2"   # e.g. 'qcom_camss|camss|isp|CAM-ICP|CAMERA_ICP'
     exclude_regex="${3:-"dummy regulator|supply [^ ]+ not found|using dummy regulator"}"
-    shift 3
-
-    mkdir -p "$prefix"
-
+    success_regex="${4:-}"      # OPTIONAL: require success evidence (e.g. FW download done successfully)
+    success_min_hits="${5:-1}"  # OPTIONAL: minimum success hits required (default 1)
+ 
+    shift 5 2>/dev/null || true
+ 
+    mkdir -p "$prefix" 2>/dev/null || true
+ 
     DMESG_SNAPSHOT="$prefix/dmesg_snapshot.log"
     DMESG_ERRORS="$prefix/dmesg_errors.log"
-    DATE_STAMP=$(date +%Y%m%d-%H%M%S)
+    DMESG_SUCCESS="$prefix/dmesg_success.log"
+    DATE_STAMP=$(date +%Y%m%d-%H%M%S 2>/dev/null || echo "unknown-date")
     DMESG_HISTORY="$prefix/dmesg_errors_$DATE_STAMP.log"
-
+ 
     # Error patterns (edit as needed for your test coverage)
     err_patterns='Unknown symbol|probe failed|fail(ed)?|error|timed out|not found|invalid|corrupt|abort|panic|oops|unhandled|can.t (start|init|open|allocate|find|register)'
-
-    rm -f "$DMESG_SNAPSHOT" "$DMESG_ERRORS"
-    dmesg > "$DMESG_SNAPSHOT" 2>/dev/null
-
-    # 1. Match lines with correct module and error pattern
-    # 2. Exclude lines with harmless patterns (using dummy regulator etc)
-    grep -iE "^\[[^]]+\][[:space:]]+($module_regex):.*($err_patterns)" "$DMESG_SNAPSHOT" \
-        | grep -vEi "$exclude_regex" > "$DMESG_ERRORS" || true
-
-    cp "$DMESG_ERRORS" "$DMESG_HISTORY"
-
+ 
+    rm -f "$DMESG_SNAPSHOT" "$DMESG_ERRORS" "$DMESG_SUCCESS" 2>/dev/null || true
+    dmesg > "$DMESG_SNAPSHOT" 2>/dev/null || true
+ 
+    # Robust match:
+    # - First filter by module_regex (anywhere in line)
+    # - Then filter by err_patterns
+    # - Exclude benign patterns
+    #
+    # This works for both:
+    #   [..] module: error ...
+    # and:
+    #   [..] CAM_INFO: ... fail ...
+    #
+    # Note: module_regex should be tight enough to avoid false positives.
+    grep -iE "($module_regex)" "$DMESG_SNAPSHOT" 2>/dev/null \
+        | grep -iE "($err_patterns)" 2>/dev/null \
+        | grep -vEi "$exclude_regex" 2>/dev/null > "$DMESG_ERRORS" || true
+ 
+    cp "$DMESG_ERRORS" "$DMESG_HISTORY" 2>/dev/null || true
+ 
     if [ -s "$DMESG_ERRORS" ]; then
-        log_info "dmesg scan: found non-benign module errors in $DMESG_ERRORS (history: $DMESG_HISTORY)"
+        log_info "dmesg scan found non benign module errors in $DMESG_ERRORS (history: $DMESG_HISTORY)"
         return 0
     fi
-    log_info "No relevant, non-benign errors for modules [$module_regex] in recent dmesg."
+ 
+    # Optional success evidence check (no extra greps in run.sh)
+    if [ -n "$success_regex" ]; then
+        grep -iE "($success_regex)" "$DMESG_SNAPSHOT" 2>/dev/null > "$DMESG_SUCCESS" || true
+ 
+        hits="$(wc -l < "$DMESG_SUCCESS" 2>/dev/null | awk '{print $1}')"
+        case "$hits" in ''|*[!0-9]*) hits=0 ;; esac
+ 
+        case "$success_min_hits" in ''|*[!0-9]*) success_min_hits=1 ;; esac
+ 
+        if [ "$hits" -lt "$success_min_hits" ]; then
+            log_info "dmesg scan found no required success evidence for modules [$module_regex] (need >=$success_min_hits hits). See $DMESG_SUCCESS"
+            return 2
+        fi
+ 
+        log_info "dmesg scan success evidence present in $DMESG_SUCCESS (hits=$hits)"
+    else
+        log_info "No relevant, non benign errors for modules [$module_regex] in recent dmesg."
+    fi
+ 
+    # No errors
     return 1
 }
 
