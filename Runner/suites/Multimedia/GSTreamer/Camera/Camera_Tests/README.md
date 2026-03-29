@@ -48,8 +48,8 @@ Tests basic camera capture without encoding.
 
 | Test Name | Format | Resolution | Command |
 |-----------|--------|------------|---------|
-| fakesink_nv12 | NV12 | 720p | `qtiqmmfsrc camera=0 num-buffers=300 ! video/x-raw,format=NV12,width=1280,height=720 ! queue ! fakesink` |
-| fakesink_ubwc | UBWC | 720p | `qtiqmmfsrc camera=0 num-buffers=300 video_0::type=preview ! video/x-raw,format=NV12_Q08C,width=1280,height=720 ! queue ! fakesink` |
+| fakesink_nv12 | NV12 | 720p | `qtiqmmfsrc camera=0 ! video/x-raw,format=NV12,width=1280,height=720 ! queue ! fakesink` |
+| fakesink_ubwc | UBWC | 720p | `qtiqmmfsrc camera=0 video_0::type=preview ! video/x-raw,format=NV12_Q08C,width=1280,height=720 ! queue ! fakesink` |
 
 #### 2. Preview Tests (2 tests)
 Tests camera preview display on Weston at 4K.
@@ -87,34 +87,34 @@ Tests basic camera capture without encoding.
 
 | Test Name | Resolution | Command |
 |-----------|------------|---------|
-| libcam_Default_Fakesink | Default | `libcamerasrc num-buffers=300 ! fakesink` |
-| libcam_720p_Fakesink | 720p | `libcamerasrc num-buffers=300 ! video/x-raw,width=1280,height=720,framerate=30/1 ! fakesink` |
+| libcam_Default_Fakesink | Default | `libcamerasrc ! fakesink` |
+| libcam_720p_Fakesink | 720p | `libcamerasrc ! video/x-raw,width=1280,height=720,framerate=30/1 ! fakesink` |
 
 #### 2. Preview Tests (3 tests)
 Tests camera preview display on Weston.
 
 | Test Name | Resolution | Command |
 |-----------|------------|---------|
-| libcam_Default_Preview | Default | `libcamerasrc num-buffers=300 ! videoconvert ! waylandsink fullscreen=true` |
-| libcam_720p_Preview | 720p | `libcamerasrc num-buffers=300 ! video/x-raw,width=1280,height=720,framerate=30/1 ! videoconvert ! waylandsink fullscreen=true` |
-| libcam_1080p_Preview | 1080p | `libcamerasrc num-buffers=300 ! video/x-raw,width=1920,height=1080,framerate=30/1 ! videoconvert ! waylandsink fullscreen=true` |
+| libcam_Default_Preview | Default | `libcamerasrc ! videoconvert ! waylandsink fullscreen=true` |
+| libcam_720p_Preview | 720p | `libcamerasrc ! video/x-raw,width=1280,height=720,framerate=30/1 ! videoconvert ! waylandsink fullscreen=true` |
+| libcam_1080p_Preview | 1080p | `libcamerasrc ! video/x-raw,width=1920,height=1080,framerate=30/1 ! videoconvert ! waylandsink fullscreen=true` |
 
 #### 3. Encode Tests (3 tests)
 Tests camera capture with H.264 hardware encoding.
 
 | Test Name | Resolution | Command |
 |-----------|------------|---------|
-| libcam_720p_NV12_Encode | 720p | `libcamerasrc num-buffers=300 ! videoconvert ! video/x-raw,format=NV12,width=1280,height=720,framerate=30/1 ! v4l2h264enc capture-io-mode=4 output-io-mode=4 ! h264parse ! mp4mux ! filesink location=/opt/sample_720p.mp4` |
-| libcam_1080p_NV12_Encode | 1080p | `libcamerasrc num-buffers=300 ! videoconvert ! video/x-raw,format=NV12,width=1920,height=1080,framerate=30/1 ! v4l2h264enc capture-io-mode=4 output-io-mode=4 ! h264parse ! mp4mux ! filesink location=/opt/sample_1080p.mp4` |
-| libcam_4k_NV12_Encode | 4K | `libcamerasrc num-buffers=300 ! videoconvert ! video/x-raw,format=NV12,width=3840,height=2160,framerate=30/1 ! v4l2h264enc capture-io-mode=4 output-io-mode=4 ! h264parse ! mp4mux ! filesink location=/opt/sample_4k.mp4` |
+| libcam_720p_NV12_Encode | 720p | `libcamerasrc ! videoconvert ! video/x-raw,format=NV12,width=1280,height=720,framerate=30/1 ! v4l2h264enc capture-io-mode=4 output-io-mode=4 ! h264parse ! mp4mux ! filesink location=/opt/sample_720p.mp4` |
+| libcam_1080p_NV12_Encode | 1080p | `libcamerasrc ! videoconvert ! video/x-raw,format=NV12,width=1920,height=1080,framerate=30/1 ! v4l2h264enc capture-io-mode=4 output-io-mode=4 ! h264parse ! mp4mux ! filesink location=/opt/sample_1080p.mp4` |
+| libcam_4k_NV12_Encode | 4K | `libcamerasrc ! videoconvert ! video/x-raw,format=NV12,width=3840,height=2160,framerate=30/1 ! v4l2h264enc capture-io-mode=4 output-io-mode=4 ! h264parse ! mp4mux ! filesink location=/opt/sample_4k.mp4` |
 
 #### 4. 2A Features Tests (2 tests)
 Tests camera 2A (Auto Exposure/Auto White Balance) features.
 
 | Test Name | Feature | Command |
 |-----------|---------|---------|
-| libcam_Disable_AE_AWB | Disable AE/AWB | `libcamerasrc num-buffers=300 ae-enable=false awb-enable=false ! videoconvert ! waylandsink` |
-| libcam_Manual_Exposure_Gain | Manual Exposure/Gain | `libcamerasrc num-buffers=300 exposure-time-mode=manual exposure-time=10000 analogue-gain-mode=manual analogue-gain=2.0 ! videoconvert ! waylandsink` |
+| libcam_Disable_AE_AWB | Disable AE/AWB | `libcamerasrc ae-enable=false awb-enable=false ! videoconvert ! waylandsink` |
+| libcam_Manual_Exposure_Gain | Manual Exposure/Gain | `libcamerasrc exposure-time-mode=manual exposure-time=10000 analogue-gain-mode=manual analogue-gain=2.0 ! videoconvert ! waylandsink` |
 
 ---
 
