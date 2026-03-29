@@ -1,6 +1,6 @@
 #!/bin/sh
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
-# SPDX-License-Identifier: BSD-3-Clause#
+# SPDX-License-Identifier: BSD-3-Clause
 # Runner/utils/lib_gstreamer.sh
 #
 # GStreamer helpers.
@@ -20,9 +20,53 @@ GSTLAUNCHFLAGS="${GSTLAUNCHFLAGS:--e -v -m}"
 # GST_ALSA_PLAYBACK_DEVICE=hw:0,0
 # GST_ALSA_CAPTURE_DEVICE=hw:0,1
 
-# -------------------- Shared encoded-artifact directory --------------------
+# -------------------- Shared artifact directory (generic) --------------------
+# gstreamer_shared_artifact_dir <env_var_name> <shared_subdir> <local_subdir> <script_dir> <outdir>
+# Generic function to get shared artifact directory for any test type.
+# Priority:
+# 1. Environment variable if explicitly provided (e.g., VIDEO_SHARED_ENCODE_DIR, AUDIO_SHARED_RECORDED_DIR)
+# 2. A job-shared path derived from the common LAVA prefix before /tests/
+# 3. Fallback to <outdir>/<local_subdir> for local/manual runs
+#
+# Parameters:
+#   env_var_name: Name of environment variable to check (e.g., "VIDEO_SHARED_ENCODE_DIR")
+#   shared_subdir: Subdirectory name for shared path (e.g., "video-encode-decode", "audio-record-playback")
+#   local_subdir: Subdirectory name for local fallback (e.g., "encoded", "recorded")
+#   script_dir: Script directory path
+#   outdir: Output directory path
+#
+# Example usage:
+#   gstreamer_shared_artifact_dir "VIDEO_SHARED_ENCODE_DIR" "video-encode-decode" "encoded" "$SCRIPT_DIR" "$OUTDIR"
+#   gstreamer_shared_artifact_dir "AUDIO_SHARED_RECORDED_DIR" "audio-record-playback" "recorded" "$SCRIPT_DIR" "$OUTDIR"
+gstreamer_shared_artifact_dir() {
+    env_var_name="$1"
+    shared_subdir="$2"
+    local_subdir="$3"
+    script_dir="$4"
+    outdir="$5"
+
+    # Check if environment variable is set (using eval for dynamic variable name)
+    env_value=$(eval "printf '%s' \"\${${env_var_name}:-}\"")
+    if [ -n "$env_value" ]; then
+        printf '%s\n' "$env_value"
+        return 0
+    fi
+
+    # Check if we're in a LAVA test structure (contains /tests/)
+    case "$script_dir" in
+        */tests/*)
+            printf '%s/shared/%s\n' "${script_dir%%/tests/*}" "$shared_subdir"
+            ;;
+        *)
+            printf '%s/%s\n' "$outdir" "$local_subdir"
+            ;;
+    esac
+}
+
+# -------------------- Shared encoded-artifact directory (video) --------------------
 # gstreamer_shared_encoded_dir <script_dir> <outdir>
 # Prints a directory path to use for encoded video artifacts.
+# This is a wrapper around gstreamer_shared_artifact_dir for backward compatibility.
 # Priority:
 # 1. VIDEO_SHARED_ENCODE_DIR if explicitly provided
 # 2. A job-shared path derived from the common LAVA prefix before /tests/
@@ -30,20 +74,22 @@ GSTLAUNCHFLAGS="${GSTLAUNCHFLAGS:--e -v -m}"
 gstreamer_shared_encoded_dir() {
     script_dir="$1"
     outdir="$2"
+    
+    gstreamer_shared_artifact_dir "VIDEO_SHARED_ENCODE_DIR" "video-encode-decode" "encoded" "$script_dir" "$outdir"
+}
 
-    if [ -n "${VIDEO_SHARED_ENCODE_DIR:-}" ]; then
-        printf '%s\n' "$VIDEO_SHARED_ENCODE_DIR"
-        return 0
-    fi
-
-    case "$script_dir" in
-        */tests/*)
-            printf '%s/shared/video-encode-decode\n' "${script_dir%%/tests/*}"
-            ;;
-        *)
-            printf '%s/encoded\n' "$outdir"
-            ;;
-    esac
+# -------------------- Shared recorded-artifact directory (audio) --------------------
+# gstreamer_shared_recorded_dir <script_dir> <outdir>
+# Prints a directory path to use for recorded audio artifacts.
+# Priority:
+# 1. AUDIO_SHARED_RECORDED_DIR if explicitly provided
+# 2. A job-shared path derived from the common LAVA prefix before /tests/
+# 3. Fallback to <outdir>/recorded for local/manual runs
+gstreamer_shared_recorded_dir() {
+    script_dir="$1"
+    outdir="$2"
+    
+    gstreamer_shared_artifact_dir "AUDIO_SHARED_RECORDED_DIR" "audio-record-playback" "recorded" "$script_dir" "$outdir"
 }
 # -------------------- Element check --------------------
 has_element() {
@@ -493,6 +539,43 @@ gstreamer_run_gstlaunch_timeout() {
 
   # shellcheck disable=SC2086
   "$GSTBIN" $GSTLAUNCHFLAGS $pipe
+  return $?
+}
+
+# -------------------- Single runner: gst-pipeline-app with timeout --------------------
+# gstreamer_run_pipeline_app_timeout <secs> <pipelineString>
+# Returns gst-pipeline-app rc.
+# Similar to gstreamer_run_gstlaunch_timeout but for gst-pipeline-app
+gstreamer_run_pipeline_app_timeout() {
+  secs="$1"
+  pipe="$2"
+  
+  pipeline_app="gst-pipeline-app"
+  pipeline_flags="-e -v -m"
+
+  case "$secs" in ''|*[!0-9]*) secs=10 ;; esac
+  command -v "$pipeline_app" >/dev/null 2>&1 || return 127
+
+  log_info "Final gst-pipeline-app command:"
+  printf '%s \\\n' "$pipeline_app"
+  printf ' %s \\\n' "$pipeline_flags"
+  gstreamer_pretty_pipeline "$pipe"
+
+  if [ "$secs" -gt 0 ] 2>/dev/null; then
+    if command -v audio_timeout_run >/dev/null 2>&1; then
+      # shellcheck disable=SC2086
+      audio_timeout_run "${secs}s" "$pipeline_app" $pipeline_flags $pipe
+      return $?
+    fi
+    if command -v timeout >/dev/null 2>&1; then
+      # shellcheck disable=SC2086
+      timeout "$secs" "$pipeline_app" $pipeline_flags $pipe
+      return $?
+    fi
+  fi
+
+  # shellcheck disable=SC2086
+  "$pipeline_app" $pipeline_flags $pipe
   return $?
 }
 
@@ -1174,29 +1257,174 @@ camera_build_qtiqmmfsrc_snapshot_pipeline() {
 }
 
 # -------------------- libcamerasrc pipeline builders --------------------
-# camera_build_libcamera_preview_pipeline <duration> <framerate>
-# Builds libcamerasrc preview pipeline with videoconvert and waylandsink
+# camera_build_libcamera_fakesink_pipeline <width> <height> <duration> <framerate>
+# Builds libcamerasrc fakesink pipeline with optional resolution caps
+# Parameters:
+#   width: Video width (0 for no caps filter)
+#   height: Video height (0 for no caps filter)
+#   duration: Test duration in seconds
+#   framerate: Framerate in fps
 # Prints: pipeline string
-camera_build_libcamera_preview_pipeline() {
-  duration="${1:-10}"
-  framerate="${2:-30}"
+camera_build_libcamera_fakesink_pipeline() {
+  width="$1"
+  height="$2"
+  duration="${3:-10}"
+  framerate="${4:-30}"
   
   # Calculate num-buffers to ensure pipeline stops
   num_buffers=$((duration * framerate))
   
-  printf '%s\n' "libcamerasrc num-buffers=${num_buffers} ! videoconvert ! waylandsink fullscreen=true"
+  # If width/height are 0 or empty, build pipeline without caps filter
+  if [ -z "$width" ] || [ -z "$height" ] || [ "$width" -eq 0 ] 2>/dev/null || [ "$height" -eq 0 ] 2>/dev/null; then
+    printf '%s\n' "libcamerasrc num-buffers=${num_buffers} ! fakesink"
+  else
+    printf '%s\n' "libcamerasrc num-buffers=${num_buffers} ! video/x-raw,width=${width},height=${height},framerate=${framerate}/1 ! fakesink"
+  fi
 }
 
-# camera_build_libcamera_encode_pipeline <output_file> <duration> <framerate>
-# Builds libcamerasrc encode pipeline with videoconvert and v4l2h264enc
+# camera_build_libcamera_preview_pipeline <width> <height> <duration> <framerate>
+# Builds libcamerasrc preview pipeline with optional resolution caps
+# Parameters:
+#   width: Video width (0 for no caps filter)
+#   height: Video height (0 for no caps filter)
+#   duration: Test duration in seconds
+#   framerate: Framerate in fps
+# Prints: pipeline string
+camera_build_libcamera_preview_pipeline() {
+  width="$1"
+  height="$2"
+  duration="${3:-10}"
+  framerate="${4:-30}"
+  
+  # Calculate num-buffers to ensure pipeline stops
+  num_buffers=$((duration * framerate))
+  
+  # If width/height are 0 or empty, build pipeline without caps filter
+  if [ -z "$width" ] || [ -z "$height" ] || [ "$width" -eq 0 ] 2>/dev/null || [ "$height" -eq 0 ] 2>/dev/null; then
+    printf '%s\n' "libcamerasrc num-buffers=${num_buffers} ! videoconvert ! waylandsink fullscreen=true"
+  else
+    printf '%s\n' "libcamerasrc num-buffers=${num_buffers} ! video/x-raw,width=${width},height=${height},framerate=${framerate}/1 ! videoconvert ! waylandsink fullscreen=true"
+  fi
+}
+
+# camera_build_libcamera_encode_pipeline <width> <height> <output_file> <duration> <framerate>
+# Builds libcamerasrc encode pipeline with NV12 format
+# Parameters:
+#   width: Video width
+#   height: Video height
+#   output_file: Output MP4 file path
+#   duration: Test duration in seconds
+#   framerate: Framerate in fps
 # Prints: pipeline string
 camera_build_libcamera_encode_pipeline() {
-  output_file="$1"
+  width="$1"
+  height="$2"
+  output_file="$3"
+  duration="${4:-10}"
+  framerate="${5:-30}"
+  
+  # Calculate num-buffers to ensure pipeline stops
+  num_buffers=$((duration * framerate))
+  
+  printf '%s\n' "libcamerasrc num-buffers=${num_buffers} ! videoconvert ! video/x-raw,format=NV12,width=${width},height=${height},framerate=${framerate}/1 ! v4l2h264enc capture-io-mode=4 output-io-mode=4 ! h264parse ! mp4mux ! filesink location=${output_file}"
+}
+
+# camera_build_libcamera_2a_features_pipeline <feature_type> <duration> <framerate>
+# Builds libcamerasrc pipeline with 2A features (AE/AWB control)
+# Parameters:
+#   feature_type: "disable_ae_awb" or "manual_exposure_gain"
+#   duration: Test duration in seconds
+#   framerate: Framerate in fps
+# Prints: pipeline string
+camera_build_libcamera_2a_features_pipeline() {
+  feature_type="$1"
   duration="${2:-10}"
   framerate="${3:-30}"
   
   # Calculate num-buffers to ensure pipeline stops
   num_buffers=$((duration * framerate))
   
-  printf '%s\n' "libcamerasrc num-buffers=${num_buffers} ! videoconvert ! v4l2h264enc ! h264parse ! mp4mux ! filesink location=${output_file}"
+  case "$feature_type" in
+    disable_ae_awb)
+      printf '%s\n' "libcamerasrc num-buffers=${num_buffers} ae-enable=false awb-enable=false ! videoconvert ! waylandsink"
+      ;;
+    manual_exposure_gain)
+      printf '%s\n' "libcamerasrc num-buffers=${num_buffers} exposure-time-mode=manual exposure-time=10000 analogue-gain-mode=manual analogue-gain=2.0 ! videoconvert ! waylandsink"
+      ;;
+    *)
+      printf '%s\n' ""
+      return 1
+      ;;
+  esac
+}
+
+# -------------------- Wayland/Weston setup helper --------------------
+# camera_setup_wayland_environment <test_name>
+# Sets up Wayland/Weston environment for camera preview tests
+# Sets wayland_ready=1 if successful, 0 otherwise
+# Parameters:
+#   test_name: Name of the test for logging purposes
+# Returns: 0 if Wayland is ready, 1 otherwise
+camera_setup_wayland_environment() {
+  test_name="${1:-Camera_Test}"
+  
+  wayland_ready=0
+  sock=""
+  
+  # Try to find existing Wayland socket
+  if command -v discover_wayland_socket_anywhere >/dev/null 2>&1; then
+    sock=$(discover_wayland_socket_anywhere | head -n 1 || true)
+    if [ -n "$sock" ]; then
+      log_info "Found existing Wayland socket: $sock"
+      if command -v adopt_wayland_env_from_socket >/dev/null 2>&1; then
+        if adopt_wayland_env_from_socket "$sock"; then
+          wayland_ready=1
+          log_info "Adopted Wayland environment from socket"
+        fi
+      fi
+    fi
+  fi
+  
+  # Try starting Weston if no socket found
+  if [ "$wayland_ready" -eq 0 ] && [ -z "$sock" ]; then
+    if command -v weston_pick_env_or_start >/dev/null 2>&1; then
+      log_info "No Wayland socket found, attempting to start Weston..."
+      if weston_pick_env_or_start "$test_name"; then
+        # Re-discover socket after Weston start
+        if command -v discover_wayland_socket_anywhere >/dev/null 2>&1; then
+          sock=$(discover_wayland_socket_anywhere | head -n 1 || true)
+          if [ -n "$sock" ]; then
+            log_info "Weston started successfully with socket: $sock"
+            if command -v adopt_wayland_env_from_socket >/dev/null 2>&1; then
+              if adopt_wayland_env_from_socket "$sock"; then
+                wayland_ready=1
+              fi
+            fi
+          fi
+        fi
+      fi
+    fi
+  fi
+  
+  # Verify Wayland connection
+  if [ "$wayland_ready" -eq 1 ] || [ -n "${WAYLAND_DISPLAY:-}" ]; then
+    if command -v wayland_connection_ok >/dev/null 2>&1; then
+      if wayland_connection_ok; then
+        wayland_ready=1
+        log_info "Wayland connection verified: OK"
+      else
+        wayland_ready=0
+        log_warn "Wayland connection test failed"
+      fi
+    else
+      # Assume ready if WAYLAND_DISPLAY is set and no verification available
+      wayland_ready=1
+      log_info "Wayland environment set (WAYLAND_DISPLAY=${WAYLAND_DISPLAY})"
+    fi
+  fi
+  
+  # Export wayland_ready for caller
+  export wayland_ready
+  
+  return $((1 - wayland_ready))
 }
