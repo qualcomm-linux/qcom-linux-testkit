@@ -616,8 +616,8 @@ run_qtiqmmf_fakesink_test() {
   test_log="$OUTDIR/${testname}.log"
   : >"$test_log"
   
-  # Use modular pipeline builder with duration for num-buffers calculation
-  pipeline=$(camera_build_qtiqmmfsrc_fakesink_pipeline "$cameraId" "$format" 1280 720 "$framerate" "$duration")
+  # Use modular pipeline builder (duration controlled by timeout)
+  pipeline=$(camera_build_qtiqmmfsrc_fakesink_pipeline "$cameraId" "$format" 1280 720 "$framerate")
   if [ -z "$pipeline" ]; then
     log_warn "$testname: Failed to build pipeline"; skip_count=$((skip_count + 1)); return 1
   fi
@@ -788,7 +788,7 @@ run_libcam_fakesink_test() {
   test_log="$OUTDIR/${testname}.log"
   : >"$test_log"
   
-  pipeline=$(camera_build_libcamera_fakesink_pipeline "$width" "$height" "$duration" "$framerate")
+  pipeline=$(camera_build_libcamera_fakesink_pipeline "$width" "$height" "$framerate")
   if [ -z "$pipeline" ]; then
     log_warn "$testname: Failed to build pipeline"; skip_count=$((skip_count + 1)); return 1
   fi
@@ -841,7 +841,7 @@ run_libcam_preview_test() {
   test_log="$OUTDIR/${testname}.log"
   : >"$test_log"
   
-  pipeline=$(camera_build_libcamera_preview_pipeline "$width" "$height" "$duration" "$framerate")
+  pipeline=$(camera_build_libcamera_preview_pipeline "$width" "$height" "$framerate")
   if [ -z "$pipeline" ]; then
     log_warn "$testname: Failed to build pipeline"; skip_count=$((skip_count + 1)); return 1
   fi
@@ -882,7 +882,7 @@ run_libcam_encode_test() {
   test_log="$OUTDIR/${testname}.log"
   : >"$test_log"
   
-  pipeline=$(camera_build_libcamera_encode_pipeline "$width" "$height" "$output_file" "$duration" "$framerate")
+  pipeline=$(camera_build_libcamera_encode_pipeline "$width" "$height" "$output_file" "$framerate")
   if [ -z "$pipeline" ]; then
     log_warn "$testname: Failed to build pipeline"; skip_count=$((skip_count + 1)); return 1
   fi
@@ -938,7 +938,7 @@ run_libcam_2a_features_test() {
   test_log="$OUTDIR/${testname}.log"
   : >"$test_log"
   
-  pipeline=$(camera_build_libcamera_2a_features_pipeline "$feature_type" "$duration" "$framerate")
+  pipeline=$(camera_build_libcamera_2a_features_pipeline "$feature_type" "$framerate")
   if [ -z "$pipeline" ]; then
     log_warn "$testname: Failed to build pipeline"; skip_count=$((skip_count + 1)); return 1
   fi

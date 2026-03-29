@@ -1176,8 +1176,8 @@ camera_format_to_gst_string() {
 }
 
 # -------------------- qtiqmmfsrc pipeline builders --------------------
-# camera_build_qtiqmmfsrc_fakesink_pipeline <camera_id> <format> <width> <height> <framerate> <duration>
-# Builds qtiqmmfsrc fakesink test pipeline with num-buffers to ensure pipeline stops
+# camera_build_qtiqmmfsrc_fakesink_pipeline <camera_id> <format> <width> <height> <framerate>
+# Builds qtiqmmfsrc fakesink test pipeline (uses timeout for duration control)
 # Prints: pipeline string
 camera_build_qtiqmmfsrc_fakesink_pipeline() {
   camera_id="$1"
@@ -1185,18 +1185,14 @@ camera_build_qtiqmmfsrc_fakesink_pipeline() {
   width="$3"
   height="$4"
   framerate="$5"
-  duration="${6:-10}"
   
   gst_format=$(camera_format_to_gst_string "$format")
   [ -z "$gst_format" ] && return 1
   
-  # Calculate num-buffers based on duration and framerate
-  num_buffers=$((duration * framerate))
-  
   if [ "$format" = "ubwc" ]; then
-    printf '%s\n' "qtiqmmfsrc camera=${camera_id} name=camsrc num-buffers=${num_buffers} video_0::type=preview ! video/x-raw,format=${gst_format},width=${width},height=${height},framerate=${framerate}/1,interlace-mode=progressive,colorimetry=bt601 ! queue ! fakesink"
+    printf '%s\n' "qtiqmmfsrc camera=${camera_id} name=camsrc video_0::type=preview ! video/x-raw,format=${gst_format},width=${width},height=${height},framerate=${framerate}/1,interlace-mode=progressive,colorimetry=bt601 ! queue ! fakesink"
   else
-    printf '%s\n' "qtiqmmfsrc camera=${camera_id} name=camsrc num-buffers=${num_buffers} ! video/x-raw,format=${gst_format},width=${width},height=${height},framerate=${framerate}/1,interlace-mode=progressive,colorimetry=bt601 ! queue ! fakesink"
+    printf '%s\n' "qtiqmmfsrc camera=${camera_id} name=camsrc ! video/x-raw,format=${gst_format},width=${width},height=${height},framerate=${framerate}/1,interlace-mode=progressive,colorimetry=bt601 ! queue ! fakesink"
   fi
 }
 
@@ -1257,99 +1253,79 @@ camera_build_qtiqmmfsrc_snapshot_pipeline() {
 }
 
 # -------------------- libcamerasrc pipeline builders --------------------
-# camera_build_libcamera_fakesink_pipeline <width> <height> <duration> <framerate>
-# Builds libcamerasrc fakesink pipeline with optional resolution caps
+# camera_build_libcamera_fakesink_pipeline <width> <height> <framerate>
+# Builds libcamerasrc fakesink pipeline with optional resolution caps (uses timeout for duration control)
 # Parameters:
 #   width: Video width (0 for no caps filter)
 #   height: Video height (0 for no caps filter)
-#   duration: Test duration in seconds
 #   framerate: Framerate in fps
 # Prints: pipeline string
 camera_build_libcamera_fakesink_pipeline() {
   width="$1"
   height="$2"
-  duration="${3:-10}"
-  framerate="${4:-30}"
-  
-  # Calculate num-buffers to ensure pipeline stops
-  num_buffers=$((duration * framerate))
+  framerate="${3:-30}"
   
   # If width/height are 0 or empty, build pipeline without caps filter
   if [ -z "$width" ] || [ -z "$height" ] || [ "$width" -eq 0 ] 2>/dev/null || [ "$height" -eq 0 ] 2>/dev/null; then
-    printf '%s\n' "libcamerasrc num-buffers=${num_buffers} ! fakesink"
+    printf '%s\n' "libcamerasrc ! fakesink"
   else
-    printf '%s\n' "libcamerasrc num-buffers=${num_buffers} ! video/x-raw,width=${width},height=${height},framerate=${framerate}/1 ! fakesink"
+    printf '%s\n' "libcamerasrc ! video/x-raw,width=${width},height=${height},framerate=${framerate}/1 ! fakesink"
   fi
 }
 
-# camera_build_libcamera_preview_pipeline <width> <height> <duration> <framerate>
-# Builds libcamerasrc preview pipeline with optional resolution caps
+# camera_build_libcamera_preview_pipeline <width> <height> <framerate>
+# Builds libcamerasrc preview pipeline with optional resolution caps (uses timeout for duration control)
 # Parameters:
 #   width: Video width (0 for no caps filter)
 #   height: Video height (0 for no caps filter)
-#   duration: Test duration in seconds
 #   framerate: Framerate in fps
 # Prints: pipeline string
 camera_build_libcamera_preview_pipeline() {
   width="$1"
   height="$2"
-  duration="${3:-10}"
-  framerate="${4:-30}"
-  
-  # Calculate num-buffers to ensure pipeline stops
-  num_buffers=$((duration * framerate))
+  framerate="${3:-30}"
   
   # If width/height are 0 or empty, build pipeline without caps filter
   if [ -z "$width" ] || [ -z "$height" ] || [ "$width" -eq 0 ] 2>/dev/null || [ "$height" -eq 0 ] 2>/dev/null; then
-    printf '%s\n' "libcamerasrc num-buffers=${num_buffers} ! videoconvert ! waylandsink fullscreen=true"
+    printf '%s\n' "libcamerasrc ! videoconvert ! waylandsink fullscreen=true"
   else
-    printf '%s\n' "libcamerasrc num-buffers=${num_buffers} ! video/x-raw,width=${width},height=${height},framerate=${framerate}/1 ! videoconvert ! waylandsink fullscreen=true"
+    printf '%s\n' "libcamerasrc ! video/x-raw,width=${width},height=${height},framerate=${framerate}/1 ! videoconvert ! waylandsink fullscreen=true"
   fi
 }
 
-# camera_build_libcamera_encode_pipeline <width> <height> <output_file> <duration> <framerate>
-# Builds libcamerasrc encode pipeline with NV12 format
+# camera_build_libcamera_encode_pipeline <width> <height> <output_file> <framerate>
+# Builds libcamerasrc encode pipeline with NV12 format (uses timeout for duration control)
 # Parameters:
 #   width: Video width
 #   height: Video height
 #   output_file: Output MP4 file path
-#   duration: Test duration in seconds
 #   framerate: Framerate in fps
 # Prints: pipeline string
 camera_build_libcamera_encode_pipeline() {
   width="$1"
   height="$2"
   output_file="$3"
-  duration="${4:-10}"
-  framerate="${5:-30}"
+  framerate="${4:-30}"
   
-  # Calculate num-buffers to ensure pipeline stops
-  num_buffers=$((duration * framerate))
-  
-  printf '%s\n' "libcamerasrc num-buffers=${num_buffers} ! videoconvert ! video/x-raw,format=NV12,width=${width},height=${height},framerate=${framerate}/1 ! v4l2h264enc capture-io-mode=4 output-io-mode=4 ! h264parse ! mp4mux ! filesink location=${output_file}"
+  printf '%s\n' "libcamerasrc ! videoconvert ! video/x-raw,format=NV12,width=${width},height=${height},framerate=${framerate}/1 ! v4l2h264enc capture-io-mode=4 output-io-mode=4 ! h264parse ! mp4mux ! filesink location=${output_file}"
 }
 
-# camera_build_libcamera_2a_features_pipeline <feature_type> <duration> <framerate>
-# Builds libcamerasrc pipeline with 2A features (AE/AWB control)
+# camera_build_libcamera_2a_features_pipeline <feature_type> <framerate>
+# Builds libcamerasrc pipeline with 2A features (AE/AWB control) - uses timeout for duration control
 # Parameters:
 #   feature_type: "disable_ae_awb" or "manual_exposure_gain"
-#   duration: Test duration in seconds
 #   framerate: Framerate in fps
 # Prints: pipeline string
 camera_build_libcamera_2a_features_pipeline() {
   feature_type="$1"
-  duration="${2:-10}"
-  framerate="${3:-30}"
-  
-  # Calculate num-buffers to ensure pipeline stops
-  num_buffers=$((duration * framerate))
+  framerate="${2:-30}"
   
   case "$feature_type" in
     disable_ae_awb)
-      printf '%s\n' "libcamerasrc num-buffers=${num_buffers} ae-enable=false awb-enable=false ! videoconvert ! waylandsink"
+      printf '%s\n' "libcamerasrc ae-enable=false awb-enable=false ! videoconvert ! waylandsink"
       ;;
     manual_exposure_gain)
-      printf '%s\n' "libcamerasrc num-buffers=${num_buffers} exposure-time-mode=manual exposure-time=10000 analogue-gain-mode=manual analogue-gain=2.0 ! videoconvert ! waylandsink"
+      printf '%s\n' "libcamerasrc exposure-time-mode=manual exposure-time=10000 analogue-gain-mode=manual analogue-gain=2.0 ! videoconvert ! waylandsink"
       ;;
     *)
       printf '%s\n' ""
