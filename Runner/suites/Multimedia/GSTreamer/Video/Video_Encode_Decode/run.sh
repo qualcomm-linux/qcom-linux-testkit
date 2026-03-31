@@ -433,7 +433,11 @@ run_encode_test() {
   width="$3"
   height="$4"
   
-  testname="encode_${codec}_${resolution}"
+  # Generate LAVA-compatible test name: GStreamer_Video_Encode_<codec>_<resolution>
+  testname="GStreamer_Video_Encode_${codec}_${resolution}"
+  # Use simple name for file paths
+  file_basename="encode_${codec}_${resolution}"
+  
   log_info "=========================================="
   log_info "Running: $testname"
   log_info "=========================================="
@@ -443,12 +447,13 @@ run_encode_test() {
   if [ -z "$encoder" ]; then
     log_warn "Encoder not available for $codec"
     skip_count=$((skip_count + 1))
+    echo "$testname SKIP" >>"$RES_FILE"
     return 1
   fi
   
   ext=$(gstreamer_container_ext_for_codec "$codec")
-  output_file="$ENCODED_DIR/${testname}.${ext}"
-  test_log="$OUTDIR/${testname}.log"
+  output_file="$ENCODED_DIR/${file_basename}.${ext}"
+  test_log="$OUTDIR/${file_basename}.log"
   
   : >"$test_log"
   
@@ -461,6 +466,7 @@ run_encode_test() {
   if [ -z "$pipeline" ]; then
     log_fail "$testname: FAIL (could not build pipeline)"
     fail_count=$((fail_count + 1))
+    echo "$testname FAIL" >>"$RES_FILE"
     return 1
   fi
   
@@ -476,9 +482,10 @@ run_encode_test() {
   log_info "Encode exit code: $gstRc"
   
   # Check for GStreamer errors in log
-  if ! gstreamer_validate_log "$test_log" "$testname"; then
+  if ! gstreamer_validate_log "$test_log" "$file_basename"; then
     log_fail "$testname: FAIL (GStreamer errors detected)"
     fail_count=$((fail_count + 1))
+    echo "$testname FAIL" >>"$RES_FILE"
     return 1
   fi
   
@@ -490,15 +497,18 @@ run_encode_test() {
     if [ "$file_size" -gt 1000 ]; then
       log_pass "$testname: PASS"
       pass_count=$((pass_count + 1))
+      echo "$testname PASS" >>"$RES_FILE"
       return 0
     else
       log_fail "$testname: FAIL (file too small: $file_size bytes)"
       fail_count=$((fail_count + 1))
+      echo "$testname FAIL" >>"$RES_FILE"
       return 1
     fi
   else
     log_fail "$testname: FAIL (no output file created)"
     fail_count=$((fail_count + 1))
+    echo "$testname FAIL" >>"$RES_FILE"
     return 1
   fi
 }
@@ -508,7 +518,11 @@ run_decode_test() {
   codec="$1"
   resolution="$2"
   
-  testname="decode_${codec}_${resolution}"
+  # Generate LAVA-compatible test name: GStreamer_Video_Decode_<codec>_<resolution>
+  testname="GStreamer_Video_Decode_${codec}_${resolution}"
+  # Use simple name for file paths
+  file_basename="decode_${codec}_${resolution}"
+  
   log_info "=========================================="
   log_info "Running: $testname"
   log_info "=========================================="
@@ -518,6 +532,7 @@ run_decode_test() {
   if [ -z "$decoder" ]; then
     log_warn "Decoder not available for $codec"
     skip_count=$((skip_count + 1))
+    echo "$testname SKIP" >>"$RES_FILE"
     return 1
   fi
   
@@ -529,6 +544,7 @@ run_decode_test() {
     if [ ! -f "$input_file" ]; then
       log_warn "VP9 WebM clip not found: $input_file"
       skip_count=$((skip_count + 1))
+      echo "$testname SKIP" >>"$RES_FILE"
       return 1
     fi
   else
@@ -536,11 +552,12 @@ run_decode_test() {
     if [ ! -f "$input_file" ]; then
       log_warn "Input file not found: $input_file (run encode first)"
       skip_count=$((skip_count + 1))
+      echo "$testname SKIP" >>"$RES_FILE"
       return 1
     fi
   fi
   
-  test_log="$OUTDIR/${testname}.log"
+  test_log="$OUTDIR/${file_basename}.log"
   : >"$test_log"
   
   # Build pipeline using library function
@@ -549,6 +566,7 @@ run_decode_test() {
   if [ -z "$pipeline" ]; then
     log_fail "$testname: FAIL (could not build pipeline)"
     fail_count=$((fail_count + 1))
+    echo "$testname FAIL" >>"$RES_FILE"
     return 1
   fi
   
@@ -564,9 +582,10 @@ run_decode_test() {
   log_info "Decode exit code: $gstRc"
   
   # Check for GStreamer errors in log
-  if ! gstreamer_validate_log "$test_log" "$testname"; then
+  if ! gstreamer_validate_log "$test_log" "$file_basename"; then
     log_fail "$testname: FAIL (GStreamer errors detected)"
     fail_count=$((fail_count + 1))
+    echo "$testname FAIL" >>"$RES_FILE"
     return 1
   fi
   
@@ -574,10 +593,12 @@ run_decode_test() {
   if [ "$gstRc" -eq 0 ]; then
     log_pass "$testname: PASS"
     pass_count=$((pass_count + 1))
+    echo "$testname PASS" >>"$RES_FILE"
     return 0
   else
     log_fail "$testname: FAIL (rc=$gstRc)"
     fail_count=$((fail_count + 1))
+    echo "$testname FAIL" >>"$RES_FILE"
     return 1
   fi
 }
@@ -737,15 +758,12 @@ fi
 case "$result" in
   PASS)
     log_pass "$TESTNAME $result: $reason"
-    echo "$TESTNAME PASS" >"$RES_FILE"
     ;;
   FAIL)
     log_fail "$TESTNAME $result: $reason"
-    echo "$TESTNAME FAIL" >"$RES_FILE"
     ;;
   *)
     log_warn "$TESTNAME $result: $reason"
-    echo "$TESTNAME SKIP" >"$RES_FILE"
     ;;
 esac
 
