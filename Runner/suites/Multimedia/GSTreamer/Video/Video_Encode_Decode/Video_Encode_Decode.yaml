@@ -19,6 +19,7 @@ params:
   VIDEO_GST_DEBUG: "2"
   VIDEO_CLIP_URL: ""
   VIDEO_CLIP_PATH: ""   # dir/file/archive (tar/tar.gz/tar.xz/xz)
+  LAVA_TESTCASE_ID: "Video_Encode_Decode"
 
 run:
   steps:
@@ -27,5 +28,5 @@ run:
     - VIDEO_SHARED_ENCODE_DIR="${REPO_PATH%%/tests/*}/shared/video-encode-decode"
     - export VIDEO_TEST_MODE VIDEO_CODECS VIDEO_RESOLUTIONS VIDEO_DURATION VIDEO_FRAMERATE
     - export VIDEO_STACK VIDEO_GST_DEBUG VIDEO_CLIP_URL VIDEO_CLIP_PATH VIDEO_SHARED_ENCODE_DIR
-    - ./run.sh --mode "${VIDEO_TEST_MODE}" --codecs "${VIDEO_CODECS}" --resolutions "${VIDEO_RESOLUTIONS}" --duration "${VIDEO_DURATION}" --framerate "${VIDEO_FRAMERATE}" --stack "${VIDEO_STACK}" --gst-debug "${VIDEO_GST_DEBUG}" --clip-url "${VIDEO_CLIP_URL}" --clip-path "${VIDEO_CLIP_PATH}" || true
+    - ./run.sh --mode "${VIDEO_TEST_MODE}" --codecs "${VIDEO_CODECS}" --resolutions "${VIDEO_RESOLUTIONS}" --duration "${VIDEO_DURATION}" --framerate "${VIDEO_FRAMERATE}" --stack "${VIDEO_STACK}" --gst-debug "${VIDEO_GST_DEBUG}" --clip-url "${VIDEO_CLIP_URL}" --clip-path "${VIDEO_CLIP_PATH}" --lava-testcase-id "${LAVA_TESTCASE_ID}" || true
     - $REPO_PATH/Runner/utils/send-to-lava.sh Video_Encode_Decode.res

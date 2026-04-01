@@ -13,6 +13,7 @@ SCRIPT_DIR="$(
 )"
 
 TESTNAME="Video_Encode_Decode"
+RESULT_TESTNAME="$TESTNAME"
 RES_FILE="${SCRIPT_DIR}/${TESTNAME}.res"
 LOG_DIR="${SCRIPT_DIR}/logs"
 OUTDIR="$LOG_DIR/$TESTNAME"
@@ -31,7 +32,7 @@ done
  
 if [ -z "${INIT_ENV:-}" ]; then
   echo "[ERROR] Could not find init_env (starting at $SCRIPT_DIR)" >&2
-  echo "$TESTNAME SKIP" >"$RES_FILE" 2>/dev/null || true
+  echo "$RESULT_TESTNAME SKIP" >"$RES_FILE" 2>/dev/null || true
   exit 0
 fi
  
@@ -62,7 +63,7 @@ if ! mkdir -p "$OUTDIR" "$DMESG_DIR" "$ENCODED_DIR"; then
   log_error "  OUTDIR=$OUTDIR"
   log_error "  DMESG_DIR=$DMESG_DIR"
   log_error "  ENCODED_DIR=$ENCODED_DIR"
-  echo "$TESTNAME FAIL" >"$RES_FILE" 2>/dev/null || true
+  echo "$RESULT_TESTNAME FAIL" >"$RES_FILE" 2>/dev/null || true
   exit 0
 fi
 
@@ -103,13 +104,13 @@ for param in VIDEO_DURATION RUNTIMESEC VIDEO_FRAMERATE VIDEO_GST_DEBUG GST_DEBUG
     case "$val" in
       ''|*[!0-9]*) 
         log_warn "$param must be numeric (got '$val')"
-        echo "$TESTNAME SKIP" >"$RES_FILE"
+        echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
         exit 0
         ;;
       *)
         if [ "$val" -le 0 ] 2>/dev/null; then
           log_warn "$param must be positive (got '$val')"
-          echo "$TESTNAME SKIP" >"$RES_FILE"
+          echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
           exit 0
         fi
         ;;
@@ -132,7 +133,7 @@ while [ $# -gt 0 ]; do
     --mode)
       if [ $# -lt 2 ] || [ "${2#--}" != "$2" ]; then
         log_warn "Missing/invalid value for --mode"
-        echo "$TESTNAME SKIP" >"$RES_FILE"
+        echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
         exit 0
       fi
       # If empty, keep default; otherwise use provided value
@@ -143,7 +144,7 @@ while [ $# -gt 0 ]; do
     --codecs)
       if [ $# -lt 2 ] || [ "${2#--}" != "$2" ]; then
         log_warn "Missing/invalid value for --codecs"
-        echo "$TESTNAME SKIP" >"$RES_FILE"
+        echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
         exit 0
       fi
       # If empty, keep default; otherwise use provided value
@@ -154,7 +155,7 @@ while [ $# -gt 0 ]; do
     --resolutions)
       if [ $# -lt 2 ] || [ "${2#--}" != "$2" ]; then
         log_warn "Missing/invalid value for --resolutions"
-        echo "$TESTNAME SKIP" >"$RES_FILE"
+        echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
         exit 0
       fi
       # If empty, keep default; otherwise use provided value
@@ -165,7 +166,7 @@ while [ $# -gt 0 ]; do
     --duration)
       if [ $# -lt 2 ] || [ "${2#--}" != "$2" ]; then
         log_warn "Missing/invalid value for --duration"
-        echo "$TESTNAME SKIP" >"$RES_FILE"
+        echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
         exit 0
       fi
       # If empty or non-numeric, keep default; otherwise use provided value
@@ -173,7 +174,7 @@ while [ $# -gt 0 ]; do
         case "$2" in
           ''|*[!0-9]*)
             log_warn "Invalid --duration '$2' (must be numeric)"
-            echo "$TESTNAME SKIP" >"$RES_FILE"
+            echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
             exit 0
             ;;
           *)
@@ -187,20 +188,20 @@ while [ $# -gt 0 ]; do
     --framerate)
       if [ $# -lt 2 ] || [ "${2#--}" != "$2" ]; then
         log_warn "Missing/invalid value for --framerate"
-        echo "$TESTNAME SKIP" >"$RES_FILE"
+        echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
         exit 0
       fi
       if [ -n "$2" ]; then
         case "$2" in
           ''|*[!0-9]*) 
             log_warn "Invalid --framerate '$2' (must be numeric)"
-            echo "$TESTNAME SKIP" >"$RES_FILE"
+            echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
             exit 0
             ;;
           *)
             if [ "$2" -le 0 ] 2>/dev/null; then
               log_warn "Framerate must be positive (got '$2')"
-              echo "$TESTNAME SKIP" >"$RES_FILE"
+              echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
               exit 0
             fi
             ;;
@@ -214,7 +215,7 @@ while [ $# -gt 0 ]; do
     --stack)
       if [ $# -lt 2 ] || [ "${2#--}" != "$2" ]; then
         log_warn "Missing/invalid value for --stack"
-        echo "$TESTNAME SKIP" >"$RES_FILE"
+        echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
         exit 0
       fi
       # If empty, keep default; otherwise use provided value
@@ -225,7 +226,7 @@ while [ $# -gt 0 ]; do
     --gst-debug)
       if [ $# -lt 2 ] || [ "${2#--}" != "$2" ]; then
         log_warn "Missing/invalid value for --gst-debug"
-        echo "$TESTNAME SKIP" >"$RES_FILE"
+        echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
         exit 0
       fi
       # If empty, keep default; otherwise use provided value
@@ -236,7 +237,7 @@ while [ $# -gt 0 ]; do
     --clip-url)
       if [ $# -lt 2 ] || [ "${2#--}" != "$2" ]; then
         log_warn "Missing/invalid value for --clip-url"
-        echo "$TESTNAME SKIP" >"$RES_FILE"
+        echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
         exit 0
       fi
       # If empty, keep default; otherwise use provided value
@@ -246,10 +247,19 @@ while [ $# -gt 0 ]; do
     --clip-path)
       if [ $# -lt 2 ] || [ "${2#--}" != "$2" ]; then
         log_warn "Missing/invalid value for --clip-path"
-        echo "$TESTNAME SKIP" >"$RES_FILE"
+        echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
         exit 0
       fi
       [ -n "$2" ] && clipPath="$2"
+      shift 2
+      ;;
+    --lava-testcase-id)
+      if [ $# -lt 2 ] || [ "${2#--}" != "$2" ]; then
+        log_warn "Missing/invalid value for --lava-testcase-id"
+        echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
+        exit 0
+      fi
+      [ -n "$2" ] && RESULT_TESTNAME="$2"
       shift 2
       ;;
     -h|--help)
@@ -294,6 +304,11 @@ OPTIONS:
   --clip-path <path>    Local path to test video files
                         (overrides --clip-url if files exist)
 
+  --lava-testcase-id <name>
+                        Override the test case name reported to LAVA
+                        (default: Video_Encode_Decode)
+                        Used by LAVA to match expected test case names
+
   -h, --help            Display this help message
 
 ENVIRONMENT VARIABLES:
@@ -332,7 +347,7 @@ EOF
       ;;
     *)
       log_warn "Unknown argument: $1"
-      echo "$TESTNAME SKIP" >"$RES_FILE"
+      echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
       exit 0
       ;;
   esac
@@ -341,14 +356,14 @@ done
 # -------------------- Validate parsed values --------------------
 case "$testMode" in all|encode|decode) : ;; *)
   log_warn "Invalid --mode '$testMode'"
-  echo "$TESTNAME SKIP" >"$RES_FILE"
+  echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
   exit 0
   ;;
 esac
 
 case "$gstDebugLevel" in 1|2|3|4|5|6|7|8|9) : ;; *)
   log_warn "Invalid --gst-debug '$gstDebugLevel' (allowed: 1-9)"
-  echo "$TESTNAME SKIP" >"$RES_FILE"
+  echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
   exit 0
   ;;
 esac
@@ -356,13 +371,13 @@ esac
 case "$duration" in
   ''|*[!0-9]*) 
     log_warn "Invalid duration '$duration' (must be numeric)"
-    echo "$TESTNAME SKIP" >"$RES_FILE"
+    echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
     exit 0
     ;;
   *)
     if [ "$duration" -le 0 ] 2>/dev/null; then
       log_warn "Duration must be positive (got '$duration')"
-      echo "$TESTNAME SKIP" >"$RES_FILE"
+      echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
       exit 0
     fi
     ;;
@@ -371,13 +386,13 @@ esac
 case "$framerate" in
   ''|*[!0-9]*) 
     log_warn "Invalid framerate '$framerate' (must be numeric)"
-    echo "$TESTNAME SKIP" >"$RES_FILE"
+    echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
     exit 0
     ;;
   *)
     if [ "$framerate" -le 0 ] 2>/dev/null; then
       log_warn "Framerate must be positive (got '$framerate')"
-      echo "$TESTNAME SKIP" >"$RES_FILE"
+      echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
       exit 0
     fi
     ;;
@@ -386,7 +401,7 @@ esac
 # -------------------- Pre-checks --------------------
 check_dependencies "gst-launch-1.0 gst-inspect-1.0 awk grep head sed tr stat find curl tar" >/dev/null 2>&1 || {
   log_skip "Missing required tools (gst-launch-1.0, gst-inspect-1.0, awk, grep, head, sed, tr, stat, find, curl, tar)"
-  echo "$TESTNAME SKIP" >"$RES_FILE"
+  echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
   exit 0
 }
 
@@ -433,11 +448,7 @@ run_encode_test() {
   width="$3"
   height="$4"
   
-  # Generate LAVA-compatible test name: GStreamer_Video_Encode_<codec>_<resolution>
-  testname="GStreamer_Video_Encode_${codec}_${resolution}"
-  # Use simple name for file paths
-  file_basename="encode_${codec}_${resolution}"
-  
+  testname="encode_${codec}_${resolution}"
   log_info "=========================================="
   log_info "Running: $testname"
   log_info "=========================================="
@@ -447,13 +458,12 @@ run_encode_test() {
   if [ -z "$encoder" ]; then
     log_warn "Encoder not available for $codec"
     skip_count=$((skip_count + 1))
-    echo "$testname SKIP" >>"$RES_FILE"
     return 1
   fi
   
   ext=$(gstreamer_container_ext_for_codec "$codec")
-  output_file="$ENCODED_DIR/${file_basename}.${ext}"
-  test_log="$OUTDIR/${file_basename}.log"
+  output_file="$ENCODED_DIR/${testname}.${ext}"
+  test_log="$OUTDIR/${testname}.log"
   
   : >"$test_log"
   
@@ -466,7 +476,6 @@ run_encode_test() {
   if [ -z "$pipeline" ]; then
     log_fail "$testname: FAIL (could not build pipeline)"
     fail_count=$((fail_count + 1))
-    echo "$testname FAIL" >>"$RES_FILE"
     return 1
   fi
   
@@ -482,10 +491,9 @@ run_encode_test() {
   log_info "Encode exit code: $gstRc"
   
   # Check for GStreamer errors in log
-  if ! gstreamer_validate_log "$test_log" "$file_basename"; then
+  if ! gstreamer_validate_log "$test_log" "$testname"; then
     log_fail "$testname: FAIL (GStreamer errors detected)"
     fail_count=$((fail_count + 1))
-    echo "$testname FAIL" >>"$RES_FILE"
     return 1
   fi
   
@@ -497,18 +505,15 @@ run_encode_test() {
     if [ "$file_size" -gt 1000 ]; then
       log_pass "$testname: PASS"
       pass_count=$((pass_count + 1))
-      echo "$testname PASS" >>"$RES_FILE"
       return 0
     else
       log_fail "$testname: FAIL (file too small: $file_size bytes)"
       fail_count=$((fail_count + 1))
-      echo "$testname FAIL" >>"$RES_FILE"
       return 1
     fi
   else
     log_fail "$testname: FAIL (no output file created)"
     fail_count=$((fail_count + 1))
-    echo "$testname FAIL" >>"$RES_FILE"
     return 1
   fi
 }
@@ -518,11 +523,7 @@ run_decode_test() {
   codec="$1"
   resolution="$2"
   
-  # Generate LAVA-compatible test name: GStreamer_Video_Decode_<codec>_<resolution>
-  testname="GStreamer_Video_Decode_${codec}_${resolution}"
-  # Use simple name for file paths
-  file_basename="decode_${codec}_${resolution}"
-  
+  testname="decode_${codec}_${resolution}"
   log_info "=========================================="
   log_info "Running: $testname"
   log_info "=========================================="
@@ -532,7 +533,6 @@ run_decode_test() {
   if [ -z "$decoder" ]; then
     log_warn "Decoder not available for $codec"
     skip_count=$((skip_count + 1))
-    echo "$testname SKIP" >>"$RES_FILE"
     return 1
   fi
   
@@ -544,7 +544,6 @@ run_decode_test() {
     if [ ! -f "$input_file" ]; then
       log_warn "VP9 WebM clip not found: $input_file"
       skip_count=$((skip_count + 1))
-      echo "$testname SKIP" >>"$RES_FILE"
       return 1
     fi
   else
@@ -552,12 +551,11 @@ run_decode_test() {
     if [ ! -f "$input_file" ]; then
       log_warn "Input file not found: $input_file (run encode first)"
       skip_count=$((skip_count + 1))
-      echo "$testname SKIP" >>"$RES_FILE"
       return 1
     fi
   fi
   
-  test_log="$OUTDIR/${file_basename}.log"
+  test_log="$OUTDIR/${testname}.log"
   : >"$test_log"
   
   # Build pipeline using library function
@@ -566,7 +564,6 @@ run_decode_test() {
   if [ -z "$pipeline" ]; then
     log_fail "$testname: FAIL (could not build pipeline)"
     fail_count=$((fail_count + 1))
-    echo "$testname FAIL" >>"$RES_FILE"
     return 1
   fi
   
@@ -582,10 +579,9 @@ run_decode_test() {
   log_info "Decode exit code: $gstRc"
   
   # Check for GStreamer errors in log
-  if ! gstreamer_validate_log "$test_log" "$file_basename"; then
+  if ! gstreamer_validate_log "$test_log" "$testname"; then
     log_fail "$testname: FAIL (GStreamer errors detected)"
     fail_count=$((fail_count + 1))
-    echo "$testname FAIL" >>"$RES_FILE"
     return 1
   fi
   
@@ -593,12 +589,10 @@ run_decode_test() {
   if [ "$gstRc" -eq 0 ]; then
     log_pass "$testname: PASS"
     pass_count=$((pass_count + 1))
-    echo "$testname PASS" >>"$RES_FILE"
     return 0
   else
     log_fail "$testname: FAIL (rc=$gstRc)"
     fail_count=$((fail_count + 1))
-    echo "$testname FAIL" >>"$RES_FILE"
     return 1
   fi
 }
@@ -758,12 +752,15 @@ fi
 case "$result" in
   PASS)
     log_pass "$TESTNAME $result: $reason"
+    echo "$RESULT_TESTNAME PASS" >"$RES_FILE"
     ;;
   FAIL)
     log_fail "$TESTNAME $result: $reason"
+    echo "$RESULT_TESTNAME FAIL" >"$RES_FILE"
     ;;
   *)
     log_warn "$TESTNAME $result: $reason"
+    echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
     ;;
 esac
 

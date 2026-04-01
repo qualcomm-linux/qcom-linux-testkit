@@ -211,6 +211,13 @@ Help:
     - `9` MEMDUMP
   - Default: `2`
 
+- `--lava-testcase-id <name>`
+  - Override the test case name reported to LAVA in the `.res` file
+  - Default: `Video_Encode_Decode`
+  - Used by LAVA to match expected test case names
+  - Example: `--lava-testcase-id "GStreamer_Video_Decode_h265_480p"`
+  - **Note:** This is typically set automatically by LAVA job definitions and should not be used for local testing
+
 ---
 
 ## Examples
@@ -585,8 +592,25 @@ The test supports these environment variables (can be set in LAVA job definition
 - `VIDEO_GST_DEBUG` - GStreamer debug level (default: 2)
 - `GST_DEBUG_LEVEL` - Alternative to VIDEO_GST_DEBUG
 - `VIDEO_CLIP_URL` - URL for VP9 clip download (default: GitHub releases)
+- `LAVA_TESTCASE_ID` - Override test case name for LAVA reporting (default: Video_Encode_Decode)
 
 **Priority order for duration**: `VIDEO_DURATION` > `RUNTIMESEC` > default (30)
+
+### LAVA Test Case Naming
+
+The test supports flexible test case naming for LAVA integration:
+
+- **Default behavior**: Reports results as `Video_Encode_Decode` in the `.res` file
+- **LAVA override**: Set `LAVA_TESTCASE_ID` parameter in the YAML definition to match LAVA's expected test case name
+- **Example YAML configuration**:
+  ```yaml
+  params:
+    VIDEO_TEST_MODE: decode
+    VIDEO_CODECS: h265
+    VIDEO_RESOLUTIONS: 480p
+    LAVA_TESTCASE_ID: "GStreamer_Video_Decode_h265_480p"  # Matches LAVA expected name
+  ```
+- This ensures LAVA correctly matches test results with expected test case names, avoiding "Unexpected test result" errors
 
 ### VP9-Specific Notes for CI/LAVA
 
