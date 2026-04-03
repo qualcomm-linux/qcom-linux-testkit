@@ -16,13 +16,15 @@ if [ -z "$INIT_ENV" ]; then
 fi
 
 # Only source if not already loaded (idempotent)
-if [ -z "$__INIT_ENV_LOADED" ]; then
+if [ -z "${__INIT_ENV_LOADED:-}" ]; then
     # shellcheck disable=SC1090
     . "$INIT_ENV"
 fi
 # Always source functestlib.sh, using $TOOLS exported by init_env
-# shellcheck disable=SC1090,SC1091
+# shellcheck disable=SC1091
 . "$TOOLS/functestlib.sh"
+# shellcheck disable=SC1090,SC1091
+. "$TOOLS/lib_display.sh"
 
 TESTNAME="core_auth"
 result_file="./${TESTNAME}.res"
@@ -91,6 +93,13 @@ fi
 
 log_info "Using core_auth binary at: $CORE_AUTH_CMD"
 
+dri_primary="$(get_drm_primary_node 2>/dev/null || true)"
+if [ -n "$dri_primary" ]; then
+    log_info "Using DRM primary node: $dri_primary"
+else
+    log_warn "$TESTNAME : DRM primary node /dev/dri/card* not present, continuing and letting core_auth determine outcome"
+fi
+
 if ! weston_stop; then
     log_error "Failed to stop Weston"
     echo "$TESTNAME FAIL" > "$result_file"
@@ -122,7 +131,11 @@ log_info "Subtest Results: SUCCESS=$success_count, FAIL=$fail_count, SKIP=$skip_
 log_info "results will be written to \"$result_file\""
 log_info "-------------------Completed $TESTNAME Testcase----------------------------"
 
-if [ "$RC" -ne 0 ]; then
+if [ "$RC" -eq 77 ] || { [ "$skip_count" -gt 0 ] && [ "$success_count" -eq 0 ] && [ "$fail_count" -eq 0 ]; }; then
+    log_skip "$TESTNAME : Test Skipped - All $skip_count subtest(s) were skipped"
+    echo "$TESTNAME SKIP" > "$result_file"
+    exit 0
+elif [ "$RC" -ne 0 ]; then
     log_fail "$TESTNAME : Test Failed (exit code: $RC)"
     echo "$TESTNAME FAIL" > "$result_file"
     exit 1
@@ -130,10 +143,6 @@ elif [ "$fail_count" -gt 0 ]; then
     log_fail "$TESTNAME : Test Failed - $fail_count subtest(s) failed out of $total_subtests"
     echo "$TESTNAME FAIL" > "$result_file"
     exit 1
-elif [ "$skip_count" -gt 0 ] && [ "$success_count" -eq 0 ]; then
-    log_skip "$TESTNAME : Test Skipped - All $skip_count subtest(s) were skipped"
-    echo "$TESTNAME SKIP" > "$result_file"
-    exit 0
 else
     if [ "$success_count" -gt 0 ]; then
         if [ "$skip_count" -gt 0 ]; then

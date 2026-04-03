@@ -110,6 +110,42 @@ display__debugfs_mode_for_crtc_name() {
     ' "$st" 2>/dev/null
 }
 
+# Return the first available DRM primary node (/dev/dri/card*).
+# Prints the node path and returns 0 on success, 1 if no primary DRM node exists.
+get_drm_primary_node() {
+    for node in /dev/dri/card*; do
+        case "$node" in
+            /dev/dri/card[0-9]*)
+                if [ -e "$node" ]; then
+                    printf '%s\n' "$node"
+                    return 0
+                fi
+                ;;
+        esac
+    done
+    return 1
+}
+
+# Remove stale Wayland socket files only when Weston is not running.
+# Best-effort cleanup for common Weston runtime paths; ignores missing files and permission errors.
+weston_cleanup_stale_sockets() {
+    if weston_is_running; then
+        return 0
+    fi
+
+    for s in \
+        /dev/socket/weston/wayland-* \
+        /run/user/0/wayland-* \
+        /run/user/1000/wayland-* \
+        /tmp/wayland-* \
+        "${XDG_RUNTIME_DIR:-/nonexistent}"/wayland-*; do
+        [ -S "$s" ] || continue
+        rm -f "$s" 2>/dev/null || true
+    done
+
+    return 0
+}
+
 drm_card_index_from_dev() {
     dev="$1"
     case "$dev" in
