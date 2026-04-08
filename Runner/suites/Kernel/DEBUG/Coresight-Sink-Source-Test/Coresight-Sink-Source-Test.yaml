@@ -1,0 +1,16 @@
+metadata:
+  name: Coresight-Sink-Source-Test
+  format: "Lava-Test Test Definition 1.0"
+  description: "This test iterates through all CoreSight sources and sinks to validate end‑to‑end trace path accessibility. It ensures trace data capture works correctly and that all sources are cleanly disabled after execution."
+  os:
+    - linux
+  scope:
+    - coresight
+    - kernel
+
+run:
+  steps:
+    - REPO_PATH=$PWD || true
+    - cd Runner/suites/Kernel/DEBUG/Coresight-Sink-Source-Test || true
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh Coresight-Sink-Source-Test.res || true
