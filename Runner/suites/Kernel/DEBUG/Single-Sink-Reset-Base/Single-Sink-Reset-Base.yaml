@@ -1,0 +1,16 @@
+metadata:
+  name: STM-HWEvent-Port-Enable-Disable
+  format: "Lava-Test Test Definition 1.0"
+  description: "This test validates CoreSight sink reset behavior while STM/ETM sources are actively generating trace data."
+  os:
+    - linux
+  scope:
+    - coresight
+    - kernel
+
+run:
+  steps:
+    - REPO_PATH=$PWD || true
+    - cd Runner/suites/Kernel/DEBUG/Single-Sink-Reset-Base || true
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh Single-Sink-Reset-Base.res || true
