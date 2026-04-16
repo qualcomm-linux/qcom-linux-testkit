@@ -1,0 +1,16 @@
+metadata:
+  name: Run-GetEnforce
+  format: "Lava-Test Test Definition 1.0"
+  description: "This test validates the SELinux enforcement mode on the target system that should be in 'Permissive' mode for certain operation that need disabling security policies"
+  os:
+    - linux
+  scope:
+    - security
+    - kernel
+
+run:
+  steps:
+    - REPO_PATH=$PWD || true
+    - cd Runner/suites/Kernel/DEBUG/Run-GetEnforce || true
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh Run-GetEnforce.res || true
