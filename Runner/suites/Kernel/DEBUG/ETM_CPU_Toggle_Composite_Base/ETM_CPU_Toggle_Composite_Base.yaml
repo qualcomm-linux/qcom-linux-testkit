@@ -1,0 +1,16 @@
+metadata:
+  name: ETM-CPU-Toggle-Composite-Base
+  format: "Lava-Test Test Definition 1.0"
+  description: "Composite stress test validating ETM stability while CPUs are dynamically offlined and onlined."
+  os:
+    - linux
+  scope:
+    - coresight
+    - kernel
+
+run:
+  steps:
+    - REPO_PATH=$PWD || true
+    - cd Runner/suites/Kernel/DEBUG/ETM-CPU-Toggle-Composite-Base || true
+    - ./run.sh 100 || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh ETM-CPU-Toggle-Composite-Base.res || true
