@@ -1,7 +1,14 @@
 metadata:
   name: fastrpc-test
   format: "Lava-Test Test Definition 1.0"
-  description: "The **fastrpc_test** runner validates FastRPC (Fast Remote Procedure Call) on Qualcomm targets, offloading work to runtime-detected DSP domains."
+  description: |
+    The **fastrpc_test** runner validates FastRPC (Fast Remote Procedure Call) on Qualcomm targets.
+
+    **Enhanced Test Coverage**:
+    - Now tests ALL supported DSP domains detected at runtime (ADSP, MDSP, SDSP, CDSP, CDSP1, GPDSP0, GPDSP1)
+    - Tests BOTH signed (system) and unsigned (user) Protection Domains where hardware supports them
+    - ADSP/MDSP/SDSP: signed PD only; CDSP/CDSP1/GPDSP: both signed and unsigned PDs
+    - For single-domain testing: set DOMAIN_MODE="single" and specify DOMAIN or DOMAIN_NAME
   os:
     - linux
   scope:
@@ -10,10 +17,10 @@ metadata:
 params:
   ARCH: ""  # Architecture (only if explicitly provided)
   BIN_DIR: "/usr/bin"  # Directory containing 'fastrpc_test' (default: /usr/bin)
-  DOMAIN_MODE: "all-supported"  # all-supported|single (default: all-supported)
+  DOMAIN_MODE: "all-supported"  # all-supported|single (default: all-supported - tests all detected domains)
   DOMAIN: ""  # Optional explicit domain id in single-domain mode
   DOMAIN_NAME: ""  # Optional explicit domain name in single-domain mode
-  PD_MODE: "both"  # both|signed-only|unsigned-only (default: both)
+  PD_MODE: "both"  # both|signed-only|unsigned-only (default: both - tests both PDs where supported)
   USER_PD: ""  # Compatibility override. If set to non-zero, runs only -U 1
   REPEAT: 1  # Number of repetitions (default: 1)
   TIMEOUT: ""  # Timeout for each run (no timeout if omitted)

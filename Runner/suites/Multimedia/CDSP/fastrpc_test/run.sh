@@ -40,16 +40,22 @@ VERBOSE=0
 USER_PD_FLAG=0 # default: -U 0 (system/signed PD)
 CLI_DOMAIN=""
 CLI_DOMAIN_NAME=""
-DOMAIN_MODE="all-supported" # ENHANCED: default to all-supported
-PD_MODE="both" # ENHANCED: default to both PDs
+DOMAIN_MODE="all-supported" # Default: test all supported domains
+PD_MODE="both" # Default: test both PDs where supported
 
 usage() {
     cat <<EOF
 Usage: $0 [OPTIONS]
 
+**Enhanced Test Coverage**:
+  This test now validates FastRPC across all supported DSP domains and PD modes.
+  - Tests all detected domains: ADSP, MDSP, SDSP, CDSP, CDSP1, GPDSP0, GPDSP1
+  - Tests both signed and unsigned Protection Domains where hardware supports them
+  - For legacy single-domain testing: use --domain-mode single --domain <N>
+
 Options:
   --arch <name> Architecture (only if explicitly provided)
-  --bin-dir <path> Directory containing 'fastrpc_test' (default: /usr/local/bin)
+  --bin-dir <path> Directory containing 'fastrpc_test' (default: /usr/bin)
   --assets-dir <path> (compat) previously used when assets lived under 'linux/'
   --domain <0|1|2|3|4|5|6> DSP domain: 0=ADSP, 1=MDSP, 2=SDSP, 3=CDSP, 4=CDSP1, 5=GPDSP0, 6=GPDSP1
   --domain-name <name> DSP domain by name: adsp|mdsp|sdsp|cdsp|cdsp1|gpdsp0|gpdsp1
@@ -60,6 +66,13 @@ Options:
   --timeout <sec> Timeout for each run (no timeout if omitted)
   --verbose Extra logging for CI debugging
   --help Show this help
+
+Domain Selection Priority:
+  1. --domain-name (highest priority, forces single domain)
+  2. --domain (forces single domain)
+  3. --domain-mode single + FASTRPC_DOMAIN_NAME env
+  4. --domain-mode single + FASTRPC_DOMAIN env
+  5. --domain-mode all-supported (default, discovers all)
 
 Env:
   FASTRPC_DOMAIN=0|1|2|3|4|5|6 Sets domain; CLI --domain/--domain-name wins.
@@ -77,7 +90,6 @@ Notes:
     CDSP_LIBRARY_PATH=/usr/local/share/fastrpc_test/v75[:v68]
     SDSP_LIBRARY_PATH=/usr/local/share/fastrpc_test/v75[:v68]
 - Domain mapping: ADSP=0 MDSP=1 SDSP=2 CDSP=3 CDSP1=4 GPDSP0=5 GPDSP1=6
-- Default: discover all supported domains at runtime and run both signed/unsigned PDs where supported.
 - PD support: ADSP/MDSP/SDSP support signed only; CDSP/CDSP1/GPDSP support both.
 EOF
 }
@@ -150,7 +162,7 @@ cmd_to_string() {
 }
 
 log_dsp_remoteproc_status() {
-    fw_list="adsp mdsp sdsp cdsp cdsp0 cdsp1 gdsp0 gdsp1 gpdsp0 gpdsp1" # extended list
+    fw_list="adsp mdsp sdsp cdsp cdsp0 cdsp1 gdsp0 gdsp1 gpdsp0 gpdsp1"
     any=0
     for fw in $fw_list; do
         if dt_has_remoteproc_fw "$fw"; then
@@ -176,9 +188,9 @@ name_to_domain() {
         mdsp) echo 1 ;;
         sdsp) echo 2 ;;
         cdsp) echo 3 ;;
-        cdsp1) echo 4 ;; # ENHANCED
-        gpdsp0|gdsp0) echo 5 ;; # ENHANCED
-        gpdsp1|gdsp1) echo 6 ;; # ENHANCED
+        cdsp1) echo 4 ;;
+        gpdsp0|gdsp0) echo 5 ;;
+        gpdsp1|gdsp1) echo 6 ;;
         *) echo "" ;;
     esac
 }
@@ -286,20 +298,6 @@ effective_pds_for_domain() {
     printf "%s" "$effective"
 }
 
-pick_default_domain() {
-    # Prefer CDSP if present; else ADSP; else SDSP; else 3
-    if dt_has_remoteproc_fw "cdsp" || dt_has_remoteproc_fw "cdsp0" || dt_has_remoteproc_fw "cdsp1"; then
-        echo 3; return
-    fi
-    if dt_has_remoteproc_fw "adsp"; then
-        echo 0; return
-    fi
-    if dt_has_remoteproc_fw "sdsp"; then
-        echo 2; return
-    fi
-    echo 3
-}
-
 # -------------------- Banner --------------------
 log_info "--------------------------------------------------------------------------"
 log_info "-------------------Starting $TESTNAME Testcase----------------------------"
@@ -319,7 +317,7 @@ case "$BIN_DIR" in
         if [ "${ALLOW_BIN_FASTRPC:-0}" -ne 1 ]; then
 	    log_skip "$TESTNAME SKIP - unsupported layout: /bin. Set ALLOW_BIN_FASTRPC=1 or pass --bin-dir."
             echo "$TESTNAME : SKIP" >"$RESULT_FILE"
-            exit 1
+            exit 0
         fi
     ;;
 esac
@@ -330,7 +328,7 @@ RUN_BIN="$RUN_DIR/fastrpc_test"
 if [ ! -x "$RUN_BIN" ]; then
     log_skip "$TESTNAME SKIP - fastrpc_test not installed (expected at: $RUN_BIN)"
     echo "$TESTNAME : SKIP" >"$RESULT_FILE"
-    exit 1
+    exit 0
 fi
 
 # New layout checks (replace legacy 'linux/' checks)
@@ -378,7 +376,7 @@ DOMAINS_TO_TEST="$(resolve_domains_to_test)"
 if [ -z "$DOMAINS_TO_TEST" ]; then
     log_skip "$TESTNAME SKIP - no mapped/supported domains detected"
     echo "$TESTNAME : SKIP" >"$RESULT_FILE"
-    exit 1
+    exit 0
 fi
 
 log_info "Domain mode: $DOMAIN_MODE"
@@ -410,6 +408,10 @@ log_info "Repeats: $REPEAT | Timeout: $tmo_label | Buffering: $buf_label"
 PASS_COUNT=0
 TOTAL_COUNT=0
 
+# Track per-domain/per-PD results during execution
+# Format: "DOMAIN:PD:pass_count:fail_count"
+RESULTS_TRACKER=""
+
 for DOMAIN in $DOMAINS_TO_TEST; do
     dom_name="$(domain_to_name "$DOMAIN")"
     PD_VALUES="$(effective_pds_for_domain "$DOMAIN")"
@@ -426,6 +428,10 @@ for DOMAIN in $DOMAINS_TO_TEST; do
             *) pd_name="unknown" ;;
         esac
 
+        # Initialize counters for this domain/PD combo
+        combo_pass=0
+        combo_fail=0
+
         i=1
         while [ "$i" -le "$REPEAT" ]; do
             TOTAL_COUNT=$((TOTAL_COUNT+1))
@@ -441,7 +447,8 @@ for DOMAIN in $DOMAINS_TO_TEST; do
             set -- -d "$DOMAIN" -t linux
             [ -n "$ARCH" ] && set -- "$@" -a "$ARCH"
             set -- "$@" -U "$PD_VAL"
-            [ -n "${FASTRPC_EXTRA_FLAGS:-}" ] && set -- "$@" $FASTRPC_EXTRA_FLAGS
+            # shellcheck disable=SC2086
+            [ -n "${FASTRPC_EXTRA_FLAGS:-}" ] && set -- "$@" ${FASTRPC_EXTRA_FLAGS}
 
             {
                 echo "DATE_UTC=$iso_now"
@@ -494,97 +501,66 @@ for DOMAIN in $DOMAINS_TO_TEST; do
                 log_dsp_remoteproc_status
             fi
 
+            # Track result immediately
             if [ "$rc" -eq 0 ] && [ -r "$iter_log" ] && grep -F -q -e "All tests completed successfully" -e "All applicable tests PASSED" "$iter_log"; then
                 PASS_COUNT=$((PASS_COUNT+1))
+                combo_pass=$((combo_pass+1))
                 log_pass "$iter_tag: success"
             else
+                combo_fail=$((combo_fail+1))
                 log_warn "$iter_tag: success pattern not found"
             fi
 
             i=$((i+1))
         done
+
+        # Store results for this domain/PD combo
+        RESULTS_TRACKER="${RESULTS_TRACKER}${DOMAIN}:${PD_VAL}:${combo_pass}:${combo_fail}
+"
     done
 done
 
 # -------------------- Finalize --------------------------------
-# Build detailed summary table
+# Build detailed summary table from tracked results
 log_info "=========================================================================="
 log_info "                         FastRPC Test Summary"
 log_info "=========================================================================="
 
-# Collect results per domain/PD combination
 SUMMARY_FILE="$LOG_ROOT/summary.txt"
-> "$SUMMARY_FILE"
-
-for DOMAIN in $DOMAINS_TO_TEST; do
-    dom_name="$(domain_to_name "$DOMAIN")"
-    PD_VALUES="$(effective_pds_for_domain "$DOMAIN")"
-    
-    [ -z "$PD_VALUES" ] && continue
-    
-    for PD_VAL in $PD_VALUES; do
-        case "$PD_VAL" in
-            0) pd_name="Signed  " ;;
-            1) pd_name="Unsigned" ;;
-            *) pd_name="Unknown " ;;
-        esac
-        
-        # Count pass/fail for this domain/PD combo
-        combo_pass=0
-        combo_fail=0
-        combo_total=0
-        
-        i=1
-        while [ "$i" -le "$REPEAT" ]; do
-            case "$PD_VAL" in
-                0) iter_tag="${dom_name}_signed_iter${i}" ;;
-                1) iter_tag="${dom_name}_unsigned_iter${i}" ;;
-                *) iter_tag="${dom_name}_u${PD_VAL}_iter${i}" ;;
-            esac
-            
-            iter_rc="$LOG_ROOT/${iter_tag}.rc"
-            iter_log="$LOG_ROOT/${iter_tag}.out"
-            
-            if [ -f "$iter_rc" ]; then
-                combo_total=$((combo_total + 1))
-                rc=$(cat "$iter_rc")
-                if [ "$rc" -eq 0 ] && [ -r "$iter_log" ] && grep -F -q -e "All tests completed successfully" -e "All applicable tests PASSED" "$iter_log"; then
-                    combo_pass=$((combo_pass + 1))
-                else
-                    combo_fail=$((combo_fail + 1))
-                fi
-            fi
-            
-            i=$((i + 1))
-        done
-        
-        # Determine status
-        if [ "$combo_total" -eq 0 ]; then
-            status="SKIP"
-        elif [ "$combo_fail" -eq 0 ]; then
-            status="PASS"
-        else
-            status="FAIL"
-        fi
-        
-        # Write to summary file
-        printf "%-10s | %-10s | %4d | %4d | %4s\n" "$dom_name" "$pd_name" "$combo_pass" "$combo_fail" "$status" >> "$SUMMARY_FILE"
-    done
-done
+true > "$SUMMARY_FILE"
 
 # Display table header
 log_info "--------------------------------------------------------------------------"
 log_info "Domain     | PD Mode    | Pass | Fail | Status"
 log_info "--------------------------------------------------------------------------"
 
-# Display table content
-if [ -f "$SUMMARY_FILE" ] && [ -s "$SUMMARY_FILE" ]; then
-    while IFS= read -r line; do
-        log_info "$line"
-    done < "$SUMMARY_FILE"
-else
-    log_info "No test results to display"
-fi
+# Parse tracked results and build table
+echo "$RESULTS_TRACKER" | while IFS=: read -r domain pd_val pass_cnt fail_cnt; do
+    [ -z "$domain" ] && continue
+
+    dom_name="$(domain_to_name "$domain")"
+    case "$pd_val" in
+        0) pd_name="Signed  " ;;
+        1) pd_name="Unsigned" ;;
+        *) pd_name="Unknown " ;;
+    esac
+
+    combo_total=$((pass_cnt + fail_cnt))
+
+    # Determine status
+    if [ "$combo_total" -eq 0 ]; then
+        status="SKIP"
+    elif [ "$fail_cnt" -eq 0 ]; then
+        status="PASS"
+    else
+        status="FAIL"
+    fi
+
+    # Write to summary file and log (properly formatted table row)
+    line=$(printf "%-10s | %-10s | %4d | %4d | %4s" "$dom_name" "$pd_name" "$pass_cnt" "$fail_cnt" "$status")
+    echo "$line" >> "$SUMMARY_FILE"
+    log_info "$line"
+done
 
 log_info "--------------------------------------------------------------------------"
 log_info "Overall:   Total runs: $TOTAL_COUNT | Passed: $PASS_COUNT | Failed: $((TOTAL_COUNT - PASS_COUNT))"
@@ -594,17 +570,13 @@ log_info "======================================================================
 if [ "$TOTAL_COUNT" -eq 0 ]; then
     log_skip "$TESTNAME SKIP - no runnable domain/PD combinations"
     echo "$TESTNAME : SKIP" > "$RESULT_FILE"
+    exit 0
 elif [ "$PASS_COUNT" -eq "$TOTAL_COUNT" ]; then
     log_pass "$TESTNAME : Test Passed ($PASS_COUNT/$TOTAL_COUNT)"
     echo "$TESTNAME : PASS" > "$RESULT_FILE"
+    exit 0
 else
     log_fail "$TESTNAME : Test Failed ($PASS_COUNT/$TOTAL_COUNT)"
     echo "$TESTNAME : FAIL" > "$RESULT_FILE"
+    exit 1
 fi
-
-[ -f "$RESULT_FILE" ] || {
-    log_error "Missing result file ($RESULT_FILE) — creating FAIL"
-    echo "$TESTNAME : FAIL" >"$RESULT_FILE"
-}
-
-exit 0
