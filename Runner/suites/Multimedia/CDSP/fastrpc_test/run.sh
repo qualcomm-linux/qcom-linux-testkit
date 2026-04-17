@@ -40,25 +40,42 @@ VERBOSE=0
 USER_PD_FLAG=0 # default: -U 0 (system/signed PD)
 CLI_DOMAIN=""
 CLI_DOMAIN_NAME=""
+DOMAIN_MODE="all-supported" # Default: test all supported domains
+PD_MODE="both" # Default: test both PDs where supported
 
 usage() {
     cat <<EOF
 Usage: $0 [OPTIONS]
 
+**Enhanced Test Coverage**:
+  This test now validates FastRPC across all supported DSP domains and PD modes.
+  - Tests all detected domains: ADSP, MDSP, SDSP, CDSP, CDSP1, GPDSP0, GPDSP1
+  - Tests both signed and unsigned Protection Domains where hardware supports them
+  - For legacy single-domain testing: use --domain-mode single --domain <N>
+
 Options:
   --arch <name> Architecture (only if explicitly provided)
-  --bin-dir <path> Directory containing 'fastrpc_test' (default: /usr/local/bin)
+  --bin-dir <path> Directory containing 'fastrpc_test' (default: /usr/bin)
   --assets-dir <path> (compat) previously used when assets lived under 'linux/'
-  --domain <0|1|2|3> DSP domain: 0=ADSP, 1=MDSP, 2=SDSP, 3=CDSP
-  --domain-name <name> DSP domain by name: adsp|mdsp|sdsp|cdsp
-  --user-pd Use '-U 1' (user/unsigned PD). Default is '-U 0'
+  --domain <0|1|2|3|4|5|6> DSP domain: 0=ADSP, 1=MDSP, 2=SDSP, 3=CDSP, 4=CDSP1, 5=GPDSP0, 6=GPDSP1
+  --domain-name <name> DSP domain by name: adsp|mdsp|sdsp|cdsp|cdsp1|gpdsp0|gpdsp1
+  --domain-mode <all-supported|single> Discover all supported domains or run only one (default: all-supported)
+  --pd-mode <both|signed-only|unsigned-only> Select PD mode(s) to run (default: both)
+  --user-pd Use '-U 1' (user/unsigned PD). Overrides --pd-mode for compatibility
   --repeat <N> Number of repetitions (default: 1)
   --timeout <sec> Timeout for each run (no timeout if omitted)
   --verbose Extra logging for CI debugging
   --help Show this help
 
+Domain Selection Priority:
+  1. --domain-name (highest priority, forces single domain)
+  2. --domain (forces single domain)
+  3. --domain-mode single + FASTRPC_DOMAIN_NAME env
+  4. --domain-mode single + FASTRPC_DOMAIN env
+  5. --domain-mode all-supported (default, discovers all)
+
 Env:
-  FASTRPC_DOMAIN=0|1|2|3 Sets domain; CLI --domain/--domain-name wins.
+  FASTRPC_DOMAIN=0|1|2|3|4|5|6 Sets domain; CLI --domain/--domain-name wins.
   FASTRPC_DOMAIN_NAME=adsp|... Named domain; CLI wins.
   FASTRPC_USER_PD=0|1 Sets PD (-U value). CLI --user-pd overrides to 1.
   FASTRPC_EXTRA_FLAGS Extra flags appended (space-separated).
@@ -72,7 +89,8 @@ Notes:
     ADSP_LIBRARY_PATH=/usr/local/share/fastrpc_test/v75[:v68]
     CDSP_LIBRARY_PATH=/usr/local/share/fastrpc_test/v75[:v68]
     SDSP_LIBRARY_PATH=/usr/local/share/fastrpc_test/v75[:v68]
-- If domain not provided, auto-pick: CDSP if present; else ADSP; else SDSP; else 3.
+- Domain mapping: ADSP=0 MDSP=1 SDSP=2 CDSP=3 CDSP1=4 GPDSP0=5 GPDSP1=6
+- PD support: ADSP/MDSP/SDSP support signed only; CDSP/CDSP1/GPDSP support both.
 EOF
 }
 
@@ -84,6 +102,8 @@ while [ $# -gt 0 ]; do
         --assets-dir) ASSETS_DIR="$2"; shift 2 ;;
         --domain) CLI_DOMAIN="$2"; shift 2 ;;
         --domain-name) CLI_DOMAIN_NAME="$2"; shift 2 ;;
+        --domain-mode) DOMAIN_MODE="$2"; shift 2 ;;
+        --pd-mode) PD_MODE="$2"; shift 2 ;;
         --user-pd) USER_PD_FLAG=1; shift ;;
         --repeat) REPEAT="$2"; shift 2 ;;
         --timeout) TIMEOUT="$2"; shift 2 ;;
@@ -105,6 +125,9 @@ case "$REPEAT" in *[!0-9]*|"") log_error "Invalid --repeat: $REPEAT"; echo "$TES
 if [ -n "$TIMEOUT" ]; then
     case "$TIMEOUT" in *[!0-9]*|"") log_error "Invalid --timeout: $TIMEOUT"; echo "$TESTNAME : FAIL" >"$RESULT_FILE"; exit 1 ;; esac
 fi
+# Validate enhanced options
+case "$DOMAIN_MODE" in all-supported|single) : ;; *) log_error "Invalid --domain-mode: $DOMAIN_MODE"; echo "$TESTNAME : FAIL" >"$RESULT_FILE"; exit 1 ;; esac
+case "$PD_MODE" in both|signed-only|unsigned-only) : ;; *) log_error "Invalid --pd-mode: $PD_MODE"; echo "$TESTNAME : FAIL" >"$RESULT_FILE"; exit 1 ;; esac
 
 # Ensure we're in the testcase directory (repo convention)
 test_path="$(find_test_case_by_name "$TESTNAME")" || {
@@ -139,7 +162,7 @@ cmd_to_string() {
 }
 
 log_dsp_remoteproc_status() {
-    fw_list="adsp cdsp cdsp0 cdsp1 sdsp gdsp0 gdsp1"
+    fw_list="adsp mdsp sdsp cdsp cdsp0 cdsp1 gdsp0 gdsp1 gpdsp0 gpdsp1"
     any=0
     for fw in $fw_list; do
         if dt_has_remoteproc_fw "$fw"; then
@@ -165,22 +188,114 @@ name_to_domain() {
         mdsp) echo 1 ;;
         sdsp) echo 2 ;;
         cdsp) echo 3 ;;
+        cdsp1) echo 4 ;;
+        gpdsp0|gdsp0) echo 5 ;;
+        gpdsp1|gdsp1) echo 6 ;;
         *) echo "" ;;
     esac
 }
 
-pick_default_domain() {
-    # Prefer CDSP if present; else ADSP; else SDSP; else 3
-    if dt_has_remoteproc_fw "cdsp" || dt_has_remoteproc_fw "cdsp0" || dt_has_remoteproc_fw "cdsp1"; then
-        echo 3; return
+# Helper to get domain name from id
+domain_to_name() {
+    case "$1" in
+        0) echo "ADSP" ;;
+        1) echo "MDSP" ;;
+        2) echo "SDSP" ;;
+        3) echo "CDSP" ;;
+        4) echo "CDSP1" ;;
+        5) echo "GPDSP0" ;;
+        6) echo "GPDSP1" ;;
+        *) echo "UNKNOWN" ;;
+    esac
+}
+
+# Helper to append unique word
+append_unique() {
+    current="$1"
+    new="$2"
+    for word in $current; do
+        [ "$word" = "$new" ] && { printf "%s" "$current"; return; }
+    done
+    [ -n "$current" ] && printf "%s %s" "$current" "$new" || printf "%s" "$new"
+}
+
+# Discover all supported domains
+discover_supported_domains() {
+    found=""
+    for fw in adsp mdsp sdsp cdsp cdsp1 gpdsp0 gpdsp1 gdsp0 gdsp1; do
+        if dt_has_remoteproc_fw "$fw"; then
+            case "$fw" in
+                adsp) found="$(append_unique "$found" "0")" ;;
+                mdsp) found="$(append_unique "$found" "1")" ;;
+                sdsp) found="$(append_unique "$found" "2")" ;;
+                cdsp) found="$(append_unique "$found" "3")" ;;
+                cdsp1) found="$(append_unique "$found" "4")" ;;
+                gpdsp0|gdsp0) found="$(append_unique "$found" "5")" ;;
+                gpdsp1|gdsp1) found="$(append_unique "$found" "6")" ;;
+            esac
+        fi
+    done
+    printf "%s" "$found"
+}
+
+# Resolve which domains to test
+resolve_domains_to_test() {
+    resolved=""
+    if [ -n "$CLI_DOMAIN_NAME" ]; then
+        resolved="$(name_to_domain "$CLI_DOMAIN_NAME")"
+    elif [ -n "$CLI_DOMAIN" ]; then
+        resolved="$CLI_DOMAIN"
+    elif [ "$DOMAIN_MODE" = "single" ]; then
+        if [ -n "${FASTRPC_DOMAIN_NAME:-}" ]; then
+            resolved="$(name_to_domain "$FASTRPC_DOMAIN_NAME")"
+        elif [ -n "${FASTRPC_DOMAIN:-}" ]; then
+            resolved="$FASTRPC_DOMAIN"
+        fi
+    else
+        resolved="$(discover_supported_domains)"
     fi
-    if dt_has_remoteproc_fw "adsp"; then
-        echo 0; return
-    fi
-    if dt_has_remoteproc_fw "sdsp"; then
-        echo 2; return
-    fi
-    echo 3
+
+    valid=""
+    for d in $resolved; do
+        case "$d" in
+            0|1|2|3|4|5|6) valid="$(append_unique "$valid" "$d")" ;;
+            *) log_warn "Ignoring invalid domain '$d'" ;;
+        esac
+    done
+    printf "%s" "$valid"
+}
+
+# Get supported PD values for a domain
+domain_supported_pds() {
+    case "$1" in
+        0|1|2) printf "%s" "0" ;; # ADSP/MDSP/SDSP: signed only
+        3|4|5|6) printf "%s" "0 1" ;; # CDSP/CDSP1/GPDSP: both
+        *) printf "%s" "" ;;
+    esac
+}
+
+# Get requested PD values
+requested_pds() {
+    [ "$USER_PD_FLAG" -eq 1 ] && { printf "%s" "1"; return; }
+    case "$PD_MODE" in
+        signed-only) printf "%s" "0" ;;
+        unsigned-only) printf "%s" "1" ;;
+        both) printf "%s" "0 1" ;;
+    esac
+}
+
+# Get effective PD values for a domain
+effective_pds_for_domain() {
+    domain="$1"
+    requested="$(requested_pds)"
+    supported="$(domain_supported_pds "$domain")"
+    effective=""
+    for req in $requested; do
+        for sup in $supported; do
+            [ "$req" = "$sup" ] && effective="$(append_unique "$effective" "$req")"
+        done
+    done
+    printf "%s" "$effective"
 }
 
 # -------------------- Banner --------------------
@@ -202,7 +317,7 @@ case "$BIN_DIR" in
         if [ "${ALLOW_BIN_FASTRPC:-0}" -ne 1 ]; then
 	    log_skip "$TESTNAME SKIP - unsupported layout: /bin. Set ALLOW_BIN_FASTRPC=1 or pass --bin-dir."
             echo "$TESTNAME : SKIP" >"$RESULT_FILE"
-            exit 1
+            exit 0
         fi
     ;;
 esac
@@ -213,7 +328,7 @@ RUN_BIN="$RUN_DIR/fastrpc_test"
 if [ ! -x "$RUN_BIN" ]; then
     log_skip "$TESTNAME SKIP - fastrpc_test not installed (expected at: $RUN_BIN)"
     echo "$TESTNAME : SKIP" >"$RESULT_FILE"
-    exit 1
+    exit 0
 fi
 
 # New layout checks (replace legacy 'linux/' checks)
@@ -238,60 +353,35 @@ log_info " file : $(file "$RUN_BIN" 2>/dev/null || echo 'N/A')"
 # >>>>>>>>>>>>>>>>>>>>>> ENV for your initramfs layout <<<<<<<<<<<<<<<<<<<<<<
 # Libraries: system + test payloads
 export LD_LIBRARY_PATH="/usr/local/lib:/usr/local/lib/fastrpc_test${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-# Skeletons: export if present (don’t clobber if user already set)
+# Skeletons: export if present (don't clobber if user already set)
 [ -n "$SKEL_PATH" ] && {
     : "${ADSP_LIBRARY_PATH:=$SKEL_PATH}"; export ADSP_LIBRARY_PATH
     : "${CDSP_LIBRARY_PATH:=$SKEL_PATH}"; export CDSP_LIBRARY_PATH
     : "${SDSP_LIBRARY_PATH:=$SKEL_PATH}"; export SDSP_LIBRARY_PATH
 }
 log_info "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}"
-[ -n "$ADSP_LIBRARY_PATH" ] && log_info "ADSP_LIBRARY_PATH=${ADSP_LIBRARY_PATH}"
-[ -n "$CDSP_LIBRARY_PATH" ] && log_info "CDSP_LIBRARY_PATH=${CDSP_LIBRARY_PATH}"
-[ -n "$SDSP_LIBRARY_PATH" ] && log_info "SDSP_LIBRARY_PATH=${SDSP_LIBRARY_PATH}"
+[ -n "${ADSP_LIBRARY_PATH:-}" ] && log_info "ADSP_LIBRARY_PATH=${ADSP_LIBRARY_PATH}"
+[ -n "${CDSP_LIBRARY_PATH:-}" ] && log_info "CDSP_LIBRARY_PATH=${CDSP_LIBRARY_PATH}"
+[ -n "${SDSP_LIBRARY_PATH:-}" ] && log_info "SDSP_LIBRARY_PATH=${SDSP_LIBRARY_PATH}"
 # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 # Ensure /usr/lib/dsp has the expected DSP artifacts (generic, idempotent)
 ensure_usr_lib_dsp_symlinks
 # Log *dsp remoteproc statuses via existing helpers
 log_dsp_remoteproc_status
 
-# -------------------- PD selection -------------------
-PD_VAL="${FASTRPC_USER_PD:-0}"
-[ "$USER_PD_FLAG" -eq 1 ] && PD_VAL=1
-log_info "PD setting: -U $PD_VAL (use --user-pd or FASTRPC_USER_PD=1 to change)"
+# -------------------- Domain and PD selection -------------------
+# Resolve domains and PDs to test
+DOMAINS_TO_TEST="$(resolve_domains_to_test)"
 
-# -------------------- Domain selection -------------------
-DOMAIN=""
-# Precedence: CLI name -> CLI number -> env name -> env number -> auto-pick
-if [ -n "$CLI_DOMAIN_NAME" ]; then
-    DOMAIN="$(name_to_domain "$CLI_DOMAIN_NAME")"
-elif [ -n "$CLI_DOMAIN" ]; then
-    DOMAIN="$CLI_DOMAIN"
-elif [ -n "${FASTRPC_DOMAIN_NAME:-}" ]; then
-    DOMAIN="$(name_to_domain "$FASTRPC_DOMAIN_NAME")"
-elif [ -n "${FASTRPC_DOMAIN:-}" ]; then
-    DOMAIN="$FASTRPC_DOMAIN"
+if [ -z "$DOMAINS_TO_TEST" ]; then
+    log_skip "$TESTNAME SKIP - no mapped/supported domains detected"
+    echo "$TESTNAME : SKIP" >"$RESULT_FILE"
+    exit 0
 fi
 
-# Validate / auto-pick
-case "$DOMAIN" in
-    0|1|2|3) : ;;
-    "" )
-        DOMAIN="$(pick_default_domain)"
-        log_info "Domain auto-picked: -d $DOMAIN (CDSP=3, ADSP=0, SDSP=2)"
-        ;;
-    * )
-        log_warn "Invalid domain '$DOMAIN' auto-picking"
-        DOMAIN="$(pick_default_domain)"
-        ;;
-esac
-
-case "$DOMAIN" in
-    0) dom_name="ADSP" ;;
-    1) dom_name="MDSP" ;;
-    2) dom_name="SDSP" ;;
-    3) dom_name="CDSP" ;;
-esac
-log_info "Domain: -d $DOMAIN ($dom_name)"
+log_info "Domain mode: $DOMAIN_MODE"
+log_info "Domains to test: $DOMAINS_TO_TEST"
+log_info "PD mode: $PD_MODE"
 
 # -------------------- Buffering tool availability ---------------
 HAVE_STDBUF=0; command -v stdbuf >/dev/null 2>&1 && HAVE_STDBUF=1
@@ -305,24 +395,6 @@ elif [ $HAVE_SCRIPT -eq 1 ]; then
     buf_label="script -q"
 fi
 
-# -------------------- Build argv safely -------------------------
-set -- -d "$DOMAIN" -t linux
-
-if [ -n "$ARCH" ]; then
-    set -- "$@" -a "$ARCH"
-    log_info "Arch option: -a $ARCH"
-else
-    log_info "No --arch provided; running without -a"
-fi
-
-set -- "$@" -U "$PD_VAL"
-
-if [ -n "$FASTRPC_EXTRA_FLAGS" ]; then
-    # shellcheck disable=SC2086
-    set -- "$@" $FASTRPC_EXTRA_FLAGS
-    log_info "Extra flags: $FASTRPC_EXTRA_FLAGS"
-fi
-
 # -------------------- Logging root -----------------------------
 TS="$(date +%Y%m%d-%H%M%S)"
 LOG_ROOT="./logs_${TESTNAME}_${TS}"
@@ -332,90 +404,179 @@ tmo_label="none"; [ -n "$TIMEOUT" ] && tmo_label="${TIMEOUT}s"
 log_info "Repeats: $REPEAT | Timeout: $tmo_label | Buffering: $buf_label"
 
 # -------------------- Run loop ---------------------------------
+# Nested loop over domains and PDs
 PASS_COUNT=0
-i=1
-while [ "$i" -le "$REPEAT" ]; do
-    iter_tag="iter$i"
-    iter_log="$LOG_ROOT/${iter_tag}.out"
-    iter_rc="$LOG_ROOT/${iter_tag}.rc"
-    iter_cmd="$LOG_ROOT/${iter_tag}.cmd"
-    iter_env="$LOG_ROOT/${iter_tag}.env"
-    iter_dmesg="$LOG_ROOT/${iter_tag}.dmesg"
-    iso_now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+TOTAL_COUNT=0
 
-    {
-        echo "DATE_UTC=$iso_now"
-        echo "RUN_DIR=$RUN_DIR"
-        echo "RUN_BIN=$RUN_BIN"
-        echo "PATH=$PATH"
-        echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}"
-        echo "ADSP_LIBRARY_PATH=${ADSP_LIBRARY_PATH:-}"
-        echo "CDSP_LIBRARY_PATH=${CDSP_LIBRARY_PATH:-}"
-        echo "SDSP_LIBRARY_PATH=${SDSP_LIBRARY_PATH:-}"
-        echo "ARCH=${ARCH:-}"
-        echo "PD_VAL=$PD_VAL"
-        echo "DOMAIN=$DOMAIN ($dom_name)"
-        echo "REPEAT=$REPEAT TIMEOUT=${TIMEOUT:-none}"
-        echo "EXTRA=$FASTRPC_EXTRA_FLAGS"
-    } > "$iter_env"
+# Track per-domain/per-PD results during execution
+# Format: "DOMAIN:PD:pass_count:fail_count"
+RESULTS_TRACKER=""
 
-    log_info "Running $iter_tag/$REPEAT | start: $iso_now | dir: $RUN_DIR"
-    log_info "Executing: ./fastrpc_test$(cmd_to_string "$@")"
-    printf "./fastrpc_test%s\n" "$(cmd_to_string "$@")" > "$iter_cmd"
+for DOMAIN in $DOMAINS_TO_TEST; do
+    dom_name="$(domain_to_name "$DOMAIN")"
+    PD_VALUES="$(effective_pds_for_domain "$DOMAIN")"
 
-    (
-        cd "$RUN_DIR" || exit 127
-        if [ $HAVE_STDBUF -eq 1 ]; then
-             runWithTimeoutIfSet stdbuf -oL -eL ./fastrpc_test "$@"
-        elif [ $HAVE_SCRIPT -eq 1 ]; then
-            cmd_str="./fastrpc_test$(cmd_to_string "$@")"
-            if [ -n "$TIMEOUT" ] && [ $HAVE_TIMEOUT -eq 1 ]; then
-                script -q -c "timeout $TIMEOUT $cmd_str" /dev/null
-            else
-                script -q -c "$cmd_str" /dev/null
+    if [ -z "$PD_VALUES" ]; then
+        log_warn "Skipping $dom_name: requested PD mode unsupported for this domain"
+        continue
+    fi
+
+    for PD_VAL in $PD_VALUES; do
+        case "$PD_VAL" in
+            0) pd_name="signed" ;;
+            1) pd_name="unsigned" ;;
+            *) pd_name="unknown" ;;
+        esac
+
+        # Initialize counters for this domain/PD combo
+        combo_pass=0
+        combo_fail=0
+
+        i=1
+        while [ "$i" -le "$REPEAT" ]; do
+            TOTAL_COUNT=$((TOTAL_COUNT+1))
+
+            iter_tag="${dom_name}_${pd_name}_iter${i}"
+            iter_log="$LOG_ROOT/${iter_tag}.out"
+            iter_rc="$LOG_ROOT/${iter_tag}.rc"
+            iter_cmd="$LOG_ROOT/${iter_tag}.cmd"
+            iter_env="$LOG_ROOT/${iter_tag}.env"
+            iter_dmesg="$LOG_ROOT/${iter_tag}.dmesg"
+            iso_now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+            set -- -d "$DOMAIN" -t linux
+            [ -n "$ARCH" ] && set -- "$@" -a "$ARCH"
+            set -- "$@" -U "$PD_VAL"
+            # shellcheck disable=SC2086
+            [ -n "${FASTRPC_EXTRA_FLAGS:-}" ] && set -- "$@" ${FASTRPC_EXTRA_FLAGS}
+
+            {
+                echo "DATE_UTC=$iso_now"
+                echo "RUN_DIR=$RUN_DIR"
+                echo "RUN_BIN=$RUN_BIN"
+                echo "PATH=$PATH"
+                echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}"
+                echo "ADSP_LIBRARY_PATH=${ADSP_LIBRARY_PATH:-}"
+                echo "CDSP_LIBRARY_PATH=${CDSP_LIBRARY_PATH:-}"
+                echo "SDSP_LIBRARY_PATH=${SDSP_LIBRARY_PATH:-}"
+                echo "ARCH=${ARCH:-}"
+                echo "PD_VAL=$PD_VAL ($pd_name)"
+                echo "DOMAIN=$DOMAIN ($dom_name)"
+                echo "REPEAT=$REPEAT TIMEOUT=${TIMEOUT:-none}"
+                echo "EXTRA=${FASTRPC_EXTRA_FLAGS:-}"
+            } > "$iter_env"
+
+            log_info "Running $iter_tag | domain=$dom_name | pd=$pd_name"
+            log_info "Executing: ./fastrpc_test$(cmd_to_string "$@")"
+            printf "./fastrpc_test%s\n" "$(cmd_to_string "$@")" > "$iter_cmd"
+
+            (
+                cd "$RUN_DIR" || exit 127
+                if [ $HAVE_STDBUF -eq 1 ]; then
+                     runWithTimeoutIfSet stdbuf -oL -eL ./fastrpc_test "$@"
+                elif [ $HAVE_SCRIPT -eq 1 ]; then
+                    cmd_str="./fastrpc_test$(cmd_to_string "$@")"
+                    if [ -n "$TIMEOUT" ] && [ $HAVE_TIMEOUT -eq 1 ]; then
+                        script -q -c "timeout $TIMEOUT $cmd_str" /dev/null
+                    else
+                        script -q -c "$cmd_str" /dev/null
+                    fi
+                else
+                    runWithTimeoutIfSet ./fastrpc_test "$@"
+                fi
+            ) >"$iter_log" 2>&1
+            rc=$?
+
+            printf '%s\n' "$rc" >"$iter_rc"
+
+            if [ -s "$iter_log" ]; then
+                echo "----- $iter_tag output begin -----"
+                cat "$iter_log"
+                echo "----- $iter_tag output end -----"
             fi
-        else
-            runWithTimeoutIfSet ./fastrpc_test "$@"
-        fi
-    ) >"$iter_log" 2>&1
-    rc=$?
 
-    printf '%s\n' "$rc" >"$iter_rc"
+            if [ "$rc" -ne 0 ]; then
+                log_fail "$iter_tag: fastrpc_test exited $rc"
+                dmesg | tail -n 300 > "$iter_dmesg" 2>/dev/null
+                log_dsp_remoteproc_status
+            fi
 
-    if [ -s "$iter_log" ]; then
-        echo "----- $iter_tag output begin -----"
-        cat "$iter_log"
-        echo "----- $iter_tag output end -----"
-    fi
+            # Track result immediately
+            if [ "$rc" -eq 0 ] && [ -r "$iter_log" ] && grep -F -q -e "All tests completed successfully" -e "All applicable tests PASSED" "$iter_log"; then
+                PASS_COUNT=$((PASS_COUNT+1))
+                combo_pass=$((combo_pass+1))
+                log_pass "$iter_tag: success"
+            else
+                combo_fail=$((combo_fail+1))
+                log_warn "$iter_tag: success pattern not found"
+            fi
 
-    if [ "$rc" -ne 0 ]; then
-        log_fail "$iter_tag: fastrpc_test exited $rc (see $iter_log)"
-        dmesg | tail -n 300 > "$iter_dmesg" 2>/dev/null
-        log_dsp_remoteproc_status
-    fi
+            i=$((i+1))
+        done
 
-	if [ -r "$iter_log" ] && grep -F -q -e "All tests completed successfully" -e "All applicable tests PASSED" "$iter_log"; then
-        PASS_COUNT=$((PASS_COUNT+1))
-        log_pass "$iter_tag: success"
-    else
-        log_warn "$iter_tag: success pattern not found"
-    fi
-
-    i=$((i+1))
+        # Store results for this domain/PD combo
+        RESULTS_TRACKER="${RESULTS_TRACKER}${DOMAIN}:${PD_VAL}:${combo_pass}:${combo_fail}
+"
+    done
 done
 
 # -------------------- Finalize --------------------------------
-if [ "$PASS_COUNT" -eq "$REPEAT" ]; then
-    log_pass "$TESTNAME : Test Passed ($PASS_COUNT/$REPEAT)"
+# Build detailed summary table from tracked results
+log_info "=========================================================================="
+log_info "                         FastRPC Test Summary"
+log_info "=========================================================================="
+
+SUMMARY_FILE="$LOG_ROOT/summary.txt"
+true > "$SUMMARY_FILE"
+
+# Display table header
+log_info "--------------------------------------------------------------------------"
+log_info "Domain     | PD Mode    | Pass | Fail | Status"
+log_info "--------------------------------------------------------------------------"
+
+# Parse tracked results and build table
+echo "$RESULTS_TRACKER" | while IFS=: read -r domain pd_val pass_cnt fail_cnt; do
+    [ -z "$domain" ] && continue
+
+    dom_name="$(domain_to_name "$domain")"
+    case "$pd_val" in
+        0) pd_name="Signed  " ;;
+        1) pd_name="Unsigned" ;;
+        *) pd_name="Unknown " ;;
+    esac
+
+    combo_total=$((pass_cnt + fail_cnt))
+
+    # Determine status
+    if [ "$combo_total" -eq 0 ]; then
+        status="SKIP"
+    elif [ "$fail_cnt" -eq 0 ]; then
+        status="PASS"
+    else
+        status="FAIL"
+    fi
+
+    # Write to summary file and log (properly formatted table row)
+    line=$(printf "%-10s | %-10s | %4d | %4d | %4s" "$dom_name" "$pd_name" "$pass_cnt" "$fail_cnt" "$status")
+    echo "$line" >> "$SUMMARY_FILE"
+    log_info "$line"
+done
+
+log_info "--------------------------------------------------------------------------"
+log_info "Overall:   Total runs: $TOTAL_COUNT | Passed: $PASS_COUNT | Failed: $((TOTAL_COUNT - PASS_COUNT))"
+log_info "=========================================================================="
+
+# Final result determination
+if [ "$TOTAL_COUNT" -eq 0 ]; then
+    log_skip "$TESTNAME SKIP - no runnable domain/PD combinations"
+    echo "$TESTNAME : SKIP" > "$RESULT_FILE"
+    exit 0
+elif [ "$PASS_COUNT" -eq "$TOTAL_COUNT" ]; then
+    log_pass "$TESTNAME : Test Passed ($PASS_COUNT/$TOTAL_COUNT)"
     echo "$TESTNAME : PASS" > "$RESULT_FILE"
+    exit 0
 else
-    log_fail "$TESTNAME : Test Failed ($PASS_COUNT/$REPEAT)"
+    log_fail "$TESTNAME : Test Failed ($PASS_COUNT/$TOTAL_COUNT)"
     echo "$TESTNAME : FAIL" > "$RESULT_FILE"
+    exit 1
 fi
-
-[ -f "$RESULT_FILE" ] || {
-    log_error "Missing result file ($RESULT_FILE) — creating FAIL"
-    echo "$TESTNAME : FAIL" >"$RESULT_FILE"
-}
-
-exit 0
