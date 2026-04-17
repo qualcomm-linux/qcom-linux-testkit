@@ -1,0 +1,19 @@
+metadata:
+  name: logging-journalctl-validation
+  format: "Lava-Test Test Definition 1.0"
+  description: "Validate systemd-journald, journalctl access, and log propagation into /var/log on Qualcomm Linux platforms."
+  os:
+    - linux
+  scope:
+    - functional
+
+params:
+  RETRY_COUNT: 5
+  RETRY_SLEEP_SECS: 1
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/System/Logging/Logging_Journalctl_Validation/ || true
+    - RETRY_COUNT="${RETRY_COUNT}" RETRY_SLEEP_SECS="${RETRY_SLEEP_SECS}" ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh Logging_Journalctl_Validation.res
