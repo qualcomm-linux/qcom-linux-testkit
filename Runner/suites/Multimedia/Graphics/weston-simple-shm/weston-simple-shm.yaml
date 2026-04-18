@@ -1,0 +1,23 @@
+metadata:
+  name: weston-simple-shm
+  format: "Lava-Test Test Definition 1.0"
+  description: "Validate weston-simple-shm runtime and wl_shm format coverage on Qualcomm Linux platforms."
+  os:
+    - linux
+  scope:
+    - functional
+
+params:
+  WAIT_SECS: 10
+  DURATION: 5
+  STARTUP_WAIT: 3
+  STOP_GRACE: 3
+  REQUIRED_FORMATS: "default xrgb8888"
+  OPTIONAL_FORMATS: "argb8888 rgb565"
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Multimedia/Graphics/weston-simple-shm/
+    - WAIT_SECS="${WAIT_SECS}" DURATION="${DURATION}" STARTUP_WAIT="${STARTUP_WAIT}" STOP_GRACE="${STOP_GRACE}" REQUIRED_FORMATS="${REQUIRED_FORMATS}" OPTIONAL_FORMATS="${OPTIONAL_FORMATS}" ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh weston-simple-shm.res
