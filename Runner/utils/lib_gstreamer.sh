@@ -529,11 +529,12 @@ gstreamer_run_gstlaunch_timeout() {
       # shellcheck disable=SC2086
       audio_timeout_run "${secs}s" "$GSTBIN" $GSTLAUNCHFLAGS $pipe
       return $?
-    fi
-    if command -v timeout >/dev/null 2>&1; then
+    elif command -v timeout >/dev/null 2>&1; then
       # shellcheck disable=SC2086
       timeout "$secs" "$GSTBIN" $GSTLAUNCHFLAGS $pipe
       return $?
+    else
+      log_warn "No timeout command available (audio_timeout_run or timeout), running without timeout"
     fi
   fi
 
@@ -684,6 +685,12 @@ gstreamer_check_errors() {
     return 1
   fi
 
+  # Segmentation faults and signals
+  if grep -q -E 'Caught SIGSEGV|Segmentation fault|SIGABRT|SIGBUS|SIGILL' "$check_log" 2>/dev/null; then
+    rm -f "$filtered_log" 2>/dev/null || true
+    return 1
+  fi
+
   # Element-reported hard failures.
   if grep -q -E 'ERROR: from element|gst.*ERROR|gst.*FATAL' "$check_log" 2>/dev/null; then
     rm -f "$filtered_log" 2>/dev/null || true
@@ -743,6 +750,14 @@ gstreamer_validate_log() {
 
     if grep -q 'No such file or directory' "$logfile" 2>/dev/null; then
       log_fail " Reason: File not found"
+    fi
+
+    if grep -q -E 'Caught SIGSEGV|Segmentation fault' "$logfile" 2>/dev/null; then
+      log_fail " Reason: Segmentation fault (SIGSEGV) - critical crash"
+    fi
+
+    if grep -q -E 'SIGABRT|SIGBUS|SIGILL' "$logfile" 2>/dev/null; then
+      log_fail " Reason: Fatal signal caught - process crashed"
     fi
 
     return 1
@@ -1418,4 +1433,210 @@ check_file_size() {
         log_info "File too small (size ${size_in_bytes} bytes < ${expected_file_size} bytes): $input_file_path"
         return 1
     fi
+}
+
+# ==================== Camera Pipeline Builders ====================
+
+# -------------------- Camera format helpers --------------------
+# camera_format_to_gst_string <format>
+# Converts camera format name to GStreamer format string
+# Prints: GStreamer format string (NV12 or NV12_Q08C)
+camera_format_to_gst_string() {
+  format="$1"
+  case "$format" in
+    nv12) printf '%s\n' "NV12" ;;
+    ubwc) printf '%s\n' "NV12_Q08C" ;;
+    *) printf '%s\n' "" ;;
+  esac
+}
+
+# -------------------- qtiqmmfsrc pipeline builders --------------------
+# camera_build_qtiqmmfsrc_fakesink_pipeline <camera_id> <format> <width> <height> <framerate>
+# Builds qtiqmmfsrc fakesink test pipeline (uses timeout for duration control)
+# Prints: pipeline string
+camera_build_qtiqmmfsrc_fakesink_pipeline() {
+  camera_id="$1"
+  format="$2"
+  width="$3"
+  height="$4"
+  framerate="$5"
+  
+  gst_format=$(camera_format_to_gst_string "$format")
+  [ -z "$gst_format" ] && return 1
+  
+  if [ "$format" = "ubwc" ]; then
+    printf '%s\n' "qtiqmmfsrc camera=${camera_id} name=camsrc ! video/x-raw,format=${gst_format},width=${width},height=${height},framerate=${framerate}/1,interlace-mode=progressive,colorimetry=bt601 ! queue ! fakesink"
+  else
+    printf '%s\n' "qtiqmmfsrc camera=${camera_id} name=camsrc ! video/x-raw,format=${gst_format},width=${width},height=${height},framerate=${framerate}/1 ! fakesink"
+  fi
+}
+
+# camera_build_qtiqmmfsrc_preview_pipeline <camera_id> <format> <width> <height> <framerate>
+# Builds qtiqmmfsrc preview pipeline with waylandsink
+# Prints: pipeline string
+camera_build_qtiqmmfsrc_preview_pipeline() {
+  camera_id="$1"
+  format="$2"
+  width="$3"
+  height="$4"
+  framerate="$5"
+  
+  gst_format=$(camera_format_to_gst_string "$format")
+  [ -z "$gst_format" ] && return 1
+  
+  if [ "$format" = "ubwc" ]; then
+    printf '%s\n' "qtiqmmfsrc camera=${camera_id} name=camsrc ! video/x-raw,format=${gst_format},width=${width},height=${height},framerate=${framerate}/1 ! waylandsink fullscreen=true async=true sync=false"
+  else
+    printf '%s\n' "qtiqmmfsrc camera=${camera_id} name=camsrc ! video/x-raw,format=${gst_format},width=${width},height=${height},framerate=${framerate}/1 ! waylandsink fullscreen=true async=true sync=false"
+  fi
+}
+
+# camera_build_qtiqmmfsrc_encode_pipeline <camera_id> <format> <width> <height> <framerate> <output_file>
+# Builds qtiqmmfsrc encode pipeline with v4l2h264enc
+# Prints: pipeline string
+camera_build_qtiqmmfsrc_encode_pipeline() {
+  camera_id="$1"
+  format="$2"
+  width="$3"
+  height="$4"
+  framerate="$5"
+  output_file="$6"
+  
+  gst_format=$(camera_format_to_gst_string "$format")
+  [ -z "$gst_format" ] && return 1
+  
+  if [ "$format" = "ubwc" ]; then
+    printf '%s\n' "qtiqmmfsrc camera=${camera_id} name=camsrc ! video/x-raw,format=${gst_format},width=${width},height=${height},framerate=${framerate}/1,interlace-mode=progressive,colorimetry=bt601 ! queue ! v4l2h264enc capture-io-mode=4 output-io-mode=5 ! h264parse ! mp4mux ! queue ! filesink location=${output_file}"
+  else
+    printf '%s\n' "qtiqmmfsrc camera=${camera_id} name=camsrc ! video/x-raw,format=${gst_format},width=${width},height=${height},framerate=${framerate}/1 ! queue ! v4l2h264enc capture-io-mode=4 output-io-mode=4 ! h264parse ! mp4mux ! queue ! filesink location=${output_file}"
+  fi
+}
+
+# -------------------- libcamerasrc pipeline builders --------------------
+# camera_build_libcamera_fakesink_pipeline <width> <height> <framerate>
+# Builds libcamerasrc fakesink pipeline with optional resolution caps (uses timeout for duration control)
+# Parameters:
+#   width: Video width (0 for no caps filter)
+#   height: Video height (0 for no caps filter)
+#   framerate: Framerate in fps
+# Prints: pipeline string
+camera_build_libcamera_fakesink_pipeline() {
+  width="$1"
+  height="$2"
+  framerate="${3:-30}"
+  
+  # If width/height are 0 or empty, build pipeline without caps filter
+  if [ -z "$width" ] || [ -z "$height" ] || [ "$width" -eq 0 ] 2>/dev/null || [ "$height" -eq 0 ] 2>/dev/null; then
+    printf '%s\n' "libcamerasrc ! fakesink"
+  else
+    printf '%s\n' "libcamerasrc ! video/x-raw,width=${width},height=${height},framerate=${framerate}/1 ! fakesink"
+  fi
+}
+
+# camera_build_libcamera_preview_pipeline <width> <height> <framerate>
+# Builds libcamerasrc preview pipeline with optional resolution caps (uses timeout for duration control)
+# Parameters:
+#   width: Video width (0 for no caps filter)
+#   height: Video height (0 for no caps filter)
+#   framerate: Framerate in fps
+# Prints: pipeline string
+camera_build_libcamera_preview_pipeline() {
+  width="$1"
+  height="$2"
+  framerate="${3:-30}"
+  
+  # If width/height are 0 or empty, build pipeline without caps filter
+  if [ -z "$width" ] || [ -z "$height" ] || [ "$width" -eq 0 ] 2>/dev/null || [ "$height" -eq 0 ] 2>/dev/null; then
+    printf '%s\n' "libcamerasrc ! videoconvert ! waylandsink fullscreen=true"
+  else
+    printf '%s\n' "libcamerasrc ! video/x-raw,width=${width},height=${height},framerate=${framerate}/1 ! videoconvert ! waylandsink fullscreen=true"
+  fi
+}
+
+# camera_build_libcamera_encode_pipeline <width> <height> <output_file> <framerate>
+# Builds libcamerasrc encode pipeline with NV12 format (uses timeout for duration control)
+# Parameters:
+#   width: Video width
+#   height: Video height
+#   output_file: Output MP4 file path
+#   framerate: Framerate in fps
+# Prints: pipeline string
+camera_build_libcamera_encode_pipeline() {
+  width="$1"
+  height="$2"
+  output_file="$3"
+  framerate="${4:-30}"
+  
+  printf '%s\n' "libcamerasrc ! videoconvert ! video/x-raw,format=NV12,width=${width},height=${height},framerate=${framerate}/1 ! v4l2h264enc capture-io-mode=4 output-io-mode=4 ! h264parse ! mp4mux ! filesink location=${output_file}"
+}
+
+# -------------------- Wayland/Weston setup helper --------------------
+# camera_setup_wayland_environment <test_name>
+# Sets up Wayland/Weston environment for camera preview tests
+# Sets wayland_ready=1 if successful, 0 otherwise
+# Parameters:
+#   test_name: Name of the test for logging purposes
+# Returns: 0 if Wayland is ready, 1 otherwise
+camera_setup_wayland_environment() {
+  test_name="${1:-Camera_Test}"
+  
+  wayland_ready=0
+  sock=""
+  
+  # Try to find existing Wayland socket
+  if command -v discover_wayland_socket_anywhere >/dev/null 2>&1; then
+    sock=$(discover_wayland_socket_anywhere | head -n 1 || true)
+    if [ -n "$sock" ]; then
+      log_info "Found existing Wayland socket: $sock"
+      if command -v adopt_wayland_env_from_socket >/dev/null 2>&1; then
+        if adopt_wayland_env_from_socket "$sock"; then
+          wayland_ready=1
+          log_info "Adopted Wayland environment from socket"
+        fi
+      fi
+    fi
+  fi
+  
+  # Try starting Weston if no socket found
+  if [ "$wayland_ready" -eq 0 ] && [ -z "$sock" ]; then
+    if command -v weston_pick_env_or_start >/dev/null 2>&1; then
+      log_info "No Wayland socket found, attempting to start Weston..."
+      if weston_pick_env_or_start "$test_name"; then
+        # Re-discover socket after Weston start
+        if command -v discover_wayland_socket_anywhere >/dev/null 2>&1; then
+          sock=$(discover_wayland_socket_anywhere | head -n 1 || true)
+          if [ -n "$sock" ]; then
+            log_info "Weston started successfully with socket: $sock"
+            if command -v adopt_wayland_env_from_socket >/dev/null 2>&1; then
+              if adopt_wayland_env_from_socket "$sock"; then
+                wayland_ready=1
+              fi
+            fi
+          fi
+        fi
+      fi
+    fi
+  fi
+  
+  # Verify Wayland connection
+  if [ "$wayland_ready" -eq 1 ] || [ -n "${WAYLAND_DISPLAY:-}" ]; then
+    if command -v wayland_connection_ok >/dev/null 2>&1; then
+      if wayland_connection_ok; then
+        wayland_ready=1
+        log_info "Wayland connection verified: OK"
+      else
+        wayland_ready=0
+        log_warn "Wayland connection test failed"
+      fi
+    else
+      # Assume ready if WAYLAND_DISPLAY is set and no verification available
+      wayland_ready=1
+      log_info "Wayland environment set (WAYLAND_DISPLAY=${WAYLAND_DISPLAY})"
+    fi
+  fi
+  
+  # Export wayland_ready for caller
+  export wayland_ready
+  
+  return $((1 - wayland_ready))
 }
