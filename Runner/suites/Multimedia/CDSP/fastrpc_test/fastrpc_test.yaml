@@ -21,7 +21,7 @@ params:
   DOMAIN: ""  # Optional explicit domain id in single-domain mode
   DOMAIN_NAME: ""  # Optional explicit domain name in single-domain mode
   PD_MODE: "both"  # both|signed-only|unsigned-only (default: both - tests both PDs where supported)
-  USER_PD: ""  # Compatibility override. If set to non-zero, runs only -U 1
+  UNSIGNED_PD: ""  # If set to non-zero, runs only unsigned PD mode (-U 1)
   REPEAT: 1  # Number of repetitions (default: 1)
   TIMEOUT: ""  # Timeout for each run (no timeout if omitted)
 
@@ -29,7 +29,7 @@ run:
   steps:
     - REPO_PATH=$PWD
     - cd Runner/suites/Multimedia/CDSP/fastrpc_test
-    - USER_PD_PARAM=""
-    - if [ -n "${USER_PD}" ] && [ "${USER_PD}" != 0 ]; then USER_PD_PARAM="--user-pd"; fi
-    - ./run.sh --arch "${ARCH}" --bin-dir "${BIN_DIR}" --domain-mode "${DOMAIN_MODE}" --domain "${DOMAIN}" --domain-name "${DOMAIN_NAME}" --pd-mode "${PD_MODE}" --repeat "${REPEAT}" --timeout "${TIMEOUT}" $USER_PD_PARAM || true
+    - UNSIGNED_PD_PARAM=""
+    - if [ -n "${UNSIGNED_PD}" ] && [ "${UNSIGNED_PD}" != 0 ]; then UNSIGNED_PD_PARAM="--unsigned-pd"; fi
+    - ./run.sh --arch "${ARCH}" --bin-dir "${BIN_DIR}" --domain-mode "${DOMAIN_MODE}" --domain "${DOMAIN}" --domain-name "${DOMAIN_NAME}" --pd-mode "${PD_MODE}" --repeat "${REPEAT}" --timeout "${TIMEOUT}" $UNSIGNED_PD_PARAM || true
     - $REPO_PATH/Runner/utils/send-to-lava.sh fastrpc_test.res || true

@@ -37,7 +37,7 @@ ARCH=""
 BIN_DIR="" # directory that CONTAINS fastrpc_test
 ASSETS_DIR="" # kept for compatibility/logging (not used by new layout)
 VERBOSE=0
-USER_PD_FLAG=0 # default: -U 0 (system/signed PD)
+UNSIGNED_PD_FLAG=0 # default: -U 0 (system/signed PD)
 CLI_DOMAIN=""
 CLI_DOMAIN_NAME=""
 DOMAIN_MODE="all-supported" # Default: test all supported domains
@@ -61,7 +61,7 @@ Options:
   --domain-name <name> DSP domain by name: adsp|mdsp|sdsp|cdsp|cdsp1|gpdsp0|gpdsp1
   --domain-mode <all-supported|single> Discover all supported domains or run only one (default: all-supported)
   --pd-mode <both|signed-only|unsigned-only> Select PD mode(s) to run (default: both)
-  --user-pd Use '-U 1' (user/unsigned PD). Overrides --pd-mode for compatibility
+  --unsigned-pd Use '-U 1' (user/unsigned PD). Overrides --pd-mode for compatibility
   --repeat <N> Number of repetitions (default: 1)
   --timeout <sec> Timeout for each run (no timeout if omitted)
   --verbose Extra logging for CI debugging
@@ -77,7 +77,7 @@ Domain Selection Priority:
 Env:
   FASTRPC_DOMAIN=0|1|2|3|4|5|6 Sets domain; CLI --domain/--domain-name wins.
   FASTRPC_DOMAIN_NAME=adsp|... Named domain; CLI wins.
-  FASTRPC_USER_PD=0|1 Sets PD (-U value). CLI --user-pd overrides to 1.
+  FASTRPC_UNSIGNED_PD=0|1 Sets PD (-U value). CLI --unsigned-pd overrides to 1.
   FASTRPC_EXTRA_FLAGS Extra flags appended (space-separated).
   ALLOW_BIN_FASTRPC=1 Permit using /bin/fastrpc_test when --bin-dir=/bin.
 
@@ -104,7 +104,7 @@ while [ $# -gt 0 ]; do
         --domain-name) CLI_DOMAIN_NAME="$2"; shift 2 ;;
         --domain-mode) DOMAIN_MODE="$2"; shift 2 ;;
         --pd-mode) PD_MODE="$2"; shift 2 ;;
-        --user-pd) USER_PD_FLAG=1; shift ;;
+        --unsigned-pd) UNSIGNED_PD_FLAG=1; shift ;;
         --repeat) REPEAT="$2"; shift 2 ;;
         --timeout) TIMEOUT="$2"; shift 2 ;;
         --verbose) VERBOSE=1; shift ;;
@@ -165,7 +165,7 @@ log_dsp_remoteproc_status() {
     fw_list="adsp mdsp sdsp cdsp cdsp0 cdsp1 gdsp0 gdsp1 gpdsp0 gpdsp1"
     any=0
     for fw in $fw_list; do
-        if dt_has_remoteproc_fw "$fw"; then
+        if dt_has_remoteproc_fw "$fw" || [ -n "$(get_remoteproc_by_firmware "$fw" "" all 2>/dev/null || true)" ]; then
             entries="$(get_remoteproc_by_firmware "$fw" "" all 2>/dev/null)" || entries=""
             if [ -n "$entries" ]; then
                 any=1
@@ -219,22 +219,45 @@ append_unique() {
     [ -n "$current" ] && printf "%s %s" "$current" "$new" || printf "%s" "$new"
 }
 
+# Helper to normalize remoteproc/firmware names
+canonicalize_domain_name() {
+    case "$(printf "%s" "$1" | tr '[:upper:]' '[:lower:]')" in
+        cdsp0) echo "cdsp" ;;
+        gdsp0) echo "gpdsp0" ;;
+        gdsp1) echo "gpdsp1" ;;
+        *) printf "%s" "$(printf "%s" "$1" | tr '[:upper:]' '[:lower:]')" ;;
+    esac
+}
+
 # Discover all supported domains
 discover_supported_domains() {
     found=""
-    for fw in adsp mdsp sdsp cdsp cdsp1 gpdsp0 gpdsp1 gdsp0 gdsp1; do
-        if dt_has_remoteproc_fw "$fw"; then
-            case "$fw" in
-                adsp) found="$(append_unique "$found" "0")" ;;
-                mdsp) found="$(append_unique "$found" "1")" ;;
-                sdsp) found="$(append_unique "$found" "2")" ;;
-                cdsp) found="$(append_unique "$found" "3")" ;;
-                cdsp1) found="$(append_unique "$found" "4")" ;;
-                gpdsp0|gdsp0) found="$(append_unique "$found" "5")" ;;
-                gpdsp1|gdsp1) found="$(append_unique "$found" "6")" ;;
-            esac
+    echo "[INFO] $(date '+%Y-%m-%d %H:%M:%S') - discover_supported_domains: helper-backed discovery active" >&2
+
+    # Prefer helper-backed runtime remoteproc discovery using actual returned names.
+    for fw in adsp mdsp sdsp cdsp cdsp0 cdsp1 gpdsp0 gpdsp1 gdsp0 gdsp1; do
+        entries="$(get_remoteproc_by_firmware "$fw" "" all 2>/dev/null || true)"
+
+        if [ -n "$entries" ]; then
+            while IFS='|' read -r rpath rstate rfirm rname; do
+                [ -n "$rname" ] || continue
+                canon="$(canonicalize_domain_name "$rname")"
+                d="$(name_to_domain "$canon")"
+                if [ -n "$d" ]; then
+                    found="$(append_unique "$found" "$d")"
+                fi
+            done <<EOF
+$entries
+EOF
+        elif dt_has_remoteproc_fw "$fw"; then
+            canon="$(canonicalize_domain_name "$fw")"
+            d="$(name_to_domain "$canon")"
+            if [ -n "$d" ]; then
+                found="$(append_unique "$found" "$d")"
+            fi
         fi
     done
+
     printf "%s" "$found"
 }
 
@@ -276,7 +299,7 @@ domain_supported_pds() {
 
 # Get requested PD values
 requested_pds() {
-    [ "$USER_PD_FLAG" -eq 1 ] && { printf "%s" "1"; return; }
+    [ "$UNSIGNED_PD_FLAG" -eq 1 ] && { printf "%s" "1"; return; }
     case "$PD_MODE" in
         signed-only) printf "%s" "0" ;;
         unsigned-only) printf "%s" "1" ;;
@@ -381,6 +404,19 @@ fi
 
 log_info "Domain mode: $DOMAIN_MODE"
 log_info "Domains to test: $DOMAINS_TO_TEST"
+
+# Build human-readable domain names
+domain_names=""
+for d in $DOMAINS_TO_TEST; do
+    n="$(domain_to_name "$d")"
+    if [ -n "$domain_names" ]; then
+        domain_names="${domain_names},${n}"
+    else
+        domain_names="$n"
+    fi
+done
+[ -n "$domain_names" ] && log_info "Resolved domain names: $domain_names"
+
 log_info "PD mode: $PD_MODE"
 
 # -------------------- Buffering tool availability ---------------
@@ -535,7 +571,7 @@ log_info "Domain     | PD Mode    | Pass | Fail | Status"
 log_info "--------------------------------------------------------------------------"
 
 # Parse tracked results and build table
-echo "$RESULTS_TRACKER" | while IFS=: read -r domain pd_val pass_cnt fail_cnt; do
+while IFS=: read -r domain pd_val pass_cnt fail_cnt; do
     [ -z "$domain" ] && continue
 
     dom_name="$(domain_to_name "$domain")"
@@ -560,7 +596,9 @@ echo "$RESULTS_TRACKER" | while IFS=: read -r domain pd_val pass_cnt fail_cnt; d
     line=$(printf "%-10s | %-10s | %4d | %4d | %4s" "$dom_name" "$pd_name" "$pass_cnt" "$fail_cnt" "$status")
     echo "$line" >> "$SUMMARY_FILE"
     log_info "$line"
-done
+done <<EOF
+$RESULTS_TRACKER
+EOF
 
 log_info "--------------------------------------------------------------------------"
 log_info "Overall:   Total runs: $TOTAL_COUNT | Passed: $PASS_COUNT | Failed: $((TOTAL_COUNT - PASS_COUNT))"
@@ -578,5 +616,5 @@ elif [ "$PASS_COUNT" -eq "$TOTAL_COUNT" ]; then
 else
     log_fail "$TESTNAME : Test Failed ($PASS_COUNT/$TOTAL_COUNT)"
     echo "$TESTNAME : FAIL" > "$RESULT_FILE"
-    exit 1
+    exit 0
 fi
