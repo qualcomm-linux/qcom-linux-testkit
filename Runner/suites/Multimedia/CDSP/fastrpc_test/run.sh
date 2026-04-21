@@ -2,6 +2,9 @@
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause
 # --------- Robustly source init_env and functestlib.sh ----------
+
+TESTNAME="fastrpc_test"
+RESULT_FILE="$TESTNAME.res"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 INIT_ENV=""
 SEARCH="$SCRIPT_DIR"
@@ -15,20 +18,19 @@ done
 
 if [ -z "$INIT_ENV" ]; then
     echo "[ERROR] Could not find init_env (starting at $SCRIPT_DIR)" >&2
-    exit 1
+    echo "$TESTNAME : FAIL" >"$RESULT_FILE" 2>/dev/null || true
+    exit 0
 fi
 
 # Only source once (idempotent)
-if [ -z "$__INIT_ENV_LOADED" ]; then
+if [ -z "${__INIT_ENV_LOADED:-}" ]; then
     # shellcheck disable=SC1090
     . "$INIT_ENV"
+    __INIT_ENV_LOADED=1
 fi
 # shellcheck disable=SC1090,SC1091
 . "$TOOLS/functestlib.sh"
 # ---------------------------------------------------------------
-
-TESTNAME="fastrpc_test"
-RESULT_FILE="$TESTNAME.res"
 
 # Defaults
 REPEAT=1
@@ -109,7 +111,7 @@ while [ $# -gt 0 ]; do
         --timeout) TIMEOUT="$2"; shift 2 ;;
         --verbose) VERBOSE=1; shift ;;
         --help) usage; exit 0 ;;
-        *) echo "[ERROR] Unknown argument: $1" >&2; usage; echo "$TESTNAME : FAIL" >"$RESULT_FILE"; exit 1 ;;
+        *) echo "[ERROR] Unknown argument: $1" >&2; usage; echo "$TESTNAME : FAIL" >"$RESULT_FILE"; exit 0 ;;
     esac
 done
 
@@ -121,29 +123,33 @@ if [ -n "${ASSETS_DIR:-}" ]; then
 fi
 
 # ---------- Validation ----------
-case "$REPEAT" in *[!0-9]*|"") log_error "Invalid --repeat: $REPEAT"; echo "$TESTNAME : FAIL" >"$RESULT_FILE"; exit 1 ;; esac
+case "$REPEAT" in *[!0-9]*|"") log_error "Invalid --repeat: $REPEAT"; echo "$TESTNAME : FAIL" >"$RESULT_FILE"; exit 0 ;; esac
 if [ -n "$TIMEOUT" ]; then
-    case "$TIMEOUT" in *[!0-9]*|"") log_error "Invalid --timeout: $TIMEOUT"; echo "$TESTNAME : FAIL" >"$RESULT_FILE"; exit 1 ;; esac
+    case "$TIMEOUT" in *[!0-9]*|"") log_error "Invalid --timeout: $TIMEOUT"; echo "$TESTNAME : FAIL" >"$RESULT_FILE"; exit 0 ;; esac
 fi
 # Validate enhanced options
-case "$DOMAIN_MODE" in all-supported|single) : ;; *) log_error "Invalid --domain-mode: $DOMAIN_MODE"; echo "$TESTNAME : FAIL" >"$RESULT_FILE"; exit 1 ;; esac
-case "$PD_MODE" in both|signed-only|unsigned-only) : ;; *) log_error "Invalid --pd-mode: $PD_MODE"; echo "$TESTNAME : FAIL" >"$RESULT_FILE"; exit 1 ;; esac
+case "$DOMAIN_MODE" in all-supported|single) : ;; *) log_error "Invalid --domain-mode: $DOMAIN_MODE"; echo "$TESTNAME : FAIL" >"$RESULT_FILE"; exit 0 ;; esac
+case "$PD_MODE" in both|signed-only|unsigned-only) : ;; *) log_error "Invalid --pd-mode: $PD_MODE"; echo "$TESTNAME : FAIL" >"$RESULT_FILE"; exit 0 ;; esac
 
 # Ensure we're in the testcase directory (repo convention)
 test_path="$(find_test_case_by_name "$TESTNAME")" || {
     log_error "Cannot locate test path for $TESTNAME"
     echo "$TESTNAME : FAIL" >"$RESULT_FILE"
-    exit 1
+    exit 0
 }
 cd "$test_path" || {
     log_error "cd to test path failed: $test_path"
     echo "$TESTNAME : FAIL" >"$RESULT_FILE"
-    exit 1
+    exit 0
 }
 
 # -------------------- Helpers --------------------
-# shellcheck disable=SC2317  # Helper kept for optional debug use.
-log_debug() { [ "$VERBOSE" -eq 1 ] && log_info "[debug] $*"; }
+# shellcheck disable=SC2317 # Helper kept for optional debug use.
+log_debug() {
+    if [ "$VERBOSE" -eq 1 ]; then
+        log_info "[debug] $*" >&2
+    fi
+}
 
 cmd_to_string() {
     out=""
@@ -159,6 +165,22 @@ cmd_to_string() {
         esac
     done
     printf "%s" "$out"
+}
+
+extract_test_summary_counts() {
+    log_file="$1"
+
+    total="$(sed -n 's/^[[:space:]]*Total tests run:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$log_file" | tail -n 1)"
+    passed="$(sed -n 's/^[[:space:]]*Passed:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$log_file" | tail -n 1)"
+    failed="$(sed -n 's/^[[:space:]]*Failed:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$log_file" | tail -n 1)"
+    skipped="$(sed -n 's/^[[:space:]]*Skipped:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$log_file" | tail -n 1)"
+
+    case "$total" in ''|*[!0-9]*) total=0 ;; esac
+    case "$passed" in ''|*[!0-9]*) passed=0 ;; esac
+    case "$failed" in ''|*[!0-9]*) failed=0 ;; esac
+    case "$skipped" in ''|*[!0-9]*) skipped=0 ;; esac
+
+    printf '%s:%s:%s:%s\n' "$total" "$passed" "$failed" "$skipped"
 }
 
 log_dsp_remoteproc_status() {
@@ -221,30 +243,42 @@ append_unique() {
 
 # Helper to normalize remoteproc/firmware names
 canonicalize_domain_name() {
-    case "$(printf "%s" "$1" | tr '[:upper:]' '[:lower:]')" in
+    norm="$(printf "%s" "$1" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+    case "$norm" in
         cdsp0) echo "cdsp" ;;
         gdsp0) echo "gpdsp0" ;;
         gdsp1) echo "gpdsp1" ;;
-        *) printf "%s" "$(printf "%s" "$1" | tr '[:upper:]' '[:lower:]')" ;;
+        *) printf "%s" "$norm" ;;
     esac
 }
 
 # Discover all supported domains
 discover_supported_domains() {
-    found=""
     echo "[INFO] $(date '+%Y-%m-%d %H:%M:%S') - discover_supported_domains: helper-backed discovery active" >&2
 
-    # Prefer helper-backed runtime remoteproc discovery using actual returned names.
     for fw in adsp mdsp sdsp cdsp cdsp0 cdsp1 gpdsp0 gpdsp1 gdsp0 gdsp1; do
         entries="$(get_remoteproc_by_firmware "$fw" "" all 2>/dev/null || true)"
 
         if [ -n "$entries" ]; then
             while IFS='|' read -r rpath rstate rfirm rname; do
-                [ -n "$rname" ] || continue
-                canon="$(canonicalize_domain_name "$rname")"
+                nameguess=""
+
+                if [ -n "$rname" ]; then
+                    nameguess="$rname"
+                elif [ -n "$rfirm" ]; then
+                    nameguess=$(basename "$rfirm" 2>/dev/null | sed 's/\.[^.]*$//')
+                fi
+
+                [ -n "$nameguess" ] || continue
+
+                canon="$(canonicalize_domain_name "$nameguess")"
                 d="$(name_to_domain "$canon")"
+
                 if [ -n "$d" ]; then
-                    found="$(append_unique "$found" "$d")"
+                    printf '%s\n' "$d"
+                    log_debug "discover: fw=$fw rname=$rname rfirm=$rfirm canon=$canon domain=$d state=$rstate"
+                else
+                    log_debug "discover: fw=$fw rname=$rname rfirm=$rfirm canon=$canon domain=<none>"
                 fi
             done <<EOF
 $entries
@@ -252,13 +286,15 @@ EOF
         elif dt_has_remoteproc_fw "$fw"; then
             canon="$(canonicalize_domain_name "$fw")"
             d="$(name_to_domain "$canon")"
+
             if [ -n "$d" ]; then
-                found="$(append_unique "$found" "$d")"
+                printf '%s\n' "$d"
+                log_debug "discover: fw=$fw dt-only canon=$canon domain=$d"
             fi
+        else
+            log_debug "discover: fw=$fw not present"
         fi
     done
-
-    printf "%s" "$found"
 }
 
 # Resolve which domains to test
@@ -278,14 +314,29 @@ resolve_domains_to_test() {
         resolved="$(discover_supported_domains)"
     fi
 
+    log_debug "resolve: raw domains='$resolved'"
+
     valid=""
     for d in $resolved; do
         case "$d" in
-            0|1|2|3|4|5|6) valid="$(append_unique "$valid" "$d")" ;;
-            *) log_warn "Ignoring invalid domain '$d'" ;;
+            0|1|2|3|4|5|6)
+                case " $valid " in
+                    *" $d "*) : ;;
+                    *)
+                        if [ -n "$valid" ]; then
+                            valid="${valid} ${d}"
+                        else
+                            valid="$d"
+                        fi
+                        ;;
+                esac
+                ;;
+            *)
+                log_warn "Ignoring invalid domain '$d'"
+                ;;
         esac
     done
-    printf "%s" "$valid"
+    printf '%s' "$valid"
 }
 
 # Get supported PD values for a domain
@@ -338,7 +389,7 @@ fi
 case "$BIN_DIR" in
     /bin)
         if [ "${ALLOW_BIN_FASTRPC:-0}" -ne 1 ]; then
-	    log_skip "$TESTNAME SKIP - unsupported layout: /bin. Set ALLOW_BIN_FASTRPC=1 or pass --bin-dir."
+            log_skip "$TESTNAME SKIP - unsupported layout: /bin. Set ALLOW_BIN_FASTRPC=1 or pass --bin-dir."
             echo "$TESTNAME : SKIP" >"$RESULT_FILE"
             exit 0
         fi
@@ -434,7 +485,7 @@ fi
 # -------------------- Logging root -----------------------------
 TS="$(date +%Y%m%d-%H%M%S)"
 LOG_ROOT="./logs_${TESTNAME}_${TS}"
-mkdir -p "$LOG_ROOT" || { log_error "Cannot create $LOG_ROOT"; echo "$TESTNAME : FAIL" >"$RESULT_FILE"; exit 1; }
+mkdir -p "$LOG_ROOT" || { log_error "Cannot create $LOG_ROOT"; echo "$TESTNAME : FAIL" >"$RESULT_FILE"; exit 0; }
 
 tmo_label="none"; [ -n "$TIMEOUT" ] && tmo_label="${TIMEOUT}s"
 log_info "Repeats: $REPEAT | Timeout: $tmo_label | Buffering: $buf_label"
@@ -559,16 +610,25 @@ done
 # -------------------- Finalize --------------------------------
 # Build detailed summary table from tracked results
 log_info "=========================================================================="
-log_info "                         FastRPC Test Summary"
+log_info " FastRPC Test Summary"
 log_info "=========================================================================="
 
 SUMMARY_FILE="$LOG_ROOT/summary.txt"
 true > "$SUMMARY_FILE"
 
 # Display table header
-log_info "--------------------------------------------------------------------------"
-log_info "Domain     | PD Mode    | Pass | Fail | Status"
-log_info "--------------------------------------------------------------------------"
+SUMMARY_FMT="%-10s | %-10s | %6s | %6s | %6s | %6s | %-6s"
+SUMMARY_SEP="--------------------------------------------------------------------------------"
+
+log_info "$SUMMARY_SEP"
+header_line="$(printf "$SUMMARY_FMT" "Domain" "PD Mode" "Total" "Pass" "Fail" "Skip" "Status")"
+log_info "$header_line"
+log_info "$SUMMARY_SEP"
+
+overall_subtests_total=0
+overall_subtests_pass=0
+overall_subtests_fail=0
+overall_subtests_skip=0
 
 # Parse tracked results and build table
 while IFS=: read -r domain pd_val pass_cnt fail_cnt; do
@@ -576,33 +636,66 @@ while IFS=: read -r domain pd_val pass_cnt fail_cnt; do
 
     dom_name="$(domain_to_name "$domain")"
     case "$pd_val" in
-        0) pd_name="Signed  " ;;
+        0) pd_name="Signed" ;;
         1) pd_name="Unsigned" ;;
-        *) pd_name="Unknown " ;;
+        *) pd_name="Unknown" ;;
     esac
 
-    combo_total=$((pass_cnt + fail_cnt))
+    combo_total_tests=0
+    combo_pass_tests=0
+    combo_fail_tests=0
+    combo_skip_tests=0
 
-    # Determine status
-    if [ "$combo_total" -eq 0 ]; then
+    case "$pd_val" in
+        0) pd_tag="signed" ;;
+        1) pd_tag="unsigned" ;;
+        *) pd_tag="unknown" ;;
+    esac
+
+    pattern="$LOG_ROOT/${dom_name}_${pd_tag}_iter"*.out
+    for iter_file in $pattern; do
+        [ -f "$iter_file" ] || continue
+
+        counts="$(extract_test_summary_counts "$iter_file")"
+        t="$(printf '%s' "$counts" | awk -F: '{print $1}')"
+        p="$(printf '%s' "$counts" | awk -F: '{print $2}')"
+        f="$(printf '%s' "$counts" | awk -F: '{print $3}')"
+        s="$(printf '%s' "$counts" | awk -F: '{print $4}')"
+
+        combo_total_tests=$((combo_total_tests + t))
+        combo_pass_tests=$((combo_pass_tests + p))
+        combo_fail_tests=$((combo_fail_tests + f))
+        combo_skip_tests=$((combo_skip_tests + s))
+    done
+
+    overall_subtests_total=$((overall_subtests_total + combo_total_tests))
+    overall_subtests_pass=$((overall_subtests_pass + combo_pass_tests))
+    overall_subtests_fail=$((overall_subtests_fail + combo_fail_tests))
+    overall_subtests_skip=$((overall_subtests_skip + combo_skip_tests))
+
+    if [ "$combo_total_tests" -eq 0 ]; then
         status="SKIP"
-    elif [ "$fail_cnt" -eq 0 ]; then
+    elif [ "$combo_fail_tests" -eq 0 ]; then
         status="PASS"
     else
         status="FAIL"
     fi
 
-    # Write to summary file and log (properly formatted table row)
-    line=$(printf "%-10s | %-10s | %4d | %4d | %4s" "$dom_name" "$pd_name" "$pass_cnt" "$fail_cnt" "$status")
+    line="$(printf "$SUMMARY_FMT" "$dom_name" "$pd_name" "$combo_total_tests" "$combo_pass_tests" "$combo_fail_tests" "$combo_skip_tests" "$status")"
     echo "$line" >> "$SUMMARY_FILE"
     log_info "$line"
 done <<EOF
 $RESULTS_TRACKER
 EOF
 
-log_info "--------------------------------------------------------------------------"
-log_info "Overall:   Total runs: $TOTAL_COUNT | Passed: $PASS_COUNT | Failed: $((TOTAL_COUNT - PASS_COUNT))"
-log_info "=========================================================================="
+log_info "$SUMMARY_SEP"
+overall_inv_line="$(printf '%-20s Total:%6d | Passed:%6d | Failed:%6d' \
+    'Overall invocations:' "$TOTAL_COUNT" "$PASS_COUNT" "$((TOTAL_COUNT - PASS_COUNT))")"
+log_info "$overall_inv_line"
+
+overall_sub_line="$(printf '%-20s Total:%6d | Passed:%6d | Failed:%6d | Skipped:%6d' \
+    'Overall subtests:' "$overall_subtests_total" "$overall_subtests_pass" "$overall_subtests_fail" "$overall_subtests_skip")"
+log_info "$overall_sub_line"
 
 # Final result determination
 if [ "$TOTAL_COUNT" -eq 0 ]; then
