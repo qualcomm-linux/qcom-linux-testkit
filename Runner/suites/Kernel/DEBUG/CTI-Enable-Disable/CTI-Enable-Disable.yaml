@@ -1,0 +1,16 @@
+metadata:
+  name: CTI-Enable-Disable
+  format: "Lava-Test Test Definition 1.0"
+  description: "Verifies that all Coresight CTI devices can be successfully enabled and disabled via sysfs."
+  os:
+    - linux
+  scope:
+    - coresight
+    - kernel
+
+run:
+  steps:
+    - REPO_PATH=$PWD || true
+    - cd Runner/suites/Kernel/DEBUG/CTI-Enable-Disable || true
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh CTI-Enable-Disable.res || true
