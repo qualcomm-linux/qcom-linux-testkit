@@ -45,7 +45,9 @@ At a high level, the test:
 4. **Recording phase (ENCODE - 4 tests)**:
    - **audiotestsrc tests**: Generates sine wave at 440Hz, encodes to WAV/FLAC
    - **pulsesrc tests**: Captures from hardware audio input, encodes to WAV/FLAC
-   - Saves recorded files to `logs/Audio_Record_Playback/recorded/`
+   - Saves recorded files to shared directory (via `AUDIO_SHARED_RECORDED_DIR` / `gstreamer_shared_recorded_dir()`)
+     - CI/LAVA runs: `<repo_root>/shared/audio-record-playback/`
+     - Local/manual runs: `logs/Audio_Record_Playback/recorded/` (fallback)
    - Duration control:
      - audiotestsrc: Buffer count calculated dynamically: `(44100 * duration) / 1024`
      - pulsesrc: Uses timeout command to stop recording after specified duration
@@ -94,15 +96,14 @@ By default, the test runs **10 test cases** with 10 second duration:
 ## PASS / FAIL / SKIP criteria
 
 ### PASS
-- **Recording**: Output file is created and has size > 1000 bytes
-- **Playback**: Pipeline completes successfully with exit code 0 (clean completion)
-  - **Note**: Timeout (exit code 124) or termination (exit code 143) are treated as **FAIL** for controlled-duration recordings
-  - This ensures playback completed successfully rather than being interrupted
+- **Recording**: Output file is created and has size > 1000 bytes, and no GStreamer errors detected in log
+  - Exit code is not directly checked - timeout/termination is acceptable if file is valid
+- **Playback**: Pipeline completes successfully with exit code 0 and no GStreamer errors detected in log
 - **Overall**: At least one test passes and no tests fail
 
 ### FAIL
-- **Recording**: No output file created or file size too small
-- **Playback**: Pipeline exits with non-zero code (including timeout 124 or termination 143) or GStreamer errors detected
+- **Recording**: No output file created, file size too small (≤ 1000 bytes), or GStreamer errors detected in log
+- **Playback**: Pipeline exits with non-zero code or GStreamer errors detected in log
 - **Overall**: One or more tests fail
 
 ### SKIP
@@ -131,14 +132,38 @@ By default, logs are written relative to the script working directory:
   playback_flac.log
   playback_pulsesrc_wav.log
   playback_pulsesrc_flac.log
-  recorded/                       # Recorded audio files
-    record_wav.wav
-    record_flac.flac
-    record_pulsesrc_wav.wav
-    record_pulsesrc_flac.flac
   dmesg/                          # dmesg scan outputs (if available)
     dmesg_errors.log
 ```
+
+### Recorded Audio Artifacts
+
+Recorded audio files are stored in a shared directory to enable artifact reuse across test runs:
+
+**Local/Manual Runs** (fallback):
+```
+./logs/Audio_Record_Playback/recorded/
+  record_wav.wav
+  record_flac.flac
+  record_pulsesrc_wav.wav
+  record_pulsesrc_flac.flac
+```
+
+**CI/LAVA Runs** (shared path):
+```
+<repo_root>/shared/audio-record-playback/
+  record_wav.wav
+  record_flac.flac
+  record_pulsesrc_wav.wav
+  record_pulsesrc_flac.flac
+```
+
+The recorded artifact directory is determined by:
+1. **Explicit override**: `AUDIO_SHARED_RECORDED_DIR` environment variable (if set)
+2. **LAVA/tests detection**: Shared path derived from repository structure (if script path contains `/tests/`)
+3. **Local fallback**: `./logs/Audio_Record_Playback/recorded/` (for manual runs)
+
+This ensures that in CI/LAVA environments, recorded artifacts are placed in a shared location accessible across multiple test runs, while local/manual runs use a simple local directory.
 
 ---
 
@@ -215,6 +240,13 @@ Help:
     - `8` MEMDUMP
     - `9` MEMDUMP
   - Default: `2`
+
+- `--lava-testcase-id <name>`
+  - Override the test case name reported to LAVA in the `.res` file
+  - Default: `Audio_Record_Playback`
+  - Used by LAVA to match expected test case names
+  - Example: `--lava-testcase-id "GStreamer_Audio_Record_wav"`
+  - **Note:** This is typically set automatically by LAVA job definitions and should not be used for local testing
 
 ---
 
@@ -530,20 +562,45 @@ fi
   - `SKIP` - No tests executed or all skipped
 - Test summary is logged showing pass/fail/skip counts
 - Individual test logs are available in `logs/Audio_Record_Playback/`
-- Recorded files are preserved in `logs/Audio_Record_Playback/recorded/` for debugging
+- Recorded files are preserved in the shared recorded directory for debugging:
+  - CI/LAVA runs: `<repo_root>/shared/audio-record-playback/`
+  - Local/manual runs: `logs/Audio_Record_Playback/recorded/` (fallback)
 
 ### LAVA Environment Variables
 
 The test supports these environment variables (can be set in LAVA job definition):
 
 - `AUDIO_TEST_MODE` - Test mode (all/record/playback) (default: all)
+- `AUDIO_TEST_NAME` - Individual test name for single test execution (optional)
 - `AUDIO_FORMATS` - Comma-separated format list (default: `wav,flac`)
 - `AUDIO_DURATION` - Recording duration in seconds (default: 10)
 - `RUNTIMESEC` - Alternative to AUDIO_DURATION (for backward compatibility)
 - `AUDIO_GST_DEBUG` - GStreamer debug level (default: 2)
 - `GST_DEBUG_LEVEL` - Alternative to AUDIO_GST_DEBUG
+- `AUDIO_CLIP_URL` - URL to download test audio files (OGG/MP3) (default: GitHub release URL)
+- `AUDIO_CLIP_PATH` - Local path to test audio files (overrides AUDIO_CLIP_URL if files exist)
+- `AUDIO_SHARED_RECORDED_DIR` - Shared directory for recorded audio artifacts (optional)
+- `REPO_PATH` - Repository root path (set by YAML, used for path resolution)
+- `LAVA_TESTCASE_ID` - Override test case name for LAVA reporting (default: Audio_Record_Playback)
 
 **Priority order for duration**: `AUDIO_DURATION` > `RUNTIMESEC` > default (10)
+
+**Shared Artifact Directory**: The test uses `AUDIO_SHARED_RECORDED_DIR` to store recorded audio files in a shared location across multiple test runs. If not set, the test will automatically determine the appropriate directory based on the environment (LAVA vs local).
+
+### LAVA Test Case Naming
+
+The test supports flexible test case naming for LAVA integration:
+
+- **Default behavior**: Reports results as `Audio_Record_Playback` in the `.res` file
+- **LAVA override**: Set `LAVA_TESTCASE_ID` parameter in the YAML definition to match LAVA's expected test case name
+- **Example YAML configuration**:
+  ```yaml
+  params:
+    AUDIO_TEST_MODE: record
+    AUDIO_FORMATS: wav
+    LAVA_TESTCASE_ID: "GStreamer_Audio_Record_wav"  # Matches LAVA expected name
+  ```
+- This ensures LAVA correctly matches test results with expected test case names, avoiding "Unexpected test result" errors
 
 ### Test Counting
 

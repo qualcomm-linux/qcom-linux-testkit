@@ -1,6 +1,7 @@
 #!/bin/sh
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
-# SPDX-License-Identifier: BSD-3-Clause# resource-tuner test runner (pinned whitelist)
+# SPDX-License-Identifier: BSD-3-Clause
+# userspace-resource-manager test runner (pinned whitelist)
 
 # ---------- Repo env + helpers ----------
 SCRIPT_DIR="$(
@@ -37,7 +38,7 @@ export PATH="/usr/sbin:/sbin:/usr/bin:/bin:${PATH}"
 # shellcheck disable=SC3045
 ( ulimit -c unlimited ) >/dev/null 2>&1 || true
 
-TESTNAME="resource-tuner"
+TESTNAME="userspace-resource-manager"
 test_path="$(find_test_case_by_name "$TESTNAME")"
 cd "$test_path" || exit 1
 RES_FILE="./${TESTNAME}.res"
@@ -62,33 +63,12 @@ fi
 
 # ---------- Approved list (pinned whitelist) ----------
 APPROVED_TESTS="
-/usr/bin/ClientDataManagerTests
-/usr/bin/ResourceProcessorTests
-/usr/bin/MemoryPoolTests
-/usr/bin/SignalConfigProcessorTests
-/usr/bin/DeviceInfoTests
-/usr/bin/ThreadPoolTests
-/usr/bin/MiscTests
-/usr/bin/SignalParsingTests
-/usr/bin/SafeOpsTests
-/usr/bin/ExtensionIntfTests
-/usr/bin/RateLimiterTests
-/usr/bin/SysConfigAPITests
-/usr/bin/ExtFeaturesParsingTests
-/usr/bin/RequestMapTests
-/usr/bin/TargetConfigProcessorTests
-/usr/bin/InitConfigParsingTests
-/usr/bin/RequestQueueTests
-/usr/bin/CocoTableTests
-/usr/bin/ResourceParsingTests
-/usr/bin/TimerTests
-/usr/bin/resource_tuner_tests
+/usr/bin/UrmComponentTests
+/usr/bin/UrmIntegrationTests
 "
 
-# Suites that need base configs (accept either common/ OR custom/)
-SUITES_REQUIRE_BASE_CFGS="ResourceProcessorTests SignalConfigProcessorTests SysConfigAPITests \
-ExtFeaturesParsingTests TargetConfigProcessorTests InitConfigParsingTests \
-ResourceParsingTests ExtensionIntfTests resource_tuner_tests"
+# Suites that need base configs (all of common/, tests/configs and tests/nodes are needed)
+SUITES_REQUIRE_BASE_CFGS="UrmComponentTests UrmIntegrationTests"
 
 # ---------- CLI ----------
 print_usage() {
@@ -96,8 +76,7 @@ print_usage() {
 Usage: $0 [--all] [--bin <name|absolute>] [--list] [--timeout SECS]
 Policy:
   - Service INACTIVE => overall SKIP (end early)
-  - Base configs: suites require common/ OR custom/ (skip only if BOTH missing)
-  - resource_tuner_tests additionally needs tests/Configs/ResourceSysFsNodes
+  - Base configs: suites require common/, tests/configs and tests/nodes (skip if any of them are missing)
   - Any test FAIL => overall FAIL
   - No FAIL & PASS>0 => overall PASS
   - No FAIL & PASS=0 => overall SKIP (everything skipped)
@@ -180,10 +159,10 @@ parse_and_score_log() {
 }
 per_suite_timeout() {
     case "$1" in
-        ThreadPoolTests|RateLimiterTests)
+        UrmComponentTests)
             echo 1800
             ;;
-        resource_tuner_tests)
+        UrmIntegrationTests)
             echo 2400
             ;;
         *)
@@ -225,7 +204,7 @@ if command -v log_soc_info >/dev/null 2>&1; then
 fi
 
 # ---------- Service gate (use repo helper) ----------
-SERVICE_NAME="${SERVICE_NAME:-resource-tuner.service}"
+SERVICE_NAME="${SERVICE_NAME:-urm.service}"
 log_info "[SERVICE] Checking $SERVICE_NAME via check_systemd_services()"
 if check_systemd_services "$SERVICE_NAME"; then
     log_pass "[SERVICE] $SERVICE_NAME is active"
@@ -233,10 +212,10 @@ else
     log_warn "[SERVICE] $SERVICE_NAME not active — attempting enable/start"
 
     if command -v systemctl >/dev/null 2>&1; then
-        systemctl enable resource-tuner >/dev/null 2>&1 || true
+        systemctl enable urm >/dev/null 2>&1 || true
         systemctl daemon-reload >/dev/null 2>&1 || true
-        systemctl start resource-tuner >/dev/null 2>&1 || true
-        systemctl status resource-tuner --no-pager -l >/dev/null 2>&1 || true
+        systemctl start urm >/dev/null 2>&1 || true
+        systemctl status urm --no-pager -l >/dev/null 2>&1 || true
     else
         log_warn "[SERVICE] systemctl not available; cannot auto-start $SERVICE_NAME"
     fi
@@ -250,56 +229,49 @@ else
     fi
 fi
 
-# ---------- Config preflight (check both common/ and custom/) ----------
-RT_CONFIG_DIR="${RT_CONFIG_DIR:-/etc/resource-tuner}"
-COMMON_DIR="$RT_CONFIG_DIR/common"
-CUSTOM_DIR="$RT_CONFIG_DIR/custom"
-TEST_NODES_DIR="$RT_CONFIG_DIR/tests/Configs/ResourceSysFsNodes"
+# ---------- Config preflight (check both common/ and tests/) ----------
+URM_CONFIG_DIR="${URM_CONFIG_DIR:-/etc/urm}"
+COMMON_CONFIGS_DIR="$URM_CONFIG_DIR/common"
+TEST_CONFIGS_DIR="$URM_CONFIG_DIR/tests/configs"
+TEST_NODES_DIR="$URM_CONFIG_DIR/tests/nodes"
 
-COMMON_OK=1
-CUSTOM_OK=1
-NODES_OK=1
+COMMON_CONFIGS_OK=1
+TEST_CONFIGS_OK=1
+TEST_NODES_OK=1
 
-REQ_COMMON_FILES="${RT_REQUIRE_COMMON_FILES:-InitConfig.yaml PropertiesConfig.yaml ResourcesConfig.yaml SignalsConfig.yaml}"
-REQ_CUSTOM_FILES="${RT_REQUIRE_CUSTOM_FILES:-InitConfig.yaml PropertiesConfig.yaml ResourcesConfig.yaml SignalsConfig.yaml TargetConfig.yaml ExtFeaturesConfig.yaml}"
+REQ_COMMON_FILES="${URM_REQUIRE_COMMON_FILES:-InitConfig.yaml PropertiesConfig.yaml ResourcesConfig.yaml SignalsConfig.yaml}"
+REQ_TEST_CONFIGS="${URM_REQUIRE_TEST_FILES:-InitConfig.yaml PropertiesConfig.yaml ResourcesConfig.yaml SignalsConfig.yaml TargetConfig.yaml ExtFeaturesConfig.yaml Baseline.yaml}"
 
 # common/
-if [ ! -d "$COMMON_DIR" ]; then
-    log_warn "[CFG] Missing dir: $COMMON_DIR"
-    COMMON_OK=0
+if [ ! -d "$COMMON_CONFIGS_DIR" ]; then
+    log_warn "[CFG] Missing dir: $COMMON_CONFIGS_DIR"
+    COMMON_CONFIGS_OK=0
 else
     for f in $REQ_COMMON_FILES; do
-        if [ ! -f "$COMMON_DIR/$f" ]; then
-            log_warn "[CFG] Missing file: $COMMON_DIR/$f"
-            COMMON_OK=0
+        if [ ! -f "$COMMON_CONFIGS_DIR/$f" ]; then
+            log_warn "[CFG] Missing file: $COMMON_CONFIGS_DIR/$f"
+            COMMON_CONFIGS_OK=0
         fi
     done
 fi
 
-# custom/
-if [ ! -d "$CUSTOM_DIR" ]; then
-    log_warn "[CFG] Missing dir: $CUSTOM_DIR"
-    CUSTOM_OK=0
+# tests/configs
+if [ ! -d "$TEST_CONFIGS_DIR" ]; then
+    log_warn "[CFG] Missing dir: $TEST_CONFIGS_DIR"
+    TEST_CONFIGS_OK=0
 else
-    for f in $REQ_CUSTOM_FILES; do
-        if [ ! -f "$CUSTOM_DIR/$f" ]; then
-            log_warn "[CFG] Missing file: $CUSTOM_DIR/$f"
-            CUSTOM_OK=0
+    for f in $REQ_TEST_CONFIGS; do
+        if [ ! -f "$TEST_CONFIGS_DIR/$f" ]; then
+            log_warn "[CFG] Missing file: $TEST_CONFIGS_DIR/$f"
+            TEST_CONFIGS_OK=0
         fi
     done
-    cn="$(
-      find "$CUSTOM_DIR/ResourceSysFsNodes" -mindepth 1 -maxdepth 1 -type f -print 2>/dev/null \
-      | wc -l | awk '{print $1}'
-    )"
-    if [ -n "$cn" ]; then
-        log_info "[CFG] custom/ResourceSysFsNodes entries: $cn"
-    fi
 fi
 
-# tests nodes (hard requirement for resource_tuner_tests)
+# tests/nodes (hard requirement for UrmIntegrationTests and UrmComponentTests)
 if [ ! -d "$TEST_NODES_DIR" ]; then
     log_warn "[CFG] Missing dir: $TEST_NODES_DIR"
-    NODES_OK=0
+    TEST_NODES_OK=0
 else
     count_nodes="$(
       find "$TEST_NODES_DIR" -mindepth 1 -maxdepth 1 -type f -print 2>/dev/null \
@@ -307,7 +279,7 @@ else
     )"
     if [ "${count_nodes:-0}" -le 0 ]; then
         log_warn "[CFG] $TEST_NODES_DIR is empty"
-        NODES_OK=0
+        TEST_NODES_OK=0
     fi
 fi
 
@@ -399,22 +371,13 @@ run_one() {
         return 2
     fi
 
-    # base config requirement: accept common OR custom; skip only if BOTH missing
+    # base config requirement: common configs, tests/configs as well as tests/nodes
+    # If any of them are missing, skip.
     if suite_requires_base_cfgs "$name"; then
-        if [ $COMMON_OK -eq 0 ] && [ $CUSTOM_OK -eq 0 ]; then
-            log_skip "[CFG] Base configs missing (common/ AND custom/) — skipping $name"
+        if [ $COMMON_CONFIGS_OK -eq 0 ] || [ $TEST_CONFIGS_OK -eq 0 ] || [ $TEST_NODES_OK -eq 0 ]; then
+            log_skip "[CFG] Base configs missing (one or more of common/, tests/configs or tests/nodes not found) — skipping $name"
             echo "SKIP" >"$tres"
             echo "[SKIP] $name – base configs missing" >>"$LOGDIR/summary.txt"
-            return 2
-        fi
-    fi
-
-    # resource_tuner_tests also needs test nodes
-    if [ "$name" = "resource_tuner_tests" ]; then
-        if [ $NODES_OK -eq 0 ]; then
-            log_skip "[CFG] Test ResourceSysFsNodes missing/empty — skipping $name"
-            echo "SKIP" >"$tres"
-            echo "[SKIP] $name – test nodes missing" >>"$LOGDIR/summary.txt"
             return 2
         fi
     fi

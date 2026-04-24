@@ -84,6 +84,16 @@ cd /var/Runner && ./run-test.sh cpufreq
 
 ---
 
+## Live Test Inventory Report
+
+A live inventory of the available test cases in this repository is published via GitHub Pages.
+
+📌 **Hosted here:**  
+👉 https://qualcomm-linux.github.io/qcom-linux-testkit/
+
+This page is automatically updated from the contents of the `main` branch and helps track the currently available test coverage across the repository.
+
+---
 ## Extending for CI/CD
 
 These tests can be used as CI jobs in:
@@ -111,4 +121,5 @@ These tests can be used as CI jobs in:
 
 ```
 Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.  
-SPDX-License-Identifier: BSD-3-Clause```
+SPDX-License-Identifier: BSD-3-Clause
+```

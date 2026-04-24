@@ -41,17 +41,13 @@ SCRIPT_DIR="$(
 )"
 
 TESTNAME="Audio_Record_Playback"
+RESULT_TESTNAME="$TESTNAME"
 RES_FILE="${SCRIPT_DIR}/${TESTNAME}.res"
 LOG_DIR="${SCRIPT_DIR}/logs"
 OUTDIR="$LOG_DIR/$TESTNAME"
 GST_LOG="$OUTDIR/gst.log"
 DMESG_DIR="$OUTDIR/dmesg"
-RECORDED_DIR="$OUTDIR/recorded"
 
-mkdir -p "$OUTDIR" "$DMESG_DIR" "$RECORDED_DIR" >/dev/null 2>&1 || true
-: >"$RES_FILE"
-: >"$GST_LOG"
- 
 INIT_ENV=""
 SEARCH="$SCRIPT_DIR"
 while [ "$SEARCH" != "/" ]; do
@@ -64,7 +60,7 @@ done
 
 if [ -z "${INIT_ENV:-}" ]; then
   echo "[ERROR] Could not find init_env (starting at $SCRIPT_DIR)" >&2
-  echo "$TESTNAME SKIP" >"$RES_FILE" 2>/dev/null || true
+  echo "$RESULT_TESTNAME SKIP" >"$RES_FILE" 2>/dev/null || true
   exit 0
 fi
 
@@ -80,6 +76,35 @@ fi
 # shellcheck disable=SC1091
 . "$TOOLS/lib_gstreamer.sh"
 
+# Create required directories now that log functions are available
+if ! mkdir -p "$OUTDIR" "$DMESG_DIR"; then
+  log_error "Failed to create required directories:"
+  log_error "  OUTDIR=$OUTDIR"
+  log_error "  DMESG_DIR=$DMESG_DIR"
+  echo "$RESULT_TESTNAME FAIL" >"$RES_FILE" 2>/dev/null || true
+  exit 0
+fi
+: >"$RES_FILE"
+: >"$GST_LOG"
+
+# -------------------- Set up shared recorded directory --------------------
+# Use gstreamer_shared_recorded_dir() as single source of truth for directory resolution
+# Priority: 1) AUDIO_SHARED_RECORDED_DIR env var, 2) LAVA/tests shared path, 3) local fallback
+if [ -n "${AUDIO_SHARED_RECORDED_DIR:-}" ]; then
+    RECORDED_DIR="$AUDIO_SHARED_RECORDED_DIR"
+elif command -v gstreamer_shared_recorded_dir >/dev/null 2>&1; then
+    RECORDED_DIR="$(gstreamer_shared_recorded_dir "$SCRIPT_DIR" "$OUTDIR")"
+else
+    RECORDED_DIR="$OUTDIR/recorded"
+fi
+
+# Create the recorded directory
+if ! mkdir -p "$RECORDED_DIR"; then
+  log_error "Failed to create recorded directory: $RECORDED_DIR"
+  echo "$RESULT_TESTNAME FAIL" >"$RES_FILE"
+  exit 0
+fi
+
 result="FAIL"
 reason="unknown"
 pass_count=0
@@ -87,18 +112,25 @@ fail_count=0
 skip_count=0
 total_tests=0
 
+# Track whether external clip provisioning was explicitly requested.
+USER_CLIP_URL_SET=0
+USER_CLIP_PATH_SET=0
+
+if [ "${AUDIO_CLIP_URL+x}" = "x" ] && [ -n "${AUDIO_CLIP_URL:-}" ]; then
+  USER_CLIP_URL_SET=1
+fi
+
+if [ "${AUDIO_CLIP_PATH+x}" = "x" ] && [ -n "${AUDIO_CLIP_PATH:-}" ]; then
+  USER_CLIP_PATH_SET=1
+fi
 # -------------------- Defaults (LAVA env vars -> defaults; CLI overrides) --------------------
 testMode="${AUDIO_TEST_MODE:-all}"
+testName="${AUDIO_TEST_NAME:-}"
 formatList="${AUDIO_FORMATS:-wav,flac}"
 duration="${AUDIO_DURATION:-${RUNTIMESEC:-10}}"
 gstDebugLevel="${AUDIO_GST_DEBUG:-${GST_DEBUG_LEVEL:-2}}"
 clipUrl="${AUDIO_CLIP_URL:-https://github.com/qualcomm-linux/qcom-linux-testkit/releases/download/GST-Audio-Files-v1.0/audio_clips_gst.tar.gz}"
 clipPath="${AUDIO_CLIP_PATH:-}"
-
-# Calculate num_buffers based on duration
-# Formula: num_buffers = (sample_rate * duration) / samples_per_buffer
-# Example: (44100 * 10) / 1024 = 430 buffers for 10 seconds
-NUM_BUFFERS=$(( (SAMPLE_RATE * duration) / SAMPLES_PER_BUFFER ))
 
 # Validate numeric parameters (only validate if explicitly set)
 for param in AUDIO_DURATION AUDIO_GST_DEBUG GST_DEBUG_LEVEL; do
@@ -113,13 +145,13 @@ for param in AUDIO_DURATION AUDIO_GST_DEBUG GST_DEBUG_LEVEL; do
     case "$val" in
       ''|*[!0-9]*)
         log_warn "$param must be numeric (got '$val')"
-        echo "$TESTNAME SKIP" >"$RES_FILE"
+        echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
         exit 0
         ;;
       *)
         if [ "$val" -le 0 ] 2>/dev/null; then
           log_warn "$param must be positive (got '$val')"
-          echo "$TESTNAME SKIP" >"$RES_FILE"
+          echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
           exit 0
         fi
         ;;
@@ -127,7 +159,7 @@ for param in AUDIO_DURATION AUDIO_GST_DEBUG GST_DEBUG_LEVEL; do
   fi
 done
 
-# shellcheck disable=SC2317
+# shellcheck disable=SC2317,SC2329
 cleanup() {
   # Best-effort: try to kill only children first; fall back to name-based kill
   if ! pkill -P "$$" -x gst-launch-1.0 >/dev/null 2>&1; then
@@ -142,7 +174,7 @@ while [ $# -gt 0 ]; do
     --mode)
       if [ $# -lt 2 ] || [ "${2#--}" != "$2" ]; then
         log_warn "Missing/invalid value for --mode"
-        echo "$TESTNAME SKIP" >"$RES_FILE"
+        echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
         exit 0
       fi
       [ -n "$2" ] && testMode="$2"
@@ -152,7 +184,7 @@ while [ $# -gt 0 ]; do
     --formats)
       if [ $# -lt 2 ] || [ "${2#--}" != "$2" ]; then
         log_warn "Missing/invalid value for --formats"
-        echo "$TESTNAME SKIP" >"$RES_FILE"
+        echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
         exit 0
       fi
       [ -n "$2" ] && formatList="$2"
@@ -162,14 +194,14 @@ while [ $# -gt 0 ]; do
     --duration)
       if [ $# -lt 2 ] || [ "${2#--}" != "$2" ]; then
         log_warn "Missing/invalid value for --duration"
-        echo "$TESTNAME SKIP" >"$RES_FILE"
+        echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
         exit 0
       fi
       if [ -n "$2" ]; then
         case "$2" in
           ''|*[!0-9]*)
             log_warn "Invalid --duration '$2' (must be numeric)"
-            echo "$TESTNAME SKIP" >"$RES_FILE"
+            echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
             exit 0
             ;;
           *)
@@ -183,7 +215,7 @@ while [ $# -gt 0 ]; do
     --gst-debug)
       if [ $# -lt 2 ] || [ "${2#--}" != "$2" ]; then
         log_warn "Missing/invalid value for --gst-debug"
-        echo "$TESTNAME SKIP" >"$RES_FILE"
+        echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
         exit 0
       fi
       [ -n "$2" ] && gstDebugLevel="$2"
@@ -193,20 +225,46 @@ while [ $# -gt 0 ]; do
     --clip-url)
       if [ $# -lt 2 ] || [ "${2#--}" != "$2" ]; then
         log_warn "Missing/invalid value for --clip-url"
-        echo "$TESTNAME SKIP" >"$RES_FILE"
+        echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
         exit 0
       fi
-      [ -n "$2" ] && clipUrl="$2"
+      if [ -n "$2" ]; then
+        clipUrl="$2"
+        USER_CLIP_URL_SET=1
+      fi
       shift 2
       ;;
-
+ 
     --clip-path)
       if [ $# -lt 2 ] || [ "${2#--}" != "$2" ]; then
         log_warn "Missing/invalid value for --clip-path"
-        echo "$TESTNAME SKIP" >"$RES_FILE"
+        echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
         exit 0
       fi
-      [ -n "$2" ] && clipPath="$2"
+      if [ -n "$2" ]; then
+        clipPath="$2"
+        USER_CLIP_PATH_SET=1
+      fi
+      shift 2
+      ;;
+ 
+    --test-name)
+      if [ $# -lt 2 ] || [ "${2#--}" != "$2" ]; then
+        log_warn "Missing/invalid value for --test-name"
+        echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
+        exit 0
+      fi
+      [ -n "$2" ] && testName="$2"
+      shift 2
+      ;;
+
+    --lava-testcase-id)
+      if [ $# -lt 2 ] || [ "${2#--}" != "$2" ]; then
+        log_warn "Missing/invalid value for --lava-testcase-id"
+        echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
+        exit 0
+      fi
+      [ -n "$2" ] && RESULT_TESTNAME="$2"
       shift 2
       ;;
 
@@ -239,6 +297,11 @@ OPTIONS:
 
   --clip-path <path>    Local path to test audio files
                         (overrides --clip-url if files exist)
+
+  --lava-testcase-id <name>
+                        Override the test case name reported to LAVA
+                        (default: Audio_Record_Playback)
+                        Used by LAVA to match expected test case names
 
   -h, --help            Display this help message
 
@@ -286,7 +349,7 @@ EOF
 
     *)
       log_warn "Unknown argument: $1"
-      echo "$TESTNAME SKIP" >"$RES_FILE"
+      echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
       exit 0
       ;;
   esac
@@ -295,14 +358,14 @@ done
 # -------------------- Validate parsed values --------------------
 case "$testMode" in all|record|playback) : ;; *)
   log_warn "Invalid --mode '$testMode'"
-  echo "$TESTNAME SKIP" >"$RES_FILE"
+  echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
   exit 0
   ;;
 esac
 
 case "$gstDebugLevel" in 1|2|3|4|5|6|7|8|9) : ;; *)
   log_warn "Invalid --gst-debug '$gstDebugLevel' (allowed: 1-9)"
-  echo "$TESTNAME SKIP" >"$RES_FILE"
+  echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
   exit 0
   ;;
 esac
@@ -310,22 +373,46 @@ esac
 case "$duration" in
   ''|*[!0-9]*)
     log_warn "Invalid duration '$duration' (must be numeric)"
-    echo "$TESTNAME SKIP" >"$RES_FILE"
+    echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
     exit 0
     ;;
   *)
     if [ "$duration" -le 0 ] 2>/dev/null; then
       log_warn "Duration must be positive (got '$duration')"
-      echo "$TESTNAME SKIP" >"$RES_FILE"
+      echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
       exit 0
     fi
     ;;
 esac
 
+# Validate test name if provided
+if [ -n "$testName" ]; then
+  case "$testName" in
+    record_wav|record_flac|record_pulsesrc_wav|record_pulsesrc_flac|\
+    playback_wav|playback_flac|playback_pulsesrc_wav|playback_pulsesrc_flac|\
+    playback_sample_ogg|playback_sample_mp3)
+      log_info "Test name: $testName (individual test mode)"
+      ;;
+    *)
+      log_warn "Invalid --test-name '$testName'"
+      log_warn "Valid names: record_wav, record_flac, record_pulsesrc_wav, record_pulsesrc_flac,"
+      log_warn "             playback_wav, playback_flac, playback_pulsesrc_wav, playback_pulsesrc_flac,"
+      log_warn "             playback_sample_ogg, playback_sample_mp3"
+      echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
+      exit 0
+      ;;
+  esac
+fi
+
+# Calculate num_buffers based on final duration value
+# Formula: num_buffers = (sample_rate * duration) / samples_per_buffer
+# Example: (44100 * 10) / 1024 = 430 buffers for 10 seconds
+NUM_BUFFERS=$(( (SAMPLE_RATE * duration) / SAMPLES_PER_BUFFER ))
+
 # -------------------- Pre-checks --------------------
 check_dependencies "gst-launch-1.0 gst-inspect-1.0 awk grep head sed tr stat find curl tar" >/dev/null 2>&1 || {
   log_skip "Missing required tools (gst-launch-1.0, gst-inspect-1.0, awk, grep, head, sed, tr, stat, find, curl, tar)"
-  echo "$TESTNAME SKIP" >"$RES_FILE"
+  echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
   exit 0
 }
 
@@ -339,6 +426,7 @@ log_info "Audio params: sample_rate=${SAMPLE_RATE}Hz, samples_per_buffer=${SAMPL
 log_info "Calculated num_buffers: $NUM_BUFFERS (for ${duration}s duration)"
 log_info "GST debug: GST_DEBUG=$gstDebugLevel"
 log_info "Logs: $OUTDIR"
+log_info "Recorded artifact dir: $RECORDED_DIR"
 
 # -------------------- Required element validation --------------------
 check_required_elements() {
@@ -381,6 +469,9 @@ run_record_test() {
   ext="$fmt"
   output_file="$RECORDED_DIR/${testname}.${ext}"
   test_log="$OUTDIR/${testname}.log"
+  
+  # Remove stale artifact from a previous rerun.
+  rm -f "$output_file"
 
   : >"$test_log"
 
@@ -534,6 +625,9 @@ run_record_pulsesrc_test() {
   ext="$fmt"
   output_file="$RECORDED_DIR/${testname}.${ext}"
   test_log="$OUTDIR/${testname}.log"
+  
+  # Remove stale artifact from a previous rerun.
+  rm -f "$output_file"
 
   : >"$test_log"
 
@@ -548,13 +642,16 @@ run_record_pulsesrc_test() {
   log_info "Pipeline: $pipeline"
 
   # Run recording with timeout
-  if gstreamer_run_gstlaunch_timeout "$duration" "$pipeline" >>"$test_log" 2>&1; then
+  if gstreamer_run_gstlaunch_timeout "$((duration + 10))" "$pipeline" >>"$test_log" 2>&1; then
     gstRc=0
   else
     gstRc=$?
   fi
 
   log_info "Record exit code: $gstRc"
+  if [ "$gstRc" -eq 124 ]; then
+    log_info "$testname: timeout rc=124 is acceptable here if a valid output file was finalized"
+  fi
 
   # Check for GStreamer errors in log
   if ! gstreamer_validate_log "$test_log" "$testname"; then
@@ -587,59 +684,71 @@ run_record_pulsesrc_test() {
 # -------------------- PulseSrc Playback test function --------------------
 run_playback_pulsesrc_test() {
   fmt="$1"
-
+ 
   testname="playback_pulsesrc_${fmt}"
   log_info "=========================================="
   log_info "Running: $testname"
   log_info "=========================================="
-
+ 
   ext="$fmt"
   input_file="$RECORDED_DIR/record_pulsesrc_${fmt}.${ext}"
-
+ 
   if [ ! -f "$input_file" ]; then
+    if [ "$testMode" = "all" ]; then
+      log_fail "$testname: FAIL - expected recorded file is missing: $input_file (pulsesrc record testcase failed in same run)"
+      fail_count=$((fail_count + 1))
+      return 1
+    fi
+ 
     log_warn "$testname: SKIP - recorded file not found: $input_file (run pulsesrc record first)"
     skip_count=$((skip_count + 1))
     return 1
   fi
-
-  # Check if file has minimum content (same threshold as recording: 1000 bytes)
+ 
   file_size="$(gstreamer_file_size_bytes "$input_file")"
   if [ "$file_size" -le 1000 ]; then
+    if [ "$testMode" = "all" ]; then
+      log_fail "$testname: FAIL - recorded file too small: $file_size bytes (pulsesrc recording failed in same run)"
+      fail_count=$((fail_count + 1))
+      return 1
+    fi
+ 
     log_warn "$testname: SKIP - recorded file too small: $file_size bytes (pulsesrc recording likely failed)"
     skip_count=$((skip_count + 1))
     return 1
   fi
-
+ 
   test_log="$OUTDIR/${testname}.log"
   : >"$test_log"
-
+  
+  # pulsesrc recordings are timeout-driven and can be longer than the nominal
+  # AUDIO_DURATION. Keep extra headroom here so valid same-run artifacts do not
+  # fail intermittently due to playback timeout racing EOS/finalization.
+  playback_timeout=$((duration + 20))
   pipeline="$(gstreamer_build_audio_playback_pipeline "$fmt" "$input_file")"
-
+ 
   if [ -z "$pipeline" ]; then
     log_fail "$testname: FAIL (could not build playback pipeline)"
     fail_count=$((fail_count + 1))
     return 1
   fi
-
+ 
   log_info "Pipeline: $pipeline"
-
-  # Run playback
-  if gstreamer_run_gstlaunch_timeout "$((duration + 10))" "$pipeline" >>"$test_log" 2>&1; then
+  
+  if gstreamer_run_gstlaunch_timeout "$playback_timeout" "$pipeline" >>"$test_log" 2>&1; then 
     gstRc=0
   else
     gstRc=$?
   fi
-
-  log_info "Playback exit code: $gstRc"
-
-  # Check for GStreamer errors in log
+ 
+  log_info "$testname: playback timeout budget=${playback_timeout}s"
+ 
   if ! gstreamer_validate_log "$test_log" "$testname"; then
     log_fail "$testname: FAIL (GStreamer errors detected)"
     fail_count=$((fail_count + 1))
     return 1
   fi
-
-  # Check for successful completion
+ 
   if [ "$gstRc" -eq 0 ]; then
     log_pass "$testname: PASS"
     pass_count=$((pass_count + 1))
@@ -650,7 +759,6 @@ run_playback_pulsesrc_test() {
     return 1
   fi
 }
-
 # -------------------- Test file playback test function (OGG/MP3) --------------------
 run_playback_ogg_mp3_test() {
   fmt="$1"
@@ -735,134 +843,373 @@ export GST_DEBUG_NO_COLOR=1
 export GST_DEBUG="$gstDebugLevel"
 export GST_DEBUG_FILE="$GST_LOG"
 
+audio_record_get_valid_duration_secs() {
+  duration_secs="$1"
+
+  if [ -z "$duration_secs" ]; then
+    echo 10
+    return 0
+  fi
+
+  case "$duration_secs" in
+    ''|*[!0-9]*)
+      log_warn "Invalid duration_secs '$duration_secs' for sample generation, defaulting to 10"
+      echo 10
+      return 0
+      ;;
+  esac
+
+  if [ "$duration_secs" -le 0 ] 2>/dev/null; then
+    log_warn "Non-positive duration_secs '$duration_secs' for sample generation, defaulting to 10"
+    echo 10
+    return 0
+  fi
+
+  echo "$duration_secs"
+  return 0
+}
+
+# Refresh sample availability flags for the current OUTDIR.
+# Note: have_ogg / have_mp3 are intentionally shared global state in this
+# POSIX sh flow so subsequent provisioning stages can make decisions based on
+# the latest discovered/generated/copied samples.
+audio_record_mark_existing_samples() {
+  outdir="$1"
+
+  sample_ogg="$outdir/sample_audio.ogg"
+  sample_mp3="$outdir/sample_audio.mp3"
+
+  have_ogg=0
+  have_mp3=0
+
+  if [ -f "$sample_ogg" ]; then
+    ogg_size="$(gstreamer_file_size_bytes "$sample_ogg")"
+    if [ "$ogg_size" -gt 1000 ]; then
+      have_ogg=1
+      log_info "OGG Test file available (size: $ogg_size bytes)"
+    fi
+  fi
+
+  if [ -f "$sample_mp3" ]; then
+    mp3_size="$(gstreamer_file_size_bytes "$sample_mp3")"
+    if [ "$mp3_size" -gt 1000 ]; then
+      have_mp3=1
+      log_info "MP3 Test file available (size: $mp3_size bytes)"
+    fi
+  fi
+
+  return 0
+}
+
+audio_record_copy_sample_from_path() {
+  src_file="$1"
+  dst_file="$2"
+  label="$3"
+
+  if [ ! -f "$src_file" ]; then
+    return 1
+  fi
+
+  if cp "$src_file" "$dst_file"; then
+    log_info "$label copied from local path"
+    return 0
+  fi
+
+  log_warn "Failed to copy $label from local path: $src_file -> $dst_file"
+  return 1
+}
+
+audio_record_generate_local_ogg_sample() {
+  outdir="$1"
+  num_buffers="$2"
+  duration_secs="$3"
+
+  duration_secs="$(audio_record_get_valid_duration_secs "$duration_secs")"
+  sample_ogg="$outdir/sample_audio.ogg"
+  test_log="$outdir/provision_sample_ogg.log"
+
+  : >"$test_log"
+
+  pipeline="audiotestsrc wave=sine freq=440 volume=1.0 num-buffers=$num_buffers ! audioconvert ! audioresample ! vorbisenc ! oggmux ! filesink location=$sample_ogg"
+
+  log_info "Generating local OGG sample from audiotestsrc..."
+  log_info "Pipeline: $pipeline"
+
+  if gstreamer_run_gstlaunch_timeout "$((duration_secs + 10))" "$pipeline" >>"$test_log" 2>&1; then
+    gstRc=0
+  else
+    gstRc=$?
+  fi
+
+  log_info "OGG generation exit code: $gstRc"
+
+  if ! gstreamer_validate_log "$test_log" "provision_sample_ogg"; then
+    log_warn "Local OGG sample generation reported GStreamer errors"
+    return 1
+  fi
+
+  if [ -f "$sample_ogg" ] && [ -s "$sample_ogg" ]; then
+    ogg_size="$(gstreamer_file_size_bytes "$sample_ogg")"
+    if [ "$ogg_size" -gt 1000 ]; then
+      log_pass "Local OGG sample generated successfully (size: $ogg_size bytes)"
+      return 0
+    fi
+    log_warn "Generated OGG sample is too small: $ogg_size bytes"
+    return 1
+  fi
+
+  log_warn "Local OGG sample was not created"
+  return 1
+}
+
+audio_record_generate_local_mp3_sample() {
+  outdir="$1"
+  num_buffers="$2"
+  duration_secs="$3"
+
+  duration_secs="$(audio_record_get_valid_duration_secs "$duration_secs")"
+  sample_mp3="$outdir/sample_audio.mp3"
+  test_log="$outdir/provision_sample_mp3.log"
+
+  : >"$test_log"
+
+  pipeline="audiotestsrc wave=sine freq=440 volume=1.0 num-buffers=$num_buffers ! audioconvert ! audioresample ! lamemp3enc ! filesink location=$sample_mp3"
+
+  log_info "Generating local MP3 sample from audiotestsrc..."
+  log_info "Pipeline: $pipeline"
+
+  if gstreamer_run_gstlaunch_timeout "$((duration_secs + 10))" "$pipeline" >>"$test_log" 2>&1; then
+    gstRc=0
+  else
+    gstRc=$?
+  fi
+
+  log_info "MP3 generation exit code: $gstRc"
+
+  if ! gstreamer_validate_log "$test_log" "provision_sample_mp3"; then
+    log_warn "Local MP3 sample generation reported GStreamer errors"
+    return 1
+  fi
+
+  if [ -f "$sample_mp3" ] && [ -s "$sample_mp3" ]; then
+    mp3_size="$(gstreamer_file_size_bytes "$sample_mp3")"
+    if [ "$mp3_size" -gt 1000 ]; then
+      log_pass "Local MP3 sample generated successfully (size: $mp3_size bytes)"
+      return 0
+    fi
+    log_warn "Generated MP3 sample is too small: $mp3_size bytes"
+    return 1
+  fi
+
+  log_warn "Local MP3 sample was not created"
+  return 1
+}
 # -------------------- Test file provisioning (OGG/MP3) --------------------
 provision_test_files() {
   log_info "=========================================="
   log_info "TEST FILE PROVISIONING"
   log_info "=========================================="
-  
+
   sample_ogg="$OUTDIR/sample_audio.ogg"
   sample_mp3="$OUTDIR/sample_audio.mp3"
   
-  # Check if Test files already exist
-  if [ -f "$sample_ogg" ] && [ -f "$sample_mp3" ]; then
-    log_info "Test files already exist"
-  else
-    # Try to get Test files from provided path or URL
-    if [ -n "$clipPath" ]; then
-      log_info "Attempting to get Test files from local path: $clipPath"
-      if [ -f "$clipPath/sample_audio.ogg" ]; then
-        cp "$clipPath/sample_audio.ogg" "$sample_ogg" 2>/dev/null || true
-        log_info "Sample OGG file copied from local path"
+  # Refresh once at each provisioning stage boundary.
+  # This is intentional: later stages depend on the latest have_ogg/have_mp3
+  # values after local-path copy, URL extraction, or best-effort generation.
+  audio_record_mark_existing_samples "$OUTDIR"
+
+  # If user explicitly gave --clip-path (or AUDIO_CLIP_PATH), honor it first.
+  if [ "$have_ogg" -eq 0 ] || [ "$have_mp3" -eq 0 ]; then
+    if [ "${USER_CLIP_PATH_SET:-0}" -eq 1 ] && [ -n "$clipPath" ]; then
+      log_info "Using user-provided clip path: $clipPath"
+
+      if [ "$have_ogg" -eq 0 ]; then
+        audio_record_copy_sample_from_path \
+          "$clipPath/sample_audio.ogg" \
+          "$sample_ogg" \
+          "Sample OGG file"
       fi
-      if [ -f "$clipPath/sample_audio.mp3" ]; then
-        cp "$clipPath/sample_audio.mp3" "$sample_mp3" 2>/dev/null || true
-        log_info "Sample MP3 file copied from local path"
+
+      if [ "$have_mp3" -eq 0 ]; then
+        audio_record_copy_sample_from_path \
+          "$clipPath/sample_audio.mp3" \
+          "$sample_mp3" \
+          "Sample MP3 file"
       fi
+
+      audio_record_mark_existing_samples "$OUTDIR"
     fi
-    
-    # If not found locally, try URL download
-    if [ ! -f "$sample_ogg" ] || [ ! -f "$sample_mp3" ]; then
-      log_info "Test files not found locally; attempting download from URL..."
+  fi
+
+  # If user explicitly gave --clip-url (or AUDIO_CLIP_URL), honor it next.
+  if [ "$have_ogg" -eq 0 ] || [ "$have_mp3" -eq 0 ]; then
+    if [ "${USER_CLIP_URL_SET:-0}" -eq 1 ] && [ -n "$clipUrl" ]; then
+      log_info "Using user-provided clip URL: $clipUrl"
       if extract_tar_from_url "$clipUrl" "$OUTDIR"; then
         log_pass "Test files downloaded and extracted successfully"
       else
         log_warn "Test file download failed (offline or URL issue)"
       fi
-    fi
-    
-  fi
-  
-  # Check what we have AFTER all provisioning attempts
-  have_ogg=0
-  have_mp3=0
-  
-  if [ -f "$sample_ogg" ]; then
-    size=$(gstreamer_file_size_bytes "$sample_ogg")
-    if [ "$size" -gt 1000 ]; then
-      have_ogg=1
-      log_info "OGG Test file available (size: $size bytes)"
+
+      audio_record_mark_existing_samples "$OUTDIR"
     fi
   fi
-  
-  if [ -f "$sample_mp3" ]; then
-    size=$(gstreamer_file_size_bytes "$sample_mp3")
-    if [ "$size" -gt 1000 ]; then
-      have_mp3=1
-      log_info "MP3 Test file available (size: $size bytes)"
+
+  # If user did NOT explicitly request clip-path or clip-url, prefer local generation.
+  if [ "${USER_CLIP_PATH_SET:-0}" -eq 0 ] && [ "${USER_CLIP_URL_SET:-0}" -eq 0 ]; then
+    if [ "$have_ogg" -eq 0 ]; then
+      if has_element vorbisenc && has_element oggmux; then
+        audio_record_generate_local_ogg_sample "$OUTDIR" "$NUM_BUFFERS" "$duration" || true
+      else
+        log_warn "OGG sample generation skipped: vorbisenc or oggmux plugin not available"
+      fi
+    fi
+
+    if [ "$have_mp3" -eq 0 ]; then
+      if has_element lamemp3enc; then
+        audio_record_generate_local_mp3_sample "$OUTDIR" "$NUM_BUFFERS" "$duration" || true
+      else
+        log_warn "MP3 sample generation skipped: lamemp3enc plugin not available"
+      fi
     fi
   fi
-  
-  # Only warn if BOTH files are missing after all attempts
+
+  # If user explicitly requested an external source but it was incomplete,
+  # local generation can still fill in missing files as best effort.
+  if [ "${USER_CLIP_PATH_SET:-0}" -eq 1 ] || [ "${USER_CLIP_URL_SET:-0}" -eq 1 ]; then
+    if [ "$have_ogg" -eq 0 ]; then
+      if has_element vorbisenc && has_element oggmux; then
+        audio_record_generate_local_ogg_sample "$OUTDIR" "$NUM_BUFFERS" "$duration" || true
+      fi
+    fi
+
+    if [ "$have_mp3" -eq 0 ]; then
+      if has_element lamemp3enc; then
+        audio_record_generate_local_mp3_sample "$OUTDIR" "$NUM_BUFFERS" "$duration" || true
+      fi
+    fi
+  fi
+
+  audio_record_mark_existing_samples "$OUTDIR"
+
   if [ "$have_ogg" -eq 0 ] && [ "$have_mp3" -eq 0 ]; then
     log_warn "No Test files (OGG/MP3) available for playback tests"
   fi
 }
-
 # -------------------- Main test execution --------------------
 log_info "Starting audio record/playback tests..."
 
 # Check required elements
 if ! check_required_elements; then
   log_warn "Required GStreamer elements (audiotestsrc/pulsesink) not available"
-  echo "$TESTNAME SKIP" >"$RES_FILE"
+  echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
   exit 0
 fi
 log_info "Required GStreamer elements verified"
 
-# Provision Test files for OGG/MP3 playback tests
-provision_test_files
-
 # Parse format list
 formats=$(printf '%s' "$formatList" | tr ',' ' ')
 
-# Run ALL record/encode tests first (4 tests total)
-if [ "$testMode" = "all" ] || [ "$testMode" = "record" ]; then
+# -------------------- Individual Test Mode --------------------
+if [ -n "$testName" ]; then
+  # Only provision test files if running OGG/MP3 playback tests
+  case "$testName" in
+    playback_sample_ogg|playback_sample_mp3)
+      provision_test_files "$OUTDIR" "$NUM_BUFFERS" "$duration" "$clipPath" "$clipUrl" "$USER_CLIP_PATH_SET" "$USER_CLIP_URL_SET"
+      ;;
+  esac
   log_info "=========================================="
-  log_info "RECORD TESTS"
+  log_info "INDIVIDUAL TEST MODE: $testName"
   log_info "=========================================="
-
-  # 1. Record with audiotestsrc (2 tests: wav, flac)
-  log_info "Recording with audiotestsrc..."
-  for fmt in $formats; do
-    total_tests=$((total_tests + 1))
-    run_record_test "$fmt" || true
-  done
-
-  # 2. Record with pulsesrc HW (2 tests: wav, flac)
-  log_info "Recording with pulsesrc HW..."
-  for fmt in $formats; do
-    total_tests=$((total_tests + 1))
-    run_record_pulsesrc_test "$fmt" || true
-  done
-fi
-
-# Run ALL playback/decode tests after recording (4 tests total)
-if [ "$testMode" = "all" ] || [ "$testMode" = "playback" ]; then
-  log_info "=========================================="
-  log_info "PLAYBACK TESTS"
-  log_info "=========================================="
-
-  # 3. Playback audiotestsrc recordings (2 tests: wav, flac)
-  log_info "Playing back audiotestsrc recordings..."
-  for fmt in $formats; do
-    total_tests=$((total_tests + 1))
-    run_playback_test "$fmt" || true
-  done
-
-  # 4. Playback pulsesrc recordings (2 tests: wav, flac)
-  log_info "Playing back pulsesrc recordings..."
-  for fmt in $formats; do
-    total_tests=$((total_tests + 1))
-    run_playback_pulsesrc_test "$fmt" || true
-  done
   
-  # 5. Playback Test files (2 tests: ogg, mp3)
-  log_info "Playing back Test files (OGG/MP3)..."
-  for fmt in ogg mp3; do
-    total_tests=$((total_tests + 1))
-    run_playback_ogg_mp3_test "$fmt" || true
-  done
+  total_tests=1
+  
+  case "$testName" in
+    record_wav)
+      run_record_test "wav" || true
+      ;;
+    record_flac)
+      run_record_test "flac" || true
+      ;;
+    record_pulsesrc_wav)
+      run_record_pulsesrc_test "wav" || true
+      ;;
+    record_pulsesrc_flac)
+      run_record_pulsesrc_test "flac" || true
+      ;;
+    playback_wav)
+      run_playback_test "wav" || true
+      ;;
+    playback_flac)
+      run_playback_test "flac" || true
+      ;;
+    playback_pulsesrc_wav)
+      run_playback_pulsesrc_test "wav" || true
+      ;;
+    playback_pulsesrc_flac)
+      run_playback_pulsesrc_test "flac" || true
+      ;;
+    playback_sample_ogg)
+      run_playback_ogg_mp3_test "ogg" || true
+      ;;
+    playback_sample_mp3)
+      run_playback_ogg_mp3_test "mp3" || true
+      ;;
+  esac
+  
+# -------------------- Grouped Test Mode (Original) --------------------
+else
+  # Run ALL record/encode tests first (4 tests total)
+  if [ "$testMode" = "all" ] || [ "$testMode" = "record" ]; then
+    log_info "=========================================="
+    log_info "RECORD TESTS"
+    log_info "=========================================="
+
+    # 1. Record with audiotestsrc (2 tests: wav, flac)
+    log_info "Recording with audiotestsrc..."
+    for fmt in $formats; do
+      total_tests=$((total_tests + 1))
+      run_record_test "$fmt" || true
+    done
+
+    # 2. Record with pulsesrc HW (2 tests: wav, flac)
+    log_info "Recording with pulsesrc HW..."
+    for fmt in $formats; do
+      total_tests=$((total_tests + 1))
+      run_record_pulsesrc_test "$fmt" || true
+    done
+  fi
+
+  # Run ALL playback/decode tests after recording (6 tests total)
+  if [ "$testMode" = "all" ] || [ "$testMode" = "playback" ]; then
+    # Provision test files only when running playback tests
+    provision_test_files "$OUTDIR" "$NUM_BUFFERS" "$duration" "$clipPath" "$clipUrl" "$USER_CLIP_PATH_SET" "$USER_CLIP_URL_SET"
+    
+    log_info "=========================================="
+    log_info "PLAYBACK TESTS"
+    log_info "=========================================="
+
+    # 3. Playback audiotestsrc recordings (2 tests: wav, flac)
+    log_info "Playing back audiotestsrc recordings..."
+    for fmt in $formats; do
+      total_tests=$((total_tests + 1))
+      run_playback_test "$fmt" || true
+    done
+
+    # 4. Playback pulsesrc recordings (2 tests: wav, flac)
+    log_info "Playing back pulsesrc recordings..."
+    for fmt in $formats; do
+      total_tests=$((total_tests + 1))
+      run_playback_pulsesrc_test "$fmt" || true
+    done
+    
+    # 5. Playback Test files (2 tests: ogg, mp3)
+    log_info "Playing back Test files (OGG/MP3)..."
+    for fmt in ogg mp3; do
+      total_tests=$((total_tests + 1))
+      run_playback_ogg_mp3_test "$fmt" || true
+    done
+  fi
 fi
 
 # -------------------- Dmesg error scan --------------------
@@ -913,15 +1260,15 @@ fi
 case "$result" in
   PASS)
     log_pass "$TESTNAME $result: $reason"
-    echo "$TESTNAME PASS" >"$RES_FILE"
+    echo "$RESULT_TESTNAME PASS" >"$RES_FILE"
     ;;
   FAIL)
     log_fail "$TESTNAME $result: $reason"
-    echo "$TESTNAME FAIL" >"$RES_FILE"
+    echo "$RESULT_TESTNAME FAIL" >"$RES_FILE"
     ;;
   *)
     log_warn "$TESTNAME $result: $reason"
-    echo "$TESTNAME SKIP" >"$RES_FILE"
+    echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
     ;;
 esac
 

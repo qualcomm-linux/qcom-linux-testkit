@@ -13,6 +13,10 @@ This suite automates the validation of audio recording capabilities on Qualcomm 
   - Use descriptive names (e.g., record_48KHz_2ch) for specific formats
   - Auto-discovery mode tests all available configs
 - **Config filtering**: Filter tests by sample rate or channel configuration
+- **CI/LAVA integration**: 
+  - Unique result file suffixes prevent file collisions in parallel test runs
+  - Unique testcase IDs prevent LAVA testcase ID collisions
+  - Enables running multiple AudioRecord configurations simultaneously in CI
 - Records audio with configurable duration and loop count
 - Automatically detects and routes to appropriate source (e.g., mic, null)
 - Validates recording using multiple evidence sources:
@@ -185,6 +189,7 @@ DMESG_SCAN	      Scan dmesg for errors after recording	                         
 VERBOSE	          Enable verbose logging	                                      0
 JUNIT_OUT	      Path to write JUnit XML output	                              unset
 RES_SUFFIX        Suffix for unique result file and log directory                 unset
+LAVA_TESTCASE_ID  Unique testcase ID written into the .res file for LAVA         AudioRecord
 
 
 CLI Options:
@@ -200,6 +205,7 @@ Option	                      Description
 --strict [0|1]                Enable strict mode (0=disabled, 1=enabled)
 --no-dmesg	                  Disable dmesg scan
 --res-suffix <suffix>         Suffix for unique result file and log directory (e.g., "Config01" generates AudioRecord_Config01.res and results/AudioRecord_Config01/)
+--lava-testcase-id <id>       Unique testcase ID written into the .res file for LAVA (e.g., "AudioRecord_Config01")
 --junit <file.xml>            Write JUnit XML output
 --verbose	                  Enable verbose logging
 --help	                      Show usage instructions
@@ -310,7 +316,32 @@ AudioRecord_Config01.res
 AudioRecord_Config07.res
 ```
 
-**Example 7: Testing all 10 configs with short duration**
+**Example 7: CI/LAVA workflow with unique testcase IDs (prevents LAVA collisions)**
+```
+# Using --lava-testcase-id ensures unique testcase IDs in LAVA results
+# This prevents testcase ID collisions when running multiple AudioRecord configs in parallel
+
+sh-5.3# ./run.sh --config-name "record_config1" --res-suffix "Config01" --lava-testcase-id "AudioRecord_Config01" --record-seconds 10s
+[INFO] 2026-01-12 07:20:15 - Using unique result file: ./AudioRecord_Config01.res
+[PASS] 2026-01-12 07:20:25 - AudioRecord PASS
+
+sh-5.3# cat AudioRecord_Config01.res
+AudioRecord_Config01 PASS
+
+sh-5.3# ./run.sh --config-name "record_config7" --res-suffix "Config07" --lava-testcase-id "AudioRecord_Config07" --record-seconds 10s
+[INFO] 2026-01-12 07:21:30 - Using unique result file: ./AudioRecord_Config07.res
+[PASS] 2026-01-12 07:21:40 - AudioRecord PASS
+
+sh-5.3# cat AudioRecord_Config07.res
+AudioRecord_Config07 PASS
+
+# LAVA will receive unique testcase IDs:
+# - AudioRecord_Config01 PASS
+# - AudioRecord_Config07 PASS
+# No testcase ID collisions!
+```
+
+**Example 8: Testing all 10 configs with short duration**
 ```
 sh-5.3# ./run.sh --record-seconds 3s
 [INFO] 2026-01-02 12:05:26 - Auto-detected config discovery mode (testing all 10 record configs)

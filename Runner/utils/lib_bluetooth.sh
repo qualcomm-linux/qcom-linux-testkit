@@ -1880,15 +1880,91 @@ btpower() {
 
 btfwpresent() {
     dir=""
+    pattern=""
+    file=""
+ 
     for d in /lib/firmware/qca /usr/lib/firmware/qca /lib/firmware /usr/lib/firmware; do
         [ -d "$d" ] || continue
-        if ls "$d"/msbtfw*.mbn "$d"/msbtfw*.tlv "$d"/msnv*.bin >/dev/null 2>&1; then
-            dir="$d"; break
-        fi
+ 
+        for pattern in \
+            "msbtfw*.mbn" \
+            "msbtfw*.tlv" \
+            "msnv*.bin" \
+            "cmbtfw*.tlv" \
+            "cmnv*.bin" \
+            "hpbtfw*.tlv" \
+            "wcnhpbtfw*.tlv" \
+            "hmtbtfw*.tlv" \
+            "hmtnv*.bin" \
+            "hpnv*.bin" \
+            "wcnhpnv*.bin"
+        do
+            for file in "$d"/$pattern; do
+                if [ -e "$file" ]; then
+                    dir="$d"
+                    printf '%s\n' "$dir"
+                    return 0
+                fi
+            done
+        done
     done
-    [ -n "$dir" ] || return 1
-    printf '%s\n' "$dir"
-    return 0
+ 
+    return 1
+}
+
+bt_wait_ready() {
+    max_wait="${1:-60}"
+    sleep_step="${2:-2}"
+    waited=0
+    started_service=0
+ 
+    if [ -z "$max_wait" ]; then
+        max_wait=60
+    fi
+    if [ -z "$sleep_step" ]; then
+        sleep_step=2
+    fi
+ 
+    case "$max_wait" in
+        ''|*[!0-9]*)
+            max_wait=60
+            ;;
+    esac
+    case "$sleep_step" in
+        ''|*[!0-9]*)
+            sleep_step=2
+            ;;
+    esac
+ 
+    if [ "$max_wait" -le 0 ] 2>/dev/null; then
+        max_wait=60
+    fi
+    if [ "$sleep_step" -le 0 ] 2>/dev/null; then
+        sleep_step=2
+    fi
+ 
+    while [ "$waited" -lt "$max_wait" ]; do
+        if btsvcactive && bthcipresent; then
+            log_info "Bluetooth runtime became ready after ${waited}s."
+            return 0
+        fi
+ 
+        if [ "$started_service" -eq 0 ]; then
+            if command -v systemctl >/dev/null 2>&1; then
+                if ! btsvcactive; then
+                    log_info "Bluetooth service not active yet, attempting start."
+                    systemctl start bluetooth.service >/dev/null 2>&1 || true
+                fi
+            fi
+            started_service=1
+        fi
+ 
+        sleep "$sleep_step"
+        waited=$((waited + sleep_step))
+    done
+ 
+    log_warn "Bluetooth runtime did not become ready within ${max_wait}s."
+    return 1
 }
 
 btfwloaded() {
@@ -1903,16 +1979,25 @@ btfwloaded() {
     # Retry/transient hints: if success exists and we see these, we likely want WARN.
     transient_re="${BTFW_TRANSIENT_RE:-Retry BT power ON|retry bt power on|reset|re-init|reinit|failed.*\\(-110\\)}"
 
-    # ---- Collect recent relevant dmesg ----
-    # Filter for BT/QCA/WCN related lines; keep a reasonable window.
-    out="$(
-        dmesg 2>/dev/null \
-        | grep -i -E 'Bluetooth|hci[0-9]|QCA|wcn|btqca|WCN' \
-        | tail -n "${BTFW_DMESG_TAIL:-600}"
-    )"
+    # ---- Collect recent relevant current-boot kernel log ----
+    # Prefer get_kernel_log() so we can use journalctl -k -b when available
+    # instead of relying only on the live dmesg ring buffer.
+    if command -v get_kernel_log >/dev/null 2>&1; then
+        out="$(
+            get_kernel_log 2>/dev/null \
+            | grep -i -E 'Bluetooth|hci[0-9]|QCA|wcn|btqca|WCN' \
+            | tail -n "${BTFW_DMESG_TAIL:-600}"
+        )"
+    else
+        out="$(
+            dmesg 2>/dev/null \
+            | grep -i -E 'Bluetooth|hci[0-9]|QCA|wcn|btqca|WCN' \
+            | tail -n "${BTFW_DMESG_TAIL:-600}"
+        )"
+    fi
 
     if [ -z "$out" ]; then
-        log_warn "btfwloaded: no recent Bluetooth/QCA/WCN messages in dmesg."
+        log_warn "btfwloaded: no Bluetooth/QCA/WCN messages found in current-boot kernel log."
         return 1
     fi
 
@@ -1922,7 +2007,7 @@ btfwloaded() {
         printf '%s\n' "$out" \
         | awk -v IGNORECASE=1 -v re="$success_re" '
             $0 ~ re { n=NR }
-            END { if (n>0) print n; else print 0 }
+            END { if (n > 0) print n; else print 0 }
         '
     )"
 
@@ -1930,7 +2015,7 @@ btfwloaded() {
         printf '%s\n' "$out" \
         | awk -v IGNORECASE=1 -v re="$fatal_re" '
             $0 ~ re { n=NR }
-            END { if (n>0) print n; else print 0 }
+            END { if (n > 0) print n; else print 0 }
         '
     )"
 
@@ -1945,32 +2030,32 @@ btfwloaded() {
 
     # ---- Decision tree ----
     if [ "$last_success" -eq 0 ]; then
-        log_warn "btfwloaded: no final success marker found (pattern: $success_re). Recent tail:"
+        log_warn "btfwloaded: no final success marker found (pattern: $success_re). Recent kernel-log tail:"
         printf '%s\n' "$out" | tail -n 30 >&2
         return 1
     fi
 
     # Fatal after success => FAIL (setup looked done, but then errors happened later)
     if [ "$last_fatal" -gt "$last_success" ]; then
-        log_warn "btfwloaded: fatal BT/QCA errors occurred after final setup marker; treating as FAIL."
+        log_warn "btfwloaded: fatal BT/QCA errors occurred after final setup marker in kernel log, treating as FAIL."
         printf '%s\n' "$out" | tail -n 40 >&2
         return 1
     fi
 
     # Fatal before success OR transient hints => WARN (retry scenario)
     if [ "$last_fatal" -gt 0 ] && [ "$last_fatal" -lt "$last_success" ]; then
-        log_warn "btfwloaded: transient errors occurred before final setup marker; treating as WARN."
+        log_warn "btfwloaded: transient errors occurred before final setup marker in kernel log, treating as WARN."
         printf '%s\n' "$out" | tail -n 30 >&2
         return 2
     fi
 
     if [ "$saw_transient" -eq 1 ]; then
-        log_warn "btfwloaded: retry/transient indicators seen; final setup marker present; treating as WARN."
+        log_warn "btfwloaded: retry/transient indicators seen in kernel log, final setup marker present, treating as WARN."
         printf '%s\n' "$out" | tail -n 30 >&2
         return 2
     fi
 
-    log_info "btfwloaded: firmware load/setup completed cleanly (no fatal errors after final setup marker)."
+    log_info "btfwloaded: firmware load/setup completed cleanly from current-boot kernel log (no fatal errors after final setup marker)."
     return 0
 }
 

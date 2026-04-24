@@ -1,0 +1,24 @@
+metadata:
+  name: AudioRecord minimal build
+  format: "Lava-Test Test Definition 1.0"
+  description: "AudioRecord on minimal build using direct ALSA capture probe/path"
+  maintainer:
+    - srikanth kumar
+  os:
+    - linux
+  scope:
+    - functional
+
+params:
+  BACKEND: "alsa"
+  SOURCE: "mic"
+  LOOPS: "1"
+  TIMEOUT: "0"
+  RECORD_SECONDS: "30s"
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Multimedia/Audio/AudioRecord/
+    - ./run.sh --backend "${BACKEND}" --source "${SOURCE}" --loops "${LOOPS}" --timeout "${TIMEOUT}" --record-seconds "${RECORD_SECONDS}" --audio-bootstrap false || true
+    - ./send-to-lava.sh AudioRecord.res

@@ -20,10 +20,11 @@ params:
   DMESG_SCAN: 1  # Scan dmesg for errors after recording, default: 1
   VERBOSE: 0  # Enable verbose logging, default: 0
   RES_SUFFIX: ""  # Suffix for unique result file and log directory (e.g., "Config1" generates AudioRecord_Config1.res and results/AudioRecord_Config1/), default: unset
+  LAVA_TESTCASE_ID: "AudioRecord"  # Unique testcase ID written into the .res file for LAVA, default: AudioRecord
 
 run:
   steps:
     - REPO_PATH=$PWD
     - cd Runner/suites/Multimedia/Audio/AudioRecord/
-    - ./run.sh --backend "${AUDIO_BACKEND}" --source "${SOURCE_CHOICE}" --config-name "${CONFIG_NAMES}" --config-filter "${CONFIG_FILTER}" --record-seconds "${RECORD_SECONDS}" --loops "${LOOPS}" --timeout "${TIMEOUT}" --strict "${STRICT}" --res-suffix "${RES_SUFFIX}" || true
+    - ./run.sh --backend "${AUDIO_BACKEND}" --source "${SOURCE_CHOICE}" --config-name "${CONFIG_NAMES}" --config-filter "${CONFIG_FILTER}" --record-seconds "${RECORD_SECONDS}" --loops "${LOOPS}" --timeout "${TIMEOUT}" --strict "${STRICT}" --res-suffix "${RES_SUFFIX}" --lava-testcase-id "${LAVA_TESTCASE_ID}" || true
     - $REPO_PATH/Runner/utils/send-to-lava.sh AudioRecord${RES_SUFFIX:+_${RES_SUFFIX}}.res

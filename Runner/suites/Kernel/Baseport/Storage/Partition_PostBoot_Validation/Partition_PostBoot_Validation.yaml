@@ -1,0 +1,20 @@
+metadata:
+  name: partition-postboot-validation
+  format: "Lava-Test Test Definition 1.0"
+  description: "Validate critical post-boot partitions and mount health on Qualcomm Linux platforms."
+  os:
+    - linux
+  scope:
+    - functional
+
+params:
+  ALLOW_DEGRADED: "0"
+  SCAN_DMESG: "1"
+  MOUNT_MATRIX: "/:ext4,erofs,squashfs:0:0;/efi:autofs,vfat:0:1;/var/lib/tee:ext4:1:0"
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/Storage/Partition_PostBoot_Validation/ || true
+    - ALLOW_DEGRADED="${ALLOW_DEGRADED}" SCAN_DMESG="${SCAN_DMESG}" MOUNT_MATRIX="${MOUNT_MATRIX}" ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh Partition_PostBoot_Validation.res

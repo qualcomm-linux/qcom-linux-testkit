@@ -1,6 +1,6 @@
 #!/bin/sh
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
-# SPDX-License-Identifier: BSD-3-Clause#
+# SPDX-License-Identifier: BSD-3-Clause
 # BT_FW_KMD_Service - Bluetooth FW + KMD + service + controller infra validation
 # Non-expect version, using lib_bluetooth.sh helpers.
 
@@ -38,7 +38,7 @@ fi
 
 # ---------- CLI / env parameters ----------
 BT_ADAPTER="${BT_ADAPTER-}"
- 
+
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --adapter)
@@ -72,11 +72,16 @@ inc_warn() { WARN_COUNT=$((WARN_COUNT + 1)); }
 log_info "------------------------------------------------------------"
 log_info "Starting $TESTNAME"
 
-log_info "Checking dependencies: bluetoothctl hciconfig dmesg lsmod"
-if ! check_dependencies bluetoothctl hciconfig dmesg lsmod; then
+log_info "Checking dependencies: bluetoothctl hciconfig lsmod"
+if ! check_dependencies bluetoothctl hciconfig lsmod; then
     echo "$TESTNAME SKIP" > "$RES_FILE"
     exit 0
 fi
+
+# ---------- Bluetooth runtime check/ readiness ----------
+log_info "Waiting for Bluetooth runtime readiness..."
+bt_wait_ready 60 2 || true
+
 # ---------- Bluetooth service / daemon ----------
 log_info "Checking if bluetoothd (or bluetooth.service) is running..."
 if btsvcactive; then
@@ -87,13 +92,14 @@ else
 fi
 
 # ---------- DT node / compatible ----------
-BT_COMPAT_LIST="
-qcom,wcn7850-bt
-qcom,wcn6855-bt
-qcom,bluetooth
-"
-
-if dt_confirm_node_or_compatible_all "BT" "$BT_COMPAT_LIST"; then
+# ---------- DT node / compatible ----------
+if dt_confirm_node_or_compatible_all \
+    "qcom,wcn3950-bt" \
+    "qcom,wcn7850-bt" \
+    "qcom,wcn6855-bt" \
+    "qcom,wcn6750-bt" \
+    "qcom,bluetooth"
+then
     log_pass "DT node/compatible for BT present (at least one entry matched)."
 else
     log_fail "DT node/compatible for BT NOT found."
@@ -104,30 +110,57 @@ fi
 if fw_dir="$(btfwpresent 2>/dev/null)"; then
     log_pass "Firmware present in: $fw_dir"
 else
-    log_warn "No BT firmware matching msbtfw*/msnv* found under standard firmware paths."
+    log_warn "No BT firmware matching msbtfw*/msnv* or cmbtfw*/cmnv* found under standard firmware paths."
     inc_warn
 fi
 
-# ---------- Firmware load dmesg ----------
+# ---------- Firmware load kernel log ----------
 if command -v btfwloaded >/dev/null 2>&1; then
     btfwloaded
     rc=$?
     case "$rc" in
         0)
-            log_pass "Firmware load/setup appears completed (dmesg)."
+            log_pass "Firmware load/setup appears completed (kernel log)."
             ;;
         2)
-            log_warn "Firmware load/setup completed after retry, transient errors seen earlier (dmesg)."
+            log_warn "Firmware load/setup completed after retry, transient errors seen earlier (kernel log)."
             inc_warn
             ;;
         *)
-            log_fail "Firmware load/setup does NOT look clean (see recent Bluetooth/QCA/WCN dmesg lines above)."
-            inc_fail
+            runtime_bt_ok=1
+            fallback_adapter="$BT_ADAPTER"
+
+            if [ -z "$fallback_adapter" ] && findhcisysfs >/dev/null 2>&1; then
+                fallback_adapter="$(findhcisysfs 2>/dev/null || true)"
+            fi
+
+            if ! btkmdpresent; then
+                runtime_bt_ok=0
+            fi
+            if ! bthcipresent; then
+                runtime_bt_ok=0
+            fi
+            if ! btsvcactive; then
+                runtime_bt_ok=0
+            fi
+            if [ -n "$fallback_adapter" ]; then
+                if ! btbdok "$fallback_adapter"; then
+                    runtime_bt_ok=0
+                fi
+            fi
+
+            if [ "$runtime_bt_ok" -eq 1 ]; then
+                log_warn "No retained BT firmware-load signature found, but BT runtime state is healthy."
+                inc_warn
+            else
+                log_fail "Firmware load/setup does NOT look clean and BT runtime state is also unhealthy."
+                inc_fail
+            fi
             ;;
     esac
 else
     # No SKIP: continue test, just warn.
-    log_warn "btfwloaded() helper not available firmware-load dmesg validation not performed."
+    log_warn "btfwloaded() helper not available; firmware-load kernel-log validation not performed."
     inc_warn
 fi
 
@@ -166,13 +199,17 @@ elif findhcisysfs >/dev/null 2>&1; then
 else
     ADAPTER=""
 fi
- 
+
 if [ -z "$ADAPTER" ]; then
-    log_warn "No HCI adapter found; skipping BT FW/KMD test."
-    echo "$TESTNAME SKIP" > "./$TESTNAME.res"
+    log_warn "No HCI adapter found."
+ 
+    if [ "$FAIL_COUNT" -gt 0 ]; then
+        echo "$TESTNAME FAIL" > "$RES_FILE"
+    else
+        echo "$TESTNAME SKIP" > "$RES_FILE"
+    fi
     exit 0
 fi
-
 # ---------- BD address sanity check ----------
 if [ -n "$ADAPTER" ]; then
     if btbdok "$ADAPTER"; then

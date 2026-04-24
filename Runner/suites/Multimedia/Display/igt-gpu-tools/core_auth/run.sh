@@ -16,13 +16,15 @@ if [ -z "$INIT_ENV" ]; then
 fi
 
 # Only source if not already loaded (idempotent)
-if [ -z "$__INIT_ENV_LOADED" ]; then
+if [ -z "${__INIT_ENV_LOADED:-}" ]; then
     # shellcheck disable=SC1090
     . "$INIT_ENV"
 fi
 # Always source functestlib.sh, using $TOOLS exported by init_env
 # shellcheck disable=SC1090,SC1091
 . "$TOOLS/functestlib.sh"
+# shellcheck disable=SC1090,SC1091
+. "$TOOLS/lib_display.sh"
 
 TESTNAME="core_auth"
 result_file="./${TESTNAME}.res"
@@ -91,10 +93,21 @@ fi
 
 log_info "Using core_auth binary at: $CORE_AUTH_CMD"
 
-if ! weston_stop; then
-    log_error "Failed to stop Weston"
-    echo "$TESTNAME FAIL" > "$result_file"
-    exit 1
+weston_stopped_by_test=0
+if command -v weston_is_running >/dev/null 2>&1; then
+    if weston_is_running; then
+        log_info "Weston is running, stopping it before $TESTNAME"
+        if ! weston_stop; then
+            log_error "Failed to stop Weston"
+            echo "$TESTNAME FAIL" > "$result_file"
+            exit 1
+        fi
+        weston_stopped_by_test=1
+    else
+        log_info "Weston is not running, no need to stop it"
+    fi
+else
+    log_info "weston_is_running helper not found, attempting to continue"
 fi
 
 log_file="$test_path/core_auth_log.txt"
@@ -120,30 +133,62 @@ total_subtests=$((success_count + fail_count + skip_count))
 
 log_info "Subtest Results: SUCCESS=$success_count, FAIL=$fail_count, SKIP=$skip_count, TOTAL=$total_subtests"
 log_info "results will be written to \"$result_file\""
-log_info "-------------------Completed $TESTNAME Testcase----------------------------"
 
-if [ "$RC" -ne 0 ]; then
-    log_fail "$TESTNAME : Test Failed (exit code: $RC)"
-    echo "$TESTNAME FAIL" > "$result_file"
-    exit 1
+final_result="PASS"
+final_exit=0
+final_message=""
+
+if [ "$RC" -eq 77 ]; then
+    final_result="SKIP"
+    final_exit=0
+    final_message="$TESTNAME : Test Skipped (exit code: 77)"
+elif [ "$RC" -ne 0 ]; then
+    final_result="FAIL"
+    final_exit=1
+    final_message="$TESTNAME : Test Failed (exit code: $RC)"
 elif [ "$fail_count" -gt 0 ]; then
-    log_fail "$TESTNAME : Test Failed - $fail_count subtest(s) failed out of $total_subtests"
-    echo "$TESTNAME FAIL" > "$result_file"
-    exit 1
+    final_result="FAIL"
+    final_exit=1
+    final_message="$TESTNAME : Test Failed - $fail_count subtest(s) failed out of $total_subtests"
 elif [ "$skip_count" -gt 0 ] && [ "$success_count" -eq 0 ]; then
-    log_skip "$TESTNAME : Test Skipped - All $skip_count subtest(s) were skipped"
-    echo "$TESTNAME SKIP" > "$result_file"
-    exit 0
+    final_result="SKIP"
+    final_exit=0
+    final_message="$TESTNAME : Test Skipped - All $skip_count subtest(s) were skipped"
 else
     if [ "$success_count" -gt 0 ]; then
         if [ "$skip_count" -gt 0 ]; then
-            log_pass "$TESTNAME : Test Passed - $success_count subtest(s) succeeded, $skip_count skipped"
+            final_message="$TESTNAME : Test Passed - $success_count subtest(s) succeeded, $skip_count skipped"
         else
-            log_pass "$TESTNAME : Test Passed - All $success_count subtest(s) succeeded"
+            final_message="$TESTNAME : Test Passed - All $success_count subtest(s) succeeded"
         fi
     else
-        log_pass "$TESTNAME : Test Passed (return code $RC)"
+        final_message="$TESTNAME : Test Passed (return code $RC)"
     fi
-    echo "$TESTNAME PASS" > "$result_file"
-    exit 0
 fi
+
+if [ "$weston_stopped_by_test" -eq 1 ]; then
+    log_info "Restoring Weston after $TESTNAME"
+    if ! weston_restore_runtime 15; then
+        log_error "Failed to restore Weston after $TESTNAME"
+        final_result="FAIL"
+        final_exit=1
+        final_message="$TESTNAME : Test Failed - Weston restore failed after test execution"
+    fi
+fi
+
+log_info "-------------------Completed $TESTNAME Testcase----------------------------"
+
+case "$final_result" in
+    PASS)
+        log_pass "$final_message"
+        ;;
+    SKIP)
+        log_skip "$final_message"
+        ;;
+    *)
+        log_fail "$final_message"
+        ;;
+esac
+
+echo "$TESTNAME $final_result" > "$result_file"
+exit "$final_exit"

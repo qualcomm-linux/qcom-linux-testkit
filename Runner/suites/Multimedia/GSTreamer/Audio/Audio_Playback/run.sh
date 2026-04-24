@@ -96,6 +96,7 @@ if [ -n "$channels" ]; then
   channelsUser="1"
 fi
 
+# shellcheck disable=SC2317  # Invoked indirectly via trap.
 cleanup() {
   pkill -x gst-launch-1.0 >/dev/null 2>&1 || true
 }

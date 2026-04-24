@@ -119,6 +119,7 @@ cd "$test_path" || {
 }
 
 # -------------------- Helpers --------------------
+# shellcheck disable=SC2317  # Helper kept for optional debug use.
 log_debug() { [ "$VERBOSE" -eq 1 ] && log_info "[debug] $*"; }
 
 cmd_to_string() {

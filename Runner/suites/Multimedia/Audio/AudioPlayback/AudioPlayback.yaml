@@ -27,10 +27,11 @@ params:
   NET_PROBE_ROUTE_IP: "1.1.1.1"  # IP used for route probing, default: 1.1.1.1
   NET_PING_HOST: "8.8.8.8"  # Host used for ping reachability check, default: 8.8.8.8
   RES_SUFFIX: ""  # Suffix for unique result file and log directory (e.g., "Config1" generates AudioPlayback_Config1.res and results/AudioPlayback_Config1/), default: unset
+  LAVA_TESTCASE_ID: "AudioPlayback"  # Unique testcase ID written into the .res file for LAVA, default: AudioPlayback
 
 run:
   steps:
     - REPO_PATH=$PWD
     - cd Runner/suites/Multimedia/Audio/AudioPlayback/
-    - ./run.sh --backend "${AUDIO_BACKEND}" --sink "${SINK_CHOICE}" --clip-name "${CLIP_NAMES}" --clip-filter "${CLIP_FILTER}" --loops "${LOOPS}" --timeout "${TIMEOUT}" --strict "${STRICT}" --audio-clips-path "${AUDIO_CLIPS_BASE_DIR}" --res-suffix "${RES_SUFFIX}" --ssid "${SSID}" --password "${PASSWORD}" || true
+    - ./run.sh --backend "${AUDIO_BACKEND}" --sink "${SINK_CHOICE}" --clip-name "${CLIP_NAMES}" --clip-filter "${CLIP_FILTER}" --loops "${LOOPS}" --timeout "${TIMEOUT}" --strict "${STRICT}" --audio-clips-path "${AUDIO_CLIPS_BASE_DIR}" --res-suffix "${RES_SUFFIX}" --lava-testcase-id "${LAVA_TESTCASE_ID}" --ssid "${SSID}" --password "${PASSWORD}" || true
     - $REPO_PATH/Runner/utils/send-to-lava.sh AudioPlayback${RES_SUFFIX:+_${RES_SUFFIX}}.res

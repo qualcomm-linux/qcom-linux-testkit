@@ -284,6 +284,13 @@ else
 fi
 log_info "Summary file: $OUT_DIR/summary.txt"
 
+# ---------- Artifacts ----------
+log_info "Artifacts under: $OUT_DIR/"
+for IDX in $INDICES; do
+    CAM_DIR="${OUT_DIR%/}/cam${IDX}"
+    log_info " - $CAM_DIR/"
+done
+
 # ---------- Final verdict ----------
 if [ "$OVERALL_PASS" -eq 1 ] && [ $ANY_RC_NONZERO -eq 0 ]; then
     echo "$TESTNAME PASS" > "$RES_FILE"
@@ -294,10 +301,3 @@ else
     log_fail "$TESTNAME FAIL"
     exit 1
 fi
-
-# ---------- Artifacts ----------
-log_info "Artifacts under: $OUT_DIR/"
-for IDX in $INDICES; do
-    CAM_DIR="${OUT_DIR%/}/cam${IDX}"
-    log_info " - $CAM_DIR/"
-done

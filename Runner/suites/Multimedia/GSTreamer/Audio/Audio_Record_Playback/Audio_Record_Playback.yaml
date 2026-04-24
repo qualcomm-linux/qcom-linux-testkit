@@ -5,7 +5,8 @@ metadata:
     Audio record/playback validation using GStreamer (gst-launch-1.0).
     Tests 10 scenarios: 4 encode (2 audiotestsrc + 2 pulsesrc) + 6 decode (4 playback + 2 OGG/MP3).
     Supports WAV, FLAC, OGG, and MP3 formats with both synthetic audio (audiotestsrc) and hardware capture (pulsesrc).
-    Duration controlled via AUDIO_DURATION (default 10s): audiotestsrc uses num-buffers, pulsesrc uses timeout.
+    Duration controlled via AUDIO_DURATION (default 10s): audiotestsrc uses num-buffers calculated after argument parsing, pulsesrc uses timeout.
+    Uses AUDIO_SHARED_RECORDED_DIR for shared artifact storage across test runs.
   os:
     - linux
   scope:
@@ -13,14 +14,17 @@ metadata:
  
 params:
   AUDIO_TEST_MODE: "all"
+  AUDIO_TEST_NAME: ""
   AUDIO_FORMATS: "wav,flac"
   AUDIO_DURATION: "10"
   AUDIO_GST_DEBUG: "2"
+  LAVA_TESTCASE_ID: "Audio_Record_Playback"
 
 run:
   steps:
     - REPO_PATH="$PWD"
-    - cd Runner/suites/Multimedia/GSTreamer/Audio/Audio_Record_Playback/
-    - export AUDIO_TEST_MODE AUDIO_FORMATS AUDIO_DURATION AUDIO_GST_DEBUG
-    - ./run.sh --mode "${AUDIO_TEST_MODE}" --formats "${AUDIO_FORMATS}" --duration "${AUDIO_DURATION}" --gst-debug "${AUDIO_GST_DEBUG}" || true
+    - cd "$REPO_PATH/Runner/suites/Multimedia/GSTreamer/Audio/Audio_Record_Playback"
+    - AUDIO_SHARED_RECORDED_DIR="${REPO_PATH%%/tests/*}/shared/audio-record-playback"
+    - export REPO_PATH AUDIO_SHARED_RECORDED_DIR AUDIO_TEST_MODE AUDIO_TEST_NAME AUDIO_FORMATS AUDIO_DURATION AUDIO_GST_DEBUG
+    - ./run.sh --lava-testcase-id "${LAVA_TESTCASE_ID}" || true
     - $REPO_PATH/Runner/utils/send-to-lava.sh Audio_Record_Playback.res

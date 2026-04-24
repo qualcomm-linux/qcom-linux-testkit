@@ -40,45 +40,40 @@ fi
 # shellcheck disable=SC1091
 . "$TOOLS/lib_video.sh"
 
+SYSTEMD_AVAILABLE=0
+if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+  SYSTEMD_AVAILABLE=1
+fi
+
 TESTNAME="AudioPlayback"
-RES_SUFFIX=""  # Optional suffix for unique result files (e.g., "Config1")
+RESULT_TESTNAME="$TESTNAME"
+RES_SUFFIX="" # Optional suffix for unique result files (e.g., "Config1")
 # RES_FILE will be set after parsing command-line arguments
 
-# Pre-parse --res-suffix for early failure handling
-# This ensures unique result files even if setup fails in parallel CI runs
+# Pre-parse --res-suffix and --lava-testcase-id for early failure handling
+# This ensures unique result files and unique testcase IDs even if setup fails in parallel CI runs
 prev_arg=""
 for arg in "$@"; do
   case "$prev_arg" in
     --res-suffix)
       RES_SUFFIX="$arg"
-      break
+      ;;
+    --lava-testcase-id)
+      RESULT_TESTNAME="$arg"
       ;;
   esac
   prev_arg="$arg"
 done
 
-# Early failure handling with suffix support
-if ! setup_overlay_audio_environment; then
-    log_fail "Overlay audio environment setup failed"
-    if [ -n "$RES_SUFFIX" ]; then
-      echo "$TESTNAME FAIL" > "$SCRIPT_DIR/${TESTNAME}_${RES_SUFFIX}.res"
-    else
-      echo "$TESTNAME FAIL" > "$SCRIPT_DIR/${TESTNAME}.res"
-    fi
-    exit 0
-fi
-
-# LOGDIR will be set after parsing command-line arguments (to apply RES_SUFFIX correctly)
-
 # ---- Assets ----
-AUDIO_TAR_URL="${AUDIO_TAR_URL:-https://github.com/qualcomm-linux/qcom-linux-testkit/releases/download/Pulse-Audio-Files-v1.0/AudioClips.tar.gz}"
+AUDIO_TAR_URL="${AUDIO_TAR_URL:-https://github.com/qualcomm-linux/qcom-linux-testkit/releases/download/AudioClips-v1.1/AudioClips.tar.gz}"
 export AUDIO_TAR_URL
 
 # ------------- Defaults / CLI -------------
 AUDIO_BACKEND=""
 SINK_CHOICE="${SINK_CHOICE:-speakers}" # speakers|null
-FORMATS=""  # Will be set to default only if using legacy mode
-DURATIONS=""  # Will be set to default only if using legacy mode
+FORMATS="" # Will be set to default only if using legacy mode
+DURATIONS="" # Will be set to default only if using legacy mode
 LOOPS="${LOOPS:-1}"
 TIMEOUT="${TIMEOUT:-0}" # 0 = no timeout (recommended)
 STRICT="${STRICT:-0}"
@@ -88,10 +83,19 @@ EXTRACT_AUDIO_ASSETS="${EXTRACT_AUDIO_ASSETS:-true}"
 ENABLE_NETWORK_DOWNLOAD="${ENABLE_NETWORK_DOWNLOAD:-false}" # Default: no network operations
 AUDIO_CLIPS_BASE_DIR="${AUDIO_CLIPS_BASE_DIR:-}" # Custom path for audio clips (CI use)
 
+AUDIO_BOOTSTRAP_MODE="${AUDIO_BOOTSTRAP_MODE:-auto}"
+AUDIO_RUNTIME_DIR="${AUDIO_RUNTIME_DIR:-}"
+MINIMAL_RAMDISK_MODE=0
+AUDIO_STARTED_PIDS=""
+AUDIO_CREATED_RUNTIME_DIR=0
+AUDIO_SYSTEMD_MANAGED=0
+AUDIO_ALSA_PLAYBACK_DEVICE=""
+export AUDIO_BOOTSTRAP_MODE AUDIO_RUNTIME_DIR AUDIO_STARTED_PIDS AUDIO_CREATED_RUNTIME_DIR MINIMAL_RAMDISK_MODE AUDIO_SYSTEMD_MANAGED AUDIO_ALSA_PLAYBACK_DEVICE
+
 # New clip-based testing options
-CLIP_NAMES=""        # Explicit clip names to test (e.g., "play_48KHz_16b_2ch play_8KHz_8b_1ch")
-CLIP_FILTER=""       # Filter pattern for clips (e.g., "48KHz" or "16b")
-USE_CLIP_DISCOVERY="${USE_CLIP_DISCOVERY:-auto}"  # auto|true|false
+CLIP_NAMES="" # Explicit clip names to test (e.g., "play_48KHz_16b_2ch play_8KHz_8b_1ch")
+CLIP_FILTER="" # Filter pattern for clips (e.g., "48KHz" or "16b")
+USE_CLIP_DISCOVERY="${USE_CLIP_DISCOVERY:-auto}" # auto|true|false
 
 # Network bring-up knobs (match video behavior)
 if [ -z "${NET_STABILIZE_SLEEP:-}" ]; then
@@ -109,17 +113,19 @@ usage() {
 Usage: $0 [options]
   --backend {pipewire|pulseaudio}
   --sink {speakers|null}
-  --formats "wav"                    # Legacy matrix mode only 
-  --durations "short|short medium"   # Legacy matrix mode only (not recommended for new tests)
-  --clip-name "play_48KHz_16b_2ch"   # Test specific clip(s) by name (space-separated)
+  --formats "wav" # Legacy matrix mode only
+  --durations "short|short medium" # Legacy matrix mode only (not recommended for new tests)
+  --clip-name "play_48KHz_16b_2ch" # Test specific clip(s) by name (space-separated)
                                      # Also supports playback_config1, playback_config2, ..., playback_config10
-  --clip-filter "48KHz"              # Filter clips by pattern
-  --res-suffix SUFFIX                # Suffix for unique result file (e.g., "Config1")
+  --clip-filter "48KHz" # Filter clips by pattern
+  --res-suffix SUFFIX # Suffix for unique result file (e.g., "Config1")
                                      # Generates AudioPlayback_SUFFIX.res instead of AudioPlayback.res
   --loops N
   --timeout SECS # set 0 to disable watchdog
   --enable-network-download
   --audio-clips-path PATH # Custom location for audio clips (CI use)
+  --audio-bootstrap {auto|true|false}
+  --runtime-dir PATH
   --strict
   --no-dmesg
   --no-extract-assets
@@ -136,8 +142,8 @@ Testing Modes:
     - Examples:
         $0 --clip-name "playback_config1 playback_config7"
         $0 --clip-filter "48KHz"
-        $0 --clip-name "playback_config1" --res-suffix "Config1"  # CI/LAVA use
-  
+        $0 --clip-name "playback_config1" --res-suffix "Config1" # CI/LAVA use
+
   Legacy Matrix Mode:
     - Uses --formats and --durations to generate test matrix
     - Maintained for backward compatibility
@@ -158,12 +164,12 @@ while [ $# -gt 0 ]; do
       ;;
     --formats)
       FORMATS="$2"
-      USE_CLIP_DISCOVERY=false  # Explicit formats = use old matrix mode
+      USE_CLIP_DISCOVERY=false # Explicit formats = use old matrix mode
       shift 2
       ;;
     --durations)
       DURATIONS="$2"
-      USE_CLIP_DISCOVERY=false  # Explicit durations = use old matrix mode
+      USE_CLIP_DISCOVERY=false # Explicit durations = use old matrix mode
       shift 2
       ;;
     --clip-name)
@@ -180,12 +186,26 @@ while [ $# -gt 0 ]; do
       RES_SUFFIX="$2"
       shift 2
       ;;
+    --lava-testcase-id)
+      RESULT_TESTNAME="$2"
+      shift 2
+      ;;
     --loops)
       LOOPS="$2"
       shift 2
       ;;
     --timeout)
       TIMEOUT="$2"
+      shift 2
+      ;;
+    --audio-bootstrap)
+      AUDIO_BOOTSTRAP_MODE="$2"
+      export AUDIO_BOOTSTRAP_MODE
+      shift 2
+      ;;
+    --runtime-dir)
+      AUDIO_RUNTIME_DIR="$2"
+      export AUDIO_RUNTIME_DIR
       shift 2
       ;;
     --strict)
@@ -271,11 +291,29 @@ mkdir -p "$LOGDIR"
 
 # ------------- Mode Detection and Validation -------------
 
+if [ "$SYSTEMD_AVAILABLE" -eq 1 ]; then
+  if ! setup_overlay_audio_environment; then
+    log_warn "Overlay audio environment setup failed; continuing with backend recovery flow"
+  fi
+else
+  log_info "systemd not available; skipping overlay audio environment setup (minimal ramdisk mode)"
+fi
+
+if [ "$SYSTEMD_AVAILABLE" -eq 0 ]; then
+  MINIMAL_RAMDISK_MODE=1
+  export MINIMAL_RAMDISK_MODE
+  log_info "Detected minimal ramdisk environment (systemd unavailable)"
+else
+  log_info "Detected standard userspace environment (systemd available)"
+fi
+
+trap 'audio_cleanup_started_daemons' EXIT HUP INT TERM
+
 # Check for conflicting parameters (discovery vs legacy mode)
 if { [ -n "$CLIP_NAMES" ] || [ -n "$CLIP_FILTER" ]; } && { [ -n "$FORMATS" ] || [ -n "$DURATIONS" ]; }; then
   log_error "Cannot mix clip discovery parameters (--clip-name, --clip-filter) with legacy matrix parameters (--formats, --durations)"
   log_error "Please use either clip discovery mode OR legacy matrix mode, not both"
-  echo "$TESTNAME SKIP" > "$RES_FILE"
+  echo "$RESULT_TESTNAME SKIP" > "$RES_FILE"
   exit 0
 fi
 
@@ -299,7 +337,7 @@ if [ "$USE_CLIP_DISCOVERY" = "auto" ]; then
         break
       fi
     done
-    
+
     if [ "$wav_found" = "true" ]; then
       USE_CLIP_DISCOVERY=true
       log_info "Auto-detected clip discovery mode (found clips in $clips_dir)"
@@ -313,7 +351,6 @@ if [ "$USE_CLIP_DISCOVERY" = "auto" ]; then
   fi
 fi
 
-
 # Validate CLI option conflicts
 if [ -n "$CLIP_NAMES" ] && [ -n "$CLIP_FILTER" ]; then
   log_warn "Both --clip-name and --clip-filter specified"
@@ -323,7 +360,7 @@ fi
 
 # Validate numeric parameters
 case "$LOOPS" in
-  ''|*[!0-9]*) 
+  ''|*[!0-9]*)
     log_error "Invalid --loops value: $LOOPS (must be positive integer)"
     exit 1
     ;;
@@ -338,7 +375,7 @@ fi
 test_path="$(find_test_case_by_name "$TESTNAME" 2>/dev/null || echo "$SCRIPT_DIR")"
 if ! cd "$test_path"; then
   log_error "cd failed: $test_path"
-  echo "$TESTNAME FAIL" >"$RES_FILE"
+  echo "$RESULT_TESTNAME FAIL" >"$RES_FILE"
   exit 1
 fi
 
@@ -357,7 +394,7 @@ if [ -n "$AUDIO_CLIPS_BASE_DIR" ]; then
   log_info "Using custom audio clips path: $AUDIO_CLIPS_BASE_DIR"
 fi
 
-log_info "Args: backend=${AUDIO_BACKEND:-auto} sink=$SINK_CHOICE loops=$LOOPS timeout=$TIMEOUT formats='$FORMATS' durations='$DURATIONS' strict=$STRICT dmesg=$DMESG_SCAN extract=$EXTRACT_AUDIO_ASSETS network_download=$ENABLE_NETWORK_DOWNLOAD clips_path=${AUDIO_CLIPS_BASE_DIR:-default}"
+log_info "Args: backend=${AUDIO_BACKEND:-auto} sink=$SINK_CHOICE loops=$LOOPS timeout=$TIMEOUT formats='$FORMATS' durations='$DURATIONS' strict=$STRICT dmesg=$DMESG_SCAN extract=$EXTRACT_AUDIO_ASSETS network_download=$ENABLE_NETWORK_DOWNLOAD clips_path=${AUDIO_CLIPS_BASE_DIR:-default} bootstrap=$AUDIO_BOOTSTRAP_MODE runtime_dir=${AUDIO_RUNTIME_DIR:-auto}"
 
 # --- Rootfs minimum size check (mirror video policy) ---
 if [ "$TOP_LEVEL_RUN" -eq 1 ]; then
@@ -370,9 +407,20 @@ fi
 if [ "$TOP_LEVEL_RUN" -eq 1 ]; then
   if [ "${EXTRACT_AUDIO_ASSETS}" = "true" ]; then
     # First check: Do we have all files we need?
-    if audio_check_clips_available "$FORMATS" "$DURATIONS"; then
-      log_info "All required audio clips present locally, skipping all network operations"
+    clips_ready=1
+    if [ "$USE_CLIP_DISCOVERY" = "true" ]; then
+      if audio_has_runnable_discovery_clips; then
+        log_info "Runnable discovery clips present locally, skipping all network operations"
+        clips_ready=0
+      fi
     else
+      if audio_check_clips_available "$FORMATS" "$DURATIONS"; then
+        log_info "All required audio clips present locally, skipping all network operations"
+        clips_ready=0
+      fi
+    fi
+
+    if [ "$clips_ready" -ne 0 ]; then
       # Files missing - check if network download is enabled
       if [ "${ENABLE_NETWORK_DOWNLOAD}" = "true" ]; then
         log_info "Audio clips missing, network download enabled - bringing network online"
@@ -393,22 +441,23 @@ if [ "$TOP_LEVEL_RUN" -eq 1 ]; then
         else
           sleep "${NET_STABILIZE_SLEEP}"
         fi
-        
+
         # Download and extract audio clips tarball
         log_info "Downloading audio clips from: $AUDIO_TAR_URL"
+        log_info "exec: audio_fetch_assets_from_url \"$AUDIO_TAR_URL\""
         if audio_fetch_assets_from_url "$AUDIO_TAR_URL"; then
           log_info "Audio clips downloaded and extracted successfully"
         else
           log_error "Failed to download or extract audio clips from: $AUDIO_TAR_URL"
           log_skip "$TESTNAME SKIP - Audio clips download failed"
-          echo "$TESTNAME SKIP" >"$RES_FILE"
+          echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
           exit 0
         fi
       else
         log_skip "$TESTNAME SKIP - Required audio clips not found locally and network download disabled"
         log_info "To download audio clips, run with: --enable-network-download"
         log_info "Or manually download from: $AUDIO_TAR_URL"
-        echo "$TESTNAME SKIP" >"$RES_FILE"
+        echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
         exit 0
       fi
     fi
@@ -419,33 +468,196 @@ fi
 
 # Resolve backend
 if [ -z "$AUDIO_BACKEND" ]; then
-  AUDIO_BACKEND="$(detect_audio_backend)"
+  AUDIO_BACKEND="$(detect_audio_backend 2>/dev/null || echo "")"
 fi
+
+AUDIO_SYSTEMD_MANAGED=0
+if [ -n "$AUDIO_BACKEND" ]; then
+  if audio_backend_is_systemd_managed "$AUDIO_BACKEND"; then
+    AUDIO_SYSTEMD_MANAGED=1
+  fi
+fi
+export AUDIO_SYSTEMD_MANAGED
+
 if [ -z "$AUDIO_BACKEND" ]; then
-  log_skip "$TESTNAME SKIP - no audio backend running"
-  echo "$TESTNAME SKIP" >"$RES_FILE"
-  exit 0
+  if audio_playback_alsa_probe; then
+    AUDIO_BACKEND="alsa"
+    AUDIO_SYSTEMD_MANAGED=0
+    export AUDIO_SYSTEMD_MANAGED
+    log_info "Using backend: alsa (direct minimal-build fallback)"
+  elif audio_bootstrap_backend_if_needed; then
+    AUDIO_BACKEND="$(detect_audio_backend 2>/dev/null || echo "")"
+    if [ -z "$AUDIO_BACKEND" ]; then
+      if audio_playback_alsa_probe; then
+        AUDIO_BACKEND="alsa"
+        AUDIO_SYSTEMD_MANAGED=0
+        export AUDIO_SYSTEMD_MANAGED
+        log_info "Using backend: alsa (direct minimal-build fallback)"
+      else
+        log_skip "$TESTNAME SKIP - no audio backend running"
+        echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
+        exit 0
+      fi
+    fi
+  else
+    log_skip "$TESTNAME SKIP - no audio backend running"
+    echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
+    exit 0
+  fi
 fi
+
 log_info "Using backend: $AUDIO_BACKEND"
 
-if ! check_audio_daemon "$AUDIO_BACKEND"; then
+backend_ok=0
+if [ "$AUDIO_BACKEND" = "alsa" ]; then
+  if audio_playback_alsa_probe; then
+    backend_ok=1
+  fi
+else
+  if audio_backend_ready "$AUDIO_BACKEND"; then
+    backend_ok=1
+  else
+    if check_audio_daemon "$AUDIO_BACKEND"; then
+      backend_ok=1
+    fi
+  fi
+fi
+
+if [ "$backend_ok" -ne 1 ]; then
+  if [ "$SYSTEMD_AVAILABLE" -eq 1 ] && [ "${AUDIO_SYSTEMD_MANAGED:-0}" -eq 1 ]; then
+    log_warn "$TESTNAME: backend not available ($AUDIO_BACKEND) - attempting restart+retry once"
+    audio_restart_services_best_effort >/dev/null 2>&1 || true
+    audio_wait_audio_ready 20 >/dev/null 2>&1 || true
+    if audio_backend_ready "$AUDIO_BACKEND"; then
+      backend_ok=1
+    else
+      if check_audio_daemon "$AUDIO_BACKEND"; then
+        backend_ok=1
+      fi
+    fi
+  fi
+fi
+
+if [ "$backend_ok" -ne 1 ] && [ "$AUDIO_BACKEND" != "alsa" ]; then
+  log_warn "$TESTNAME: backend not available ($AUDIO_BACKEND) - attempting manual bootstrap"
+  if audio_bootstrap_backend_if_needed; then
+    AUDIO_SYSTEMD_MANAGED=0
+    export AUDIO_SYSTEMD_MANAGED
+    if audio_backend_ready "$AUDIO_BACKEND"; then
+      backend_ok=1
+    else
+      if check_audio_daemon "$AUDIO_BACKEND"; then
+        backend_ok=1
+      fi
+    fi
+  fi
+fi
+
+if [ "$backend_ok" -ne 1 ] && [ "$AUDIO_BACKEND" != "alsa" ]; then
+  if audio_playback_alsa_probe; then
+    log_warn "$TESTNAME: falling back to ALSA direct playback path"
+    AUDIO_BACKEND="alsa"
+    AUDIO_SYSTEMD_MANAGED=0
+    export AUDIO_SYSTEMD_MANAGED
+    backend_ok=1
+  fi
+fi
+
+if [ "$backend_ok" -ne 1 ]; then
   log_skip "$TESTNAME SKIP - backend not available: $AUDIO_BACKEND"
-  echo "$TESTNAME SKIP" >"$RES_FILE"
+  echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
   exit 0
 fi
 
 # Dependencies per backend
+case "$AUDIO_BACKEND" in
+  pipewire)
+    if ! check_dependencies pw-play; then
+      if audio_playback_alsa_probe && check_dependencies aplay; then
+        log_warn "$TESTNAME: PipeWire playback utility missing - falling back to ALSA"
+        AUDIO_BACKEND="alsa"
+        AUDIO_SYSTEMD_MANAGED=0
+        export AUDIO_SYSTEMD_MANAGED
+      else
+        log_skip "$TESTNAME SKIP - missing PipeWire playback utility"
+        echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
+        exit 0
+      fi
+    fi
+    ;;
+  pulseaudio)
+    if ! check_dependencies paplay; then
+      if audio_playback_alsa_probe && check_dependencies aplay; then
+        log_warn "$TESTNAME: PulseAudio playback utility missing - falling back to ALSA"
+        AUDIO_BACKEND="alsa"
+        AUDIO_SYSTEMD_MANAGED=0
+        export AUDIO_SYSTEMD_MANAGED
+      else
+        log_skip "$TESTNAME SKIP - missing PulseAudio playback utility"
+        echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
+        exit 0
+      fi
+    fi
+    ;;
+  alsa)
+    if ! check_dependencies aplay; then
+      log_skip "$TESTNAME SKIP - missing ALSA playback utility"
+      echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
+      exit 0
+    fi
+    ;;
+  *)
+    log_skip "$TESTNAME SKIP - unsupported backend: $AUDIO_BACKEND"
+    echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
+    exit 0
+    ;;
+esac
+
 if [ "$AUDIO_BACKEND" = "pipewire" ]; then
-  if ! check_dependencies wpctl pw-play; then
-    log_skip "$TESTNAME SKIP - missing PipeWire utils"
-    echo "$TESTNAME SKIP" >"$RES_FILE"
-    exit 0
+  if ! audio_pw_ctl_ok 2>/dev/null; then
+    if [ "$SYSTEMD_AVAILABLE" -eq 1 ] && [ "${AUDIO_SYSTEMD_MANAGED:-0}" -eq 1 ]; then
+      log_warn "$TESTNAME: wpctl not responsive - attempting restart+retry once"
+      audio_restart_services_best_effort >/dev/null 2>&1 || true
+      audio_wait_audio_ready 20 >/dev/null 2>&1 || true
+    else
+      log_warn "$TESTNAME: PipeWire control-plane not responsive - attempting ALSA fallback"
+    fi
+
+    if ! audio_pw_ctl_ok 2>/dev/null; then
+      if audio_playback_alsa_probe && check_dependencies aplay; then
+        log_warn "$TESTNAME: falling back to ALSA direct playback path"
+        AUDIO_BACKEND="alsa"
+        AUDIO_SYSTEMD_MANAGED=0
+        export AUDIO_SYSTEMD_MANAGED
+      else
+        log_skip "$TESTNAME SKIP - PipeWire control-plane not responsive"
+        echo "$RESULT_TESTNAME SKIP" > "$RES_FILE"
+        exit 0
+      fi
+    fi
   fi
-else
-  if ! check_dependencies pactl paplay; then
-    log_skip "$TESTNAME SKIP - missing PulseAudio utils"
-    echo "$TESTNAME SKIP" >"$RES_FILE"
-    exit 0
+elif [ "$AUDIO_BACKEND" = "pulseaudio" ]; then
+  if ! audio_pa_ctl_ok 2>/dev/null; then
+    if [ "$SYSTEMD_AVAILABLE" -eq 1 ] && [ "${AUDIO_SYSTEMD_MANAGED:-0}" -eq 1 ]; then
+      log_warn "$TESTNAME: pactl not responsive - attempting restart+retry once"
+      audio_restart_services_best_effort >/dev/null 2>&1 || true
+      audio_wait_audio_ready 20 >/dev/null 2>&1 || true
+    else
+      log_warn "$TESTNAME: PulseAudio control-plane not responsive - attempting ALSA fallback"
+    fi
+
+    if ! audio_pa_ctl_ok 2>/dev/null; then
+      if audio_playback_alsa_probe && check_dependencies aplay; then
+        log_warn "$TESTNAME: falling back to ALSA direct playback path"
+        AUDIO_BACKEND="alsa"
+        AUDIO_SYSTEMD_MANAGED=0
+        export AUDIO_SYSTEMD_MANAGED
+      else
+        log_skip "$TESTNAME SKIP - PulseAudio control-plane not responsive"
+        echo "$RESULT_TESTNAME SKIP" > "$RES_FILE"
+        exit 0
+      fi
+    fi
   fi
 fi
 
@@ -464,11 +676,22 @@ case "$AUDIO_BACKEND:$SINK_CHOICE" in
   pulseaudio:*)
     SINK_ID="$(pa_default_speakers)"
     ;;
+  alsa:null)
+    SINK_ID="null"
+    ;;
+  alsa:*)
+    audio_playback_alsa_prepare >/dev/null 2>&1 || true
+    if [ -n "${AUDIO_ALSA_PLAYBACK_DEVICE:-}" ]; then
+      SINK_ID="$AUDIO_ALSA_PLAYBACK_DEVICE"
+    else
+      SINK_ID="$(audio_playback_pick_alsa_sink)"
+    fi
+    ;;
 esac
 
 if [ -z "$SINK_ID" ]; then
   log_skip "$TESTNAME SKIP - requested sink '$SINK_CHOICE' not found for $AUDIO_BACKEND"
-  echo "$TESTNAME SKIP" >"$RES_FILE"
+  echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
   exit 0
 fi
 
@@ -479,13 +702,16 @@ if [ "$AUDIO_BACKEND" = "pipewire" ]; then
     SINK_NAME="unknown"
   fi
   log_info "Routing to sink: id=$SINK_ID name='$SINK_NAME' choice=$SINK_CHOICE"
-else
+elif [ "$AUDIO_BACKEND" = "pulseaudio" ]; then
   SINK_NAME="$(pa_sink_name "$SINK_ID")"
   if [ -z "$SINK_NAME" ]; then
     SINK_NAME="$SINK_ID"
   fi
   pa_set_default_sink "$SINK_ID" >/dev/null 2>&1 || true
   log_info "Routing to sink: name='$SINK_NAME' choice=$SINK_CHOICE"
+else
+  SINK_NAME="$SINK_ID"
+  log_info "Routing to sink: device='$SINK_NAME' choice=$SINK_CHOICE"
 fi
 
 # Decide minimum ok seconds if timeout>0
@@ -496,7 +722,7 @@ fi
 
 min_ok=0
 if [ "$dur_s" -gt 0 ] 2>/dev/null; then
-  min_ok=$(expr $dur_s - 1)
+  min_ok=$($dur_s - 1)
   if [ "$min_ok" -lt 1 ]; then
     min_ok=1
   fi
@@ -515,62 +741,58 @@ suite_rc=0
 if [ "$USE_CLIP_DISCOVERY" = "true" ]; then
   # ========== NEW: Clip Discovery Mode ==========
   log_info "Using clip discovery mode"
-  
+
   # Discover and filter clips
   clips_dir="${AUDIO_CLIPS_BASE_DIR:-AudioClips}"
-  
+
   # Get list of clips to test
   if [ -n "$CLIP_NAMES" ] || [ -n "$CLIP_FILTER" ]; then
-    # Use discover_and_filter_clips helper (logs go to stderr automatically)
     CLIPS_TO_TEST="$(discover_and_filter_clips "$CLIP_NAMES" "$CLIP_FILTER")" || {
-      # Error messages already printed to stderr, just skip
       log_skip "$TESTNAME SKIP - Invalid clip/config name(s) provided"
-      echo "$TESTNAME SKIP" > "$RES_FILE"
+      echo "$RESULT_TESTNAME SKIP" > "$RES_FILE"
       exit 0
     }
   else
-    # Discover all clips (logs go to stderr automatically)
     CLIPS_TO_TEST="$(discover_audio_clips)" || {
-      # Error messages already printed to stderr, just skip
       log_skip "$TESTNAME SKIP - No audio clips found in $clips_dir"
-      echo "$TESTNAME SKIP" > "$RES_FILE"
+      echo "$RESULT_TESTNAME SKIP" > "$RES_FILE"
       exit 0
     }
   fi
-  
+
   # Count clips
   clip_count=0
   for clip_file in $CLIPS_TO_TEST; do
-    clip_count=$(expr $clip_count + 1)
+    clip_count=$((clip_count + 1))
   done
-  
+
   log_info "Discovered $clip_count clips to test"
-  
+
   # Test each clip
   for clip_file in $CLIPS_TO_TEST; do
-    # Generate test case name from clip filename
-    case_name="$(generate_clip_testcase_name "$clip_file")" || {
-      log_warn "Skipping clip with unparseable name: $clip_file"
-      continue
-    }
-    
+    case_name="$(generate_clip_testcase_name "$clip_file" 2>/dev/null || true)"
+    if [ -z "$case_name" ]; then
+      case_name="$(printf '%s' "$clip_file" | sed 's/\.[Ww][Aa][Vv]$//' | tr ' /' '__')"
+      log_warn "Clip name not in expected format; using generic testcase name: $case_name"
+    fi
+
     # Resolve full path
     clip_path="$clips_dir/$clip_file"
-    
+
     # Validate clip file
     if ! validate_clip_file "$clip_path"; then
       log_skip "[$case_name] SKIP: Invalid clip file: $clip_path"
       echo "$case_name SKIP (invalid file)" >> "$LOGDIR/summary.txt"
-      skip=$(expr $skip + 1)
+      skip=$((skip + 1))
       continue
     fi
-    
+
     # Extract clip duration for accurate timeout handling
     clip_duration="$(extract_clip_duration "$clip_file" 2>/dev/null || echo 0)"
     if [ "$clip_duration" -gt 0 ] 2>/dev/null; then
       # Use clip duration for timeout calculations
       clip_dur_s="$clip_duration"
-      clip_min_ok=$(expr $clip_duration - 1)
+      clip_min_ok=$((clip_duration - 1))
       if [ "$clip_min_ok" -lt 1 ]; then
         clip_min_ok=1
       fi
@@ -580,30 +802,30 @@ if [ "$USE_CLIP_DISCOVERY" = "true" ]; then
       clip_dur_s="$dur_s"
       clip_min_ok="$min_ok"
     fi
-    
-    total=$(expr $total + 1)
+
+    total=$((total + 1))
     logf="$LOGDIR/${case_name}.log"
     : > "$logf"
     export AUDIO_LOGCTX="$logf"
-    
+
     CLIP_BYTES="$(file_size_bytes "$clip_path" 2>/dev/null || echo 0)"
     log_info "[$case_name] Using clip: $clip_file (${CLIP_BYTES} bytes)"
-    
+
     i=1
     ok_runs=0
     last_elapsed=0
-    
+
     while [ "$i" -le "$LOOPS" ]; do
       iso="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-      
+
       if [ "$AUDIO_BACKEND" = "pipewire" ]; then
         loop_hdr="sink=$SINK_CHOICE($SINK_ID)"
       else
         loop_hdr="sink=$SINK_CHOICE($SINK_NAME)"
       fi
-      
+
       log_info "[$case_name] loop $i/$LOOPS start=$iso clip=$clip_file backend=$AUDIO_BACKEND $loop_hdr"
-      
+
       # Determine effective timeout: use clip duration when TIMEOUT is disabled
       effective_timeout="$TIMEOUT"
       if [ "$TIMEOUT" = "0" ] || [ "$TIMEOUT" = "" ]; then
@@ -612,43 +834,47 @@ if [ "$USE_CLIP_DISCOVERY" = "true" ]; then
           log_info "[$case_name] Using clip duration as timeout: ${effective_timeout}s"
         fi
       fi
-      
+
       start_s="$(date +%s 2>/dev/null || echo 0)"
-      
+
       if [ "$AUDIO_BACKEND" = "pipewire" ]; then
         log_info "[$case_name] exec: pw-play -v \"$clip_path\""
         audio_exec_with_timeout "$effective_timeout" pw-play -v "$clip_path" >>"$logf" 2>&1
         rc=$?
-      else
+      elif [ "$AUDIO_BACKEND" = "pulseaudio" ]; then
         log_info "[$case_name] exec: paplay --device=\"$SINK_NAME\" \"$clip_path\""
         audio_exec_with_timeout "$effective_timeout" paplay --device="$SINK_NAME" "$clip_path" >>"$logf" 2>&1
         rc=$?
+      else
+        log_info "[$case_name] exec: aplay -D \"$SINK_NAME\" \"$clip_path\""
+        audio_exec_with_timeout "$effective_timeout" aplay -D "$SINK_NAME" "$clip_path" >>"$logf" 2>&1
+        rc=$?
       fi
-      
+
       end_s="$(date +%s 2>/dev/null || echo 0)"
-      last_elapsed=$(expr $end_s - $start_s)
+      last_elapsed=$((end_s - start_s))
       if [ "$last_elapsed" -lt 0 ]; then
         last_elapsed=0
       fi
-      
+
       # Evidence collection
       pw_ev="$(audio_evidence_pw_streaming || echo 0)"
       pa_ev="$(audio_evidence_pa_streaming || echo 0)"
-      
+
       # Minimal PulseAudio fallback
       if [ "$AUDIO_BACKEND" = "pulseaudio" ] && [ "$pa_ev" -eq 0 ]; then
         if [ "$rc" -eq 0 ] || { [ "$rc" -eq 124 ] && [ "$dur_s" -gt 0 ] 2>/dev/null && [ "$last_elapsed" -ge "$min_ok" ]; }; then
           pa_ev=1
         fi
       fi
-      
+
       alsa_ev="$(audio_evidence_alsa_running_any || echo 0)"
       asoc_ev="$(audio_evidence_asoc_path_on || echo 0)"
       pwlog_ev="$(audio_evidence_pw_log_seen || echo 0)"
-      if [ "$AUDIO_BACKEND" = "pulseaudio" ]; then
+      if [ "$AUDIO_BACKEND" = "pulseaudio" ] || [ "$AUDIO_BACKEND" = "alsa" ]; then
         pwlog_ev=0
       fi
-      
+
       # Fast teardown fallback
       if [ "$alsa_ev" -eq 0 ]; then
         if [ "$AUDIO_BACKEND" = "pipewire" ] && [ "$pw_ev" -eq 1 ]; then
@@ -658,201 +884,205 @@ if [ "$USE_CLIP_DISCOVERY" = "true" ]; then
           alsa_ev=1
         fi
       fi
-      
+
       if [ "$asoc_ev" -eq 0 ] && [ "$alsa_ev" -eq 1 ]; then
         asoc_ev=1
       fi
-      
+
       log_info "[$case_name] evidence: pw_streaming=$pw_ev pa_streaming=$pa_ev alsa_running=$alsa_ev asoc_path_on=$asoc_ev pw_log=$pwlog_ev"
-      
+
       # Determine result (use clip-specific timeout thresholds)
       if [ "$rc" -eq 0 ]; then
         log_pass "[$case_name] loop $i OK (rc=0, ${last_elapsed}s)"
-        ok_runs=$(expr $ok_runs + 1)
+	ok_runs=$((ok_runs + 1))
       elif [ "$rc" -eq 124 ] && [ "$clip_dur_s" -gt 0 ] 2>/dev/null && [ "$last_elapsed" -ge "$clip_min_ok" ]; then
         log_warn "[$case_name] TIMEOUT ($TIMEOUT) - PASS (ran ~${last_elapsed}s, expected ${clip_duration}s)"
-        ok_runs=$(expr $ok_runs + 1)
+	ok_runs=$((ok_runs + 1))
       elif [ "$rc" -ne 0 ] && { [ "$pw_ev" -eq 1 ] || [ "$pa_ev" -eq 1 ] || [ "$alsa_ev" -eq 1 ] || [ "$asoc_ev" -eq 1 ]; }; then
         log_warn "[$case_name] nonzero rc=$rc but evidence indicates playback - PASS"
-        ok_runs=$(expr $ok_runs + 1)
+	ok_runs=$((ok_runs + 1))
       else
         log_fail "[$case_name] loop $i FAILED (rc=$rc, ${last_elapsed}s) - see $logf"
       fi
-      
-      i=$(expr $i + 1)
+
+      i=$((i + 1))
     done
-    
+
     # Aggregate result for this clip
     if [ "$ok_runs" -ge 1 ]; then
-      pass=$(expr $pass + 1)
+      pass=$((pass + 1))
       echo "$case_name PASS" >> "$LOGDIR/summary.txt"
     else
-      fail=$(expr $fail + 1)
+      fail=$((fail + 1))
       echo "$case_name FAIL" >> "$LOGDIR/summary.txt"
       suite_rc=1
     fi
   done
-  
-  # Collect evidence once at end (not per clip)
-  if [ "$DMESG_SCAN" -eq 1 ]; then
-    scan_audio_dmesg "$LOGDIR"
-    dump_mixers "$LOGDIR/mixer_dump.txt"
-  fi
 
 else
   # ========== LEGACY: Matrix Mode ==========
-  
+
   for fmt in $FORMATS; do
     for dur in $DURATIONS; do
-    clip="$(resolve_clip "$fmt" "$dur")"
-    case_name="play_${fmt}_${dur}"
-    total=$(expr $total + 1)
-    logf="$LOGDIR/${case_name}.log"
-    : > "$logf"
-    export AUDIO_LOGCTX="$logf"
+      clip="$(resolve_clip "$fmt" "$dur")"
+      case_name="play_${fmt}_${dur}"
+      total=$((total + 1))
+      logf="$LOGDIR/${case_name}.log"
+      : > "$logf"
+      export AUDIO_LOGCTX="$logf"
 
-    if [ -z "$clip" ]; then
-      log_warn "[$case_name] No clip mapping for format=$fmt duration=$dur"
-      echo "$case_name SKIP (no clip mapping)" >> "$LOGDIR/summary.txt"
-      skip=$(expr $skip + 1)
-      continue
-    fi
-
-    # Check if clip is available (should have been downloaded at top level if needed)
-    if [ "${EXTRACT_AUDIO_ASSETS}" = "true" ]; then
-      if [ -s "$clip" ]; then
-        CLIP_BYTES="$(file_size_bytes "$clip" 2>/dev/null || echo 0)"
-        log_info "[$case_name] Using clip: $clip (${CLIP_BYTES} bytes)"
-      else
-        # Clip missing or empty - this shouldn't happen if top-level download succeeded
-        log_skip "[$case_name] SKIP: Clip not available: $clip"
-        if [ "${ENABLE_NETWORK_DOWNLOAD}" = "true" ]; then
-          log_info "[$case_name] Hint: Clip should have been downloaded at test startup"
-        else
-          log_info "[$case_name] Hint: Run with --enable-network-download to download clips"
-        fi
-        echo "$case_name SKIP (clip unavailable)" >> "$LOGDIR/summary.txt"
-        skip=$(expr $skip + 1)
+      if [ -z "$clip" ]; then
+        log_warn "[$case_name] No clip mapping for format=$fmt duration=$dur"
+        echo "$case_name SKIP (no clip mapping)" >> "$LOGDIR/summary.txt"
+	skip=$((skip + 1)) 
         continue
       fi
-    fi
 
-    i=1
-    ok_runs=0
-    last_elapsed=0
-
-    while [ "$i" -le "$LOOPS" ]; do
-      iso="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-
-      if [ "$AUDIO_BACKEND" = "pipewire" ]; then
-        loop_hdr="sink=$SINK_CHOICE($SINK_ID)"
-      else
-        loop_hdr="sink=$SINK_CHOICE($SINK_NAME)"
-      fi
-
-      log_info "[$case_name] loop $i/$LOOPS start=$iso clip=$clip backend=$AUDIO_BACKEND $loop_hdr"
-
-      start_s="$(date +%s 2>/dev/null || echo 0)"
-
-      if [ "$AUDIO_BACKEND" = "pipewire" ]; then
-        log_info "[$case_name] exec: pw-play -v \"$clip\""
-        audio_exec_with_timeout "$TIMEOUT" pw-play -v "$clip" >>"$logf" 2>&1
-        rc=$?
-      else
-        log_info "[$case_name] exec: paplay --device=\"$SINK_NAME\" \"$clip\""
-        audio_exec_with_timeout "$TIMEOUT" paplay --device="$SINK_NAME" "$clip" >>"$logf" 2>&1
-        rc=$?
-      fi
-
-      end_s="$(date +%s 2>/dev/null || echo 0)"
-      last_elapsed=$(expr $end_s - $start_s)
-      if [ "$last_elapsed" -lt 0 ]; then
-        last_elapsed=0
-      fi
-
-      # Evidence
-      pw_ev="$(audio_evidence_pw_streaming || echo 0)"
-      pa_ev="$(audio_evidence_pa_streaming || echo 0)"
-
-      # Minimal PulseAudio fallback so pa_streaming doesn't read as 0 after teardown
-      if [ "$AUDIO_BACKEND" = "pulseaudio" ] && [ "$pa_ev" -eq 0 ]; then
-        if [ "$rc" -eq 0 ] || { [ "$rc" -eq 124 ] && [ "$dur_s" -gt 0 ] 2>/dev/null && [ "$last_elapsed" -ge "$min_ok" ]; }; then
-          pa_ev=1
+      # Check if clip is available (should have been downloaded at top level if needed)
+      if [ "${EXTRACT_AUDIO_ASSETS}" = "true" ]; then
+        if [ -s "$clip" ]; then
+          CLIP_BYTES="$(file_size_bytes "$clip" 2>/dev/null || echo 0)"
+          log_info "[$case_name] Using clip: $clip (${CLIP_BYTES} bytes)"
+        else
+          # Clip missing or empty - this shouldn't happen if top-level download succeeded
+          log_skip "[$case_name] SKIP: Clip not available: $clip"
+          if [ "${ENABLE_NETWORK_DOWNLOAD}" = "true" ]; then
+            log_info "[$case_name] Hint: Clip should have been downloaded at test startup"
+          else
+            log_info "[$case_name] Hint: Run with --enable-network-download to download clips"
+          fi
+          echo "$case_name SKIP (clip unavailable)" >> "$LOGDIR/summary.txt"
+	  skip=$((skip + 1))
+          continue
         fi
       fi
 
-      alsa_ev="$(audio_evidence_alsa_running_any || echo 0)"
-      asoc_ev="$(audio_evidence_asoc_path_on || echo 0)"
-      pwlog_ev="$(audio_evidence_pw_log_seen || echo 0)"
-      if [ "$AUDIO_BACKEND" = "pulseaudio" ]; then
-        pwlog_ev=0
-      fi
+      i=1
+      ok_runs=0
+      last_elapsed=0
 
-      # Fast teardown fallback: if user-space stream was active, trust ALSA/ASoC too.
-      if [ "$alsa_ev" -eq 0 ]; then
-        if [ "$AUDIO_BACKEND" = "pipewire" ] && [ "$pw_ev" -eq 1 ]; then
-          alsa_ev=1
+      while [ "$i" -le "$LOOPS" ]; do
+        iso="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+        if [ "$AUDIO_BACKEND" = "pipewire" ]; then
+          loop_hdr="sink=$SINK_CHOICE($SINK_ID)"
+        else
+          loop_hdr="sink=$SINK_CHOICE($SINK_NAME)"
         fi
-        if [ "$AUDIO_BACKEND" = "pulseaudio" ] && [ "$pa_ev" -eq 1 ]; then
-          alsa_ev=1
+
+        log_info "[$case_name] loop $i/$LOOPS start=$iso clip=$clip backend=$AUDIO_BACKEND $loop_hdr"
+
+        start_s="$(date +%s 2>/dev/null || echo 0)"
+
+        if [ "$AUDIO_BACKEND" = "pipewire" ]; then
+          log_info "[$case_name] exec: pw-play -v \"$clip\""
+          audio_exec_with_timeout "$TIMEOUT" pw-play -v "$clip" >>"$logf" 2>&1
+          rc=$?
+        elif [ "$AUDIO_BACKEND" = "pulseaudio" ]; then
+          log_info "[$case_name] exec: paplay --device=\"$SINK_NAME\" \"$clip\""
+          audio_exec_with_timeout "$TIMEOUT" paplay --device="$SINK_NAME" "$clip" >>"$logf" 2>&1
+          rc=$?
+        else
+          log_info "[$case_name] exec: aplay -D \"$SINK_NAME\" \"$clip\""
+          audio_exec_with_timeout "$TIMEOUT" aplay -D "$SINK_NAME" "$clip" >>"$logf" 2>&1
+          rc=$?
         fi
-      fi
 
-      if [ "$asoc_ev" -eq 0 ] && [ "$alsa_ev" -eq 1 ]; then
-        asoc_ev=1
-      fi
+        end_s="$(date +%s 2>/dev/null || echo 0)"
+	last_elapsed=$((end_s - start_s))
+        if [ "$last_elapsed" -lt 0 ]; then
+          last_elapsed=0
+        fi
 
-      log_info "[$case_name] evidence: pw_streaming=$pw_ev pa_streaming=$pa_ev alsa_running=$alsa_ev asoc_path_on=$asoc_ev pw_log=$pwlog_ev"
+        # Evidence
+        pw_ev="$(audio_evidence_pw_streaming || echo 0)"
+        pa_ev="$(audio_evidence_pa_streaming || echo 0)"
 
-      if [ "$rc" -eq 0 ]; then
-        log_pass "[$case_name] loop $i OK (rc=0, ${last_elapsed}s)"
-        ok_runs=$(expr $ok_runs + 1)
-      elif [ "$rc" -eq 124 ] && [ "$dur_s" -gt 0 ] 2>/dev/null && [ "$last_elapsed" -ge "$min_ok" ]; then
-        log_warn "[$case_name] TIMEOUT ($TIMEOUT) - PASS (ran ~${last_elapsed}s)"
-        ok_runs=$(expr $ok_runs + 1)
-      elif [ "$rc" -ne 0 ] && { [ "$pw_ev" -eq 1 ] || [ "$pa_ev" -eq 1 ] || [ "$alsa_ev" -eq 1 ] || [ "$asoc_ev" -eq 1 ]; }; then
-        log_warn "[$case_name] nonzero rc=$rc but evidence indicates playback - PASS"
-        ok_runs=$(expr $ok_runs + 1)
+        # Minimal PulseAudio fallback so pa_streaming doesn't read as 0 after teardown
+        if [ "$AUDIO_BACKEND" = "pulseaudio" ] && [ "$pa_ev" -eq 0 ]; then
+          if [ "$rc" -eq 0 ] || { [ "$rc" -eq 124 ] && [ "$dur_s" -gt 0 ] 2>/dev/null && [ "$last_elapsed" -ge "$min_ok" ]; }; then
+            pa_ev=1
+          fi
+        fi
+
+        alsa_ev="$(audio_evidence_alsa_running_any || echo 0)"
+        asoc_ev="$(audio_evidence_asoc_path_on || echo 0)"
+        pwlog_ev="$(audio_evidence_pw_log_seen || echo 0)"
+        if [ "$AUDIO_BACKEND" = "pulseaudio" ] || [ "$AUDIO_BACKEND" = "alsa" ]; then
+          pwlog_ev=0
+        fi
+
+        # Fast teardown fallback: if user-space stream was active, trust ALSA/ASoC too.
+        if [ "$alsa_ev" -eq 0 ]; then
+          if [ "$AUDIO_BACKEND" = "pipewire" ] && [ "$pw_ev" -eq 1 ]; then
+            alsa_ev=1
+          fi
+          if [ "$AUDIO_BACKEND" = "pulseaudio" ] && [ "$pa_ev" -eq 1 ]; then
+            alsa_ev=1
+          fi
+        fi
+
+        if [ "$asoc_ev" -eq 0 ] && [ "$alsa_ev" -eq 1 ]; then
+          asoc_ev=1
+        fi
+
+        log_info "[$case_name] evidence: pw_streaming=$pw_ev pa_streaming=$pa_ev alsa_running=$alsa_ev asoc_path_on=$asoc_ev pw_log=$pwlog_ev"
+
+        if [ "$rc" -eq 0 ]; then
+          log_pass "[$case_name] loop $i OK (rc=0, ${last_elapsed}s)"
+	  ok_runs=$((ok_runs + 1))
+        elif [ "$rc" -eq 124 ] && [ "$dur_s" -gt 0 ] 2>/dev/null && [ "$last_elapsed" -ge "$min_ok" ]; then
+          log_warn "[$case_name] TIMEOUT ($TIMEOUT) - PASS (ran ~${last_elapsed}s)"
+	  ok_runs=$((ok_runs + 1))
+        elif [ "$rc" -ne 0 ] && { [ "$pw_ev" -eq 1 ] || [ "$pa_ev" -eq 1 ] || [ "$alsa_ev" -eq 1 ] || [ "$asoc_ev" -eq 1 ]; }; then
+          log_warn "[$case_name] nonzero rc=$rc but evidence indicates playback - PASS"
+	  ok_runs=$((ok_runs + 1))
+        else
+          log_fail "[$case_name] loop $i FAILED (rc=$rc, ${last_elapsed}s) - see $logf"
+        fi
+
+	i=$((i + 1))
+      done
+
+      if [ "$ok_runs" -ge 1 ]; then
+	pass=$((pass + 1))
+        echo "$case_name PASS" >> "$LOGDIR/summary.txt"
       else
-        log_fail "[$case_name] loop $i FAILED (rc=$rc, ${last_elapsed}s) - see $logf"
+	fail=$((fail + 1))
+        echo "$case_name FAIL" >> "$LOGDIR/summary.txt"
+        suite_rc=1
       fi
-
-      i=$(expr $i + 1)
-    done
-
-    if [ "$ok_runs" -ge 1 ]; then
-      pass=$(expr $pass + 1)
-      echo "$case_name PASS" >> "$LOGDIR/summary.txt"
-    else
-      fail=$(expr $fail + 1)
-      echo "$case_name FAIL" >> "$LOGDIR/summary.txt"
-      suite_rc=1
-    fi
     done
   done
-  
-  # Collect evidence once at end (not per test case)
-  if [ "$DMESG_SCAN" -eq 1 ]; then
-    scan_audio_dmesg "$LOGDIR"
-    dump_mixers "$LOGDIR/mixer_dump.txt"
-  fi
+fi
+
+# Collect evidence once at end (not per test case)
+if [ "$DMESG_SCAN" -eq 1 ]; then
+  scan_audio_dmesg "$LOGDIR"
+  dump_mixers "$LOGDIR/mixer_dump.txt"
 fi
 
 log_info "Summary: total=$total pass=$pass fail=$fail skip=$skip"
 
+if [ "$total" -eq 0 ] && [ "$pass" -eq 0 ] && [ "$fail" -eq 0 ]; then
+  log_skip "$TESTNAME SKIP - no runnable playback testcases"
+  echo "$RESULT_TESTNAME SKIP" > "$RES_FILE"
+  exit 0
+fi
+
 # --- Proper exit codes: PASS=0, FAIL=1, SKIP-only=0 ---
 if [ "$pass" -eq 0 ] && [ "$fail" -eq 0 ] && [ "$skip" -gt 0 ]; then
   log_skip "$TESTNAME SKIP"
-  echo "$TESTNAME SKIP" > "$RES_FILE"
+  echo "$RESULT_TESTNAME SKIP" > "$RES_FILE"
   exit 0
 fi
 
 if [ "$suite_rc" -eq 0 ]; then
   log_pass "$TESTNAME PASS"
-  echo "$TESTNAME PASS" > "$RES_FILE"
+  echo "$RESULT_TESTNAME PASS" > "$RES_FILE"
   exit 0
 fi
 
 log_fail "$TESTNAME FAIL"
-echo "$TESTNAME FAIL" > "$RES_FILE"
+echo "$RESULT_TESTNAME FAIL" > "$RES_FILE"
 exit 1

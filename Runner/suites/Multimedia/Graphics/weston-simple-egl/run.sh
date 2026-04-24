@@ -52,18 +52,21 @@ RUN_LOG="./${TESTNAME}_run.log"
 # ---------------------------------------------------------------------------
 DURATION="${DURATION:-30s}"
 STOP_GRACE="${STOP_GRACE:-3s}"
-EXPECT_FPS="${EXPECT_FPS:-60}"
+FPS_EXPECT_MODE="${FPS_EXPECT_MODE:-auto}"
+EXPECT_FPS="${EXPECT_FPS:-}"
+EXPECT_FPS_DEFAULT="${EXPECT_FPS_DEFAULT:-60}"
 FPS_TOL_PCT="${FPS_TOL_PCT:-10}"
+MIN_FPS_PCT="${MIN_FPS_PCT:-85}"
 REQUIRE_FPS="${REQUIRE_FPS:-1}"
 
 # Detect overlay by presence of Adreno GLVND vendor JSON
 BUILD_FLAVOUR="base"
 EGL_VENDOR_JSON=""
- 
+
 # Check common vendor JSON locations and filename patterns
 for d in /usr/share/glvnd/egl_vendor.d /etc/glvnd/egl_vendor.d; do
   [ -d "$d" ] || continue
- 
+
   # Try both naming styles: 10_adreno.json and 10_EGL_adreno.json
   for f in "$d"/*adreno*.json "$d"/*EGL_adreno*.json; do
     [ -e "$f" ] || continue
@@ -74,24 +77,23 @@ for d in /usr/share/glvnd/egl_vendor.d /etc/glvnd/egl_vendor.d; do
     fi
   done
 done
- 
+
 log_info "Weston log directory: $SCRIPT_DIR"
 log_info "--------------------------------------------------------------------------"
 log_info "------------------- Starting ${TESTNAME} Testcase --------------------------"
- 
+
 # Optional platform details (helper from functestlib)
 if command -v detect_platform >/dev/null 2>&1; then
   detect_platform
 fi
- 
+
 if [ "$BUILD_FLAVOUR" = "overlay" ]; then
   log_info "Build flavor: overlay (EGL vendor JSON present: ${EGL_VENDOR_JSON})"
 else
   log_info "Build flavor: base (no Adreno EGL vendor JSON found)"
 fi
 
-log_info "Config: DURATION=${DURATION} STOP_GRACE=${STOP_GRACE} EXPECT_FPS=${EXPECT_FPS}+/-${FPS_TOL_PCT}% REQUIRE_FPS=${REQUIRE_FPS} BUILD_FLAVOUR=${BUILD_FLAVOUR}"
-
+log_info "Input config: DURATION=${DURATION} STOP_GRACE=${STOP_GRACE} FPS_EXPECT_MODE=${FPS_EXPECT_MODE} EXPECT_FPS=${EXPECT_FPS:-<unset>} EXPECT_FPS_DEFAULT=${EXPECT_FPS_DEFAULT} (fallback) FPS_TOL_PCT=${FPS_TOL_PCT}% MIN_FPS_PCT=${MIN_FPS_PCT}% REQUIRE_FPS=${REQUIRE_FPS} BUILD_FLAVOUR=${BUILD_FLAVOUR}"
 # ---------------------------------------------------------------------------
 # Display snapshot
 # ---------------------------------------------------------------------------
@@ -159,6 +161,25 @@ if [ -n "$sock" ] && command -v adopt_wayland_env_from_socket >/dev/null 2>&1; t
   fi
 fi
 
+# On base, do not start Weston here, but allow a short wait for an already
+# expected Weston runtime to come back after a previous DRM-exclusive test.
+if [ -z "$sock" ] && [ "$BUILD_FLAVOUR" = "base" ]; then
+  if command -v weston_wait_ready >/dev/null 2>&1; then
+    log_info "No usable Wayland socket yet on base build; waiting briefly for Weston runtime..."
+    if weston_wait_ready 10; then
+      if command -v discover_wayland_socket_anywhere >/dev/null 2>&1; then
+        sock=$(discover_wayland_socket_anywhere | head -n 1 || true)
+      fi
+      if [ -n "$sock" ] && command -v adopt_wayland_env_from_socket >/dev/null 2>&1; then
+        log_info "Base Weston runtime became ready: $sock"
+        if ! adopt_wayland_env_from_socket "$sock"; then
+          log_warn "Failed to adopt env from $sock after wait"
+        fi
+      fi
+    fi
+  fi
+fi
+
 # If no usable socket yet:
 # - base: SKIP (do not try to start/stop Weston)
 # - overlay: try starting private Weston (helper) then re-discover/adopt
@@ -186,8 +207,8 @@ if [ -z "$sock" ]; then
       log_warn "overlay_start_weston_drm returned non-zero; private Weston may have failed to start."
     fi
   else
-    log_warn "No Wayland socket found and not starting Weston on base build; skipping ${TESTNAME}."
-    echo "${TESTNAME} SKIP" >"$RES_FILE"
+    log_fail "No Wayland socket found and not starting Weston on base build, failing ${TESTNAME}."
+    echo "${TESTNAME} FAIL" >"$RES_FILE"
     exit 0
   fi
 fi
@@ -198,10 +219,10 @@ if command -v discover_wayland_socket_anywhere >/dev/null 2>&1; then
   [ -n "$new_sock" ] && sock="$new_sock"
 fi
 
-# Final decision: run or SKIP
+# Final decision: run or FAIL
 if [ -z "$sock" ]; then
-  log_warn "No Wayland socket found after autodetection; skipping ${TESTNAME}."
-  echo "${TESTNAME} SKIP" >"$RES_FILE"
+  log_fail "No Wayland socket found after autodetection, failing ${TESTNAME}."
+  echo "${TESTNAME} FAIL" >"$RES_FILE"
   exit 0
 fi
 
@@ -215,38 +236,54 @@ fi
 
 if command -v wayland_connection_ok >/dev/null 2>&1; then
   if ! wayland_connection_ok; then
-    log_fail "Wayland connection test failed; cannot run ${TESTNAME}."
-    echo "${TESTNAME} SKIP" >"$RES_FILE"
-    exit 0
+    if [ "$BUILD_FLAVOUR" = "base" ] && command -v weston_wait_ready >/dev/null 2>&1; then
+      log_warn "Initial Wayland connection test failed, waiting briefly and retrying..."
+      if weston_wait_ready 5; then
+        if command -v discover_wayland_socket_anywhere >/dev/null 2>&1; then
+          sock=$(discover_wayland_socket_anywhere | head -n 1 || true)
+        fi
+        if [ -n "$sock" ] && command -v adopt_wayland_env_from_socket >/dev/null 2>&1; then
+          adopt_wayland_env_from_socket "$sock" || true
+        fi
+      fi
+    fi
+
+    if ! wayland_connection_ok; then
+      log_fail "Wayland connection test failed, cannot run ${TESTNAME}."
+      echo "${TESTNAME} FAIL" >"$RES_FILE"
+      exit 0
+    fi
   fi
   log_info "Wayland connection test: OK"
 else
   log_warn "wayland_connection_ok helper not found continuing without explicit Wayland probe."
 fi
 
+if ! display_resolve_fps_policy; then
+  log_fail "Failed to resolve FPS policy"
+  echo "${TESTNAME} FAIL" >"$RES_FILE"
+  exit 0
+fi
+
+if [ "${DISPLAY_FPS_MODE:-}" = "detected" ]; then
+  log_info "Resolved FPS policy: mode=${DISPLAY_FPS_MODE} refresh=${DISPLAY_FPS_DETECTED_HZ}Hz expected=${DISPLAY_FPS_EXPECTED} min_ok=${DISPLAY_FPS_MIN_OK}"
+else
+  log_info "Resolved FPS policy: mode=${DISPLAY_FPS_MODE} expected=${DISPLAY_FPS_EXPECTED} range=[${DISPLAY_FPS_MIN_OK}, ${DISPLAY_FPS_MAX_OK}]"
+fi
 # ---------------------------------------------------------------------------
-# Ensure primary output is ~60Hz (best-effort, no churn if already ~60Hz)
+# Apply refresh policy resolved in lib_display.sh
 # ---------------------------------------------------------------------------
 if command -v display_debug_snapshot >/dev/null 2>&1; then
-  display_debug_snapshot "${TESTNAME}: before-ensure-60hz"
+  display_debug_snapshot "${TESTNAME}: before-refresh-policy"
 fi
 if command -v wayland_debug_snapshot >/dev/null 2>&1; then
-  wayland_debug_snapshot "${TESTNAME}: before-ensure-60hz"
+  wayland_debug_snapshot "${TESTNAME}: before-refresh-policy"
 fi
 
-if command -v weston_force_primary_1080p60_if_not_60 >/dev/null 2>&1; then
-  log_info "Ensuring primary output is ~60Hz (best-effort) ..."
-  if weston_force_primary_1080p60_if_not_60; then
-    log_info "Primary output is ~60Hz (or was already ~60Hz)."
-  else
-    log_warn "Unable to force ~60Hz (continuing; not a hard failure)."
-  fi
-else
-  log_warn "weston_force_primary_1080p60_if_not_60 helper not found; skipping ~60Hz enforcement."
-fi
+display_apply_fps_refresh_policy || true
 
 if command -v display_debug_snapshot >/dev/null 2>&1; then
-  display_debug_snapshot "${TESTNAME}: after-ensure-60hz"
+  display_debug_snapshot "${TESTNAME}: after-refresh-policy"
 fi
 
 # --- Skip if only CPU/software renderer is active (GPU HW accel not enabled) ---
@@ -328,51 +365,19 @@ log_info "Client finished: rc=${rc} elapsed=${elapsed}s"
 # FPS parsing: average / min / max from all intervals
 # - Discard FIRST sample as warm-up if we have 2+ samples.
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# FPS parsing
+# ---------------------------------------------------------------------------
 fps_count=0
 fps_avg="-"
 fps_min="-"
 fps_max="-"
 
-fps_stats=$(
-  awk '
-    /[0-9]+[[:space:]]+frames in[[:space:]]+[0-9]+[[:space:]]+seconds/ {
-      val = $(NF-1) + 0.0
-      all_n++
-      all_vals[all_n] = val
-    }
-    END {
-      if (all_n == 0) exit
-
-      if (all_n == 1) {
-        n = 1
-        sum = all_vals[1]
-        min = all_vals[1]
-        max = all_vals[1]
-      } else {
-        n = 0
-        sum = 0.0
-        for (i = 2; i <= all_n; i++) {
-          v = all_vals[i]
-          n++
-          sum += v
-          if (n == 1 || v < min) min = v
-          if (n == 1 || v > max) max = v
-        }
-      }
-
-      if (n > 0) {
-        avg = sum / n
-        printf "n=%d avg=%f min=%f max=%f\n", n, avg, min, max
-      }
-    }' "$RUN_LOG" 2>/dev/null || true
-)
-
-if [ -n "$fps_stats" ]; then
-  fps_count=$(printf '%s\n' "$fps_stats" | awk '{print $1}' | sed 's/^n=//')
-  fps_avg=$(printf '%s\n' "$fps_stats" | awk '{print $2}' | sed 's/^avg=//')
-  fps_min=$(printf '%s\n' "$fps_stats" | awk '{print $3}' | sed 's/^min=//')
-  fps_max=$(printf '%s\n' "$fps_stats" | awk '{print $4}' | sed 's/^max=//')
-
+if display_parse_fps_log "$RUN_LOG"; then
+  fps_count="$DISPLAY_FPS_COUNT"
+  fps_avg="$DISPLAY_FPS_AVG"
+  fps_min="$DISPLAY_FPS_MIN"
+  fps_max="$DISPLAY_FPS_MAX"
   log_info "FPS stats from ${RUN_LOG}: samples=${fps_count} avg=${fps_avg} min=${fps_min} max=${fps_max}"
 else
   log_warn "No FPS lines detected in ${RUN_LOG} weston-simple-egl may not have emitted FPS stats (or output was truncated)."
@@ -383,7 +388,11 @@ if [ "$fps_count" -eq 0 ]; then
   fps_for_summary="-"
 fi
 
-log_info "Result summary: rc=${rc} elapsed=${elapsed}s fps=${fps_for_summary} (expected ~${EXPECT_FPS}+/-${FPS_TOL_PCT}%)"
+if [ "${DISPLAY_FPS_MODE:-}" = "detected" ]; then
+  log_info "Result summary: rc=${rc} elapsed=${elapsed}s fps=${fps_for_summary} mode=${DISPLAY_FPS_MODE} refresh=${DISPLAY_FPS_DETECTED_HZ}Hz expected=${DISPLAY_FPS_EXPECTED} min_ok=${DISPLAY_FPS_MIN_OK}"
+else
+  log_info "Result summary: rc=${rc} elapsed=${elapsed}s fps=${fps_for_summary} mode=${DISPLAY_FPS_MODE} expected=${DISPLAY_FPS_EXPECTED} range=[${DISPLAY_FPS_MIN_OK}, ${DISPLAY_FPS_MAX_OK}]"
+fi
 
 # ---------------------------------------------------------------------------
 # PASS / FAIL decision
@@ -401,28 +410,8 @@ if [ "$elapsed" -le 1 ]; then
   final="FAIL"
 fi
 
-# FPS gating if explicitly required
-if [ "$REQUIRE_FPS" -ne 0 ]; then
-  if [ "$fps_count" -eq 0 ]; then
-    log_fail "FPS gating enabled (REQUIRE_FPS=${REQUIRE_FPS}) but no FPS samples were found treating as FAIL."
-    final="FAIL"
-  else
-    min_ok=$(awk -v f="$EXPECT_FPS" -v tol="$FPS_TOL_PCT" 'BEGIN { printf "%.0f\n", f * (100.0 - tol) / 100.0 }')
-    max_ok=$(awk -v f="$EXPECT_FPS" -v tol="$FPS_TOL_PCT" 'BEGIN { printf "%.0f\n", f * (100.0 + tol) / 100.0 }')
-
-    fps_int=$(printf '%s\n' "$fps_avg" | awk 'BEGIN {v=0} {v=$1+0.0} END {printf "%.0f\n", v}')
-
-    if [ "$fps_int" -lt "$min_ok" ] || [ "$fps_int" -gt "$max_ok" ]; then
-      log_fail "Average FPS out of range: avg=${fps_avg} (~${fps_int}) not in [${min_ok}, ${max_ok}] (EXPECT_FPS=${EXPECT_FPS}, tol=${FPS_TOL_PCT}%)."
-      final="FAIL"
-    fi
-  fi
-else
-  if [ "$fps_count" -eq 0 ]; then
-    log_warn "REQUIRE_FPS=0 and no FPS samples found skipping FPS gating."
-  else
-    log_info "REQUIRE_FPS=0 FPS stats recorded but not used for gating."
-  fi
+if ! display_fps_gate_avg "$fps_avg" "$fps_count"; then
+  final="FAIL"
 fi
 
 log_info "Final decision for ${TESTNAME}: ${final}"

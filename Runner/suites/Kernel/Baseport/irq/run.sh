@@ -40,7 +40,7 @@ log_info "=== Test Initialization ==="
 
 # Function to get the timer count
 get_timer_count() {
-    grep arch_timer /proc/interrupts
+    get_interrupt_line_by_name "arch_timer"
 }
 
 # Get the initial timer count
@@ -61,17 +61,45 @@ log_info "Comparing timer counts:"
 while IFS= read -r line; do
     [ -n "$line" ] || continue
 
-    cpu=$(printf '%s\n' "$line" | awk '{print $1}')
-    initial_values=$(printf '%s\n' "$line" | awk '{for(i=2;i<=9;i++) print $i}')
-    final_values=$(printf '%s\n' "$final_count" | awk -v cpu="$cpu" '$1 == cpu {for(i=2;i<=9;i++) print $i}')
+    irq_id=$(printf '%s\n' "$line" | awk '{print $1}')
+    final_line=$(printf '%s\n' "$final_count" | awk -v irq="$irq_id" '$1 == irq { print; exit }')
+
+    if [ -z "$final_line" ]; then
+        log_fail "Could not find matching final timer line for IRQ $irq_id"
+        log_fail "$TESTNAME : Test Failed"
+        echo "$TESTNAME FAIL" > "$res_file"
+        exit 1
+    fi
+
+    initial_values=$(extract_interrupt_cpu_counts "$line")
+    final_values=$(extract_interrupt_cpu_counts "$final_line")
+
+    initial_cpu_count=$(count_interrupt_cpu_counts "$initial_values")
+    final_cpu_count=$(count_interrupt_cpu_counts "$final_values")
+
+    log_info "Detected timer counters: initial=${initial_cpu_count} final=${final_cpu_count}"
+
+    if [ "$initial_cpu_count" -eq 0 ] || [ "$final_cpu_count" -eq 0 ]; then
+        log_fail "No per-CPU timer counters could be parsed from /proc/interrupts"
+        log_fail "$TESTNAME : Test Failed"
+        echo "$TESTNAME FAIL" > "$res_file"
+        exit 1
+    fi
+
+    if [ "$initial_cpu_count" -ne "$final_cpu_count" ]; then
+        log_fail "Mismatch in parsed CPU timer counters: initial=${initial_cpu_count} final=${final_cpu_count}"
+        log_fail "$TESTNAME : Test Failed"
+        echo "$TESTNAME FAIL" > "$res_file"
+        exit 1
+    fi
 
     fail_test=false
     i=0
 
-    while IFS= read -r initial_value; do
-        [ -n "$initial_value" ] || continue
-
+    while [ "$i" -lt "$initial_cpu_count" ]; do
+        initial_value=$(printf '%s\n' "$initial_values" | sed -n "$((i + 1))p")
         final_value=$(printf '%s\n' "$final_values" | sed -n "$((i + 1))p")
+
         if [ "$initial_value" -lt "$final_value" ]; then
             log_pass "CPU $i: Timer count has incremented. Test PASSED"
         else
@@ -79,9 +107,7 @@ while IFS= read -r line; do
             fail_test=true
         fi
         i=$((i + 1))
-    done <<EOF
-$initial_values
-EOF
+    done
 
     if [ "$fail_test" = false ]; then
         log_pass "$TESTNAME : Test Passed"

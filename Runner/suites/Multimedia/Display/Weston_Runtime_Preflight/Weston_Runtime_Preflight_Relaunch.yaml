@@ -1,0 +1,19 @@
+metadata:
+  name: weston-runtime-preflight-relaunch
+  format: "Lava-Test Test Definition 1.0"
+  description: "Validate Weston and Wayland runtime health, allowing Weston relaunch recovery before Weston client-level tests."
+  os:
+    - linux
+  scope:
+    - functional
+
+params:
+  WAIT_SECS: "10"
+  VALIDATE_EGLINFO: "1"
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Multimedia/Display/Weston_Runtime_Preflight/
+    - WAIT_SECS="${WAIT_SECS}" VALIDATE_EGLINFO="${VALIDATE_EGLINFO}" ./run.sh --allow-relaunch || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh Weston_Runtime_Preflight.res

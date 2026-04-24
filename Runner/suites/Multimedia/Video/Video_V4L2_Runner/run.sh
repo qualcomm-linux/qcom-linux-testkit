@@ -1386,5 +1386,3 @@ else
     printf '%s\n' "$TESTNAME FAIL" >"$RES_FILE"
     exit 1
 fi
-
-exit "$suite_rc"

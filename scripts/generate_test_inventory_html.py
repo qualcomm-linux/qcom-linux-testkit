@@ -1,11 +1,13 @@
+#!/usr/bin/env python3
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause
-#!/usr/bin/env python3
-import os
+
 import html
-from pathlib import Path
-from datetime import datetime, timezone
+import os
+import sys
 from collections import defaultdict
+from datetime import datetime, timezone
+from pathlib import Path
 
 import requests
 
@@ -19,10 +21,23 @@ HEADERS = {"Accept": "application/vnd.github+json"}
 if TOKEN:
     HEADERS["Authorization"] = f"Bearer {TOKEN}"
 
+MAX_SEGMENTS_PER_AREA = 99
+MIN_SLICE_PCT = 8.0
+LABEL_SLICE_PCT = 6.0
+PALETTE = [
+    (214, "#93c5fd"),
+    (160, "#86efac"),
+    (36, "#fcd34d"),
+    (280, "#d8b4fe"),
+    (345, "#f9a8d4"),
+    (14, "#fdba74"),
+    (190, "#67e8f9"),
+    (95, "#bef264"),
+]
+
 
 def find_repo_root():
     candidates = []
-
     cwd = Path.cwd().resolve()
     script_dir = Path(__file__).resolve().parent
 
@@ -49,13 +64,23 @@ REPO_ROOT = find_repo_root()
 BASE = REPO_ROOT / "Runner" / "suites"
 
 
+
 def gh_get(url, params=None):
     response = requests.get(url, headers=HEADERS, params=params, timeout=30)
     response.raise_for_status()
     return response.json()
 
 
+def get_open_prs():
+    return gh_get(f"{API}/pulls", params={"state": "open", "per_page": 100})
+
+
+def get_pr_files(pr_number):
+    return gh_get(f"{API}/pulls/{pr_number}/files", params={"per_page": 100})
+
+
 def h(text):
+
     return html.escape(str(text))
 
 
@@ -67,9 +92,7 @@ def html_link(text, url):
 
 
 def parse_suite_path(runsh: Path):
-    rel_runsh = runsh.relative_to(REPO_ROOT).as_posix()
     rel_dir = runsh.parent.relative_to(REPO_ROOT).as_posix()
-
     parts = runsh.relative_to(BASE).parts
     area = parts[0] if len(parts) >= 1 else ""
     functional_area = parts[1] if len(parts) >= 2 else ""
@@ -104,25 +127,19 @@ def discover_tests():
     return tests
 
 
-def get_open_prs():
-    return gh_get(f"{API}/pulls", params={"state": "open", "per_page": 100})
-
-
-def get_pr_files(pr_number):
-    return gh_get(f"{API}/pulls/{pr_number}/files", params={"per_page": 100})
-
-
 def mark_open_pr_tests(tests):
     by_path = {t["Suite Path"]: t for t in tests}
     open_pr_numbers = set()
 
-    for pr in get_open_prs():
+    prs = get_open_prs()
+    if not prs:
+        return open_pr_numbers
+
+    for pr in prs:
         pr_number = pr["number"]
         pr_link = html_link(f"PR #{pr_number}", pr["html_url"])
-
-        try:
-            files = get_pr_files(pr_number)
-        except Exception:
+        files = get_pr_files(pr_number)
+        if not files:
             continue
 
         touched_dirs = set()
@@ -136,7 +153,6 @@ def mark_open_pr_tests(tests):
 
         open_pr_numbers.add(pr_number)
 
-        # Suites not yet on main: surface in Open PR column.
         for suite_dir in touched_dirs:
             if suite_dir not in by_path:
                 fake_runsh = REPO_ROOT / suite_dir / "run.sh"
@@ -146,7 +162,6 @@ def mark_open_pr_tests(tests):
                 tests.append(meta)
                 by_path[suite_dir] = meta
 
-        # Existing suites on main: show Update PR only for suite-specific PRs.
         if len(touched_dirs) == 1:
             suite_dir = next(iter(touched_dirs))
             if suite_dir in by_path and by_path[suite_dir]["Present on main"] == "yes":
@@ -168,26 +183,145 @@ def group_tests(tests):
 
 def build_area_summary(tests):
     by_area = defaultdict(int)
-    by_functional_area = defaultdict(int)
-
     for test in tests:
         by_area[test["Area"]] += 1
-        by_functional_area[(test["Area"], test["Functional Area"])] += 1
 
-    area_rows = []
+    rows = []
     for area, count in sorted(by_area.items()):
-        area_rows.append(f"<tr><td>{h(area)}</td><td>{count}</td></tr>")
+        rows.append(f"<tr><td>{h(area)}</td><td>{count}</td></tr>")
+    return "\n".join(rows)
 
-    functional_area_rows = []
-    for (area, functional_area), count in sorted(by_functional_area.items()):
-        functional_area_rows.append(
-            f"<tr><td>{h(area)}</td><td>{h(functional_area)}</td><td>{count}</td></tr>"
+
+def aggregate_area_segments(tests):
+    by_area = defaultdict(lambda: defaultdict(lambda: {"merged": 0, "open_pr": 0}))
+    for test in tests:
+        area = test["Area"] or "Other"
+        functional_area = test["Functional Area"] or "Other"
+        bucket = by_area[area][functional_area]
+        if test["Present on main"] == "yes":
+            bucket["merged"] += 1
+        elif test["Open PR"]:
+            bucket["open_pr"] += 1
+
+    result = []
+    for area, fa_map in sorted(by_area.items()):
+        items = []
+        for functional_area, counts in fa_map.items():
+            total = counts["merged"] + counts["open_pr"]
+            if total <= 0:
+                continue
+            items.append(
+                {
+                    "functional_area": functional_area,
+                    "merged": counts["merged"],
+                    "open_pr": counts["open_pr"],
+                    "total": total,
+                }
+            )
+
+        items.sort(key=lambda item: (-item["total"], item["functional_area"].lower()))
+
+        area_total = sum(item["total"] for item in items)
+        result.append({"area": area, "total": area_total, "segments": items})
+
+    result.sort(key=lambda item: (-item["total"], item["area"].lower()))
+    return result
+
+
+
+def build_functional_area_chart(tests):
+    areas = aggregate_area_segments(tests)
+    if not areas:
+        return '<div class="empty-state">No functional area data available.</div>'
+
+    columns = []
+    for area_index, area_info in enumerate(areas):
+        area = area_info["area"]
+        total = area_info["total"]
+        segments = area_info["segments"]
+
+        normalized_segments = []
+        for seg_index, segment in enumerate(segments):
+            hue, chip = PALETTE[(area_index + seg_index) % len(PALETTE)]
+            seg_total = segment["total"]
+            actual_pct = (seg_total * 100.0) / total if total > 0 else 0.0
+            display_pct = max(actual_pct, MIN_SLICE_PCT if seg_total > 0 else 0.0)
+
+            normalized_segments.append(
+                {
+                    "segment": segment,
+                    "hue": hue,
+                    "chip": chip,
+                    "actual_pct": actual_pct,
+                    "display_pct": display_pct,
+                }
+            )
+
+        display_sum = sum(item["display_pct"] for item in normalized_segments) or 1.0
+        for item in normalized_segments:
+            item["display_pct"] = (item["display_pct"] * 100.0) / display_sum
+
+        seg_html = []
+        list_html = []
+        for item in normalized_segments:
+            segment = item["segment"]
+            seg_total = segment["total"]
+            merged_width_pct = (segment["merged"] * 100.0) / seg_total if seg_total > 0 else 0.0
+            open_width_pct = (segment["open_pr"] * 100.0) / seg_total if seg_total > 0 else 0.0
+            label = segment["functional_area"]
+
+            label_html = ""
+            if item["display_pct"] >= LABEL_SLICE_PCT:
+                label_class = "area-stack-seg-label"
+                if item["display_pct"] < 8.5:
+                    label_class += " small"
+                label_html = f'<span class="{label_class}">{seg_total}</span>'
+
+            seg_html.append(
+                f'''
+<div class="area-stack-seg" style="height: {item["display_pct"]:.2f}%" title="{h(area)} / {h(label)} | Total {seg_total}, Merged {segment['merged']}, Open PR {segment['open_pr']}">
+  <div class="area-stack-seg-split">
+    <div class="area-stack-merged" style="width: {merged_width_pct:.2f}%; --seg-hue: {item["hue"]};"></div>
+    <div class="area-stack-open" style="width: {open_width_pct:.2f}%; --seg-hue: {item["hue"]};"></div>
+  </div>
+  {label_html}
+</div>
+'''
+            )
+            list_html.append(
+                f'''
+<div class="area-breakdown-item">
+  <span class="area-breakdown-swatch" style="--seg-chip: {item["chip"]};"></span>
+  <span class="area-breakdown-name">{h(label)}</span>
+  <span class="area-breakdown-count">{seg_total}</span>
+  <span class="area-breakdown-meta">M {segment['merged']} | PR {segment['open_pr']}</span>
+</div>
+'''
+            )
+
+        columns.append(
+            f'''
+<div class="area-chart-col">
+  <div class="area-chart-total">{total}</div>
+  <div class="area-chart-bars">
+    <div class="area-chart-stack">
+      {''.join(seg_html)}
+    </div>
+  </div>
+  <div class="area-chart-name">{h(area)}</div>
+  <div class="area-chart-meta">{len(segments)} segment(s)</div>
+  <div class="area-breakdown-list">
+    {''.join(list_html)}
+  </div>
+</div>
+'''
         )
 
-    return "\n".join(area_rows), "\n".join(functional_area_rows)
+    return "\n".join(columns)
 
 
 def build_test_table_rows(items):
+
     rows = []
     for test in items:
         rows.append(
@@ -227,7 +361,7 @@ def build_sections(tests):
     <span class="summary-title">{h(functional_area)}</span>
     <span class="summary-count">{functional_area_count} test(s)</span>
   </summary>
-  <div class="table-wrap">
+  <div class="table-wrap inventory-table-wrap">
     <table class="inventory-table">
       <thead>
         <tr>
@@ -277,8 +411,7 @@ def build_html(
     open_pr_count,
     new_test_suites_in_open_prs,
     existing_suites_updated_in_open_prs,
-    area_summary_rows,
-    functional_area_summary_rows,
+    functional_area_chart_html,
     sections_html,
 ):
     template = """<!DOCTYPE html>
@@ -404,13 +537,8 @@ def build_html(
     }
     .summary-grid {
       display: grid;
-      grid-template-columns: 1fr 1fr;
+      grid-template-columns: 1fr;
       gap: 20px;
-    }
-    @media (max-width: 1000px) {
-      .summary-grid {
-        grid-template-columns: 1fr;
-      }
     }
     .toolbar {
       display: flex;
@@ -436,11 +564,16 @@ def build_html(
       border: 1px solid var(--line);
       border-radius: 12px;
     }
+    .inventory-table-wrap {
+      width: 100%;
+    }
     table {
       width: 100%;
       border-collapse: collapse;
-      min-width: 950px;
       background: #0d142b;
+    }
+    .inventory-table {
+      min-width: 950px;
     }
     th, td {
       padding: 10px 12px;
@@ -472,6 +605,206 @@ def build_html(
       color: var(--muted);
       font-size: 13px;
       margin-top: 8px;
+    }
+    .chart-wrap {
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #0d142b;
+      padding: 14px 10px 10px 10px;
+      overflow-x: auto;
+      overflow-y: hidden;
+    }
+    .chart-legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 14px;
+    }
+    .legend-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      border-radius: 999px;
+      padding: 6px 10px;
+      border: 1px solid var(--line);
+      background: #0a1228;
+      font-size: 12px;
+      color: var(--text);
+      white-space: nowrap;
+    }
+    .legend-swatch {
+      width: 12px;
+      height: 12px;
+      border-radius: 3px;
+      display: inline-block;
+    }
+    .legend-swatch.merged {
+      background: linear-gradient(180deg, hsl(214 84% 75%), hsl(214 84% 68%));
+    }
+    .legend-swatch.open {
+      background: repeating-linear-gradient(
+        135deg,
+        hsl(214 84% 75%) 0px,
+        hsl(214 84% 75%) 4px,
+        rgba(255,255,255,0.15) 4px,
+        rgba(255,255,255,0.15) 8px
+      );
+    }
+    .fa-chart {
+      display: inline-flex;
+      align-items: flex-start;
+      justify-content: flex-start;
+      gap: 18px;
+      min-width: 100%;
+      width: max-content;
+      padding: 10px 0 4px 0;
+    }
+    
+.area-chart-col {
+  min-width: 176px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 7px;
+}
+.area-chart-total {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text);
+  line-height: 1;
+  min-height: 18px;
+}
+.area-chart-bars {
+  height: 320px;
+  width: 100%;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding: 0 18px;
+  border-bottom: 1px solid var(--line);
+  position: relative;
+  background:
+    linear-gradient(to top, transparent 24.5%, rgba(255,255,255,0.04) 25%, transparent 25.5%),
+    linear-gradient(to top, transparent 49.5%, rgba(255,255,255,0.04) 50%, transparent 50.5%),
+    linear-gradient(to top, transparent 74.5%, rgba(255,255,255,0.04) 75%, transparent 75.5%);
+}
+.area-chart-stack {
+  width: 78px;
+  height: 100%;
+  min-height: 100%;
+  display: flex;
+  flex-direction: column-reverse;
+  border: 1px solid var(--line);
+  border-radius: 10px 10px 0 0;
+  background: #0a1228;
+  overflow: hidden;
+  box-shadow: 0 0 0 1px rgba(255,255,255,0.02) inset;
+}
+.area-stack-seg {
+  width: 100%;
+  min-height: 10px;
+  border-top: 1px solid rgba(255,255,255,0.08);
+  display: block;
+  position: relative;
+  overflow: hidden;
+}
+.area-stack-seg-split {
+  width: 100%;
+  height: 100%;
+  display: flex;
+}
+.area-stack-merged {
+  height: 100%;
+  background: linear-gradient(
+    180deg,
+    hsl(var(--seg-hue) 90% 76%),
+    hsl(var(--seg-hue) 78% 54%)
+  );
+}
+.area-stack-open {
+  height: 100%;
+  background:
+    repeating-linear-gradient(
+      135deg,
+      rgba(255,255,255,0.70) 0px,
+      rgba(255,255,255,0.70) 3px,
+      rgba(255,255,255,0.10) 3px,
+      rgba(255,255,255,0.10) 6px
+    ),
+    linear-gradient(
+      180deg,
+      hsl(var(--seg-hue) 58% 44%),
+      hsl(var(--seg-hue) 52% 30%)
+    );
+  box-shadow: inset 1px 0 0 rgba(11, 16, 32, 0.40);
+}
+.area-stack-seg-label {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: 700;
+  color: #08101f;
+  text-shadow: 0 1px 0 rgba(255,255,255,0.20);
+  pointer-events: none;
+  line-height: 1;
+}
+.area-stack-seg-label.small {
+  font-size: 9px;
+}
+.area-chart-name {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text);
+  text-align: center;
+  line-height: 1.2;
+  min-height: 16px;
+}
+.area-chart-meta {
+  font-size: 11px;
+  color: var(--muted);
+  text-align: center;
+  line-height: 1.15;
+  min-height: 12px;
+}
+.area-breakdown-list {
+  width: 100%;
+  display: grid;
+  gap: 5px;
+  margin-top: 4px;
+  padding-top: 4px;
+}
+.area-breakdown-item {
+  display: grid;
+  grid-template-columns: 10px 1fr auto auto;
+  gap: 6px;
+  align-items: center;
+  font-size: 11px;
+  color: var(--muted);
+}
+.area-breakdown-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  background: var(--seg-chip);
+  display: inline-block;
+}
+.area-breakdown-name {
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+    .area-breakdown-count {
+      color: var(--text);
+      font-weight: 700;
+      padding-left: 4px;
+    }
+    .area-breakdown-meta {
+      white-space: nowrap;
     }
     details {
       border: 1px solid var(--line);
@@ -573,30 +906,17 @@ def build_html(
       <h2>Summary</h2>
       <div class="summary-grid">
         <div>
-          <h3>By Area</h3>
-          <div class="table-wrap">
-            <table>
-              <thead>
-                <tr><th>Area</th><th>Test Count</th></tr>
-              </thead>
-              <tbody>
-                __AREA_SUMMARY_ROWS__
-              </tbody>
-            </table>
-          </div>
-        </div>
-
-        <div>
           <h3>By Functional Area</h3>
-          <div class="table-wrap">
-            <table>
-              <thead>
-                <tr><th>Area</th><th>Functional Area</th><th>Test Count</th></tr>
-              </thead>
-              <tbody>
-                __FUNCTIONAL_AREA_SUMMARY_ROWS__
-              </tbody>
-            </table>
+          <div class="chart-wrap">
+            <div class="chart-legend">
+              <span class="legend-pill"><span class="legend-swatch merged"></span> Merged</span>
+              <span class="legend-pill"><span class="legend-swatch open"></span> Open PR</span>
+              <span class="legend-pill">Bars grouped by Area</span>
+              <span class="legend-pill">Stacks show Functional Areas</span>
+            </div>
+            <div class="fa-chart">
+              __FUNCTIONAL_AREA_CHART_HTML__
+            </div>
           </div>
         </div>
       </div>
@@ -716,8 +1036,7 @@ def build_html(
         .replace("__REPO_HOME__", h(repo_home))
         .replace("__REPO_ACTIONS__", h(repo_actions))
         .replace("__REPO_SUITES__", h(repo_suites))
-        .replace("__AREA_SUMMARY_ROWS__", area_summary_rows)
-        .replace("__FUNCTIONAL_AREA_SUMMARY_ROWS__", functional_area_summary_rows)
+        .replace("__FUNCTIONAL_AREA_CHART_HTML__", functional_area_chart_html)
         .replace("__SECTIONS_HTML__", sections_html)
     )
 
@@ -751,7 +1070,7 @@ def main():
     repo_actions = f"{REPO_WEB}/actions"
     repo_suites = f"{MAIN_TREE}/Runner/suites"
 
-    area_summary_rows, functional_area_summary_rows = build_area_summary(tests)
+    functional_area_chart_html = build_functional_area_chart(tests)
     sections_html = build_sections(tests)
 
     print(
@@ -765,8 +1084,7 @@ def main():
             open_pr_count=open_pr_count,
             new_test_suites_in_open_prs=new_test_suites_in_open_prs,
             existing_suites_updated_in_open_prs=existing_suites_updated_in_open_prs,
-            area_summary_rows=area_summary_rows,
-            functional_area_summary_rows=functional_area_summary_rows,
+            functional_area_chart_html=functional_area_chart_html,
             sections_html=sections_html,
         )
     )

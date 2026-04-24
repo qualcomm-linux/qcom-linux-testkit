@@ -14,6 +14,10 @@ This suite automates the validation of audio playback capabilities on Qualcomm L
   - Use descriptive names (e.g., play_48KHz_8b_2ch) for specific formats
   - Auto-discovery mode tests all available clips
 - **Clip filtering**: Filter tests by sample rate, bit rate, or channel configuration
+- **CI/LAVA integration**: 
+  - Unique result file suffixes prevent file collisions in parallel test runs
+  - Unique testcase IDs prevent LAVA testcase ID collisions
+  - Enables running multiple AudioPlayback configurations simultaneously in CI
 - Plays audio clips with configurable format, duration, and loop count
 - **Network operations are optional**: By default, no network connection is attempted. Use `--enable-network-download` to enable downloading missing audio files
 - Automatically downloads and extracts audio assets if missing
@@ -226,6 +230,7 @@ PASSWORD                 Wi-Fi password for network connection             unset
 NET_PROBE_ROUTE_IP       IP used for route probing (default: 1.1.1.1)      1.1.1.1
 NET_PING_HOST            Host used for ping reachability check             8.8.8.8
 RES_SUFFIX               Suffix for unique result file and log directory   unset
+LAVA_TESTCASE_ID         Unique testcase ID written into the .res file for LAVA    AudioPlayback
 
 
 CLI Options
@@ -244,6 +249,7 @@ Option	                    Description
 --enable-network-download   Enable network operations to download missing audio files (default: disabled)
 --audio-clips-path <path>   Custom location for audio clips (for CI with pre-staged clips)
 --res-suffix <suffix>       Suffix for unique result file and log directory (e.g., "Config01" generates AudioPlayback_Config01.res and results/AudioPlayback_Config01/)
+--lava-testcase-id <id>     Unique testcase ID written into the .res file for LAVA (e.g., "AudioPlayback_Config01")
 --junit <file.xml>	        Write JUnit XML output
 --verbose	                Enable verbose logging
 --help	                    Show usage instructions
@@ -359,6 +365,31 @@ AudioPlayback PASS
 sh-5.3# ls -1 AudioPlayback*.res
 AudioPlayback_Config01.res
 AudioPlayback_Config07.res
+```
+
+**Example 7: CI/LAVA workflow with unique testcase IDs (prevents LAVA collisions)**
+```
+# Using --lava-testcase-id ensures unique testcase IDs in LAVA results
+# This prevents testcase ID collisions when running multiple AudioPlayback configs in parallel
+
+sh-5.3# ./run.sh --clip-name "playback_config1" --res-suffix "Config01" --lava-testcase-id "AudioPlayback_Config01" --audio-clips-path /home/AudioClips/ --no-extract-assets
+[INFO] 2026-01-22 18:10:15 - Using unique result file: ./AudioPlayback_Config01.res
+[PASS] 2026-01-22 18:10:45 - AudioPlayback PASS
+
+sh-5.3# cat AudioPlayback_Config01.res
+AudioPlayback_Config01 PASS
+
+sh-5.3# ./run.sh --clip-name "playback_config7" --res-suffix "Config07" --lava-testcase-id "AudioPlayback_Config07" --audio-clips-path /home/AudioClips/ --no-extract-assets
+[INFO] 2026-01-22 18:11:30 - Using unique result file: ./AudioPlayback_Config07.res
+[PASS] 2026-01-22 18:12:00 - AudioPlayback PASS
+
+sh-5.3# cat AudioPlayback_Config07.res
+AudioPlayback_Config07 PASS
+
+# LAVA will receive unique testcase IDs:
+# - AudioPlayback_Config01 PASS
+# - AudioPlayback_Config07 PASS
+# No testcase ID collisions!
 ```
 
 Results:

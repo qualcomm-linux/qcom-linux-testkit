@@ -33,9 +33,9 @@ jobs:
           set -eu
 
           BASE_BRANCH="${{ github.base_ref }}"
-          git fetch origin "${BASE_BRANCH}" --depth=1
+          git fetch --no-tags origin "+refs/heads/${BASE_BRANCH}:refs/remotes/origin/${BASE_BRANCH}"
 
-          MERGE_BASE="$(git merge-base HEAD "origin/${BASE_BRANCH}")"
+          MERGE_BASE="$(git merge-base HEAD "refs/remotes/origin/${BASE_BRANCH}")"
           FILES="$(git diff --diff-filter=d --name-only "${MERGE_BASE}"...HEAD -- '*.sh')"
 
           if [ -n "$FILES" ]; then

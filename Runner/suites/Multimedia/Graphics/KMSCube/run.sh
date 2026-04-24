@@ -99,11 +99,8 @@ fi
 KMSCUBE_BIN="$(command -v kmscube 2>/dev/null || true)"
 log_info "Using kmscube: ${KMSCUBE_BIN:-<not found>}"
 
-# --- Track Weston state (restore at end if needed) ---------------------------
-weston_was_running=0
-if weston_is_running; then
-    weston_was_running=1
-fi
+# --- Track whether this test stopped Weston ----------------------------------
+weston_stopped_by_test=0
 # --- GPU acceleration gating (avoid auto/Wayland for kmscube) ----------------
 # KMSCube is a DRM/KMS test. Using "auto" can start/adopt Weston and steal DRM master.
 if command -v display_is_cpu_renderer >/dev/null 2>&1; then
@@ -129,7 +126,14 @@ fi
 # Stop weston after gating too, because some helpers may have started it.
 if weston_is_running; then
     log_info "Weston is running, stopping it so kmscube can modeset (DRM master)"
-    weston_stop >/dev/null 2>&1 || true
+    if weston_stop >/dev/null 2>&1; then
+        weston_stopped_by_test=1
+    else
+        log_warn "weston_stop returned non-zero, re-checking Weston state"
+        if ! weston_is_running; then
+            weston_stopped_by_test=1
+        fi
+    fi
 fi
 
 # Double-check and be strict: kmscube will fail if weston still holds DRM master.
@@ -157,10 +161,12 @@ if kmscube --count="${FRAME_COUNT}" >"$LOG_FILE" 2>&1; then :; else
         unset EGL_PLATFORM
     fi
 
-    # Restore Weston if it was running before
-    if [ "$weston_was_running" -eq 1 ]; then
-        log_info "Restarting Weston after failure"
-        weston_start >/dev/null 2>&1 || true
+    # Restore Weston if we stopped it
+    if [ "$weston_stopped_by_test" -eq 1 ]; then
+        log_info "Restoring Weston after failure"
+        if ! weston_restore_runtime 15; then
+            log_error "Failed to restore Weston runtime after $TESTNAME failure"
+        fi
     fi
     exit 1
 fi
@@ -185,26 +191,31 @@ FRAMES_RENDERED="$(
 [ "$EXPECTED_MIN" -lt 0 ] && EXPECTED_MIN=0
 log_info "kmscube reported: Rendered ${FRAMES_RENDERED} frames (requested ${FRAME_COUNT}, min acceptable ${EXPECTED_MIN})"
 
+# --- Restore Weston if we stopped it -----------------------------------------
+restore_failed=0
+if [ "$weston_stopped_by_test" -eq 1 ]; then
+    log_info "Restoring Weston after $TESTNAME completion"
+    if ! weston_restore_runtime 15; then
+        restore_failed=1
+        log_error "Failed to restore Weston runtime after $TESTNAME"
+    fi
+fi
+
 # --- Verdict -----------------------------------------------------------------
-if [ "$FRAMES_RENDERED" -ge "$EXPECTED_MIN" ]; then
-    log_pass "$TESTNAME : PASS"
-    echo "$TESTNAME PASS" >"$RES_FILE"
-else
+if [ "$FRAMES_RENDERED" -lt "$EXPECTED_MIN" ]; then
     log_fail "$TESTNAME : FAIL (rendered ${FRAMES_RENDERED} < ${EXPECTED_MIN})"
     echo "$TESTNAME FAIL" >"$RES_FILE"
-
-    if [ "$weston_was_running" -eq 1 ]; then
-        log_info "Restarting Weston after failure"
-        weston_start >/dev/null 2>&1 || true
-    fi
     exit 1
 fi
 
-# --- Restore Weston if we stopped it -----------------------------------------
-if [ "$weston_was_running" -eq 1 ]; then
-    log_info "Restarting Weston after $TESTNAME completion"
-    weston_start >/dev/null 2>&1 || true
+if [ "$restore_failed" -ne 0 ]; then
+    log_fail "$TESTNAME : FAIL (rendered ${FRAMES_RENDERED}, but Weston restore failed)"
+    echo "$TESTNAME FAIL" >"$RES_FILE"
+    exit 1
 fi
+
+log_pass "$TESTNAME : PASS"
+echo "$TESTNAME PASS" >"$RES_FILE"
 
 log_info "------------------- Completed $TESTNAME Testcase ------------------"
 exit 0

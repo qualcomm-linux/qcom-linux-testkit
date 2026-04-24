@@ -3281,34 +3281,78 @@ wifi_write_wpa_conf() {
 
 # Find the first available WiFi interface (wl* or wlan0), using 'ip' or 'ifconfig'.
 # Prints the interface name, or returns non-zero if not found.
+# Discover the most likely WiFi netdev using override, iw, sysfs markers,
+# nmcli, and legacy name-based fallbacks while preserving existing behavior.
 get_wifi_interface() {
     WIFI_IF=""
 
-    # Prefer 'ip' if available.
-    if command -v ip >/dev/null 2>&1; then
-        WIFI_IF=$(ip link | awk -F: '/ wl/ {print $2}' | tr -d ' ' | head -n1)
-        if [ -z "$WIFI_IF" ]; then
-            WIFI_IF=$(ip link | awk -F: '/^[0-9]+: wl/ {print $2}' | tr -d ' ' | head -n1)
-        fi
-        if [ -z "$WIFI_IF" ] && ip link show wlan0 >/dev/null 2>&1; then
-            WIFI_IF="wlan0"
-        fi
-    else
-        # Fallback to 'ifconfig' if 'ip' is missing.
-        if command -v ifconfig >/dev/null 2>&1; then
-            WIFI_IF=$(ifconfig -a 2>/dev/null | grep -o '^wl[^:]*' | head -n1)
-            if [ -z "$WIFI_IF" ] && ifconfig wlan0 >/dev/null 2>&1; then
-                WIFI_IF="wlan0"
+    if [ -n "${WIFI_IFACE:-}" ]; then
+        if command -v ip >/dev/null 2>&1; then
+            if ip link show "$WIFI_IFACE" >/dev/null 2>&1; then
+                printf '%s\n' "$WIFI_IFACE"
+                return 0
             fi
         fi
     fi
 
-    if [ -n "$WIFI_IF" ]; then
-        echo "$WIFI_IF"
-        return 0
-    else
-        return 1
+    if command -v iw >/dev/null 2>&1; then
+        WIFI_IF="$(iw dev 2>/dev/null | awk '
+            $1 == "Interface" && $2 !~ /^p2p-dev-/ {
+                print $2
+                exit
+            }
+        ')"
+        if [ -n "$WIFI_IF" ]; then
+            printf '%s\n' "$WIFI_IF"
+            return 0
+        fi
     fi
+
+    for n in /sys/class/net/*; do
+        [ -e "$n" ] || continue
+        WIFI_IF="$(basename "$n")"
+
+        if [ "$WIFI_IF" = "lo" ]; then
+            continue
+        fi
+
+        if [ -d "$n/wireless" ] || [ -e "$n/phy80211" ]; then
+            printf '%s\n' "$WIFI_IF"
+            return 0
+        fi
+    done
+
+    if command -v nmcli >/dev/null 2>&1; then
+        WIFI_IF="$(nmcli -t -f DEVICE,TYPE device status 2>/dev/null | awk -F: '
+            $2 == "wifi" {
+                print $1
+                exit
+            }
+        ')"
+        if [ -n "$WIFI_IF" ]; then
+            printf '%s\n' "$WIFI_IF"
+            return 0
+        fi
+    fi
+
+    if command -v ip >/dev/null 2>&1; then
+        WIFI_IF="$(ip -o link show 2>/dev/null | awk -F': ' '
+            $2 ~ /^wlan[0-9]+$/ { print $2; exit }
+            $2 ~ /^wl[[:alnum:]_.-]*$/ { print $2; exit }
+            $2 ~ /^ath[[:alnum:]_.-]*$/ { print $2; exit }
+        ')"
+        if [ -n "$WIFI_IF" ]; then
+            printf '%s\n' "$WIFI_IF"
+            return 0
+        fi
+
+        if ip link show wlan0 >/dev/null 2>&1; then
+            printf '%s\n' "wlan0"
+            return 0
+        fi
+    fi
+
+    return 1
 }
 
 # Auto-detect eMMC block device (non-removable, not UFS)
@@ -4686,4 +4730,596 @@ file_size_bytes() {
 
   printf '%s\n' "$size"
   return 0
+}
+
+# Return the first /proc/interrupts line matching the given pattern.
+# Prints the full line and returns 0 on success, 1 if no match is found.
+get_interrupt_line_by_name() {
+    pattern="$1"
+    [ -n "$pattern" ] || return 1
+    grep "$pattern" /proc/interrupts 2>/dev/null | head -n 1
+}
+
+# Extract only numeric per-CPU interrupt counters from a /proc/interrupts line.
+# Prints one counter per line, stopping at the first non-numeric token after the IRQ field.
+extract_interrupt_cpu_counts() {
+    printf '%s\n' "$1" | awk '
+        {
+            seen_irq = 0
+            for (i = 1; i <= NF; i++) {
+                if (seen_irq == 0) {
+                    if ($i ~ /:$/) {
+                        seen_irq = 1
+                    }
+                    continue
+                }
+                if ($i ~ /^[0-9]+$/) {
+                    print $i
+                } else {
+                    break
+                }
+            }
+        }
+    '
+}
+
+# Count extracted per-CPU interrupt counters.
+# Prints the count as a decimal integer.
+count_interrupt_cpu_counts() {
+    printf '%s\n' "$1" | awk 'NF { c++ } END { print c + 0 }'
+}
+
+# ---------------------------------------------------------------------------
+# Partition / mount validation helpers
+# ---------------------------------------------------------------------------
+
+# Check whether a mountpoint exists in /proc/mounts.
+partition_mount_exists() {
+    part_path="$1"
+
+    [ -n "$part_path" ] || return 1
+    [ -r /proc/mounts ] || return 1
+
+    awk -v p="$part_path" '
+        $2 == p { found=1; exit }
+        END { exit(found ? 0 : 1) }
+    ' /proc/mounts 2>/dev/null
+}
+
+# Print the mount source for a mountpoint.
+partition_get_mount_source() {
+    part_path="$1"
+
+    [ -n "$part_path" ] || return 1
+    [ -r /proc/mounts ] || return 1
+
+    awk -v p="$part_path" '
+        $2 == p { print $1; exit }
+    ' /proc/mounts 2>/dev/null
+}
+
+# Print the filesystem type for a mountpoint.
+partition_get_mount_fstype() {
+    part_path="$1"
+
+    [ -n "$part_path" ] || return 1
+    [ -r /proc/mounts ] || return 1
+
+    awk -v p="$part_path" '
+        $2 == p { print $3; exit }
+    ' /proc/mounts 2>/dev/null
+}
+
+# Print the mount options for a mountpoint.
+partition_get_mount_options() {
+    part_path="$1"
+
+    [ -n "$part_path" ] || return 1
+    [ -r /proc/mounts ] || return 1
+
+    awk -v p="$part_path" '
+        $2 == p { print $4; exit }
+    ' /proc/mounts 2>/dev/null
+}
+
+# Log platform details using existing helpers where available.
+partition_log_platform_details() {
+    log_info "----- Partition platform details -----"
+
+    if command -v detect_platform >/dev/null 2>&1; then
+        detect_platform >/dev/null 2>&1 || true
+    fi
+
+    if [ -n "${PLATFORM_MACHINE:-}" ]; then
+        log_info "Platform machine: ${PLATFORM_MACHINE}"
+    fi
+    if [ -n "${PLATFORM_TARGET:-}" ]; then
+        log_info "Platform target: ${PLATFORM_TARGET}"
+    fi
+    if [ -n "${PLATFORM_OS_NAME:-}" ]; then
+        log_info "Platform OS: ${PLATFORM_OS_NAME}"
+    fi
+    if [ -n "${PLATFORM_KERNEL:-}" ]; then
+        log_info "Platform kernel: ${PLATFORM_KERNEL}"
+    else
+        log_info "Platform kernel: $(uname -r 2>/dev/null)"
+    fi
+    if [ -n "${PLATFORM_ARCH:-}" ]; then
+        log_info "Platform arch: ${PLATFORM_ARCH}"
+    else
+        log_info "Platform arch: $(uname -m 2>/dev/null)"
+    fi
+
+    if command -v log_soc_info >/dev/null 2>&1; then
+        log_soc_info || true
+    fi
+
+    log_info "----- End partition platform details -----"
+}
+
+# Log mount/storage inventory for post-boot debug visibility.
+partition_log_mount_inventory() {
+    log_info "----- Partition / mount inventory -----"
+
+    if command -v findmnt >/dev/null 2>&1; then
+        log_info "findmnt output:"
+        findmnt -R / 2>/dev/null | while IFS= read -r line; do
+            [ -n "$line" ] && log_info "[findmnt] $line"
+        done
+    else
+        log_warn "findmnt not available"
+    fi
+
+    if [ -r /proc/mounts ]; then
+        log_info "/proc/mounts output:"
+        while IFS= read -r line; do
+            [ -n "$line" ] && log_info "[mounts] $line"
+        done < /proc/mounts
+    else
+        log_warn "/proc/mounts not readable"
+    fi
+
+    if command -v lsblk >/dev/null 2>&1; then
+        log_info "lsblk output:"
+        lsblk -o NAME,TYPE,FSTYPE,SIZE,MOUNTPOINT,PARTLABEL,UUID 2>/dev/null | while IFS= read -r line; do
+            [ -n "$line" ] && log_info "[lsblk] $line"
+        done
+    else
+        log_warn "lsblk not available"
+    fi
+
+    if command -v blkid >/dev/null 2>&1; then
+        log_info "blkid output:"
+        blkid 2>/dev/null | while IFS= read -r line; do
+            [ -n "$line" ] && log_info "[blkid] $line"
+        done
+    else
+        log_warn "blkid not available"
+    fi
+
+    log_info "----- End partition / mount inventory -----"
+}
+
+# Log failed mount/fs related systemd units. Return 1 if any are failed.
+partition_systemd_mount_failures() {
+    part_found_failed=0
+
+    if ! command -v systemctl >/dev/null 2>&1; then
+        log_info "systemctl not available; skipping failed mount/fs unit scan"
+        return 0
+    fi
+
+    systemctl --failed --no-legend --plain 2>/dev/null | while IFS= read -r line; do
+        unit_name=$(printf '%s\n' "$line" | awk '{print $1}')
+        [ -n "$unit_name" ] || continue
+
+        case "$unit_name" in
+            *.mount|systemd-fsck*|local-fs.target|local-fs-pre.target)
+                log_warn "Failed systemd mount/fs unit: $line"
+                printf '%s\n' "$unit_name"
+                ;;
+        esac
+    done > /tmp/partition_failed_units.$$ 2>/dev/null
+
+    if [ -s /tmp/partition_failed_units.$$ ]; then
+        part_found_failed=1
+    fi
+    rm -f /tmp/partition_failed_units.$$ 2>/dev/null || true
+
+    if [ "$part_found_failed" -eq 1 ]; then
+        return 1
+    fi
+
+    return 0
+}
+
+# Check overall systemd readiness.
+# Args:
+# $1 = allow_degraded (0/1, default 0)
+partition_systemd_is_ready() {
+    part_allow_degraded="${1:-0}"
+    part_state=""
+
+    if ! command -v systemctl >/dev/null 2>&1; then
+        log_info "systemctl not available; skipping systemd readiness check"
+        return 0
+    fi
+
+    part_state="$(systemctl is-system-running 2>/dev/null || true)"
+    [ -n "$part_state" ] || part_state="unknown"
+
+    case "$part_state" in
+        running)
+            log_info "systemd state: $part_state"
+            return 0
+            ;;
+        degraded)
+            if [ "$part_allow_degraded" = "1" ]; then
+                log_warn "systemd state: $part_state (accepted)"
+                return 0
+            fi
+            log_fail "systemd state: $part_state"
+            return 1
+            ;;
+        *)
+            log_fail "systemd state: $part_state"
+            return 1
+            ;;
+    esac
+}
+
+# Validate the system is boot-ready enough for partition checks.
+# Args:
+# $1 = allow_degraded (0/1, default 0)
+# $2 = require_boot_ready (0/1, default 1)
+# $3 = require_systemd (0/1, default 0)
+partition_check_boot_ready() {
+    part_allow_degraded="${1:-0}"
+    part_require_boot_ready="${2:-1}"
+    part_require_systemd="${3:-0}"
+
+    log_info "----- Boot readiness check -----"
+
+    if ! command -v systemctl >/dev/null 2>&1; then
+        if [ "$part_require_systemd" = "1" ]; then
+            log_fail "systemctl not available but systemd readiness is required"
+            return 1
+        fi
+        log_info "systemctl not available; boot readiness check skipped"
+        return 0
+    fi
+
+    if ! partition_systemd_is_ready "$part_allow_degraded"; then
+        return 1
+    fi
+
+    if command -v systemd_service_exists >/dev/null 2>&1; then
+        if systemd_service_exists local-fs.target; then
+            if command -v systemd_service_is_active >/dev/null 2>&1; then
+                if ! systemd_service_is_active local-fs.target; then
+                    log_fail "local-fs.target is not active"
+                    return 1
+                fi
+                log_info "local-fs.target is active"
+            fi
+        fi
+    fi
+
+    if [ "$part_require_boot_ready" = "1" ]; then
+        if systemctl list-jobs --no-legend 2>/dev/null | grep -q '\.mount'; then
+            log_warn "Pending systemd mount jobs are still present"
+        fi
+    fi
+
+    if ! partition_systemd_mount_failures; then
+        log_fail "One or more mount/fs-related systemd units are failed"
+        return 1
+    fi
+
+    log_info "----- End boot readiness check -----"
+    return 0
+}
+
+# Trigger an autofs mountpoint by touching the path in a non-destructive way.
+partition_trigger_autofs() {
+    part_path="$1"
+
+    [ -n "$part_path" ] || return 1
+
+    log_info "Triggering autofs path: $part_path"
+
+    if [ ! -e "$part_path" ]; then
+        log_fail "Autofs trigger path does not exist: $part_path"
+        return 1
+    fi
+
+    if [ -d "$part_path" ]; then
+        ls "$part_path" >/dev/null 2>&1 || true
+        stat "$part_path" >/dev/null 2>&1 || true
+    else
+        stat "$part_path" >/dev/null 2>&1 || true
+    fi
+
+    if [ ! -r "$part_path" ] && [ ! -x "$part_path" ] && [ ! -d "$part_path" ]; then
+        log_fail "Autofs trigger path is not accessible: $part_path"
+        return 1
+    fi
+
+    sleep 1
+    return 0
+}
+
+# Non-destructive RW probe for a mountpoint.
+partition_check_rw() {
+    part_path="$1"
+    part_testfile=""
+    part_now=""
+
+    [ -n "$part_path" ] || return 1
+    [ -d "$part_path" ] || {
+        log_fail "RW probe path is not a directory: $part_path"
+        return 1
+    }
+
+    part_now="$(date +%s 2>/dev/null || echo 0)"
+    part_testfile="$part_path/.partition_rw_test_${part_now}_$$"
+
+    if ! ( umask 077 && printf 'partition-rw-test\n' > "$part_testfile" ); then
+        log_fail "RW probe write failed at $part_path"
+        return 1
+    fi
+
+    sync >/dev/null 2>&1 || true
+
+    if [ ! -f "$part_testfile" ]; then
+        log_fail "RW probe file was not created at $part_path"
+        return 1
+    fi
+
+    if ! rm -f "$part_testfile" 2>/dev/null; then
+        log_fail "RW probe cleanup failed at $part_path"
+        return 1
+    fi
+
+    log_info "RW probe passed at $part_path"
+    return 0
+}
+
+# Validate a single mount entry.
+# Args:
+# $1 = path
+# $2 = expected fs regex (ex: ext4|erofs|autofs|vfat)
+# $3 = rw required (0/1)
+# $4 = autofs trigger (0/1)
+partition_validate_mount() {
+    part_path="$1"
+    part_expected_fs="$2"
+    part_rw_required="${3:-0}"
+    part_autofs_trigger="${4:-0}"
+
+    part_src_before=""
+    part_fs_before=""
+    part_opts_before=""
+    part_src_after=""
+    part_fs_after=""
+    part_opts_after=""
+    part_fs_ok=0
+
+    [ -n "$part_path" ] || {
+        log_fail "partition_validate_mount: empty mount path"
+        return 1
+    }
+
+    if ! partition_mount_exists "$part_path"; then
+        log_fail "Required mountpoint is missing: $part_path"
+        return 1
+    fi
+
+    part_src_before="$(partition_get_mount_source "$part_path" 2>/dev/null)"
+    part_fs_before="$(partition_get_mount_fstype "$part_path" 2>/dev/null)"
+    part_opts_before="$(partition_get_mount_options "$part_path" 2>/dev/null)"
+
+    log_info "Mount before validation: path=$part_path source=${part_src_before:-unknown} fstype=${part_fs_before:-unknown} opts=${part_opts_before:-unknown}"
+
+    if [ "$part_autofs_trigger" = "1" ] || [ "$part_fs_before" = "autofs" ]; then
+        if ! partition_trigger_autofs "$part_path"; then
+            log_fail "Autofs trigger failed for $part_path"
+            return 1
+        fi
+    fi
+
+    part_src_after="$(partition_get_mount_source "$part_path" 2>/dev/null)"
+    part_fs_after="$(partition_get_mount_fstype "$part_path" 2>/dev/null)"
+    part_opts_after="$(partition_get_mount_options "$part_path" 2>/dev/null)"
+
+    log_info "Mount after validation: path=$part_path source=${part_src_after:-unknown} fstype=${part_fs_after:-unknown} opts=${part_opts_after:-unknown}"
+
+    if [ -n "$part_expected_fs" ]; then
+        if printf '%s\n' "$part_fs_before" | grep -Eq "^(${part_expected_fs})$"; then
+            part_fs_ok=1
+        fi
+        if printf '%s\n' "$part_fs_after" | grep -Eq "^(${part_expected_fs})$"; then
+            part_fs_ok=1
+        fi
+
+        if [ "$part_fs_ok" -ne 1 ]; then
+            log_fail "Filesystem type mismatch for $part_path: expected=(${part_expected_fs}) actual_before=${part_fs_before:-unknown} actual_after=${part_fs_after:-unknown}"
+            return 1
+        fi
+    fi
+
+    if [ "$part_rw_required" = "1" ]; then
+        if ! printf '%s\n' "$part_opts_after" | grep -Eq '(^|,)rw(,|$)'; then
+            if ! printf '%s\n' "$part_opts_before" | grep -Eq '(^|,)rw(,|$)'; then
+                log_fail "Mountpoint is not RW as required: $part_path"
+                return 1
+            fi
+        fi
+
+        if ! partition_check_rw "$part_path"; then
+            return 1
+        fi
+    fi
+
+    log_pass "Mount validation passed: $part_path"
+    return 0
+}
+
+# Validate a semicolon-separated mount matrix.
+# Entry format:
+# /path:fs1,fs2:rw_required:autofs_trigger
+# Example:
+# /efi:autofs,vfat:0:1;/var/lib/tee:ext4:1:0
+partition_validate_mount_matrix() {
+    part_matrix="$1"
+    part_fail_count=0
+    part_entry=""
+    part_path=""
+    part_expected=""
+    part_rw_required=""
+    part_autofs_trigger=""
+    oldifs="$IFS"
+
+    if [ -z "$part_matrix" ]; then
+        log_fail "partition_validate_mount_matrix: empty mount matrix"
+        return 1
+    fi
+
+    IFS=';'
+    for part_entry in $part_matrix; do
+        [ -n "$part_entry" ] || continue
+
+        part_path="$(printf '%s\n' "$part_entry" | awk -F: '{print $1}')"
+        part_expected="$(printf '%s\n' "$part_entry" | awk -F: '{print $2}')"
+        part_rw_required="$(printf '%s\n' "$part_entry" | awk -F: '{print $3}')"
+        part_autofs_trigger="$(printf '%s\n' "$part_entry" | awk -F: '{print $4}')"
+
+        [ -n "$part_path" ] || continue
+
+        if [ -z "$part_rw_required" ]; then
+            part_rw_required="0"
+        fi
+        if [ -z "$part_autofs_trigger" ]; then
+            part_autofs_trigger="0"
+        fi
+
+        part_expected="$(printf '%s\n' "$part_expected" | tr ',' '|')"
+
+        log_info "Validating mount matrix entry: path=$part_path expected_fs=${part_expected:-<any>} rw_required=$part_rw_required autofs_trigger=$part_autofs_trigger"
+
+        if ! partition_validate_mount "$part_path" "$part_expected" "$part_rw_required" "$part_autofs_trigger"; then
+            part_fail_count=$((part_fail_count + 1))
+        fi
+    done
+    IFS="$oldifs"
+
+    if [ "$part_fail_count" -ne 0 ]; then
+        log_fail "Partition mount matrix validation failed for $part_fail_count entry(s)"
+        return 1
+    fi
+
+    log_pass "Partition mount matrix validation passed"
+    return 0
+}
+
+# Scan mount/storage related dmesg using existing scan_dmesg_errors().
+# Returns 0 when clean, 1 when relevant errors are found.
+partition_scan_mount_dmesg() {
+    part_log_dir="$1"
+
+    if [ -z "$part_log_dir" ]; then
+        part_log_dir="."
+    fi
+
+    mkdir -p "$part_log_dir" 2>/dev/null || true
+
+    if ! command -v scan_dmesg_errors >/dev/null 2>&1; then
+        log_warn "scan_dmesg_errors not available; skipping partition dmesg scan"
+        return 0
+    fi
+
+    log_info "Scanning dmesg for mount/storage/filesystem issues"
+
+    if scan_dmesg_errors \
+        "$part_log_dir" \
+        "EXT4-fs .*|F2FS-fs .*|BTRFS .*|XFS .*|VFS.*|systemd-fsck.*|erofs.*" \
+        "dummy regulator|supply [^ ]+ not found|using dummy regulator"
+    then
+        log_fail "Relevant mount/storage/filesystem dmesg errors were found"
+        return 1
+    fi
+
+    log_info "No relevant mount/storage/filesystem dmesg errors were found"
+    return 0
+}
+
+# Log the current mount inventory in a CI-friendly format.
+# Prefers findmnt, falls back to /proc/mounts, then mount(8).
+partition_log_current_mounts() {
+    log_info "----- Current mount inventory -----"
+
+    if command -v findmnt >/dev/null 2>&1; then
+        findmnt -rn -o TARGET,SOURCE,FSTYPE,OPTIONS 2>/dev/null | \
+        while IFS= read -r line; do
+            if [ -n "$line" ]; then
+                log_info "[mount] $line"
+            fi
+        done
+        log_info "----- End current mount inventory -----"
+        return 0
+    fi
+
+    if [ -r /proc/mounts ]; then
+        while IFS= read -r line; do
+            if [ -n "$line" ]; then
+                log_info "[mount] $line"
+            fi
+        done < /proc/mounts
+        log_info "----- End current mount inventory -----"
+        return 0
+    fi
+
+    if command -v mount >/dev/null 2>&1; then
+        mount 2>/dev/null | while IFS= read -r line; do
+            if [ -n "$line" ]; then
+                log_info "[mount] $line"
+            fi
+        done
+        log_info "----- End current mount inventory -----"
+        return 0
+    fi
+
+    log_warn "Unable to log current mount inventory"
+    log_info "----- End current mount inventory -----"
+    return 1
+}
+
+# Log block device and partition inventory for post-boot validation.
+# Uses lsblk for topology and blkid for filesystem metadata.
+partition_log_block_devices() {
+    log_info "----- Block device inventory -----"
+
+    if command -v lsblk >/dev/null 2>&1; then
+        lsblk -o NAME,TYPE,FSTYPE,SIZE,MOUNTPOINT,LABEL,PARTLABEL,UUID 2>/dev/null | \
+        while IFS= read -r line; do
+            if [ -n "$line" ]; then
+                log_info "[lsblk] $line"
+            fi
+        done
+    else
+        log_warn "lsblk not available for block device inventory"
+    fi
+
+    if command -v blkid >/dev/null 2>&1; then
+        blkid 2>/dev/null | while IFS= read -r line; do
+            if [ -n "$line" ]; then
+                log_info "[blkid] $line"
+            fi
+        done
+    else
+        log_warn "blkid not available for block device inventory"
+    fi
+
+    log_info "----- End block device inventory -----"
+    return 0
 }
