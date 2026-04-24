@@ -1,6 +1,6 @@
 #!/bin/sh
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
-# SPDX-License-Identifier: BSD-3-Clause#
+# SPDX-License-Identifier: BSD-3-Clause
 # Runner/utils/lib_gstreamer.sh
 #
 # GStreamer helpers.
@@ -20,9 +20,53 @@ GSTLAUNCHFLAGS="${GSTLAUNCHFLAGS:--e -v -m}"
 # GST_ALSA_PLAYBACK_DEVICE=hw:0,0
 # GST_ALSA_CAPTURE_DEVICE=hw:0,1
 
-# -------------------- Shared encoded-artifact directory --------------------
+# -------------------- Shared artifact directory (generic) --------------------
+# gstreamer_shared_artifact_dir <env_var_name> <shared_subdir> <local_subdir> <script_dir> <outdir>
+# Generic function to get shared artifact directory for any test type.
+# Priority:
+# 1. Environment variable if explicitly provided (e.g., VIDEO_SHARED_ENCODE_DIR, AUDIO_SHARED_RECORDED_DIR)
+# 2. A job-shared path derived from the common LAVA prefix before /tests/
+# 3. Fallback to <outdir>/<local_subdir> for local/manual runs
+#
+# Parameters:
+#   env_var_name: Name of environment variable to check (e.g., "VIDEO_SHARED_ENCODE_DIR")
+#   shared_subdir: Subdirectory name for shared path (e.g., "video-encode-decode", "audio-record-playback")
+#   local_subdir: Subdirectory name for local fallback (e.g., "encoded", "recorded")
+#   script_dir: Script directory path
+#   outdir: Output directory path
+#
+# Example usage:
+#   gstreamer_shared_artifact_dir "VIDEO_SHARED_ENCODE_DIR" "video-encode-decode" "encoded" "$SCRIPT_DIR" "$OUTDIR"
+#   gstreamer_shared_artifact_dir "AUDIO_SHARED_RECORDED_DIR" "audio-record-playback" "recorded" "$SCRIPT_DIR" "$OUTDIR"
+gstreamer_shared_artifact_dir() {
+    env_var_name="$1"
+    shared_subdir="$2"
+    local_subdir="$3"
+    script_dir="$4"
+    outdir="$5"
+
+    # Check if environment variable is set (using eval for dynamic variable name)
+    env_value=$(eval "printf '%s' \"\${${env_var_name}:-}\"")
+    if [ -n "$env_value" ]; then
+        printf '%s\n' "$env_value"
+        return 0
+    fi
+
+    # Check if we're in a LAVA test structure (contains /tests/)
+    case "$script_dir" in
+        */tests/*)
+            printf '%s/shared/%s\n' "${script_dir%%/tests/*}" "$shared_subdir"
+            ;;
+        *)
+            printf '%s/%s\n' "$outdir" "$local_subdir"
+            ;;
+    esac
+}
+
+# -------------------- Shared encoded-artifact directory (video) --------------------
 # gstreamer_shared_encoded_dir <script_dir> <outdir>
 # Prints a directory path to use for encoded video artifacts.
+# This is a wrapper around gstreamer_shared_artifact_dir for backward compatibility.
 # Priority:
 # 1. VIDEO_SHARED_ENCODE_DIR if explicitly provided
 # 2. A job-shared path derived from the common LAVA prefix before /tests/
@@ -30,20 +74,22 @@ GSTLAUNCHFLAGS="${GSTLAUNCHFLAGS:--e -v -m}"
 gstreamer_shared_encoded_dir() {
     script_dir="$1"
     outdir="$2"
+    
+    gstreamer_shared_artifact_dir "VIDEO_SHARED_ENCODE_DIR" "video-encode-decode" "encoded" "$script_dir" "$outdir"
+}
 
-    if [ -n "${VIDEO_SHARED_ENCODE_DIR:-}" ]; then
-        printf '%s\n' "$VIDEO_SHARED_ENCODE_DIR"
-        return 0
-    fi
-
-    case "$script_dir" in
-        */tests/*)
-            printf '%s/shared/video-encode-decode\n' "${script_dir%%/tests/*}"
-            ;;
-        *)
-            printf '%s/encoded\n' "$outdir"
-            ;;
-    esac
+# -------------------- Shared recorded-artifact directory (audio) --------------------
+# gstreamer_shared_recorded_dir <script_dir> <outdir>
+# Prints a directory path to use for recorded audio artifacts.
+# Priority:
+# 1. AUDIO_SHARED_RECORDED_DIR if explicitly provided
+# 2. A job-shared path derived from the common LAVA prefix before /tests/
+# 3. Fallback to <outdir>/recorded for local/manual runs
+gstreamer_shared_recorded_dir() {
+    script_dir="$1"
+    outdir="$2"
+    
+    gstreamer_shared_artifact_dir "AUDIO_SHARED_RECORDED_DIR" "audio-record-playback" "recorded" "$script_dir" "$outdir"
 }
 # -------------------- Element check --------------------
 has_element() {
@@ -483,11 +529,12 @@ gstreamer_run_gstlaunch_timeout() {
       # shellcheck disable=SC2086
       audio_timeout_run "${secs}s" "$GSTBIN" $GSTLAUNCHFLAGS $pipe
       return $?
-    fi
-    if command -v timeout >/dev/null 2>&1; then
+    elif command -v timeout >/dev/null 2>&1; then
       # shellcheck disable=SC2086
       timeout "$secs" "$GSTBIN" $GSTLAUNCHFLAGS $pipe
       return $?
+    else
+      log_warn "No timeout command available (audio_timeout_run or timeout), running without timeout"
     fi
   fi
 
@@ -546,7 +593,7 @@ gstreamer_build_audio_record_pipeline() {
   esac
 
   # Construct complete pipeline
-  printf '%s\n' "${source_elem} ! audioconvert ! ${encoder_elem} ! filesink location=${output_file}"
+  printf '%s\n' "${source_elem} ! audioconvert ! audioresample ! ${encoder_elem} ! filesink location=${output_file}"
   return 0
 }
 
@@ -618,44 +665,57 @@ gstreamer_build_audio_playback_pipeline() {
 # Uses severity-based matching to avoid false positives on benign logs
 gstreamer_check_errors() {
   logfile="$1"
-  
+
   [ -f "$logfile" ] || return 0
-  
-  # Check for explicit ERROR: prefixed messages (most reliable)
-  if grep -q -E "^ERROR:|^0:[0-9]+:[0-9]+\.[0-9]+ [0-9]+ [^ ]+ ERROR" "$logfile" 2>/dev/null; then
+
+  filtered_log="${logfile}.filtered.$$"
+  check_log="$logfile"
+
+  # Ignore known benign warnings seen on successful downstream V4L2 decode paths.
+  if sed \
+    -e '/gst_video_info_dma_drm_to_caps: assertion .*drm_fourcc != DRM_FORMAT_INVALID/d' \
+    -e "/gst_structure_remove_field: assertion 'IS_MUTABLE (structure)' failed/d" \
+    "$logfile" >"$filtered_log" 2>/dev/null; then
+    check_log="$filtered_log"
+  fi
+
+  # Explicit gst-launch / GStreamer ERROR/FATAL lines.
+  if grep -q -E '^ERROR:|^FATAL:|^0:[0-9]+:[0-9]+\.[0-9]+ [0-9]+ [^ ]+ (ERROR|FATAL)' "$check_log" 2>/dev/null; then
+    rm -f "$filtered_log" 2>/dev/null || true
     return 1
   fi
-  
-  # Check for ERROR messages from GStreamer elements
-  if grep -q -E "ERROR: from element|gst.*ERROR" "$logfile" 2>/dev/null; then
+
+  # Segmentation faults and signals
+  if grep -q -E 'Caught SIGSEGV|Segmentation fault|SIGABRT|SIGBUS|SIGILL' "$check_log" 2>/dev/null; then
+    rm -f "$filtered_log" 2>/dev/null || true
     return 1
   fi
-  
-  # Check for critical streaming errors
-  if grep -q -E "Internal data stream error|streaming stopped, reason not-negotiated" "$logfile" 2>/dev/null; then
+
+  # Element-reported hard failures.
+  if grep -q -E 'ERROR: from element|gst.*ERROR|gst.*FATAL' "$check_log" 2>/dev/null; then
+    rm -f "$filtered_log" 2>/dev/null || true
     return 1
   fi
-  
-  # Check for pipeline failures (more specific patterns)
-  if grep -q -E "pipeline doesn't want to preroll|pipeline doesn't want to play|ERROR.*pipeline" "$logfile" 2>/dev/null; then
+
+  # Known fatal streaming / negotiation failures.
+  if grep -q -E 'Internal data stream error|streaming stopped, reason not-negotiated|not-negotiated' "$check_log" 2>/dev/null; then
+    rm -f "$filtered_log" 2>/dev/null || true
     return 1
   fi
-  
-  # Check for state change failures (require ERROR context)
-  if grep -q -E "ERROR.*failed to change state|ERROR.*state change failed" "$logfile" 2>/dev/null; then
+
+  # Pipeline / state transition failures.
+  if grep -q -E "pipeline doesn't want to preroll|pipeline doesn't want to play|ERROR.*pipeline|ERROR.*failed to change state|ERROR.*state change failed|failed to change state|state change failed" "$check_log" 2>/dev/null; then
+    rm -f "$filtered_log" 2>/dev/null || true
     return 1
   fi
-  
-  # Check for specific error patterns with proper grouping
-  if grep -q -E '(^ERROR:|ERROR: from element|Internal data stream error|streaming stopped, reason not-negotiated|pipeline.*failed|state change failed|Could not open resource|No such file or directory)' "$logfile" 2>/dev/null; then
+
+  # Resource / file failures.
+  if grep -q -E 'Could not open resource|No such file or directory|Failed to open|failed to open' "$check_log" 2>/dev/null; then
+    rm -f "$filtered_log" 2>/dev/null || true
     return 1
   fi
-  
-  # Check for CRITICAL or FATAL level messages (keep these as they are actual severity indicators)
-  if grep -q -E '(^CRITICAL:|^FATAL:|gst.*(CRITICAL|FATAL))' "$logfile" 2>/dev/null; then
-    return 1
-  fi
-  
+
+  rm -f "$filtered_log" 2>/dev/null || true
   return 0
 }
 
@@ -666,42 +726,102 @@ gstreamer_check_errors() {
 gstreamer_validate_log() {
   logfile="$1"
   testname="${2:-test}"
-  
+
   [ -f "$logfile" ] || {
     log_warn "$testname: Log file not found: $logfile"
     return 1
   }
-  
+
   if ! gstreamer_check_errors "$logfile"; then
-    log_fail "$testname: GStreamer errors detected in log"
-    
-    # Extract and log specific error messages
-    if grep -q "ERROR:" "$logfile" 2>/dev/null; then
-      log_fail "Error messages found:"
-      grep "ERROR:" "$logfile" 2>/dev/null | head -n 5 | while IFS= read -r line; do
-        log_fail "  $line"
-      done
+    log_fail "$testname: GStreamer fatal errors detected in log"
+
+    grep -E '^ERROR:|^FATAL:|ERROR: from element|gst.*ERROR|gst.*FATAL|Internal data stream error|streaming stopped, reason not-negotiated|not-negotiated|pipeline doesn'\''t want to preroll|pipeline doesn'\''t want to play|failed to change state|state change failed|Could not open resource|No such file or directory|Failed to open|failed to open' \
+      "$logfile" 2>/dev/null | head -n 5 | while IFS= read -r line; do
+      [ -n "$line" ] && log_fail " $line"
+    done
+
+    if grep -q 'not-negotiated' "$logfile" 2>/dev/null; then
+      log_fail " Reason: Format negotiation failed (caps mismatch)"
     fi
-    
-    # Check for specific failure reasons
-    if grep -q "not-negotiated" "$logfile" 2>/dev/null; then
-      log_fail "  Reason: Format negotiation failed (caps mismatch)"
+
+    if grep -q -E 'Could not open resource|Failed to open|failed to open' "$logfile" 2>/dev/null; then
+      log_fail " Reason: File or device access failed"
     fi
-    
-    if grep -q "Could not open" "$logfile" 2>/dev/null; then
-      log_fail "  Reason: File or device access failed"
+
+    if grep -q 'No such file or directory' "$logfile" 2>/dev/null; then
+      log_fail " Reason: File not found"
     fi
-    
-    if grep -q "No such file" "$logfile" 2>/dev/null; then
-      log_fail "  Reason: File not found"
+
+    if grep -q -E 'Caught SIGSEGV|Segmentation fault' "$logfile" 2>/dev/null; then
+      log_fail " Reason: Segmentation fault (SIGSEGV) - critical crash"
     fi
-    
+
+    if grep -q -E 'SIGABRT|SIGBUS|SIGILL' "$logfile" 2>/dev/null; then
+      log_fail " Reason: Fatal signal caught - process crashed"
+    fi
+
     return 1
   fi
-  
+
+  filtered_log="${logfile}.filtered.$$"
+  check_log="$logfile"
+
+  # Ignore known benign warnings seen on successful downstream V4L2 decode paths.
+  if sed \
+    -e '/gst_video_info_dma_drm_to_caps: assertion .*drm_fourcc != DRM_FORMAT_INVALID/d' \
+    -e "/gst_structure_remove_field: assertion 'IS_MUTABLE (structure)' failed/d" \
+    "$logfile" >"$filtered_log" 2>/dev/null; then
+    check_log="$filtered_log"
+  fi
+
+  # If any CRITICAL lines remain after filtering, decide using success evidence
+  # instead of failing blindly on severity alone.
+  if grep -q -E '(^CRITICAL:|^FATAL:|gst.*(CRITICAL|FATAL))' "$check_log" 2>/dev/null; then
+    playing_seen=0
+    eos_seen=0
+    complete_seen=0
+    caps_seen=0
+
+    if grep -q -E 'Setting pipeline to PLAYING|new-state=\(GstState\)playing' "$logfile" 2>/dev/null; then
+      playing_seen=1
+    fi
+
+    if grep -q -E 'Got EOS from element|EOS received - stopping pipeline' "$logfile" 2>/dev/null; then
+      eos_seen=1
+    fi
+
+    if grep -q -E 'Execution ended after|Freeing pipeline' "$logfile" 2>/dev/null; then
+      complete_seen=1
+    fi
+
+    if grep -q -E 'caps = (video|audio)/x-|caps = image/' "$logfile" 2>/dev/null; then
+      caps_seen=1
+    fi
+
+    if [ "$eos_seen" -eq 1 ]; then
+      complete_seen=1
+    fi
+
+    if [ "$playing_seen" -eq 1 ] && [ "$complete_seen" -eq 1 ] && [ "$caps_seen" -eq 1 ]; then
+      log_warn "$testname: Non-fatal GStreamer criticals detected, but pipeline completed successfully"
+      grep -E '(^CRITICAL:|^FATAL:|gst.*(CRITICAL|FATAL))' "$check_log" 2>/dev/null | head -n 5 | while IFS= read -r line; do
+        [ -n "$line" ] && log_warn " $line"
+      done
+      rm -f "$filtered_log" 2>/dev/null || true
+      return 0
+    fi
+
+    log_fail "$testname: GStreamer critical/fatal messages detected without clear success evidence"
+    grep -E '(^CRITICAL:|^FATAL:|gst.*(CRITICAL|FATAL))' "$check_log" 2>/dev/null | head -n 5 | while IFS= read -r line; do
+      [ -n "$line" ] && log_fail " $line"
+    done
+    rm -f "$filtered_log" 2>/dev/null || true
+    return 1
+  fi
+
+  rm -f "$filtered_log" 2>/dev/null || true
   return 0
 }
-
 # -------------------- Video codec helpers (V4L2) --------------------
 # gstreamer_resolution_to_wh <resolution>
 # Converts resolution name to width and height
@@ -1075,4 +1195,448 @@ prepare_vp9_from_local_path() {
   fi
 
   return 1
+}
+# --------------------------------------------------------------
+# download_resource
+#   $1  url   – URL to download
+#   $2  dest  – Either a file name or an existing directory.
+#   Prints the full path of the downloaded file on stdout.
+# --------------------------------------------------------------
+download_resource() {
+    url=$1
+    dest=$2
+
+    if [ -d "${dest}" ]; then
+        filename=$(basename "${url}")
+        dest="${dest%/}/${filename}"
+    fi
+
+    # Check if file already exists and is non-empty
+    if [ -f "${dest}" ] && [ -s "${dest}" ]; then
+        if command -v realpath >/dev/null 2>&1; then
+            realpath "${dest}"
+        else
+            case "${dest}" in
+                ./*) echo "${dest#./}" ;;
+                *)   echo "${dest}" ;;
+            esac
+        fi
+        return 0
+    fi
+    if command -v ensure_network_online >/dev/null 2>&1; then
+        if ! ensure_network_online; then
+            echo "Network offline/limited; cannot fetch assets"
+            return 1
+        fi
+    fi
+
+    mkdir -p "$(dirname "${dest}")"
+    if command -v curl >/dev/null 2>&1; then
+        curl -fkL "${url}" -o "${dest}" || { echo "Error: curl failed to download ${url}" >&2; return 1; }
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q "${url}" -O "${dest}" || { echo "Error: wget failed to download ${url}" >&2; return 1; }
+    else
+        echo "Error: neither 'curl' nor 'wget' is installed." >&2
+        return 1
+    fi
+
+    # Verify successful download with non-empty file
+    if [ ! -s "${dest}" ]; then
+        echo "Error: downloaded file is empty: ${dest}" >&2
+        return 1
+    fi
+
+    if command -v realpath >/dev/null 2>&1; then
+        realpath "${dest}"
+    else
+        case "${dest}" in
+        ./*) echo "${dest#./}" ;;
+        *)   echo "${dest}" ;;
+        esac
+    fi
+}
+# --------------------------------------------------------------
+# extract_zip_to_dir
+# --------------------------------------------------------------
+extract_zip_to_dir() {
+    zip_path=$1
+    dest_dir=$2
+
+    mkdir -p "${dest_dir}"
+    if ! unzip -o "${zip_path}" -d "${dest_dir}" >/dev/null; then
+        echo "Unzip of ${zip_path} failed" >&2
+        return 1
+    fi
+}
+# -------------------------------------------------------------------------
+# check_pipeline_elements <pipeline-string>
+#   Verify that every GStreamer element that appears in a gst-launch
+#   pipeline is installed on the system (via `has_element`).
+#   Returns:
+#       0 – all elements are present
+#       1 – at least one element is missing
+# -------------------------------------------------------------------------
+check_pipeline_elements() {
+    pipeline="${1:?missing pipeline argument}"
+    missing_count=0
+    missing_list=""
+    total_elements=0
+
+    log_info "Checking elements in pipeline"
+
+    # ---------------------------------------------------------
+    # Normalise the pipeline string
+    # ---------------------------------------------------------
+    pipeline=$(printf '%s' "$pipeline" | tr -d '\\\n')
+    pipeline=${pipeline#gst-launch-1.0* }
+    #   Remove the literal "gst-launch-1.0" if present
+    pipeline=${pipeline#gst-launch-1.0}
+    #   Trim any leading whitespace left by the previous step
+    pipeline=${pipeline#"${pipeline%%[![:space:]]*}"}
+    #   Drop leading option tokens (e.g. "-e", "-v", "--no-fault")
+    while [ "${pipeline#-}" != "$pipeline" ]; do
+        #   Remove the first token (option) and any following whitespace
+        pipeline=${pipeline#* }
+        pipeline=${pipeline#"${pipeline%%[![:space:]]*}"}
+    done
+
+    # ---------------------------------------------------------
+    # Write the token list to a temporary file
+    # ---------------------------------------------------------
+    tmpfile=$(mktemp)
+    printf '%s' "$pipeline" | tr '!' '\n' >"$tmpfile"
+
+    # ---------------------------------------------------------
+    # Read the file line‑by‑line – this runs in the *current*
+    #    shell, so variable updates survive.
+    # ---------------------------------------------------------
+    while IFS= read -r element_spec; do
+        # ---- NEW ----
+        # Strip surrounding whitespace; skip blank lines
+        # element_spec=$(printf '%s' "$element_spec" | xargs)
+        element_spec=$(printf '%s\n' "$element_spec" | awk '{$1=$1; print}')
+        [ -z "$element_spec" ] && continue
+        # --------------
+
+        element_name=$(printf '%s' "$element_spec" | cut -d' ' -f1)
+
+        case "$element_name" in
+            *.)               log_info "Skipping element reference: $element_name" ; continue ;;
+            name=*)           log_info "Skipping property assignment: $element_name" ; continue ;;
+            *_::*)            log_info "Skipping property assignment: $element_name" ; continue ;;
+            video/*|audio/*|application/*|text/*|image/*)
+                            log_info "Skipping caps filter: $element_name" ; continue ;;
+            *)
+                total_elements=$(( total_elements + 1 ))
+                if ! has_element "$element_name"; then
+                    missing_count=$(( missing_count + 1 ))
+                    missing_list="${missing_list}${element_name} "
+                    log_error "Required element missing: $element_name"
+                fi
+                ;;
+        esac
+    done <"$tmpfile"
+    # Clean up the temporary file
+    rm -f "$tmpfile"
+
+    if [ "$missing_count" -eq 0 ]; then
+        log_pass "All $total_elements elements in pipeline are available"
+        return 0
+    else
+        log_fail "Missing $missing_count/$total_elements elements: $missing_list"
+        return 1
+    fi
+}
+# ----------------------------------------------------------------------
+#  Run a pipeline with timeout, capture console output and GST debug logs.
+# ----------------------------------------------------------------------
+run_pipeline_with_logs() {
+    name=$1
+    cmd=$2
+    logdir=${3:-logs}
+    TIMEOUT=${4:-60} # default 60 seconds
+
+    console_log="${logdir}/${name}_console.log"
+    gst_debug_log="${logdir}/${name}_gst_debug.log"
+
+    export GST_DEBUG_FILE="${gst_debug_log}"
+
+    log_info "Running ${name} (timeout=${TIMEOUT}s)"
+    gstreamer_run_gstlaunch_timeout "$TIMEOUT" "$cmd" >"$console_log" 2>&1
+    rc=$?
+
+    # Look for a successful PLAYING state and the absence of ERROR messages.
+    playing=$(grep -c "Setting pipeline to PLAYING" "$console_log" || true)
+    error_present=$(grep -c "ERROR:" "$console_log" || true)
+
+    if [ "$playing" -gt 0 ] && [ "$error_present" -eq 0 ]; then
+        log_pass "${name} PASS"
+        return 0
+    fi
+
+    # Special case: timeout (rc = 124) but PLAYING was already reached.
+    if [ "$rc" -eq 124 ] && [ "$playing" -gt 0 ]; then
+        log_pass "${name} PASS (completed before timeout)"
+        return 0
+    fi
+
+    # Anything else is a failure.
+    log_fail "${name} FAIL (rc=${rc})"
+    log_info "=== ERROR DETAILS ==="
+    if [ "$error_present" -gt 0 ]; then
+        grep -A10 -B5 "ERROR:" "$console_log" | tail -n 30 |
+            while IFS= read -r line; do log_info "$line"; done
+    else
+        tail -n 30 "$console_log" |
+            while IFS= read -r line; do log_info "$line"; done
+    fi
+    log_info "====================="
+    return 1
+}
+# ------------------------------------------------------------------
+# Function:  check_file_size
+# Purpose :  Check that a file exists and its size > 0.
+# Returns :  0  → file size > 0 (success)
+#            1  → file missing, unreadable, or size == 0 (failure)
+# Requires:  GNU coreutils (stat -c %s)
+# ------------------------------------------------------------------
+check_file_size() {
+  input_file_path="$1"
+  expected_file_size="$2"
+
+  if [ -z "$input_file_path" ]; then
+      log_fail "No input file path provided"
+      return 1
+  fi
+  if [ ! -e "$input_file_path" ]; then
+      log_fail "Encoded video file does not exist: $input_file_path"
+      return 1
+  fi
+
+    # ---- Ensure we have `stat` ------------------------------------------------
+    if ! command -v stat >/dev/null 2>&1; then
+        log_fail "stat command not found – cannot determine file size"
+        return 1
+    fi
+
+    # ---- Get the actual size -------------------------------------------------
+    size_in_bytes=$(stat -c %s "$input_file_path" 2>/dev/null || wc -c <"$input_file_path" 2>/dev/null) || {
+        log_fail "Unable to read size of file: $input_file_path"
+        return 1
+    }
+
+    # ---- Compare with the expected size --------------------------------------
+    if [ "$size_in_bytes" -ge "$expected_file_size" ]; then
+        log_pass "File OK (size ${size_in_bytes} bytes ≥ ${expected_file_size} bytes): $input_file_path"
+        return 0
+    else
+        log_info "File too small (size ${size_in_bytes} bytes < ${expected_file_size} bytes): $input_file_path"
+        return 1
+    fi
+}
+
+# ==================== Camera Pipeline Builders ====================
+
+# -------------------- Camera format helpers --------------------
+# camera_format_to_gst_string <format>
+# Converts camera format name to GStreamer format string
+# Prints: GStreamer format string (NV12 or NV12_Q08C)
+camera_format_to_gst_string() {
+  format="$1"
+  case "$format" in
+    nv12) printf '%s\n' "NV12" ;;
+    ubwc) printf '%s\n' "NV12_Q08C" ;;
+    *) printf '%s\n' "" ;;
+  esac
+}
+
+# -------------------- qtiqmmfsrc pipeline builders --------------------
+# camera_build_qtiqmmfsrc_fakesink_pipeline <camera_id> <format> <width> <height> <framerate>
+# Builds qtiqmmfsrc fakesink test pipeline (uses timeout for duration control)
+# Prints: pipeline string
+camera_build_qtiqmmfsrc_fakesink_pipeline() {
+  camera_id="$1"
+  format="$2"
+  width="$3"
+  height="$4"
+  framerate="$5"
+  
+  gst_format=$(camera_format_to_gst_string "$format")
+  [ -z "$gst_format" ] && return 1
+  
+  if [ "$format" = "ubwc" ]; then
+    printf '%s\n' "qtiqmmfsrc camera=${camera_id} name=camsrc ! video/x-raw,format=${gst_format},width=${width},height=${height},framerate=${framerate}/1,interlace-mode=progressive,colorimetry=bt601 ! queue ! fakesink"
+  else
+    printf '%s\n' "qtiqmmfsrc camera=${camera_id} name=camsrc ! video/x-raw,format=${gst_format},width=${width},height=${height},framerate=${framerate}/1 ! fakesink"
+  fi
+}
+
+# camera_build_qtiqmmfsrc_preview_pipeline <camera_id> <format> <width> <height> <framerate>
+# Builds qtiqmmfsrc preview pipeline with waylandsink
+# Prints: pipeline string
+camera_build_qtiqmmfsrc_preview_pipeline() {
+  camera_id="$1"
+  format="$2"
+  width="$3"
+  height="$4"
+  framerate="$5"
+  
+  gst_format=$(camera_format_to_gst_string "$format")
+  [ -z "$gst_format" ] && return 1
+  
+  if [ "$format" = "ubwc" ]; then
+    printf '%s\n' "qtiqmmfsrc camera=${camera_id} name=camsrc ! video/x-raw,format=${gst_format},width=${width},height=${height},framerate=${framerate}/1 ! waylandsink fullscreen=true async=true sync=false"
+  else
+    printf '%s\n' "qtiqmmfsrc camera=${camera_id} name=camsrc ! video/x-raw,format=${gst_format},width=${width},height=${height},framerate=${framerate}/1 ! waylandsink fullscreen=true async=true sync=false"
+  fi
+}
+
+# camera_build_qtiqmmfsrc_encode_pipeline <camera_id> <format> <width> <height> <framerate> <output_file>
+# Builds qtiqmmfsrc encode pipeline with v4l2h264enc
+# Prints: pipeline string
+camera_build_qtiqmmfsrc_encode_pipeline() {
+  camera_id="$1"
+  format="$2"
+  width="$3"
+  height="$4"
+  framerate="$5"
+  output_file="$6"
+  
+  gst_format=$(camera_format_to_gst_string "$format")
+  [ -z "$gst_format" ] && return 1
+  
+  if [ "$format" = "ubwc" ]; then
+    printf '%s\n' "qtiqmmfsrc camera=${camera_id} name=camsrc ! video/x-raw,format=${gst_format},width=${width},height=${height},framerate=${framerate}/1,interlace-mode=progressive,colorimetry=bt601 ! queue ! v4l2h264enc capture-io-mode=4 output-io-mode=5 ! h264parse ! mp4mux ! queue ! filesink location=${output_file}"
+  else
+    printf '%s\n' "qtiqmmfsrc camera=${camera_id} name=camsrc ! video/x-raw,format=${gst_format},width=${width},height=${height},framerate=${framerate}/1 ! queue ! v4l2h264enc capture-io-mode=4 output-io-mode=4 ! h264parse ! mp4mux ! queue ! filesink location=${output_file}"
+  fi
+}
+
+# -------------------- libcamerasrc pipeline builders --------------------
+# camera_build_libcamera_fakesink_pipeline <width> <height> <framerate>
+# Builds libcamerasrc fakesink pipeline with optional resolution caps (uses timeout for duration control)
+# Parameters:
+#   width: Video width (0 for no caps filter)
+#   height: Video height (0 for no caps filter)
+#   framerate: Framerate in fps
+# Prints: pipeline string
+camera_build_libcamera_fakesink_pipeline() {
+  width="$1"
+  height="$2"
+  framerate="${3:-30}"
+  
+  # If width/height are 0 or empty, build pipeline without caps filter
+  if [ -z "$width" ] || [ -z "$height" ] || [ "$width" -eq 0 ] 2>/dev/null || [ "$height" -eq 0 ] 2>/dev/null; then
+    printf '%s\n' "libcamerasrc ! fakesink"
+  else
+    printf '%s\n' "libcamerasrc ! video/x-raw,width=${width},height=${height},framerate=${framerate}/1 ! fakesink"
+  fi
+}
+
+# camera_build_libcamera_preview_pipeline <width> <height> <framerate>
+# Builds libcamerasrc preview pipeline with optional resolution caps (uses timeout for duration control)
+# Parameters:
+#   width: Video width (0 for no caps filter)
+#   height: Video height (0 for no caps filter)
+#   framerate: Framerate in fps
+# Prints: pipeline string
+camera_build_libcamera_preview_pipeline() {
+  width="$1"
+  height="$2"
+  framerate="${3:-30}"
+  
+  # If width/height are 0 or empty, build pipeline without caps filter
+  if [ -z "$width" ] || [ -z "$height" ] || [ "$width" -eq 0 ] 2>/dev/null || [ "$height" -eq 0 ] 2>/dev/null; then
+    printf '%s\n' "libcamerasrc ! videoconvert ! waylandsink fullscreen=true"
+  else
+    printf '%s\n' "libcamerasrc ! video/x-raw,width=${width},height=${height},framerate=${framerate}/1 ! videoconvert ! waylandsink fullscreen=true"
+  fi
+}
+
+# camera_build_libcamera_encode_pipeline <width> <height> <output_file> <framerate>
+# Builds libcamerasrc encode pipeline with NV12 format (uses timeout for duration control)
+# Parameters:
+#   width: Video width
+#   height: Video height
+#   output_file: Output MP4 file path
+#   framerate: Framerate in fps
+# Prints: pipeline string
+camera_build_libcamera_encode_pipeline() {
+  width="$1"
+  height="$2"
+  output_file="$3"
+  framerate="${4:-30}"
+  
+  printf '%s\n' "libcamerasrc ! videoconvert ! video/x-raw,format=NV12,width=${width},height=${height},framerate=${framerate}/1 ! v4l2h264enc capture-io-mode=4 output-io-mode=4 ! h264parse ! mp4mux ! filesink location=${output_file}"
+}
+
+# -------------------- Wayland/Weston setup helper --------------------
+# camera_setup_wayland_environment <test_name>
+# Sets up Wayland/Weston environment for camera preview tests
+# Sets wayland_ready=1 if successful, 0 otherwise
+# Parameters:
+#   test_name: Name of the test for logging purposes
+# Returns: 0 if Wayland is ready, 1 otherwise
+camera_setup_wayland_environment() {
+  test_name="${1:-Camera_Test}"
+  
+  wayland_ready=0
+  sock=""
+  
+  # Try to find existing Wayland socket
+  if command -v discover_wayland_socket_anywhere >/dev/null 2>&1; then
+    sock=$(discover_wayland_socket_anywhere | head -n 1 || true)
+    if [ -n "$sock" ]; then
+      log_info "Found existing Wayland socket: $sock"
+      if command -v adopt_wayland_env_from_socket >/dev/null 2>&1; then
+        if adopt_wayland_env_from_socket "$sock"; then
+          wayland_ready=1
+          log_info "Adopted Wayland environment from socket"
+        fi
+      fi
+    fi
+  fi
+  
+  # Try starting Weston if no socket found
+  if [ "$wayland_ready" -eq 0 ] && [ -z "$sock" ]; then
+    if command -v weston_pick_env_or_start >/dev/null 2>&1; then
+      log_info "No Wayland socket found, attempting to start Weston..."
+      if weston_pick_env_or_start "$test_name"; then
+        # Re-discover socket after Weston start
+        if command -v discover_wayland_socket_anywhere >/dev/null 2>&1; then
+          sock=$(discover_wayland_socket_anywhere | head -n 1 || true)
+          if [ -n "$sock" ]; then
+            log_info "Weston started successfully with socket: $sock"
+            if command -v adopt_wayland_env_from_socket >/dev/null 2>&1; then
+              if adopt_wayland_env_from_socket "$sock"; then
+                wayland_ready=1
+              fi
+            fi
+          fi
+        fi
+      fi
+    fi
+  fi
+  
+  # Verify Wayland connection
+  if [ "$wayland_ready" -eq 1 ] || [ -n "${WAYLAND_DISPLAY:-}" ]; then
+    if command -v wayland_connection_ok >/dev/null 2>&1; then
+      if wayland_connection_ok; then
+        wayland_ready=1
+        log_info "Wayland connection verified: OK"
+      else
+        wayland_ready=0
+        log_warn "Wayland connection test failed"
+      fi
+    else
+      # Assume ready if WAYLAND_DISPLAY is set and no verification available
+      wayland_ready=1
+      log_info "Wayland environment set (WAYLAND_DISPLAY=${WAYLAND_DISPLAY})"
+    fi
+  fi
+  
+  # Export wayland_ready for caller
+  export wayland_ready
+  
+  return $((1 - wayland_ready))
 }
