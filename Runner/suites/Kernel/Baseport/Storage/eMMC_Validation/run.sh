@@ -16,13 +16,14 @@ done
 
 if [ -z "$INIT_ENV" ]; then
     echo "[ERROR] Could not find init_env (starting at $SCRIPT_DIR)" >&2
-    exit 1
+    exit 0
 fi
 
 # Only source if not already loaded
 if [ -z "$__INIT_ENV_LOADED" ]; then
     # shellcheck disable=SC1090
     . "$INIT_ENV"
+    export __INIT_ENV_LOADED=1
 fi
 
 # Always source functestlib.sh
@@ -31,13 +32,13 @@ fi
 
 TESTNAME="eMMC_Validation"
 test_path=$(find_test_case_by_name "$TESTNAME")
-cd "$test_path" || exit 1
+cd "$test_path" || exit 0
 res_file="./$TESTNAME.res"
 
 log_info "--------------------------------------------------"
 log_info "------------ Starting $TESTNAME Test -------------"
 
-check_dependencies dd grep cut head tail udevadm
+check_dependencies dd grep
 
 MANDATORY_CONFIGS="CONFIG_MMC CONFIG_MMC_BLOCK"
 OPTIONAL_CONFIGS="CONFIG_MMC_SDHCI CONFIG_MMC_SDHCI_MSM CONFIG_MMC_BLOCK_MINORS"
@@ -95,7 +96,7 @@ else
         else
             log_fail "eMMC read test failed"
             echo "$TESTNAME FAIL" > "$res_file"
-            exit 1
+            exit 0
         fi
     fi
 fi
@@ -116,7 +117,7 @@ if dd if=/dev/zero of="$tmpfile" bs=1M count=64 conv=fsync status=none 2>/dev/nu
         log_fail "eMMC I/O stress test failed (read)"
         rm -f "$tmpfile"
         echo "$TESTNAME FAIL" > "$res_file"
-        exit 1
+        exit 0
     fi
 else
     log_warn "'conv=fsync' not supported. Trying basic write fallback."
@@ -133,7 +134,7 @@ else
         log_fail "eMMC I/O stress test failed (fallback)"
         rm -f "$tmpfile"
         echo "$TESTNAME FAIL" > "$res_file"
-        exit 1
+        exit 0
     fi
 fi
 

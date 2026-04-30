@@ -1,0 +1,15 @@
+metadata:
+  name: ufs-runtime-suspend-resume
+  format: "Lava-Test Test Definition 1.0"
+  description: "Verify UFS Runtime suspend/resume during load and without load"
+  os:
+    - linux
+  scope:
+    - functional
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/Storage/ufs_runtime_suspend_resume
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh ufs_runtime_suspend_resume.res || true
