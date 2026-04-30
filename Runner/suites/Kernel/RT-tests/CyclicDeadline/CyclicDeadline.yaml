@@ -1,0 +1,30 @@
+metadata:
+  name: CyclicDeadline
+  format: "Lava-Test Test Definition 1.0"
+  description: "Run rt-tests cyclicdeadline in JSON mode and parse results without requiring python3."
+  os:
+    - linux
+  scope:
+    - performance
+    - preempt-rt
+
+params:
+  INTERVAL: "1000"
+  STEP: "500"
+  THREADS: "1"
+  DURATION: "2m"
+  BACKGROUND_CMD: ""
+  ITERATIONS: "1"
+  USER_BASELINE: ""
+  BINARY: ""
+  OUT_DIR: "./logs_CyclicDeadline"
+  VERBOSE: "0"
+  PROGRESS_EVERY: "1"
+  HEARTBEAT_SEC: "10"
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/RT-tests/CyclicDeadline
+    - ./run.sh --interval "${INTERVAL}" --step "${STEP}" --threads "${THREADS}" --duration "${DURATION}" --iterations "${ITERATIONS}" --background-cmd "${BACKGROUND_CMD}" --user-baseline "${USER_BASELINE}" --binary "${BINARY}" --out "${OUT_DIR}" --progress-every "${PROGRESS_EVERY}" --heartbeat-sec "${HEARTBEAT_SEC}" $( [ "${VERBOSE}" = "1" ] && echo "--verbose" ) || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh CyclicDeadline.res

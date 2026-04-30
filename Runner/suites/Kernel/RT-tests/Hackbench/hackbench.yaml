@@ -1,0 +1,38 @@
+metadata:
+  name: Hackbench
+  format: "Lava-Test Test Definition 1.0"
+  description: >
+    Hackbench is both a benchmark and a stress test for the Linux kernel scheduler.
+    It creates groups of communicating tasks via sockets or pipes and measures the
+    time taken. This wrapper runs hackbench for N iterations, parses Time samples
+    into mean/min/max and worst-sample, and emits Hackbench.res.
+  os:
+    - linux
+  scope:
+    - performance
+    - preempt-rt
+
+params:
+  OUT_DIR: "./logs_Hackbench"
+  VERBOSE: "0"
+  PROGRESS_EVERY: "1"
+  HEARTBEAT_SEC: "10"
+
+  ITERATIONS: "5"
+  TARGET: "host"
+  DATASIZE: "100"
+  LOOPS: "100"
+  GRPS: "10"
+  FDS: "20"
+  PIPE: "false"
+  THREADS: "false"
+
+  BACKGROUND_CMD: ""
+  BINARY: ""
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/RT-tests/Hackbench
+    - ./run.sh --out "${OUT_DIR}" --iterations "${ITERATIONS}" --target "${TARGET}" --datasize "${DATASIZE}" --loops "${LOOPS}" --grps "${GRPS}" --fds "${FDS}" --pipe "${PIPE}" --threads "${THREADS}" --background-cmd "${BACKGROUND_CMD}" --binary "${BINARY}" --progress-every "${PROGRESS_EVERY}" --heartbeat-sec "${HEARTBEAT_SEC}" $( [ "${VERBOSE}" = "1" ] && echo "--verbose" ) || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh Hackbench.res

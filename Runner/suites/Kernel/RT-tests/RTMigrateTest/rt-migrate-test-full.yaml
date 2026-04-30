@@ -1,0 +1,38 @@
+metadata:
+  name: RTMigrateTest-full
+  format: "Lava-Test Test Definition 1.0"
+  description: "Run rt-tests rt-migrate-test with extended options in JSON mode and parse results without requiring python3."
+  os:
+    - linux
+  scope:
+    - performance
+    - preempt-rt
+
+params:
+  DURATION: "2m"
+  BACKGROUND_CMD: ""
+  ITERATIONS: "1"
+
+  PRIO: "51"
+  QUIET: "true"
+  CHECK: "false"
+  EQUAL: "false"
+  LOOPS: ""
+  MAXERR_US: ""
+  RUN_TIME_MS: ""
+  SLEEP_TIME_MS: ""
+  NR_TASKS: ""
+
+  PROGRESS_EVERY: "1"
+  HEARTBEAT_SEC: "10"
+  VERBOSE: "0"
+
+  BINARY: ""
+  OUT_DIR: "./logs_RTMigrateTest"
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/RT-tests/RTMigrateTest
+    - ./run.sh --duration "${DURATION}" --iterations "${ITERATIONS}" --background-cmd "${BACKGROUND_CMD}" --prio "${PRIO}" --quiet "${QUIET}" --check "${CHECK}" --equal "${EQUAL}" --loops "${LOOPS}" --maxerr-us "${MAXERR_US}" --run-time-ms "${RUN_TIME_MS}" --sleep-time-ms "${SLEEP_TIME_MS}" --nr-tasks "${NR_TASKS}" --progress-every "${PROGRESS_EVERY}" --heartbeat-sec "${HEARTBEAT_SEC}" --out "${OUT_DIR}" --binary "${BINARY}" $( [ "${VERBOSE}" = "1" ] && echo "--verbose" ) || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh RTMigrateTest.res

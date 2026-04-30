@@ -1,0 +1,42 @@
+metadata:
+  name: SVSematest
+  format: "Lava-Test Test Definition 1.0"
+  description: "Run rt-tests svsematest (SYSV semaphore latency) in JSON mode and parse results without requiring python3."
+  os:
+    - linux
+  scope:
+    - performance
+    - preempt-rt
+
+params:
+  DURATION: "1m"
+  BACKGROUND_CMD: ""
+  ITERATIONS: "1"
+
+  PRIO: "98"
+  QUIET: "true"
+  THREADS: "true"
+  THREADS_NUM: ""
+  AFFINITY: "true"
+  AFFINITY_CPU: ""
+  BREAKTRACE_US: ""
+  DISTANCE_US: ""
+  FORK_MODE: "false"
+  FORK_OPT: ""
+  INTERVAL_US: ""
+  LOOPS: ""
+  SMP: "false"
+
+  BINARY: ""
+  OUT_DIR: "./logs_SVSematest"
+
+  VERBOSE: "0"
+  PROGRESS_EVERY: "1"
+  HEARTBEAT_SEC: "10"
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/RT-tests/SVSematest
+    - ./run.sh --duration "${DURATION}" --iterations "${ITERATIONS}" --background-cmd "${BACKGROUND_CMD}" --prio "${PRIO}" --quiet "${QUIET}" --threads "${THREADS}" --threads-num "${THREADS_NUM}" --affinity "${AFFINITY}" --affinity-cpu "${AFFINITY_CPU}" --breaktrace-us "${BREAKTRACE_US}" --distance-us "${DISTANCE_US}" --fork "${FORK_MODE}" --fork-opt "${FORK_OPT}" --interval-us "${INTERVAL_US}" --loops "${LOOPS}" --smp "${SMP}" --binary "${BINARY}" --out "${OUT_DIR}" --progress-every "${PROGRESS_EVERY}" --heartbeat-sec "${HEARTBEAT_SEC}" $( [ "${VERBOSE}" = "1" ] && echo "--verbose" ) || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh SVSematest.res

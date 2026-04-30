@@ -1,0 +1,40 @@
+metadata:
+  name: OSLat
+  format: "Lava-Test Test Definition 1.0"
+  description: "Run rt-tests oslat (OS latency detector) in JSON mode and parse results without requiring python3."
+  os:
+    - linux
+  scope:
+    - performance
+    - preempt-rt
+
+params:
+  DURATION: "1m"
+  BACKGROUND_CMD: ""
+  ITERATIONS: "1"
+
+  BUCKET_SIZE: ""
+  BIAS: "false"
+  CPU_LIST: ""
+  CPU_MAIN_THREAD: ""
+  RTPRIO: ""
+  WORKLOAD_MEM: ""
+  QUIET: "true"
+  SINGLE_PREHEAT: "false"
+  TRACE_THRESHOLD_US: ""
+  WORKLOAD: ""
+  BUCKET_WIDTH_NS: ""
+  ZERO_OMIT: "false"
+
+  BINARY: ""
+  OUT_DIR: "./logs_OSLat"
+  VERBOSE: "0"
+  PROGRESS_EVERY: "1"
+  HEARTBEAT_SEC: "10"
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/RT-tests/OSLat
+    - ./run.sh --duration "${DURATION}" --iterations "${ITERATIONS}" --background-cmd "${BACKGROUND_CMD}" --bucket-size "${BUCKET_SIZE}" --bias "${BIAS}" --cpu-list "${CPU_LIST}" --cpu-main-thread "${CPU_MAIN_THREAD}" --rtprio "${RTPRIO}" --workload-mem "${WORKLOAD_MEM}" --quiet "${QUIET}" --single-preheat "${SINGLE_PREHEAT}" --trace-threshold-us "${TRACE_THRESHOLD_US}" --workload "${WORKLOAD}" --bucket-width-ns "${BUCKET_WIDTH_NS}" --zero-omit "${ZERO_OMIT}" --binary "${BINARY}" --out "${OUT_DIR}" --progress-every "${PROGRESS_EVERY}" --heartbeat-sec "${HEARTBEAT_SEC}" $( [ "${VERBOSE}" = "1" ] && echo "--verbose" ) || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh OSLat.res

@@ -1,0 +1,41 @@
+metadata:
+  name: SigwaitTest
+  format: "Lava-Test Test Definition 1.0"
+  description: "Run rt-tests sigwaittest (sigwait() latency) in JSON mode and parse results without requiring python3."
+  os:
+    - linux
+  scope:
+    - performance
+    - preempt-rt
+
+params:
+  DURATION: "2m"
+  BACKGROUND_CMD: ""
+  ITERATIONS: "1"
+
+  PRIO: "98"
+  QUIET: "true"
+  THREADS: "true"
+  THREADS_NUM: "2"
+  AFFINITY: "true"
+  AFFINITY_CPU: ""
+  BREAKTRACE_US: ""
+  LOOPS: ""
+  DISTANCE: ""
+  INTERVAL: ""
+  FORK: "false"
+  FORK_OPT: ""
+
+  BINARY: ""
+  OUT_DIR: "./logs_SigwaitTest"
+
+  VERBOSE: "0"
+  PROGRESS_EVERY: "1"
+  HEARTBEAT_SEC: "10"
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/RT-tests/SigwaitTest
+    - ./run.sh --duration "${DURATION}" --iterations "${ITERATIONS}" --background-cmd "${BACKGROUND_CMD}" --prio "${PRIO}" --quiet "${QUIET}" --threads "${THREADS}" --threads-num "${THREADS_NUM}" --affinity "${AFFINITY}" --affinity-cpu "${AFFINITY_CPU}" --breaktrace-us "${BREAKTRACE_US}" --loops "${LOOPS}" --distance "${DISTANCE}" --interval "${INTERVAL}" --fork "${FORK}" --fork-opt "${FORK_OPT}" --binary "${BINARY}" --out "${OUT_DIR}" --progress-every "${PROGRESS_EVERY}" --heartbeat-sec "${HEARTBEAT_SEC}" $( [ "${VERBOSE}" = "1" ] && echo "--verbose" ) || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh SigwaitTest.res

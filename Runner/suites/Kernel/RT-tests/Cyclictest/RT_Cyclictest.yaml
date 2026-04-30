@@ -1,0 +1,33 @@
+metadata:
+  name: Cyclictest
+  format: "Lava-Test Test Definition 1.0"
+  description: "Run rt-tests cyclictest and collect latency KPI in JSON; parse results without requiring python3."
+  os:
+    - linux
+  scope:
+    - performance
+    - preempt-rt
+
+params:
+  INTERVAL: "1000"
+  THREADS: "1"
+  DURATION: "2m"
+  BACKGROUND_CMD: ""
+  ITERATIONS: "1"
+  PRIO: "98"
+  QUIET: "true"
+  MLOCKALL: "true"
+  SMP: "false"
+  BINARY: ""
+  VERBOSE: "0"
+  PROGRESS_EVERY: "1"
+  HEARTBEAT_SEC: "10"
+  OUT_DIR: "./logs_Cyclictest"
+
+run:
+  steps:
+    - 'REPO_PATH="$PWD"'
+    - 'cd Runner/suites/Kernel/RT-tests/Cyclictest'
+    - './run.sh --out "${OUT_DIR}" --interval "${INTERVAL}" --threads "${THREADS}" --duration "${DURATION}" --iterations "${ITERATIONS}" --background-cmd "${BACKGROUND_CMD}" --binary "${BINARY}" --progress-every "${PROGRESS_EVERY}" --heartbeat-sec "${HEARTBEAT_SEC}" $( [ "${VERBOSE}" = "1" ] && echo "--verbose" ) || true'
+    - 'if [ -f CyclicTest.res ]; then sed "s/^CyclicTest /Cyclictest /" CyclicTest.res > Cyclictest.res; fi'
+    - '$REPO_PATH/Runner/utils/send-to-lava.sh Cyclictest.res'

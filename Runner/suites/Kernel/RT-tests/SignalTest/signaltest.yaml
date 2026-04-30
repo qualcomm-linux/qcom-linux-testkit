@@ -1,0 +1,38 @@
+metadata:
+  name: SignalTest
+  format: "Lava-Test Test Definition 1.0"
+  description: "Run rt-tests signaltest (RT signal roundtrip) in JSON mode and parse results without requiring python3."
+  os:
+    - linux
+  scope:
+    - performance
+    - preempt-rt
+
+params:
+  DURATION: "1m"
+  BACKGROUND_CMD: ""
+  ITERATIONS: "1"
+
+  PRIO: "98"
+  THREADS: "2"
+  QUIET: "true"
+  AFFINITY: "true"
+  AFFINITY_CPU: ""
+  MLOCKALL: "true"
+  BREAKTRACE_US: ""
+  LOOPS: ""
+  SIG_VERBOSE: "false"
+
+  BINARY: ""
+  OUT_DIR: "./logs_SignalTest"
+
+  VERBOSE: "0"
+  PROGRESS_EVERY: "1"
+  HEARTBEAT_SEC: "10"
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/RT-tests/SignalTest
+    - ./run.sh --duration "${DURATION}" --iterations "${ITERATIONS}" --background-cmd "${BACKGROUND_CMD}" --prio "${PRIO}" --threads "${THREADS}" --quiet "${QUIET}" --affinity "${AFFINITY}" --affinity-cpu "${AFFINITY_CPU}" --mlockall "${MLOCKALL}" --breaktrace-us "${BREAKTRACE_US}" --loops "${LOOPS}" --sig-verbose "${SIG_VERBOSE}" --binary "${BINARY}" --out "${OUT_DIR}" --progress-every "${PROGRESS_EVERY}" --heartbeat-sec "${HEARTBEAT_SEC}" $( [ "${VERBOSE}" = "1" ] && echo "--verbose" ) || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh SignalTest.res
