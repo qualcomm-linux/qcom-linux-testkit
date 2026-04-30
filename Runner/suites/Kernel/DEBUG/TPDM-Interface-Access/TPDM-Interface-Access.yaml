@@ -1,0 +1,16 @@
+metadata:
+  name: TPDM-Interface-Access
+  format: "Lava-Test Test Definition 1.0"
+  description: "Test reading all active and inactive TPDM node interfaces, verifying dataset configurations and sysfs attributes."
+  os:
+    - linux
+  scope:
+    - coresight
+    - kernel
+
+run:
+  steps:
+    - REPO_PATH=$PWD || true
+    - cd Runner/suites/Kernel/DEBUG/TPDM-Interface-Access || true
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh TPDM-Interface-Access.res || true
