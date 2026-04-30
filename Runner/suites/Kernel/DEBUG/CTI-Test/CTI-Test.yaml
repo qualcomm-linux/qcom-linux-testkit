@@ -1,0 +1,16 @@
+metadata:
+  name: CTI-Trigger-Map
+  format: "Lava-Test Test Definition 1.0"
+  description: "Validates Coresight Cross Trigger Interface (CTI) by mapping and unmapping triggers to channels."
+  os:
+    - linux
+  scope:
+    - coresight
+    - kernel
+
+run:
+  steps:
+    - REPO_PATH=$PWD || true
+    - cd Runner/suites/Kernel/DEBUG/CTI-Test || true
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh CTI-Test.res || true
