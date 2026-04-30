@@ -1,0 +1,18 @@
+metadata:
+  name: ETM-Register
+  format: "Lava-Test Test Definition 1.0"
+  description: "Verifies read access to ETM (Embedded Trace Macrocell) registers 
+    located in the sysfs management (mgmt) and base directories. Validates that 
+    the registers can be read without errors while the ETM is active."
+  os:
+    - linux
+  scope:
+    - coresight
+    - kernel
+
+run:
+  steps:
+    - REPO_PATH=$PWD || true
+    - cd Runner/suites/Kernel/DEBUG/ETM-Register || true
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh ETM-Register.res || true
