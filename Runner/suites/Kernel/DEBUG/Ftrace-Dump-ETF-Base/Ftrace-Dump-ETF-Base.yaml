@@ -1,0 +1,16 @@
+metadata:
+  name: Ftrace-Dump-ETF-Base
+  format: "Lava-Test Test Definition 1.0"
+  description: "Validates STM trace data flow to an ETF sink through Ftrace. It ensures correct sink selection and verifies successful trace capture by reading ETF output."
+  os:
+    - linux
+  scope:
+    - coresight
+    - kernel
+
+run:
+  steps:
+    - REPO_PATH=$PWD || true
+    - cd Runner/suites/Kernel/DEBUG/Ftrace-Dump-ETF-Base || true
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh Ftrace-Dump-ETF-Base.res || true
