@@ -1,0 +1,30 @@
+{
+    "NativeHalX.OmniTest": {
+        "frames": 150,
+        "camera": 0,
+        "formats": [
+            34
+        ],
+        "resolutions": [
+            "max"
+        ],
+        "usage_flags": [
+            65536
+        ],
+        "data_spaces": [
+            260
+        ],
+        "directions": [
+            "OUTPUT"
+        ],
+        "stream_intervals": [
+            150
+        ],
+        "num_streams": 1,
+        "request_types": [
+            3
+        ],
+        "session_mode": 0,
+        "all_image_dump": true
+    }
+}
