@@ -3,10 +3,10 @@ metadata:
   format: "Lava-Test Test Definition 1.0"
   description: >
     Comprehensive camera validation using GStreamer with qtiqmmfsrc or libcamerasrc.
-    Auto-detects available plugin (qtiqmmfsrc: 10 tests, libcamerasrc: 7 tests).
-    Tests run in sequence: Fakesink -> Preview -> Encode.
-    qtiqmmfsrc supports NV12 (linear) and UBWC (Qualcomm compressed) formats.
-    libcamerasrc supports NV12 only.
+    Auto-detects available plugin (qtiqmmfsrc: 12 tests, libcamerasrc: 9 tests).
+    Tests run in sequence: Fakesink -> Preview -> Encode -> Snapshot.
+    qtiqmmfsrc supports NV12 (linear) and UBWC (Qualcomm compressed) formats, plus snapshot tests (1080p, 4K).
+    libcamerasrc supports NV12 only and includes snapshot tests (1080p, 4K).
   os:
     - linux
   scope:
@@ -15,7 +15,7 @@ metadata:
 params:
   CAMERA_ID: "0"
   CAMERA_PLUGIN: "auto"
-  CAMERA_TEST_MODES: "fakesink,preview,encode"
+  CAMERA_TEST_MODES: "fakesink,preview,encode,snapshot"
   CAMERA_FORMATS: "nv12,ubwc"
   CAMERA_RESOLUTIONS: "720p,1080p,4k"
   CAMERA_FRAMERATE: "30"

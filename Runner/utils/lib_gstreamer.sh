@@ -1512,6 +1512,28 @@ camera_build_qtiqmmfsrc_encode_pipeline() {
   fi
 }
 
+# camera_build_qtiqmmfsrc_snapshot_pipeline <camera_id> <width> <height> <framerate> <output_location> <max_files>
+# Builds qtiqmmfsrc snapshot pipeline for still image capture
+# Uses NV12 format with jpegenc for JPEG output
+# Parameters:
+#   camera_id: Camera device ID
+#   width: Image width
+#   height: Image height
+#   framerate: Framerate in fps
+#   output_location: Output file pattern (e.g., /path/to/camera0_4k_image%d.jpg)
+#   max_files: Maximum number of snapshots to capture
+# Prints: pipeline string
+camera_build_qtiqmmfsrc_snapshot_pipeline() {
+  camera_id="$1"
+  width="$2"
+  height="$3"
+  framerate="$4"
+  output_location="$5"
+  max_files="${6:-2}"
+  
+  printf '%s\n' "qtiqmmfsrc camera=${camera_id} name=camsrc ! capsfilter caps=\"video/x-raw,format=NV12,width=${width},height=${height},framerate=${framerate}/1\" ! jpegenc ! multifilesink location=${output_location} max-files=${max_files}"
+}
+
 # -------------------- libcamerasrc pipeline builders --------------------
 # camera_build_libcamera_fakesink_pipeline <width> <height> <framerate>
 # Builds libcamerasrc fakesink pipeline with optional resolution caps (uses timeout for duration control)
@@ -1568,6 +1590,24 @@ camera_build_libcamera_encode_pipeline() {
   framerate="${4:-30}"
   
   printf '%s\n' "libcamerasrc ! videoconvert ! video/x-raw,format=NV12,width=${width},height=${height},framerate=${framerate}/1 ! v4l2h264enc capture-io-mode=4 output-io-mode=4 ! h264parse ! mp4mux ! filesink location=${output_file}"
+}
+
+# camera_build_libcamera_snapshot_pipeline <width> <height> <output_location> <max_files>
+# Builds libcamerasrc snapshot pipeline for still image capture
+# Uses src_1::stream-role=still-capture for high-quality still images
+# Parameters:
+#   width: Image width
+#   height: Image height
+#   output_location: Output file pattern (e.g., /path/to/snapshot%d.jpg)
+#   max_files: Maximum number of snapshots to capture
+# Prints: pipeline string
+camera_build_libcamera_snapshot_pipeline() {
+  width="$1"
+  height="$2"
+  output_location="$3"
+  max_files="${4:-5}"
+  
+  printf '%s\n' "libcamerasrc name=camsrc src_1::stream-role=still-capture ! video/x-raw,width=${width},height=${height} ! videoconvert ! jpegenc ! multifilesink location=${output_location} max-files=${max_files}"
 }
 
 # -------------------- Wayland/Weston setup helper --------------------

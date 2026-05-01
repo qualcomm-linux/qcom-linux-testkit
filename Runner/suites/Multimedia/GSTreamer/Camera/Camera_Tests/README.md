@@ -34,29 +34,33 @@ Auto-detects available plugin (prioritizes qtiqmmfsrc). Use `--plugin` to explic
 
 ## Test Matrix
 
-### qtiqmmfsrc Tests (10 Total)
+### qtiqmmfsrc Tests (12 Total)
 
 | Category | Tests | Formats | Resolutions | Description |
 |----------|-------|---------|-------------|-------------|
 | Fakesink | 2 | NV12, UBWC | 720p | Basic capture validation |
 | Preview | 2 | NV12, UBWC | 4K | Display on Weston |
 | Encode | 6 | NV12, UBWC | 720p, 1080p, 4K | H.264 encoding to MP4 |
+| Snapshot | 2 | NV12 | 1080p, 4K | JPEG still image capture |
 
 **Format Notes:**
 - **NV12**: Standard linear format (universal support)
 - **UBWC**: Qualcomm compressed format (Qualcomm optimized)
+- **Snapshot**: Uses NV12 format only
 
-### libcamerasrc Tests (7 Total)
+### libcamerasrc Tests (9 Total)
 
 | Category | Tests | Resolutions | Description |
 |----------|-------|-------------|-------------|
 | Fakesink | 2 | 720p, 1080p | Basic capture validation |
 | Preview | 2 | 720p, 1080p | Display on Weston |
 | Encode | 3 | 720p, 1080p, 4K | H.264 encoding to MP4 |
+| Snapshot | 2 | 1080p, 4K | Still image capture (JPEG) |
 
 **Format Notes:**
 - Only supports NV12 format
 - Requires `videoconvert` element
+- Snapshot tests use `src_1::stream-role=still-capture` for high-quality stills
 
 ## Parameters
 
@@ -67,7 +71,7 @@ Auto-detects available plugin (prioritizes qtiqmmfsrc). Use `--plugin` to explic
 
 --camera-id <id>        Camera device ID (qtiqmmfsrc only, default: 0)
 --plugin <name>         Plugin: qtiqmmfsrc, libcamerasrc, auto (default: auto)
---test-modes <list>     Modes: fakesink,preview,encode (default: all)
+--test-modes <list>     Modes: fakesink,preview,encode,snapshot (default: all)
 --formats <list>        Formats: nv12,ubwc (qtiqmmfsrc only, default: both)
 --resolutions <list>    Resolutions: 720p,1080p,4k (default: all)
 --framerate <fps>       Framerate (default: 30)
@@ -82,7 +86,7 @@ Auto-detects available plugin (prioritizes qtiqmmfsrc). Use `--plugin` to explic
 |----------|-------------|---------|
 | `CAMERA_ID` | Camera device ID (qtiqmmfsrc only) | 0 |
 | `CAMERA_PLUGIN` | Plugin: qtiqmmfsrc, libcamerasrc, auto | auto |
-| `CAMERA_TEST_MODES` | Test modes (comma-separated) | fakesink,preview,encode |
+| `CAMERA_TEST_MODES` | Test modes (comma-separated) | fakesink,preview,encode,snapshot |
 | `CAMERA_FORMATS` | Formats (qtiqmmfsrc only) | nv12,ubwc |
 | `CAMERA_RESOLUTIONS` | Resolutions | 720p,1080p,4k |
 | `CAMERA_FRAMERATE` | Framerate (fps) | 30 |
@@ -102,6 +106,9 @@ Auto-detects available plugin (prioritizes qtiqmmfsrc). Use `--plugin` to explic
 # Run specific test modes
 ./run.sh --plugin qtiqmmfsrc --test-modes fakesink
 ./run.sh --plugin libcamerasrc --test-modes preview,encode
+
+# Run libcamerasrc snapshot tests (2 tests: 1080p and 4K)
+./run.sh --plugin libcamerasrc --test-modes snapshot
 
 # Test specific formats/resolutions
 ./run.sh --plugin qtiqmmfsrc --formats nv12 --resolutions 720p,1080p

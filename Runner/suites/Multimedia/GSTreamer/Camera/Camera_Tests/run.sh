@@ -70,7 +70,7 @@ total_tests=0
 # -------------------- Defaults --------------------
 cameraId="${CAMERA_ID:-0}"
 cameraPlugin="${CAMERA_PLUGIN:-auto}"
-testModeList="${CAMERA_TEST_MODES:-fakesink,preview,encode}"
+testModeList="${CAMERA_TEST_MODES:-fakesink,preview,encode,snapshot}"
 formatList="${CAMERA_FORMATS:-nv12,ubwc}"
 resolutionList="${CAMERA_RESOLUTIONS:-720p,1080p,4k}"
 framerate="${CAMERA_FRAMERATE:-30}"
@@ -247,22 +247,24 @@ Camera Tests - Comprehensive GStreamer Camera Validation
 OVERVIEW:
   This test suite validates camera functionality using GStreamer with two camera
   source plugins:
-  - qtiqmmfsrc (Qualcomm CAMX downstream) - 10 tests
-  - libcamerasrc (upstream) - 7 tests
+  - qtiqmmfsrc (Qualcomm CAMX downstream) - 12 tests
+  - libcamerasrc (upstream) - 9 tests
   
   Tests run in sequence to progressively validate different camera capabilities.
 
 TEST SEQUENCES:
 
-  qtiqmmfsrc (10 Total Tests):
+  qtiqmmfsrc (12 Total Tests):
     1. Fakesink  (2 tests)  - Basic camera capture validation (no encoding)
     2. Preview   (2 tests)  - Camera preview on Weston display (4K)
     3. Encode    (6 tests)  - Camera capture with H.264 encoding (720p/1080p/4K)
+    4. Snapshot  (2 tests)  - Still image capture to JPEG (1080p/4K)
 
-  libcamerasrc (7 Total Tests):
+  libcamerasrc (9 Total Tests):
     1. Fakesink  (2 tests)  - Basic camera capture validation (no encoding, 720p/1080p)
     2. Preview   (2 tests)  - Camera preview on Weston (720p/1080p)
     3. Encode    (3 tests)  - Camera capture with H.264 encoding (720p/1080p/4K)
+    4. Snapshot  (2 tests)  - Still image capture to JPEG (1080p/4K)
 
 USAGE:
   $0 [OPTIONS]
@@ -360,7 +362,7 @@ EXAMPLES:
 
 TEST DETAILS:
 
-  qtiqmmfsrc Tests (10):
+  qtiqmmfsrc Tests (12):
     Fakesink (2):
       - fakesink_nv12  : NV12 format, 720p, no encoding
       - fakesink_ubwc  : UBWC format, 720p, no encoding
@@ -376,8 +378,12 @@ TEST DETAILS:
       - encode_ubwc_720p   : UBWC, 1280x720, H.264 encode
       - encode_ubwc_1080p  : UBWC, 1920x1080, H.264 encode
       - encode_ubwc_4k     : UBWC, 3840x2160, H.264 encode
+    
+    Snapshot (2):
+      - snapshot_1080p : NV12, 1920x1080, JPEG still capture (2 images)
+      - snapshot_4k    : NV12, 3840x2160, JPEG still capture (2 images)
 
-  libcamerasrc Tests (7):
+  libcamerasrc Tests (9):
     Fakesink (2):
       - libcam_720p_Fakesink    : 720p, no encoding
       - libcam_1080p_Fakesink   : 1080p, no encoding
@@ -390,6 +396,10 @@ TEST DETAILS:
       - libcam_720p_NV12_Encode  : NV12, 1280x720, H.264 encode
       - libcam_1080p_NV12_Encode : NV12, 1920x1080, H.264 encode
       - libcam_4k_NV12_Encode    : NV12, 3840x2160, H.264 encode
+    
+    Snapshot (2):
+      - libcam_1080p_Snapshot : 1920x1080, JPEG still capture (2 images)
+      - libcam_4k_Snapshot    : 3840x2160, JPEG still capture (5 images)
 
 FORMAT DETAILS:
   NV12 (Linear):
@@ -868,6 +878,92 @@ run_qtiqmmf_encode_test() {
   run_camera_test "$testname" "$pipeline" "$output_file" "yes"
 }
 
+# qtiqmmfsrc Snapshot test
+run_qtiqmmf_snapshot_test() {
+  resolution="$1"
+  width="$2"
+  height="$3"
+  max_files="${4:-2}"
+  
+  if ! has_element jpegenc; then
+    log_warn "jpegenc not available, skipping qtiqmmf snapshot test"
+    skip_count=$((skip_count + 1)); return 1
+  fi
+  
+  if ! has_element multifilesink; then
+    log_warn "multifilesink not available, skipping qtiqmmf snapshot test"
+    skip_count=$((skip_count + 1)); return 1
+  fi
+  
+  testname="snapshot_${resolution}"
+  output_pattern="$ENCODED_DIR/camera${cameraId}_${resolution}_image%d.jpg"
+  
+  log_info "Resolution: $resolution (${width}x${height})"
+  log_info "Max snapshots: $max_files"
+  
+  # Clean up old snapshot files from previous runs to avoid false positives
+  if ls "$ENCODED_DIR"/camera"${cameraId}"_"${resolution}"_image*.jpg >/dev/null 2>&1; then
+    log_info "Cleaning up old snapshot files..."
+    rm -f "$ENCODED_DIR"/camera"${cameraId}"_"${resolution}"_image*.jpg
+  fi
+  
+  pipeline=$(camera_build_qtiqmmfsrc_snapshot_pipeline "$cameraId" "$width" "$height" "$framerate" "$output_pattern" "$max_files")
+  
+  # For snapshot tests, we check if at least one snapshot file was created
+  # Run the test with a shorter timeout since we're only capturing a few frames
+  snapshot_timeout=$((max_files + 5))
+  
+  log_info "=========================================="; log_info "Running: $testname"; log_info "=========================================="
+  
+  # Restart cam-server before snapshot test (qtiqmmfsrc only)
+  log_info "Restarting cam-server..."
+  systemctl restart cam-server >/dev/null 2>&1 || log_warn "Failed to restart cam-server (may not be critical)"
+  sleep 1
+  
+  test_log="$OUTDIR/${testname}.log"
+  : >"$test_log"
+  
+  if [ -z "$pipeline" ]; then
+    log_warn "$testname: Failed to build pipeline"; skip_count=$((skip_count + 1)); return 1
+  fi
+  
+  log_info "Pipeline: gst-launch-1.0 -e $pipeline"
+  
+  # Run pipeline with timeout
+  if gstreamer_run_gstlaunch_timeout "$snapshot_timeout" "$pipeline" >>"$test_log" 2>&1; then gstRc=0; else gstRc=$?; fi
+  
+  # Wait for filesystem to sync
+  sleep 5
+  
+  # Validate log
+  if ! gstreamer_validate_log "$test_log" "$testname"; then
+    diagnose_camera_failure "$testname" "$test_log"
+    log_fail "$testname: FAIL"; fail_count=$((fail_count + 1)); return 1
+  fi
+  
+  # Check if at least one snapshot file was created (any number, not just 0)
+  # multifilesink may continue numbering from previous runs
+  snapshot_files=$(find "$ENCODED_DIR" -name "camera${cameraId}_${resolution}_image*.jpg" -type f 2>/dev/null)
+  snapshot_count=$(printf '%s\n' "$snapshot_files" | grep -c .)
+  
+  if [ "$snapshot_count" -gt 0 ]; then
+    # Get the first file found (any number)
+    first_snapshot=$(printf '%s\n' "$snapshot_files" | head -n 1)
+    file_size=$(gstreamer_file_size_bytes "$first_snapshot")
+    log_info "Found snapshot file: $(basename "$first_snapshot")"
+    
+    # Check if file size is reasonable for a JPEG (> 10KB)
+    if [ "$file_size" -gt 10000 ]; then
+      log_info "Snapshots created: $snapshot_count (file size: $file_size bytes)"
+      log_pass "$testname: PASS"; pass_count=$((pass_count + 1)); return 0
+    else
+      log_fail "$testname: FAIL (snapshot file too small: $file_size bytes)"; fail_count=$((fail_count + 1)); return 1
+    fi
+  else
+    log_fail "$testname: FAIL (no snapshot files created)"; fail_count=$((fail_count + 1)); return 1
+  fi
+}
+
 # -------------------- libcamerasrc Test Functions --------------------
 
 # Fakesink test (parameterized)
@@ -949,6 +1045,92 @@ run_libcam_encode_test() {
   
   pipeline=$(camera_build_libcamera_encode_pipeline "$width" "$height" "$output_file" "$framerate")
   run_camera_test "$testname" "$pipeline" "$output_file"
+}
+
+# Snapshot test (parameterized)
+run_libcam_snapshot_test() {
+  width="$1"
+  height="$2"
+  resolution_name="$3"
+  max_files="${4:-5}"
+  
+  if ! has_element videoconvert; then
+    log_warn "videoconvert not available, skipping libcam snapshot test"
+    skip_count=$((skip_count + 1)); return 1
+  fi
+  
+  if ! has_element jpegenc; then
+    log_warn "jpegenc not available, skipping libcam snapshot test"
+    skip_count=$((skip_count + 1)); return 1
+  fi
+  
+  if ! has_element multifilesink; then
+    log_warn "multifilesink not available, skipping libcam snapshot test"
+    skip_count=$((skip_count + 1)); return 1
+  fi
+  
+  testname="libcam_${resolution_name}_Snapshot"
+  output_pattern="$ENCODED_DIR/snapshot_${resolution_name}_%d.jpg"
+  
+  log_info "Resolution: $resolution_name (${width}x${height})"
+  log_info "Max snapshots: $max_files"
+  
+  # Clean up old snapshot files from previous runs to avoid false positives
+  if ls "$ENCODED_DIR"/snapshot_"${resolution_name}"_*.jpg >/dev/null 2>&1; then
+    log_info "Cleaning up old snapshot files..."
+    rm -f "$ENCODED_DIR"/snapshot_"${resolution_name}"_*.jpg
+  fi
+  
+  pipeline=$(camera_build_libcamera_snapshot_pipeline "$width" "$height" "$output_pattern" "$max_files")
+  
+  # For snapshot tests, we check if at least one snapshot file was created
+  # Run the test with a shorter timeout since we're only capturing a few frames
+  snapshot_timeout=$((max_files + 5))
+  
+  log_info "=========================================="; log_info "Running: $testname"; log_info "=========================================="
+  
+  test_log="$OUTDIR/${testname}.log"
+  : >"$test_log"
+  
+  if [ -z "$pipeline" ]; then
+    log_warn "$testname: Failed to build pipeline"; skip_count=$((skip_count + 1)); return 1
+  fi
+  
+  log_info "Pipeline: gst-launch-1.0 -e $pipeline"
+  
+  # Run pipeline with timeout
+  if gstreamer_run_gstlaunch_timeout "$snapshot_timeout" "$pipeline" >>"$test_log" 2>&1; then gstRc=0; else gstRc=$?; fi
+  
+  # Wait for filesystem to sync
+  sleep 5
+  
+  # Validate log
+  if ! gstreamer_validate_log "$test_log" "$testname"; then
+    diagnose_camera_failure "$testname" "$test_log"
+    log_fail "$testname: FAIL"; fail_count=$((fail_count + 1)); return 1
+  fi
+  
+  # Check if at least one snapshot file was created (any number, not just 0)
+  # multifilesink may continue numbering from previous runs
+  snapshot_files=$(find "$ENCODED_DIR" -name "snapshot_${resolution_name}_*.jpg" -type f 2>/dev/null)
+  snapshot_count=$(printf '%s\n' "$snapshot_files" | grep -c .)
+  
+  if [ "$snapshot_count" -gt 0 ]; then
+    # Get the first file found (any number)
+    first_snapshot=$(printf '%s\n' "$snapshot_files" | head -n 1)
+    file_size=$(gstreamer_file_size_bytes "$first_snapshot")
+    log_info "Found snapshot file: $(basename "$first_snapshot")"
+    
+    # Check if file size is reasonable for a JPEG (> 10KB)
+    if [ "$file_size" -gt 10000 ]; then
+      log_info "Snapshots created: $snapshot_count (file size: $file_size bytes)"
+      log_pass "$testname: PASS"; pass_count=$((pass_count + 1)); return 0
+    else
+      log_fail "$testname: FAIL (snapshot file too small: $file_size bytes)"; fail_count=$((fail_count + 1)); return 1
+    fi
+  else
+    log_fail "$testname: FAIL (no snapshot files created)"; fail_count=$((fail_count + 1)); return 1
+  fi
 }
 
 # -------------------- Main test execution --------------------
@@ -1060,6 +1242,30 @@ if [ "$camera_source" = "libcamerasrc" ]; then
         done
         ;;
       
+      snapshot)
+        log_info "=========================================="
+        log_info "LIBCAMERA SNAPSHOT TESTS"
+        log_info "=========================================="
+        
+        # Run snapshot tests for 1080p and 4K only
+        for res in $resolutions; do
+          case "$res" in
+            1080p)
+              total_tests=$((total_tests + 1))
+              run_libcam_snapshot_test 1920 1080 "1080p" 2 || true
+              ;;
+            4k)
+              total_tests=$((total_tests + 1))
+              run_libcam_snapshot_test 3840 2160 "4k" 5 || true
+              ;;
+            720p|default|*)
+              # Only 1080p and 4K snapshot supported for libcamerasrc - skip without counting
+              log_warn "libcamerasrc snapshot: Resolution '$res' not enabled in this suite (only 1080p and 4k are supported)"
+              ;;
+          esac
+        done
+        ;;
+      
       *)
         log_warn "Unknown test mode for libcamerasrc: $mode"
         ;;
@@ -1128,6 +1334,29 @@ else
             total_tests=$((total_tests + 1))
             run_qtiqmmf_encode_test "$format" "$res" "$width" "$height" || true
           done
+        done
+        ;;
+      snapshot)
+        log_info "=========================================="
+        log_info "QTIQMMFSRC SNAPSHOT TESTS"
+        log_info "=========================================="
+        
+        # Run snapshot tests for 1080p and 4K only
+        for res in $resolutions; do
+          case "$res" in
+            1080p)
+              total_tests=$((total_tests + 1))
+              run_qtiqmmf_snapshot_test "1080p" 1920 1080 2 || true
+              ;;
+            4k)
+              total_tests=$((total_tests + 1))
+              run_qtiqmmf_snapshot_test "4k" 3840 2160 2 || true
+              ;;
+            720p|default|*)
+              # Only 1080p and 4K snapshot supported for qtiqmmfsrc - skip without counting
+              log_warn "qtiqmmfsrc snapshot: Resolution '$res' not enabled in this suite (only 1080p and 4k are supported)"
+              ;;
+          esac
         done
         ;;
       *)
