@@ -496,74 +496,56 @@ audio_restart_pipewire_service() {
 }
 
 # Function: setup_overlay_audio_environment
-# Purpose: Configure audio environment for overlay builds (audioreach-based)
-# Returns: 0 on success, 1 on failure
-# Usage: Call early in audio test initialization, before backend detection
-# Configure overlay-specific audio prerequisites and restart PipeWire.
-# Restart and readiness share the same centralized timeout to avoid drift.
+# Purpose: Validate overlay audio prerequisites without mutating system state.
+# Returns: 0 on success, 1 on prerequisite failure
+# Usage: Call early in audio test initialization, before backend detection.
+#
+# Distro is expected to provide correct dma_heap permissions and PipeWire
+# readiness. This helper intentionally does not chmod /dev/dma_heap/system
+# and does not restart PipeWire, so distro regressions are not hidden by tests.
 setup_overlay_audio_environment() {
-  PIPEWIRE_SYSTEMCTL_TIMEOUT="${PIPEWIRE_SYSTEMCTL_TIMEOUT:-180}"
   PIPEWIRE_READY_TIMEOUT="${PIPEWIRE_READY_TIMEOUT:-120}"
-  PIPEWIRE_RESTART_RETRIES="${PIPEWIRE_RESTART_RETRIES:-3}"
-
-  sao_attempt=1
-
+ 
   if ! lsmod 2>/dev/null | awk '$1 ~ /^audioreach/ { found=1; exit } END { exit !found }'; then
-    log_info "Base build detected (no audioreach modules), skipping overlay setup"
+    log_info "Base build detected, no audioreach modules, skipping overlay setup"
     return 0
   fi
-
-  log_info "Overlay build detected (audioreach modules present), configuring environment..."
-
-  if [ "$(id -u)" -ne 0 ]; then
-    log_fail "Overlay audio setup requires root permissions"
+ 
+  log_info "Overlay build detected, validating distro-provided audio prerequisites"
+ 
+  if [ ! -e /dev/dma_heap/system ]; then
+    log_fail "/dev/dma_heap/system is missing"
+    log_fail "Distro should provide dma_heap system node for overlay audio"
     return 1
   fi
-
-  if [ -e /dev/dma_heap/system ]; then
-    log_info "Setting permissions on /dev/dma_heap/system"
-    if ! chmod 666 /dev/dma_heap/system; then
-      log_fail "Failed to chmod /dev/dma_heap/system"
-      return 1
-    fi
+ 
+  if command -v stat >/dev/null 2>&1; then
+    dma_heap_mode="$(stat -c '%a' /dev/dma_heap/system 2>/dev/null || echo unknown)"
+    dma_heap_owner="$(stat -c '%U:%G' /dev/dma_heap/system 2>/dev/null || echo unknown)"
+    log_info "/dev/dma_heap/system mode, ${dma_heap_mode}, owner, ${dma_heap_owner}"
   else
-    log_warn "/dev/dma_heap/system not found, skipping chmod"
+    log_info "stat command not available, skipping /dev/dma_heap/system mode and owner dump"
   fi
 
-  if ! audio_should_use_service_recovery "pipewire"; then
-    log_info "pipewire service unit not available; skipping service restart and leaving backend recovery to manual bootstrap"
-    return 0
+  if [ -r /dev/dma_heap/system ] && [ -w /dev/dma_heap/system ]; then
+    log_pass "/dev/dma_heap/system is accessible"
+  else
+    log_fail "/dev/dma_heap/system is present but not accessible"
+    log_fail "Distro should provide correct dma_heap permissions, test will not chmod it"
+    return 1
   fi
-
-  while [ "$sao_attempt" -le "$PIPEWIRE_RESTART_RETRIES" ]; do
-    sao_label="${sao_attempt}/${PIPEWIRE_RESTART_RETRIES}"
-
-    if audio_restart_pipewire_service "$sao_label"; then
-      log_info "Waiting for pipewire to be ready..."
-      if audio_wait_audio_ready "$PIPEWIRE_READY_TIMEOUT" pipewire; then
-        log_pass "PipeWire is ready"
-        return 0
-      fi
-
-      sao_active_state="$(systemctl show -p ActiveState --value pipewire 2>/dev/null || echo unknown)"
-      sao_sub_state="$(systemctl show -p SubState --value pipewire 2>/dev/null || echo unknown)"
-      log_warn "PipeWire restart attempt ${sao_label} reached active state but backend was not ready within ${PIPEWIRE_READY_TIMEOUT}s (state=${sao_active_state}/${sao_sub_state})"
-    fi
-
-    if [ "$sao_attempt" -lt "$PIPEWIRE_RESTART_RETRIES" ]; then
-      log_warn "Retrying full pipewire restart flow after short delay"
-      sleep 2
-    fi
-
-    sao_attempt=$((sao_attempt + 1))
-  done
-
-  sao_active_state="$(systemctl show -p ActiveState --value pipewire 2>/dev/null || echo unknown)"
-  sao_sub_state="$(systemctl show -p SubState --value pipewire 2>/dev/null || echo unknown)"
-  log_fail "PipeWire failed to become ready after ${PIPEWIRE_RESTART_RETRIES} attempts (state=${sao_active_state}/${sao_sub_state})"
-  log_fail "This usually means the sound card is still not online"
-  log_fail "Check 'systemctl status pipewire' and 'journalctl -u pipewire' for details"
-  return 1
+ 
+  log_info "Waiting for PipeWire readiness, timeout ${PIPEWIRE_READY_TIMEOUT}s"
+  if audio_wait_audio_ready "$PIPEWIRE_READY_TIMEOUT" pipewire; then
+    log_pass "PipeWire is ready"
+  else
+    log_fail "PipeWire is not ready within ${PIPEWIRE_READY_TIMEOUT}s"
+    log_fail "Distro should start PipeWire correctly, test will not restart it during overlay setup"
+    return 1
+  fi
+ 
+  log_pass "Overlay audio prerequisites are ready"
+  return 0
 }
 
 # ---------- PipeWire control helpers (bounded; never hang) ----------
