@@ -1,0 +1,15 @@
+metadata:
+  name: Kubernetes_Kernel_Config
+  format: Lava-Test Test Definition 1.0
+  description: "Validate required kernel configs for Kubernetes support"
+  maintainer:
+    - "Qualcomm Linux Testkit"
+
+params: {}
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/System/Kubernetes_Kernel_Config
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh Kubernetes_Kernel_Config.res

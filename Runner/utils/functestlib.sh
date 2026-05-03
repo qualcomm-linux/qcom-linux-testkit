@@ -198,27 +198,55 @@ find_test_case_script_by_name() {
     find "$base_dir" -type d -iname "$test_name" -print -quit 2>/dev/null
 }
 
-# Check each given kernel config is set to y/m in /proc/config.gz, logs result, returns 0/1.
+# Check each given kernel config in /proc/config.gz.
+# Supported inputs:
+# CONFIG_FOO
+# passes when CONFIG_FOO is enabled as y or m
+# CONFIG_BAR=y
+# CONFIG_BAZ=m
+# passes only when the exact expected value matches
+# Logs PASS or FAIL for each config and returns 0 on success, 1 on first mismatch.
 check_kernel_config() {
     cfgs=$1
-    for config_key in $cfgs; do
+
+    if [ ! -r /proc/config.gz ]; then
+        log_fail "Kernel config source /proc/config.gz is not available"
+        return 1
+    fi
+
+    for cfg in $cfgs; do
+        [ -n "$cfg" ] || continue
+
+        case "$cfg" in
+            *=*)
+                pattern="^${cfg}$"
+                pass_msg="Kernel config matches expected value, $cfg"
+                fail_msg="Kernel config does not match expected value, required $cfg"
+                ;;
+            *)
+                pattern="^${cfg}=(y|m)$"
+                pass_msg="Kernel config $cfg is enabled"
+                fail_msg="Kernel config $cfg is missing or not enabled"
+                ;;
+        esac
+
         if command -v zgrep >/dev/null 2>&1; then
-            if zgrep -qE "^${config_key}=(y|m)" /proc/config.gz 2>/dev/null; then
-                log_pass "Kernel config $config_key is enabled"
+            if zgrep -qE "$pattern" /proc/config.gz 2>/dev/null; then
+                log_pass "$pass_msg"
             else
-                log_fail "Kernel config $config_key is missing or not enabled"
+                log_fail "$fail_msg"
                 return 1
             fi
         else
-            # Fallback if zgrep is unavailable
-            if gzip -dc /proc/config.gz 2>/dev/null | grep -qE "^${config_key}=(y|m)"; then
-                log_pass "Kernel config $config_key is enabled"
+            if gzip -dc /proc/config.gz 2>/dev/null | grep -qE "$pattern"; then
+                log_pass "$pass_msg"
             else
-                log_fail "Kernel config $config_key is missing or not enabled"
+                log_fail "$fail_msg"
                 return 1
             fi
         fi
     done
+
     return 0
 }
 
