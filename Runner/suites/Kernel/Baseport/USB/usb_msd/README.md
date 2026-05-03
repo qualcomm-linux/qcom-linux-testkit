@@ -1,0 +1,47 @@
+```
+Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+SPDX-License-Identifier: BSD-3-Clause
+```
+
+# USB MSD Validation
+
+## Overview
+
+This shell script executes on the DUT (Device-Under-Test) and verifies USB Mass Storage Devices (MSD).
+The test validation scope includes:
+- Successful enumeration of MSD devices
+- For each device:
+  - Determine and report bound transport driver (`uas` or `usb-storage`) from the MSD interface for debug visibility
+  - Discover associated block devices via sysfs
+  - If block device is missing, print device information to facilitate debug
+- Print a table of enumerated devices:
+
+```
+DEVICE    VID:PID   DRIVER            PRODUCT
+-------------------------------------------------------------------------------
+<dev>     <vid:pid> <uas|usb-storage> <product>
+```
+The test PASS requires all detected MSD device to have an associated block device node.
+---
+
+## Setup
+
+- Connect USB MSD peripheral(s) to USB port(s) on DUT.
+- Only applicable for USB ports that support Host Mode functionality. 
+- USB MSD peripherals examples: USB flash drive, external HDD/SSD, etc. 
+
+---
+
+## Usage
+### Instructions:
+1. **Copy the test suite to the target device** using `scp` or any preferred method.
+2. **Navigate to the test directory** on the target device.
+3. **Run the test script** using the test runner or directly.
+
+---
+
+### Quick Example
+```
+cd Runner
+./run-test.sh usb_msd
+```
