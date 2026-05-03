@@ -1,0 +1,17 @@
+metadata:
+  name: KVM_EL2_DTB
+  format: "Lava-Test Test Definition 1.0"
+  description: "Validate dynamic EL2-DTB remoteproc/IOMMU runtime evidence for KVM boot"
+  maintainer:
+    - Srikanth kumar
+  os:
+    - linux
+  scope:
+    - functional
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Virtualization/KVM/KVM_EL2_DTB
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh KVM_EL2_DTB.res
