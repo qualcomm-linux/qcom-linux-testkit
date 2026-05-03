@@ -1,0 +1,17 @@
+metadata:
+  name: KVM_Boot_Up
+  format: "Lava-Test Test Definition 1.0"
+  description: "Validate KVM boot initialization, kernel configs, /dev/kvm, and boot dmesg"
+  maintainer:
+    - Srikanth kumar
+  os:
+    - linux
+  scope:
+    - functional
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Virtualization/KVM/KVM_Boot_Up
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh KVM_Boot_Up.res
