@@ -1,0 +1,15 @@
+metadata:
+  name: ToggleSetenforce
+  format: "Lava-Test Test Definition 1.0"
+  description: "Toggle Setenforce to check if altered mode is reflected"
+  os:
+    - linux
+  scope:
+    - functional
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Security/ToggleSetenforce
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh ToggleSetenforce.res
