@@ -1,0 +1,23 @@
+metadata:
+    format: Lava-Test Test Definition 1.0
+    name: cma
+    description: "CMA (Contiguous Memory Allocator) enablement and functionality validation"
+    maintainer:
+        - vnarapar@qti.qualcomm.com
+    os:
+        - openembedded
+    scope:
+        - functional
+    devices:
+        - rb3gen2
+        - qcs6490
+        - qcs8300
+        - qcs9100
+        - sa8775p
+
+run:
+    steps:
+        - REPO_PATH=$PWD
+        - cd Runner/suites/Kernel/Baseport/cma
+        - ./run.sh
+        - $REPO_PATH/Runner/utils/send-to-lava.sh cma.res
