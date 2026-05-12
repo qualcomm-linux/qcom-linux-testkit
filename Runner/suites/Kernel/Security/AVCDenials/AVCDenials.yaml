@@ -1,0 +1,15 @@
+metadata:
+  name: AVCDenials
+  format: "Lava-Test Test Definition 1.0"
+  description: "Collect logs, fetch and parse AVC Denials."
+  os:
+    - linux
+  scope:
+    - functional
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Security/AVCDenials
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh AVCDenials.res
