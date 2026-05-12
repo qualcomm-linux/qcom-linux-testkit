@@ -1,0 +1,19 @@
+metadata:
+    format: Lava-Test Test Definition 1.0
+    name: hw-probe-local
+    description: "Run hw-probe test in local mode"
+    maintainer:
+        - smuppand@qti.qualcomm.com
+    os:
+        - yocto open embedded
+    scope:
+        - functional
+    devices:
+        - rb3gen2
+
+run:
+    steps:
+        - cd Runner/tools/hw-probe
+        - ./run.sh --mode local --extract yes --uninstall yes || true
+        - ./../../utils/send-to-lava.sh ./hw-probe.res || true
+        - ./../../utils/result_parse.sh || true

@@ -1,0 +1,19 @@
+metadata:
+    format: Lava-Test Test Definition 1.0
+    name: hw-probe-docker
+    description: "Run hw-probe test via Docker mode"
+    maintainer:
+        - smuppand@qti.qualcomm.com
+    os:
+        - yocto open embedded
+    scope:
+        - functional
+    devices:
+        - rb
+
+run:
+    steps:
+        - cd Runner/tools/hw-probe
+        - ./run.sh --mode docker --extract yes --uninstall yes || true
+        - ./../../utils/send-to-lava.sh ./hw-probe.res || true
+        - ./../../utils/result_parse.sh || true
