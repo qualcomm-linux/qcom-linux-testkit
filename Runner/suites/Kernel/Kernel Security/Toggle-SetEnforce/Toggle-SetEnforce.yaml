@@ -1,0 +1,16 @@
+metadata:
+  name: Toggle-SetEnforce
+  format: "Lava-Test Test Definition 1.0"
+  description: "This test validates SELinux mode can be toggled at runtime and checks if its ends at Permissive state from any initial state."
+  os:
+    - linux
+  scope:
+    - security
+    - kernel
+
+run:
+  steps:
+    - REPO_PATH=$PWD || true
+    - cd Runner/suites/Kernel/DEBUG/Toggle-SetEnforce || true
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh Toggle-SetEnforce.res || true
