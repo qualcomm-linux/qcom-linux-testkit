@@ -1,0 +1,16 @@
+metadata:
+  name: Sysfs-Node-Access
+  format: "Lava-Test Test Definition 1.0"
+  description: "Iterates through all Coresight sysfs nodes (excluding TPDM) and attempts to read them to ensure stability and permission correctness."
+  os:
+    - linux
+  scope:
+    - coresight
+    - kernel
+
+run:
+  steps:
+    - REPO_PATH=$PWD || true
+    - cd Runner/suites/Kernel/DEBUG/Node-Access || true
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh Node-Access.res || true
