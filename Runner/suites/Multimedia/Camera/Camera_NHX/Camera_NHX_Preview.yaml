@@ -1,15 +1,19 @@
 metadata:
   name: camera_nhx
   format: "Lava-Test Test Definition 1.0"
-  description: "Camera NHX preview validation"
+  description: "Camera NHX validation with selectable CAMX/NHX JSON config"
   os:
     - yocto
   scope:
     - functional
 
+params:
+  NHX_JSON: ""
+  NHX_TARGET: ""
+
 run:
   steps:
     - REPO_PATH=$PWD
     - cd Runner/suites/Multimedia/Camera/Camera_NHX
-    - ./run.sh || true
+    - ./run.sh --json "${NHX_JSON}" --target "${NHX_TARGET}" || true
     - $REPO_PATH/Runner/utils/send-to-lava.sh Camera_NHX.res

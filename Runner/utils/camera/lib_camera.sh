@@ -539,8 +539,8 @@ camx_fdtdump_has_cam_nodes() {
   [ -r /sys/firmware/fdt ] || return 1
 
   out="$(fdtdump /sys/firmware/fdt 2>/dev/null \
-    | grep -i 'cam' \
-    | grep -Ei 'qcom,cam|qcom,camera|camera@|cam-req|cam-cpas|cam-jpeg|cam-ife|cam-icp|cam-sensor|camera0-thermal' || true)"
+    | grep -Ei 'qcom,(cam|camera|cci|csiphy|eeprom)|camera@|cam-|cci[0-9]*@|csiphy[0-9]*@' \
+    | grep -Ei 'qcom,cam|qcom,camera|qcom,cci|qcom,csiphy|qcom,eeprom|qcom,cam-tpg|qcom,cam-gmsl|qcom,cam-sensor|camera@|cam-req|cam-cpas|cam-jpeg|cam-ife|cam-icp|cam-sensor|camera0-thermal|cci[0-9]*@|csiphy[0-9]*@' || true)"
 
   [ -n "$out" ] || return 1
   printf '%s\n' "$out" | head -n 20
@@ -557,6 +557,163 @@ nhx_pick_cksum_tool() {
   else
     echo ""
   fi
+}
+
+# Resolve one requested NHX JSON file.
+# Usage:
+# nhx_resolve_json_file "<base_dir>" "<json>" "<target>"
+#
+# base_dir: Camera_NHX testcase directory
+# json: absolute path, path relative to base_dir, or filename
+# target: optional target folder: Kodiak/Lemans/Monaco/Talos
+#
+# Prints resolved path on success.
+nhx_resolve_json_file() {
+  base_dir="$1"
+  json="$2"
+  target="$3"
+  cand=""
+  found=""
+  dir=""
+
+  [ -n "$base_dir" ] || return 1
+  [ -n "$json" ] || return 1
+
+  case "$json" in
+    /*)
+      if [ -f "$json" ]; then
+        printf '%s\n' "$json"
+        return 0
+      fi
+      ;;
+    */*)
+      cand="$base_dir/$json"
+      if [ -f "$cand" ]; then
+        printf '%s\n' "$cand"
+        return 0
+      fi
+
+      cand="$(pwd)/$json"
+      if [ -f "$cand" ]; then
+        printf '%s\n' "$cand"
+        return 0
+      fi
+      ;;
+    *)
+      if [ -n "$target" ]; then
+        cand="$base_dir/$target/$json"
+        if [ -f "$cand" ]; then
+          printf '%s\n' "$cand"
+          return 0
+        fi
+      fi
+
+      cand="$base_dir/$json"
+      if [ -f "$cand" ]; then
+        printf '%s\n' "$cand"
+        return 0
+      fi
+
+      for dir in Kodiak Lemans Monaco Talos; do
+        cand="$base_dir/$dir/$json"
+        if [ -f "$cand" ]; then
+          if [ -n "$found" ]; then
+            return 2
+          fi
+          found="$cand"
+        fi
+      done
+
+      if [ -n "$found" ]; then
+        printf '%s\n' "$found"
+        return 0
+      fi
+      ;;
+  esac
+
+  return 1
+}
+
+# Stage resolved NHX JSON into the path expected by /usr/bin/nhx.sh.
+# nhx.sh expects an argument without ".json" and internally looks under:
+# /etc/camera/test/NHX/${JSON_FILE}.json
+#
+# Usage:
+# nhx_stage_json_for_launcher "<base_dir>" "<resolved_json>" "<target>"
+#
+# Prints launcher argument, for example:
+# Lemans/Prev_plus_Video_YUVNV12_MaxResolution_NHX
+nhx_stage_json_for_launcher() {
+  base_dir="$1"
+  src_json="$2"
+  target="$3"
+  json_root="${NHX_JSON_ROOT:-/etc/camera/test/NHX}"
+  rel=""
+  first=""
+  base=""
+  name_no_ext=""
+  dst_dir=""
+  dst_json=""
+
+  [ -n "$base_dir" ] || return 1
+  [ -n "$src_json" ] || return 1
+  [ -f "$src_json" ] || return 1
+
+  base="${src_json##*/}"
+  name_no_ext="${base%.json}"
+
+  if [ "$name_no_ext" = "$base" ]; then
+    return 1
+  fi
+
+  if [ -z "$target" ]; then
+    case "$src_json" in
+      "$base_dir"/*)
+        rel="${src_json#"$base_dir"/}"
+        first="${rel%%/*}"
+        case "$first" in
+          Kodiak|Lemans|Monaco|Talos)
+            target="$first"
+            ;;
+        esac
+        ;;
+    esac
+  fi
+
+  case "$target" in
+    Kodiak|Lemans|Monaco|Talos)
+      dst_dir="$json_root/$target"
+      dst_json="$dst_dir/$base"
+
+      if ! mkdir -p "$dst_dir"; then
+        return 1
+      fi
+
+      if ! cp -f "$src_json" "$dst_json"; then
+        return 1
+      fi
+
+      printf '%s/%s\n' "$target" "$name_no_ext"
+      return 0
+      ;;
+    "")
+      dst_dir="$json_root"
+      dst_json="$dst_dir/$base"
+
+      if ! mkdir -p "$dst_dir"; then
+        return 1
+      fi
+
+      if ! cp -f "$src_json" "$dst_json"; then
+        return 1
+      fi
+
+      printf '%s\n' "$name_no_ext"
+      return 0
+      ;;
+  esac
+
+  return 1
 }
 
 nhx_collect_new_dumps() {
