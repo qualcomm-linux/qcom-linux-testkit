@@ -1,0 +1,16 @@
+metadata:
+  name: ETM-Trace-Enable-Disable
+  format: "Lava-Test Test Definition 1.0"
+  description: "Validates the stability of enabling and disabling ETM sources repeatedly and verifies trace data generation."
+  os:
+    - linux
+  scope:
+    - coresight
+    - kernel
+
+run:
+  steps:
+    - REPO_PATH=$PWD || true
+    - cd Runner/suites/Kernel/DEBUG/ETM-Trace || true
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh ETM-Trace.res || true
