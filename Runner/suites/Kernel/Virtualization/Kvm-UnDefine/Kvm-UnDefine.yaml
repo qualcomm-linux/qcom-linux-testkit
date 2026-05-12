@@ -1,0 +1,15 @@
+metadata:
+  name: kvm-teardown
+  format: "Lava-Test Test Definition 1.0"
+  description: "Stop and Remove Gunyah KVM Virtual Machine"
+  os:
+    - linux
+  scope:
+    - functional
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Virtualization/Kvm-Teardown
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh Kvm-Teardown.res || true
