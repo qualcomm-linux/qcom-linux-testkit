@@ -1,0 +1,37 @@
+metadata:
+  name: Apps_Suspend_Resume
+  format: "Lava-Test Test Definition 1.0"
+  description: "Host-side APPS suspend/resume validation using serial transport and /sys/power/suspend_stats"
+  os:
+    - linux
+  scope:
+    - functional
+
+params:
+  TRANSPORT: serial
+  SERIAL_PORT: ""
+  SERIAL_BAUDRATE: 115200
+  WAKE_METHOD: tac-power-key
+  TAC_API_BIN: /usr/local/bin/tac-api.py
+  TAC_SERIAL: ""
+  TAC_POWER_KEY_PRESS_COMMAND: powerKeyPress
+  TAC_POWER_KEY_RELEASE_COMMAND: powerKeyRelease
+  TAC_WAKE_HOLD_MS: 1000
+  TAC_WAKE_COMMAND: ""
+  TAC_USB_DISCONNECT_COMMAND: usbDisconnect
+  TAC_USB_CONNECT_COMMAND: usbConnect
+  CYCLES: 1
+  SUSPEND_DELAY: 10
+  PRE_DISCONNECT_DELAY: 1
+  SUSPEND_WINDOW: 10
+  RESUME_TIMEOUT: 20
+  POST_WAKE_SETTLE: 3
+  COMMAND_TIMEOUT: 30
+  ALLOW_ADB_FALLBACK: 0
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd host-tools/Apps_Suspend_Resume
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh Apps_Suspend_Resume.res
