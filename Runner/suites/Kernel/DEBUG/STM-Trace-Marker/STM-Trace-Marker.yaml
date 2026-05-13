@@ -1,0 +1,16 @@
+metadata:
+  name: MultiSource-STM-ETM
+  format: "Lava-Test Test Definition 1.0"
+  description: "Validates concurrent STM and ETM trace collection across multiple cores."
+  os:
+    - linux
+  scope:
+    - coresight
+    - kernel
+
+run:
+  steps:
+    - REPO_PATH=$PWD || true
+    - cd Runner/suites/Kernel/DEBUG/STM-Trace-Marker || true
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh STM-Trace-Marker.res || true

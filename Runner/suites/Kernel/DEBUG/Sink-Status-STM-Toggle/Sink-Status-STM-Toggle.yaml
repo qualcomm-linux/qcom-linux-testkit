@@ -1,0 +1,16 @@
+metadata:
+  name: Sink-Status-STM-Toggle
+  format: "Lava-Test Test Definition 1.0"
+  description: "Verifies that Coresight sinks maintain correct enabled/disabled states when sources (STM/ETM) are toggled."
+  os:
+    - linux
+  scope:
+    - coresight
+    - kernel
+
+run:
+  steps:
+    - REPO_PATH=$PWD || true
+    - cd Runner/suites/Kernel/DEBUG/Sink-Status-STM-Toggle || true
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh Sink-Status-STM-Toggle.res || true

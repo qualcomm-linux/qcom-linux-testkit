@@ -1,0 +1,16 @@
+metadata:
+  name: STM-Source-Enable-Disable
+  format: "Lava-Test Test Definition 1.0"
+  description: "Stress test that toggles the STM source enablement 50 times to ensure stability."
+  os:
+    - linux
+  scope:
+    - coresight
+    - kernel
+
+run:
+  steps:
+    - REPO_PATH=$PWD || true
+    - cd Runner/suites/Kernel/DEBUG/STM-Source-Enable-Disable || true
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh STM-Source-Enable-Disable.res || true
