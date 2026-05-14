@@ -45,16 +45,21 @@ RES_FILE="./${TESTNAME}.res"
 
 # ---------- Lock (avoid concurrent runs on same host) ----------
 LOCKFILE="/tmp/${TESTNAME}.lock"
+LOCKDIR="/tmp/${TESTNAME}.lockdir"
+
 if command -v flock >/dev/null 2>&1; then
   exec 9>"$LOCKFILE"
   if ! flock -n 9; then
     log_warn "Another ${TESTNAME} run is active; skipping"
+    log_info "Active URM-related processes:"
+    ps 2>/dev/null | grep -E 'userspace-resource-manager|Urm(Component|Integration)Tests|[run.sh](http://run.sh/)' | grep -v grep || true
     echo "$TESTNAME SKIP" >"$RES_FILE"
     exit 0
   fi
+  trap 'exec 9>&-' EXIT INT TERM
 else
-  if ! mkdir "$LOCKFILE" 2>/dev/null; then
-    log_warn "Another ${TESTNAME} run is active; skipping"
+  if ! mkdir "$LOCKDIR" 2>/dev/null; then
+    log_warn "Another ${TESTNAME} run is active or stale fallback lockdir exists: $LOCKDIR"
     echo "$TESTNAME SKIP" >"$RES_FILE"
     exit 0
   fi
@@ -146,16 +151,6 @@ suite_requires_base_cfgs() {
         fi
     done
     return 1
-}
-parse_and_score_log() {
-    logf="$1"
-    if grep -Eiq '(^|[^a-z])fail(ed)?([^a-z]|$)|Assertion failed|Terminating Suite|Segmentation fault|Backtrace' "$logf"; then
-        return 1
-    fi
-    if grep -Eiq 'Run Successful|executed successfully|Ran Successfully' "$logf"; then
-        return 0
-    fi
-    return 2
 }
 per_suite_timeout() {
     case "$1" in
@@ -398,13 +393,7 @@ run_one() {
     run_cmd_maybe_timeout "$bin" >"$tlog" 2>&1
     rc=$?
 
-    parse_and_score_log "$tlog"
-    score=$?
-    if [ $score -eq 2 ] && [ $rc -eq 0 ]; then
-        score=0
-    fi
-
-    case $score in
+    case $rc in
         0)
             log_pass "[TEST] $name PASS"
             echo "PASS" >"$tres"
@@ -417,11 +406,11 @@ run_one() {
             echo "[FAIL] $name (rc=$rc)" >>"$LOGDIR/summary.txt"
             return 1
             ;;
-        2)
-            log_skip "[TEST] $name SKIP"
-            echo "SKIP" >"$tres"
-            echo "[SKIP] $name (rc=$rc)" >>"$LOGDIR/summary.txt"
-            return 2
+        *)
+            log_fail "[TEST] $name UNKNOWN RC=$rc"
+            echo "FAIL" >"$tres"
+            echo "[FAIL] $name (unexpected rc=$rc)" >>"$LOGDIR/summary.txt"
+            return 1
             ;;
     esac
 }
