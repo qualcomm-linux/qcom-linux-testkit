@@ -814,6 +814,51 @@ weston_cleanup_stale_sockets() {
 
     return 0
 }
+
+# Adopt an existing Wayland socket and validate that a client can connect.
+# This supports socket-activated Weston setups where weston.service may not
+# already be running, but weston.socket or /run/wayland-* can activate it.
+weston_adopt_existing_runtime_and_probe() {
+    tag="$1"
+    sock=""
+
+    if command -v weston_preferred_socket >/dev/null 2>&1; then
+        sock="$(weston_preferred_socket 2>/dev/null || true)"
+    fi
+
+    if [ -z "$sock" ] && command -v discover_wayland_socket_anywhere >/dev/null 2>&1; then
+        sock="$(discover_wayland_socket_anywhere 2>/dev/null | head -n 1 || true)"
+    fi
+
+    if [ -z "$sock" ]; then
+        log_warn "No Wayland socket found for ${tag}"
+        return 1
+    fi
+
+    if ! command -v adopt_wayland_env_from_socket >/dev/null 2>&1; then
+        log_warn "adopt_wayland_env_from_socket helper not found for ${tag}"
+        return 1
+    fi
+
+    if ! command -v wayland_connection_ok >/dev/null 2>&1; then
+        log_warn "wayland_connection_ok helper not found for ${tag}"
+        return 1
+    fi
+
+    log_info "Found existing Wayland socket, ${sock}"
+
+    if ! adopt_wayland_env_from_socket "$sock"; then
+        log_warn "Failed to adopt Wayland environment from ${sock}"
+        return 1
+    fi
+
+    if ! wayland_connection_ok; then
+        log_warn "Wayland socket probe failed for ${sock}"
+        return 1
+    fi
+
+    return 0
+}
 ###############################################################################
 # Hz helpers
 ###############################################################################
@@ -2364,6 +2409,7 @@ weston_prepare_runtime() {
     wr_new_sock=""
     wr_service_failed=0
     wr_need_relaunch=0
+    wr_passive_recovered=0
 
     if command -v systemd_service_exists >/dev/null 2>&1 && command -v systemctl >/dev/null 2>&1; then
         if systemd_service_exists weston.service; then
@@ -2381,13 +2427,78 @@ weston_prepare_runtime() {
         wr_need_relaunch=1
     fi
 
+    # Passive recovery path:
+    #
+    # Some base images expose an active weston.socket or /run/wayland-* socket
+    # even when weston.service is currently failed and no Weston process is
+    # running. A short Wayland client probe can trigger socket activation and
+    # recover Weston without requiring ALLOW_RELAUNCH=1.
+    #
+    # This avoids false failures like:
+    # weston.service is in failed state
+    # weston.socket is active
+    # no weston process found
+    #
+    # while still failing later if the socket/client probe cannot recover the
+    # runtime.
+    if [ "$wr_service_failed" -eq 1 ] || ! weston_has_running_process; then
+        log_warn "Weston runtime is not fully healthy, attempting passive Wayland socket recovery"
+
+        if command -v weston_adopt_existing_runtime_and_probe >/dev/null 2>&1; then
+            if weston_adopt_existing_runtime_and_probe "${wr_testname}: passive-recovery"; then
+                log_info "Passive Wayland socket probe succeeded"
+
+                if command -v weston_wait_ready >/dev/null 2>&1; then
+                    if ! weston_wait_ready "$wr_wait_secs"; then
+                        log_warn "Weston did not report fully ready after passive recovery wait"
+                    fi
+                fi
+
+                if weston_has_running_process; then
+                    wr_need_relaunch=0
+                    wr_passive_recovered=1
+                fi
+
+                if command -v systemd_service_exists >/dev/null 2>&1 && command -v systemctl >/dev/null 2>&1; then
+                    if systemd_service_exists weston.service; then
+                        if systemctl is-failed --quiet weston.service 2>/dev/null; then
+                            wr_service_failed=1
+                        else
+                            wr_service_failed=0
+                        fi
+                    fi
+                fi
+            else
+                log_warn "Passive Wayland socket recovery did not recover Weston runtime"
+            fi
+        else
+            log_warn "weston_adopt_existing_runtime_and_probe helper not found, skipping passive recovery"
+        fi
+    fi
+
+    if [ "$wr_passive_recovered" -eq 1 ]; then
+        if command -v weston_log_runtime_snapshot >/dev/null 2>&1; then
+            weston_log_runtime_snapshot "${wr_testname}: after-passive-recovery"
+        elif command -v wayland_debug_snapshot >/dev/null 2>&1; then
+            wayland_debug_snapshot "${wr_testname}: after-passive-recovery"
+        fi
+    fi
+
     if [ "$wr_service_failed" -eq 1 ]; then
         if [ "$wr_allow_relaunch" -eq 1 ]; then
             wr_need_relaunch=1
             log_warn "weston.service is in failed state, cleanup and relaunch will be attempted"
         else
-            log_fail "weston.service is in failed state, runtime is not healthy"
-            return 3
+            log_warn "weston.service is in failed state, runtime relaunch is disabled"
+
+            if weston_has_running_process && weston_runtime_socket_exists; then
+                log_warn "Continuing because Weston process and Wayland socket are usable despite failed systemd state"
+                wr_service_failed=0
+                wr_need_relaunch=0
+            else
+                log_fail "weston.service is in failed state and passive runtime recovery did not make Weston usable"
+                return 3
+            fi
         fi
     fi
 
@@ -2425,7 +2536,9 @@ weston_prepare_runtime() {
 
             if command -v weston_force_primary_1080p60_if_not_60 >/dev/null 2>&1; then
                 log_info "Pre-configuring primary output to about 60Hz before starting Weston, best effort"
-                weston_force_primary_1080p60_if_not_60 || true
+                if ! weston_force_primary_1080p60_if_not_60; then
+                    log_warn "Primary output pre-configuration failed, continuing with Weston start"
+                fi
             fi
 
             if ! overlay_start_weston_drm; then
@@ -2437,7 +2550,9 @@ weston_prepare_runtime() {
             fi
 
             if command -v weston_wait_ready >/dev/null 2>&1; then
-                weston_wait_ready "$wr_wait_secs" || true
+                if ! weston_wait_ready "$wr_wait_secs"; then
+                    log_warn "weston_wait_ready did not confirm readiness after overlay_start_weston_drm"
+                fi
             fi
         else
             log_fail "No Weston relaunch helper is available"
