@@ -1,0 +1,23 @@
+metadata:
+  name: pelt-sched-debug
+  format: "Lava-Test Test Definition 1.0"
+  description: "Validates the scheduler debugfs interface for PELT state inspection"
+  maintainer:
+    - vnarapar@qti.qualcomm.com
+  os:
+    - linux
+  scope:
+    - functional
+  devices:
+    - rb3gen2
+    - qcs6490
+    - qcs8300
+    - qcs9100
+    - sa8775p
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd "$REPO_PATH/Runner/suites/Kernel/Scheduler/PELT_sched_debug"  || true
+    - ./run.sh
+    - $REPO_PATH/Runner/utils/send-to-lava.sh PELT_sched_debug.res
