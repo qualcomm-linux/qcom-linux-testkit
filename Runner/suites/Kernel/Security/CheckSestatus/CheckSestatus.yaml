@@ -1,0 +1,16 @@
+metadata:
+  name: CheckSestatus
+  format: "Lava-Test Test Definition 1.0"
+  description: "Check sestatus command output: Check if selinux is in enforcing / permissive / disabled"
+  os:
+    - linux
+  scope:
+    - functional
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Security/CheckSestatus
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh CheckSestatus.res
+

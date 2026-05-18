@@ -1,0 +1,16 @@
+metadata:
+  name: CheckGetenforce
+  format: "Lava-Test Test Definition 1.0"
+  description: "Check getenforce command output: Check if selinux is in enforcing / permissive / disabled"
+  os:
+    - linux
+  scope:
+    - functional
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Security/CheckGetenforce
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh CheckGetenforce.res
+
