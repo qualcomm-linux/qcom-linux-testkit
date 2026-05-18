@@ -1,0 +1,17 @@
+metadata:
+  name: KVM_Infra
+  format: "Lava-Test Test Definition 1.0"
+  description: "Validate QEMU/KVM host infrastructure and KVM acceleration availability"
+  maintainer:
+    - Srikanth kumar
+  os:
+    - linux
+  scope:
+    - functional
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Virtualization/KVM/KVM_Infra
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh KVM_Infra.res

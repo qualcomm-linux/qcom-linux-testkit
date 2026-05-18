@@ -1,0 +1,17 @@
+metadata:
+  name: KVM_Driver
+  format: "Lava-Test Test Definition 1.0"
+  description: "Validate /dev/kvm device node and KVM ioctl API"
+  maintainer:
+    - Srikanth kumar
+  os:
+    - linux
+  scope:
+    - functional
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Virtualization/KVM/KVM_Driver
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh KVM_Driver.res
