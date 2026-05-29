@@ -1,0 +1,15 @@
+metadata:
+  name: ufs-hibern8
+  format: "Lava-Test Test Definition 1.0"
+  description: "Verify the UFS link hibern8"
+  os:
+    - linux
+  scope:
+    - functional
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/Storage/ufs_hibern8
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh ufs_hibern8.res || true
