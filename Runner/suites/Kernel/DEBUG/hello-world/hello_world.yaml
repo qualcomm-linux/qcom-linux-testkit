@@ -1,0 +1,13 @@
+metadata:
+  name: hello_world
+  format: Lava-Test Test Definition 1.0
+  description: Simple Hello World test
+  os:
+    - debian
+  scope:
+    - functional
+
+run:
+  steps:
+    - chmod +x ./hello_world.sh
+    - ./hello_world.sh
