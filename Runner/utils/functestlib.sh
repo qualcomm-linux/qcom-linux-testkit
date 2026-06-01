@@ -177,7 +177,115 @@ check_dependencies() {
     return 0
 }
 
+###############################################################################
+# CPU and interrupt validation helpers
+###############################################################################
 
+# Return 0 if the input is an unsigned decimal number.
+is_unsigned_number() {
+    unsigned_value="$1"
+
+    case "$unsigned_value" in
+        ''|*[!0-9]*)
+            return 1
+            ;;
+        *)
+            return 0
+            ;;
+    esac
+}
+
+# Read the first line from a sysfs/procfs file.
+read_first_line() {
+    read_file="$1"
+
+    if [ -r "$read_file" ]; then
+        sed -n '1p' "$read_file" 2>/dev/null
+    fi
+}
+
+# Expand Linux CPU list format.
+#
+# Input examples:
+# 0-7
+# 0,2-3,5
+#
+# Output:
+# one CPU index per line
+expand_cpu_list() {
+    cpu_list="$1"
+
+    printf '%s\n' "$cpu_list" | tr ',' '\n' |
+    while IFS= read -r cpu_range || [ -n "$cpu_range" ]; do
+        [ -n "$cpu_range" ] || continue
+
+        case "$cpu_range" in
+            *-*)
+                cpu_start="${cpu_range%-*}"
+                cpu_end="${cpu_range#*-}"
+
+                if ! is_unsigned_number "$cpu_start" || ! is_unsigned_number "$cpu_end"; then
+                    continue
+                fi
+
+                cpu_index="$cpu_start"
+                while [ "$cpu_index" -le "$cpu_end" ]; do
+                    printf '%s\n' "$cpu_index"
+                    cpu_index=$((cpu_index + 1))
+                done
+                ;;
+            *)
+                if is_unsigned_number "$cpu_range"; then
+                    printf '%s\n' "$cpu_range"
+                fi
+                ;;
+        esac
+    done
+}
+
+# Return 0 if a CPU is present in a Linux CPU list.
+cpu_in_list() {
+    cpu_index="$1"
+    cpu_list="$2"
+
+    [ -n "$cpu_list" ] || return 1
+
+    expand_cpu_list "$cpu_list" | grep -qx "$cpu_index"
+}
+
+# Return online CPUs, one CPU index per line.
+get_online_cpus() {
+    cpu_online_raw="$(read_first_line /sys/devices/system/cpu/online)"
+
+    if [ -n "$cpu_online_raw" ]; then
+        expand_cpu_list "$cpu_online_raw"
+        return 0
+    fi
+
+    awk '
+        NR == 1 {
+            for (i = 1; i <= NF; i++) {
+                if ($i ~ /^CPU[0-9]+$/) {
+                    cpu = $i
+                    sub(/^CPU/, "", cpu)
+                    print cpu
+                }
+            }
+        }
+    ' /proc/interrupts 2>/dev/null
+}
+
+# Return interrupt lines matching a pattern from /proc/interrupts.
+#
+# Keep this helper name because existing irq-style tests already call it.
+# ShellCheck cannot see those external call sites when checking this file alone.
+# shellcheck disable=SC2317
+get_interrupt_line_by_name() {
+    irq_name="$1"
+
+    [ -r /proc/interrupts ] || return 1
+    grep "$irq_name" /proc/interrupts 2>/dev/null
+}
 
 # Return the first matching interrupt line with usable fields.
 get_first_interrupt_line_by_name() {
@@ -284,6 +392,26 @@ interrupt_counter_delta() {
     '
 }
 
+# Return 0 if taskset can schedule a trivial task on the CPU.
+#
+# Return:
+# 0 - CPU is schedulable
+# 1 - taskset exists, but CPU is not schedulable
+# 2 - taskset is missing
+cpu_is_schedulable() {
+    cpu_index="$1"
+
+    if ! command -v taskset >/dev/null 2>&1; then
+        log_warn "taskset command is not available; cannot verify CPU$cpu_index schedulability"
+        return 2
+    fi
+
+    if taskset -c "$cpu_index" sh -c 'true' >/dev/null 2>&1; then
+        return 0
+    fi
+
+    return 1
+}
 
 # Run bounded workload pinned to one CPU.
 #
