@@ -1,0 +1,24 @@
+metadata:
+  name: audio-playback-hamoa-handset
+  format: "Lava-Test Test Definition 1.0"
+  description: "Audio Hamoa handset playback validation (4-way speaker system)"
+  os:
+    - linux
+  scope:
+    - functional
+
+params:
+  DEVICE: "handset"  # Device to test: handset, headset, or all, default: handset
+  CLIP_NAMES: "playback_config1"  # Clip configuration name for auto-discovery, default: playback_config1
+  AUDIO_CLIPS_BASE_DIR: "/home/AudioClips"  # Path to audio clips directory, default: /home/AudioClips
+  SKIP_ACTUAL_PLAYBACK: 0  # Skip actual audio playback, only test mixer configuration (0=play audio, 1=skip), default: 0
+  VERBOSE: 0  # Enable verbose logging, default: 0
+  RES_SUFFIX: "Handset"  # Suffix for unique result file, default: Handset
+  LAVA_TESTCASE_ID: "AudioPlayback_Hamoa_Handset"  # Unique testcase ID for LAVA, default: AudioPlayback_Hamoa_Handset
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Multimedia/Audio/Audio_Hamoa/AudioPlayback/
+    - ./run.sh --device "${DEVICE}" --clip-name "${CLIP_NAMES}" --audio-clips-path "${AUDIO_CLIPS_BASE_DIR}" --skip-actual-playback "${SKIP_ACTUAL_PLAYBACK}" --verbose "${VERBOSE}" --res-suffix "${RES_SUFFIX}" --lava-testcase-id "${LAVA_TESTCASE_ID}" || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh AudioPlayback_Hamoa${RES_SUFFIX:+_${RES_SUFFIX}}.res
