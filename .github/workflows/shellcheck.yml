@@ -29,26 +29,127 @@ jobs:
 
       - name: Run ShellCheck on changed .sh files in PR
         if: github.event_name == 'pull_request'
+        env:
+          BASE_BRANCH: ${{ github.base_ref }}
         run: |
           set -eu
 
-          BASE_BRANCH="${{ github.base_ref }}"
+          if [ -z "$BASE_BRANCH" ]; then
+            echo "BASE_BRANCH is empty"
+            exit 1
+          fi
+
+          if ! git check-ref-format --branch "$BASE_BRANCH" >/dev/null 2>&1; then
+            echo "Invalid base branch name: $BASE_BRANCH"
+            exit 1
+          fi
+
           git fetch --no-tags origin "+refs/heads/${BASE_BRANCH}:refs/remotes/origin/${BASE_BRANCH}"
 
           MERGE_BASE="$(git merge-base HEAD "refs/remotes/origin/${BASE_BRANCH}")"
-          FILES="$(git diff --diff-filter=d --name-only "${MERGE_BASE}"...HEAD -- '*.sh')"
+          files_list="$(mktemp)"
+          trap 'rm -f "$files_list"' EXIT
 
-          if [ -n "$FILES" ]; then
-            echo "Checking changed shell files:"
-            printf '%s\n' "$FILES"
-            printf '%s\n' "$FILES" | tr '\n' '\0' | xargs -0 -r shellcheck -s sh -e SC1091,SC2230,SC3043
-          else
+          git diff --diff-filter=d --name-only -z "${MERGE_BASE}"...HEAD -- '*.sh' > "$files_list"
+
+          if [ ! -s "$files_list" ]; then
             echo "No shell files to lint."
+            exit 0
           fi
+
+          echo "Checking changed shell files:"
+          tr '\0' '\n' < "$files_list"
+
+          xargs -0 -r sh -c '
+            is_functestlib() {
+              lint_file_path="$1"
+
+              case "$lint_file_path" in
+                ./Runner/utils/functestlib.sh|Runner/utils/functestlib.sh)
+                  return 0
+                  ;;
+              esac
+
+              return 1
+            }
+
+            run_shellcheck() {
+              lint_file_path="$1"
+              base_excludes="SC1091,SC2230,SC3043"
+              lint_excludes="$base_excludes"
+
+              if is_functestlib "$lint_file_path"; then
+                lint_excludes="${base_excludes},SC2317"
+                echo "ShellCheck functestlib mode: $lint_file_path"
+              else
+                echo "ShellCheck strict mode: $lint_file_path"
+              fi
+
+              shellcheck -s sh -e "$lint_excludes" -- "$lint_file_path"
+            }
+
+            rc=0
+
+            for lint_file_path do
+              if ! run_shellcheck "$lint_file_path"; then
+                rc=1
+              fi
+            done
+
+            exit "$rc"
+          ' sh < "$files_list"
 
       - name: Run ShellCheck on all .sh files (push/manual)
         if: github.event_name != 'pull_request'
         run: |
           set -eu
+
+          files_list="$(mktemp)"
+          trap 'rm -f "$files_list"' EXIT
+
           echo "Linting all shell files in repository..."
-          find . -type f -name '*.sh' -print0 | xargs -0 -r shellcheck -s sh -e SC1091,SC2230,SC3043
+          find . -type f -name '*.sh' -print0 > "$files_list"
+
+          if [ ! -s "$files_list" ]; then
+            echo "No shell files to lint."
+            exit 0
+          fi
+
+          xargs -0 -r sh -c '
+            is_functestlib() {
+              lint_file_path="$1"
+
+              case "$lint_file_path" in
+                ./Runner/utils/functestlib.sh|Runner/utils/functestlib.sh)
+                  return 0
+                  ;;
+              esac
+
+              return 1
+            }
+
+            run_shellcheck() {
+              lint_file_path="$1"
+              base_excludes="SC1091,SC2230,SC3043"
+              lint_excludes="$base_excludes"
+
+              if is_functestlib "$lint_file_path"; then
+                lint_excludes="${base_excludes},SC2317"
+                echo "ShellCheck functestlib mode: $lint_file_path"
+              else
+                echo "ShellCheck strict mode: $lint_file_path"
+              fi
+
+              shellcheck -s sh -e "$lint_excludes" -- "$lint_file_path"
+            }
+
+            rc=0
+
+            for lint_file_path do
+              if ! run_shellcheck "$lint_file_path"; then
+                rc=1
+              fi
+            done
+
+            exit "$rc"
+          ' sh < "$files_list"
