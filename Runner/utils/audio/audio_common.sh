@@ -4,6 +4,20 @@
 # Common audio helpers for PipeWire / PulseAudio runners.
 # Requires: functestlib.sh (log_* helpers, extract_tar_from_url, scan_dmesg_errors)
 
+# Source ALSA-specific helpers (includes Hamoa profile functions)
+# Use BASH_SOURCE to get the directory of this script file when sourced
+if [ -n "${BASH_SOURCE:-}" ]; then
+  AUDIO_UTILS_DIR="$(cd "$(dirname "$0")" && pwd)"
+else
+  # For POSIX shells, try $0 first, then fall back to TOOLS variable
+  AUDIO_UTILS_DIR="$(cd "$(dirname "$0")" && pwd)"
+  if [ ! -f "$AUDIO_UTILS_DIR/alsa_common.sh" ] && [ -n "${TOOLS:-}" ]; then
+    AUDIO_UTILS_DIR="$TOOLS/audio"
+  fi
+fi
+# shellcheck disable=SC1091
+. "$AUDIO_UTILS_DIR/alsa_common.sh"
+
 # Check whether a command exists in PATH.
 # Used by bootstrap helpers before attempting backend startup.
 have_cmd() {

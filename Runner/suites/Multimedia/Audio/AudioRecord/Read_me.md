@@ -6,7 +6,7 @@ This suite automates the validation of audio recording capabilities on Qualcomm 
 
 ## Features
 
-- Supports **PipeWire** and **PulseAudio** backends
+- Supports **PipeWire**, **PulseAudio**, and **ALSA** backends (including Hamoa ALSA profile)
 - **10-config test coverage**: Comprehensive validation across diverse audio formats (sample rates: 8KHz-96KHz, channels: 1ch-6ch)
 - **Flexible config selection**: 
   - Use generic config names (record_config1-record_config10) for easy selection
@@ -71,6 +71,91 @@ For overlay builds using audioreach kernel modules, the test automatically:
 
 This happens transparently before tests run. No manual configuration needed.
 
+## Hamoa ALSA Profile Support
+
+For **Hamoa base builds** (ALSA-only, no PipeWire/PulseAudio), use the dedicated Hamoa YAML files:
+
+### Hamoa-Specific Features
+- **Direct ALSA backend** with hardware-specific profile (`--backend alsa --alsa-profile hamoa`)
+- **Device-specific routing**: Handset (internal microphones) and Headset (external microphone)
+- **Hardware mixer configuration**: Automatic mixer setup for each device
+- **10 record configs**: Same comprehensive coverage as generic configs
+- **CI/LAVA ready**: Includes `--res-suffix` and `--lava-testcase-id` parameters
+
+### Hamoa YAML Files
+```
+AudioRecord_Hamoa_Handset.yaml  # For handset (internal mics)
+AudioRecord_Hamoa_Headset.yaml  # For headset (external mic)
+```
+
+### Hamoa Usage Examples
+
+**Handset Recording (internal microphones):**
+```bash
+cd Runner/suites/Multimedia/Audio/AudioRecord
+
+# Test with handset device
+./run.sh --backend alsa --alsa-profile hamoa --device handset \
+  --config-name record_config1 --record-seconds 5s --loops 1
+
+# With CI/LAVA parameters
+./run.sh --backend alsa --alsa-profile hamoa --device handset \
+  --config-name record_config1 --record-seconds 5s --loops 1 \
+  --res-suffix Hamoa_Handset --lava-testcase-id AudioRecord_Hamoa_Handset
+```
+
+**Headset Recording (external microphone):**
+```bash
+# Test with headset device
+./run.sh --backend alsa --alsa-profile hamoa --device headset \
+  --config-name record_config1 --record-seconds 5s --loops 1
+
+# With CI/LAVA parameters
+./run.sh --backend alsa --alsa-profile hamoa --device headset \
+  --config-name record_config1 --record-seconds 5s --loops 1 \
+  --res-suffix Hamoa_Headset --lava-testcase-id AudioRecord_Hamoa_Headset
+```
+
+### Hamoa Sample Output
+```
+ubuntu@ubuntu:tmp/Runner/suites/Multimedia/Audio/AudioRecord$ ./run.sh --backend alsa --alsa-profile hamoa --device handset --config-name record_config1 --record-seconds 5s --loops 1 --res-suffix Hamoa_Handset --lava-testcase-id AudioRecord_Hamoa_Handset
+[INFO] 2026-04-15 19:31:45 - Using unique result file: /tmp/Runner/suites/Multimedia/Audio/AudioRecord/AudioRecord_Hamoa_Handset.res
+[INFO] 2026-04-15 19:31:45 - Using unique log directory: /tmp/Runner/suites/Multimedia/Audio/AudioRecord/results/AudioRecord_Hamoa_Handset
+[INFO] 2026-04-15 19:31:45 - Base build detected, no audioreach modules, skipping overlay setup
+[INFO] 2026-04-15 19:31:45 - ---------------- Starting AudioRecord ----------------
+[INFO] 2026-04-15 19:31:45 - Platform Details: machine='Qualcomm Technologies, Inc. Hamoa IoT EVK' target='unknown' kernel='7.0.0-1005-qcom' arch='aarch64'
+[INFO] 2026-04-15 19:31:45 - Using backend: alsa
+[INFO] 2026-04-15 19:31:45 - Using hardware-specific ALSA profile 'hamoa' - device validation handled by profile
+[INFO] 2026-04-15 19:31:45 - Using ALSA profile: hamoa for device: handset
+[INFO] 2026-04-15 19:31:45 - Configuring mixer for handset capture (mic)...
+[INFO] 2026-04-15 19:31:45 - Handset capture mixer configured successfully
+[INFO] 2026-04-15 19:31:45 - ALSA profile configured successfully, device: plughw:0,0
+[INFO] 2026-04-15 19:31:45 - Using config discovery mode
+[INFO] 2026-04-15 19:31:45 - Discovered 1 configs to test
+[INFO] 2026-04-15 19:31:45 - [record_8KHz_1ch] Using config: record_config1 (rate=8000Hz channels=1)
+[INFO] 2026-04-15 19:31:45 - [record_8KHz_1ch] loop 1/1 start=2026-04-15T19:31:45Z rate=8000Hz channels=1 backend=alsa source=mic(plughw:0,0)
+[INFO] 2026-04-15 19:31:45 - [record_8KHz_1ch] exec: arecord -D "plughw:0,0" -f S16_LE -r 8000 -c 1 -d 5 "/tmp/Runner/suites/Multimedia/Audio/AudioRecord/results/AudioRecord_Hamoa_Handset/record_8KHz_1ch.wav"
+[INFO] 2026-04-15 19:31:51 - [record_8KHz_1ch] evidence: pw_streaming=0 pa_streaming=1 alsa_running=0 asoc_path_on=0 bytes=80044 pw_log=0
+[PASS] 2026-04-15 19:31:51 - [record_8KHz_1ch] loop 1 OK (rc=0, 5s, bytes=80044)
+[PASS] 2026-04-15 19:31:52 - AudioRecord PASS
+
+ubuntu@ubuntu:tmp/Runner/suites/Multimedia/Audio/AudioRecord$ cat AudioRecord_Hamoa_Handset.res
+AudioRecord_Hamoa_Handset PASS
+```
+
+### Hamoa Device Mapping
+| Device   | Hardware                    | ALSA Device  | Mixer Profile          |
+|----------|-----------------------------|--------------|------------------------|
+| handset  | Internal microphones        | plughw:0,0   | handset_capture        |
+| headset  | External microphone         | plughw:0,1   | headset_capture        |
+
+### Important Notes for Hamoa
+- **ALSA-only**: Hamoa builds do not have PipeWire/PulseAudio. Always use `--backend alsa --alsa-profile hamoa`
+- **Device parameter required**: Must specify `--device handset` or `--device headset`
+- **Automatic mixer configuration**: The script automatically configures hardware mixers for each device
+- **Evidence-based validation**: Uses ALSA runtime status and ASoC path validation
+- **All 10 configs supported**: Same record_config1-10 coverage as generic configs
+
 ## Directory Structure
 
 ```bash
@@ -78,7 +163,9 @@ Runner/
 ├── run-test.sh
 ├── utils/
 │   ├── functestlib.sh
-│   └── audio_common.sh
+│   └── audio/
+│       ├── audio_common.sh      # Generic audio utilities
+│       └── alsa_common.sh       # ALSA-specific utilities (Hamoa support)
 └── suites/
     └── Multimedia/
         └── Audio/
@@ -89,7 +176,9 @@ Runner/
                 ├── AudioRecord_Config01.yaml
                 ├── AudioRecord_Config02.yaml
                 ├── ...
-                └── AudioRecord_Config10.yaml
+                ├── AudioRecord_Config10.yaml
+                ├── AudioRecord_Hamoa_Handset.yaml   # Hamoa handset recording
+                └── AudioRecord_Hamoa_Headset.yaml   # Hamoa headset recording
 ```
 
 ## Usage
@@ -176,7 +265,7 @@ cd Runner/suites/Multimedia/Audio/AudioRecord
 
 Environment Variables:
 Variable	      Description	                                                  Default
-AUDIO_BACKEND	  Selects backend: pipewire or pulseaudio	                      auto-detect
+AUDIO_BACKEND	  Selects backend: pipewire, pulseaudio, or alsa	              auto-detect
 SOURCE_CHOICE	  Recording source: mic or null                                   mic
 CONFIG_NAMES      Test specific configs (e.g., "record_config1 record_config2")   record_config1
 CONFIG_FILTER     Filter configs by pattern (e.g., "48KHz" or "2ch")              unset
@@ -191,10 +280,14 @@ JUNIT_OUT	      Path to write JUnit XML output	                              uns
 RES_SUFFIX        Suffix for unique result file and log directory                 unset
 LAVA_TESTCASE_ID  Unique testcase ID written into the .res file for LAVA         AudioRecord
 
+**Hamoa-Specific Environment Variables (ALSA backend only):**
+ALSA_PROFILE      ALSA hardware profile (e.g., "hamoa")                           unset
+DEVICE            Device type: handset or headset (Hamoa only)                    unset
+
 
 CLI Options:
 Option	                      Description
---backend	                  Select backend: pipewire or pulseaudio
+--backend	                  Select backend: pipewire, pulseaudio, or alsa
 --source	                  Recording source: mic or null
 --config-name <names>         Test specific configs using record_config1-record_config10 or descriptive names (space-separated)
 --config-filter <patterns>    Filter configs by sample rate or channels (space-separated patterns)
@@ -209,6 +302,10 @@ Option	                      Description
 --junit <file.xml>            Write JUnit XML output
 --verbose	                  Enable verbose logging
 --help	                      Show usage instructions
+
+**Hamoa-Specific CLI Options (ALSA backend only):**
+--alsa-profile <profile>      ALSA hardware profile (e.g., "hamoa")
+--device <type>               Device type: handset or headset (Hamoa only)
 ```
 
 Sample Output:
