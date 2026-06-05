@@ -1,0 +1,16 @@
+metadata:
+  name: TPDM-Enable-Disable
+  format: "Lava-Test Test Definition 1.0"
+  description: "Script to repeatedly enable and disable all TPDM coresight sources and verify their status."
+  os:
+    - linux
+  scope:
+    - coresight
+    - kernel
+
+run:
+  steps:
+    - REPO_PATH=$PWD || true
+    - cd Runner/suites/Kernel/DEBUG/TPDM-Enable-Disable || true
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh TPDM-Enable-Disable.res || true

@@ -26,5 +26,5 @@ run:
   steps:
     - REPO_PATH=$PWD
     - cd Runner/suites/Multimedia/OpenCV
-    - ./run.sh --bin "${BIN_PATH}" --build-dir "${BUILD_DIR}" --cwd "${CWD}" --testdata "${TESTDATA_PATH}" --args "${EXTRA_ARGS}" --timeout "${TIMEOUT_SEC}" --suite "${SUITE}" --list "${LIST_ONLY}" --repeat "${REPEAT}" --shuffle "${SHUFFLE}" --seed "{SEED}" --perf-args "${PERF_ARGS}" --perf-to-test "${PERF_TO_TEST}" || true
+    - ./run.sh --bin "${BIN_PATH}" --build-dir "${BUILD_DIR}" --cwd "${CWD}" --testdata "${TESTDATA_PATH}" --args "${EXTRA_ARGS}" --timeout "${TIMEOUT_SECS}" --suite "${SUITE}" $( [ "${LIST_ONLY}" = "1" ] && printf '%s' "--list" ) --repeat "${REPEAT}" $( [ "${SHUFFLE}" = "1" ] && printf '%s' "--shuffle" ) $( [ -n "${SEED}" ] && printf '%s %s' "--seed" "${SEED}" ) --perf-args "${PERF_ARGS}" $( [ "${PERF_TO_TESTS}" = "1" ] && printf '%s' "--perf-to-tests" ) || true
     - $REPO_PATH/Runner/utils/send-to-lava.sh OpenCV.res || true
