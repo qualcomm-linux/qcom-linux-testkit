@@ -138,10 +138,10 @@ fi
 
 count=1
 while [ "$count" -le 50 ]; do
-    
+
     echo 1 > "$stm_path/enable_source" 2>/dev/null
     val=$(cat "$stm_path/enable_source" 2>/dev/null)
-    
+
     if [ "$val" != "1" ]; then
         log_fail "Iteration $count: Failed to enable STM source"
         fail=$((fail + 1))
@@ -149,7 +149,7 @@ while [ "$count" -le 50 ]; do
 
     echo 0 > "$stm_path/enable_source" 2>/dev/null
     val=$(cat "$stm_path/enable_source" 2>/dev/null)
-    
+
     if [ "$val" != "0" ]; then
         log_fail "Iteration $count: Failed to disable STM source"
         fail=$((fail + 1))
@@ -168,4 +168,4 @@ else
     echo "$TESTNAME FAIL" > "$res_file"
 fi
 
-log_info "-------------------$TESTNAME Testcase Finished----------------------------" 
+log_info "-------------------$TESTNAME Testcase Finished----------------------------"

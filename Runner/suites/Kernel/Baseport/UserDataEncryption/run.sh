@@ -79,14 +79,14 @@ cleanup() {
         else
             log_info "removed key $key_id from $FS_PATH"
         fi
-    fi 
+    fi
 
-    
+
     if [ -n "${KEY_FILE:-}" ]; then
         if ! rm -f "$KEY_FILE" 2>/dev/null; then
             log_warn "Failed to remove key file: $KEY_FILE"
         fi
-    fi  
+    fi
 
     scan_dmesg_errors "$test_path" "fscrypt" ""
 }
@@ -218,7 +218,7 @@ fi
 log_info "Key ID: $key_id"
 
 # Step 4: Check key status
-log_info "Checking key status" 
+log_info "Checking key status"
 status=$("$FSCRYPTCTL" key_status "$key_id" "$FS_PATH" 2>&1)
 rc=$?
 
@@ -256,7 +256,7 @@ rc=$?
 if [ "$rc" -ne 0 ] || [ -z "${policy_output:-}" ]; then
     log_fail "fscryptctl get_policy failed for $MOUNT_DIR: $policy_output"
     echo "$TESTNAME FAIL" > "$res_file"
-    exit 0  
+    exit 0
 fi
 
 not_encrypted=$(echo "$policy_output" | awk '/file or directory not encrypted/ {print 1}')

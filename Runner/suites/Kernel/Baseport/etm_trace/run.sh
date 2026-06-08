@@ -37,9 +37,9 @@ res_file="./$TESTNAME.res"
 log_info "-----------------------------------------------------------------------------------------"
 log_info "-------------------Starting $TESTNAME Testcase----------------------------"
 log_info "=== Test Initialization ==="
- 
+
 pass=true
- 
+
 # Step 1: Check required kernel config
 required_configs="CONFIG_CORESIGHT_SOURCE_ETM4X"
 check_kernel_config "$required_configs" || {
@@ -47,7 +47,7 @@ check_kernel_config "$required_configs" || {
     echo "$TESTNAME SKIP" > "$res_file"
     exit 0
 }
- 
+
 # Step 2: Enable CoreSight sink
 log_info "Enabling CoreSight sink (tmc_etr0)..."
 echo 1 > /sys/bus/coresight/devices/tmc_etr0/enable_sink
@@ -57,7 +57,7 @@ else
     log_fail "Failed to enable sink."
     pass=false
 fi
- 
+
 # Step 3: Enable CoreSight source
 log_info "Enabling CoreSight source (etm0)..."
 echo 1 > /sys/bus/coresight/devices/etm0/enable_source
@@ -67,7 +67,7 @@ else
     log_fail "Failed to enable source."
     pass=false
 fi
- 
+
 # Step 4: Capture trace data
 TRACE_FILE="/tmp/qdss.bin"
 log_info "Capturing trace data to $TRACE_FILE..."
@@ -77,7 +77,7 @@ else
     log_fail "Failed to capture trace data."
     pass=false
 fi
- 
+
 # Step 5: Validate trace output
 if [ -s "$TRACE_FILE" ]; then
     log_info "Trace file is not empty."
@@ -85,7 +85,7 @@ else
     log_fail "Trace file is empty."
     pass=false
 fi
- 
+
 # Final result and cleanup
 if $pass; then
     log_pass "$TESTNAME : Test Passed"
@@ -100,5 +100,5 @@ else
     log_info "-------------------Completed $TESTNAME Testcase----------------------------"
     exit 1
 fi
- 
+
 

@@ -103,7 +103,7 @@ if [ -z "$CTI_LIST" ]; then
 else
     for cti in $CTI_LIST; do
         dev_path="$CS_BASE/$cti"
-        
+
         if [ ! -f "$dev_path/enable" ]; then
             log_warn "Skipping $cti: 'enable' node not found"
             continue

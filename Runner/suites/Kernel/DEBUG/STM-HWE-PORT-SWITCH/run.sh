@@ -67,7 +67,7 @@ reset_source_sink() {
 test_attribute() {
     attr_name=$1
     attr_path="$stm_path/$attr_name"
-    
+
     log_info "Testing Attribute: $attr_name"
 
     if [ ! -f "$attr_path" ]; then
@@ -77,12 +77,12 @@ test_attribute() {
 
     for stm_state in 0 1; do
         echo "$stm_state" > "$stm_path/enable_source"
-        
+
         for val in 0 1; do
             echo "$val" > "$attr_path"
             readback=$(cat "$attr_path")
-            
-            
+
+
             if [ "$attr_name" = "hwe_enable" ]; then
                 if [ "$readback" -eq "$val" ]; then
                     log_pass "STM_Src:$stm_state | $attr_name set to $val"
@@ -94,7 +94,7 @@ test_attribute() {
             elif [ "$attr_name" = "port_enable" ]; then
                  if [ "$val" -eq 1 ] && [ "$readback" != "0" ] && [ "$readback" != "0x0" ]; then
                      log_pass "STM_Src:$stm_state | $attr_name set to $val"
-                 elif [ "$val" -eq 0 ] && [ "$readback" = "0" ]; then 
+                 elif [ "$val" -eq 0 ] && [ "$readback" = "0" ]; then
                      log_pass "STM_Src:$stm_state | $attr_name set to $val"
                  elif [ "$val" -eq 0 ] && [ "$readback" = "0x0" ]; then
                      log_pass "STM_Src:$stm_state | $attr_name set to $val"
@@ -106,7 +106,7 @@ test_attribute() {
             fi
         done
     done
-    
+
     echo "$TESTNAME PASS" > "$res_file"
     return 0
 }
@@ -139,4 +139,4 @@ if [ -f "$stm_path/port_enable" ]; then
     echo 0xffffffff > "$stm_path/port_enable"
 fi
 
-log_info "-------------------$TESTNAME Testcase Finished----------------------------" 
+log_info "-------------------$TESTNAME Testcase Finished----------------------------"

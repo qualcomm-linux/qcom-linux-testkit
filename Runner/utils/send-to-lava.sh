@@ -33,7 +33,7 @@ fi
 if [ -s "$SIGNAL_FILE" ]; then
     while IFS= read -r signal_line || [ -n "$signal_line" ]; do
         [ -n "$signal_line" ] || continue
- 
+
         # Blank lines help if previous console output did not end cleanly.
         # The signal itself is still emitted only once.
         printf '\n%s\n\n' "$signal_line"

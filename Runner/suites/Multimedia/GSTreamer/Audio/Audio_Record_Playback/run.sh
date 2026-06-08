@@ -234,7 +234,7 @@ while [ $# -gt 0 ]; do
       fi
       shift 2
       ;;
- 
+
     --clip-path)
       if [ $# -lt 2 ] || [ "${2#--}" != "$2" ]; then
         log_warn "Missing/invalid value for --clip-path"
@@ -247,7 +247,7 @@ while [ $# -gt 0 ]; do
       fi
       shift 2
       ;;
- 
+
     --test-name)
       if [ $# -lt 2 ] || [ "${2#--}" != "$2" ]; then
         log_warn "Missing/invalid value for --test-name"
@@ -469,7 +469,7 @@ run_record_test() {
   ext="$fmt"
   output_file="$RECORDED_DIR/${testname}.${ext}"
   test_log="$OUTDIR/${testname}.log"
-  
+
   # Remove stale artifact from a previous rerun.
   rm -f "$output_file"
 
@@ -625,7 +625,7 @@ run_record_pulsesrc_test() {
   ext="$fmt"
   output_file="$RECORDED_DIR/${testname}.${ext}"
   test_log="$OUTDIR/${testname}.log"
-  
+
   # Remove stale artifact from a previous rerun.
   rm -f "$output_file"
 
@@ -684,27 +684,27 @@ run_record_pulsesrc_test() {
 # -------------------- PulseSrc Playback test function --------------------
 run_playback_pulsesrc_test() {
   fmt="$1"
- 
+
   testname="playback_pulsesrc_${fmt}"
   log_info "=========================================="
   log_info "Running: $testname"
   log_info "=========================================="
- 
+
   ext="$fmt"
   input_file="$RECORDED_DIR/record_pulsesrc_${fmt}.${ext}"
- 
+
   if [ ! -f "$input_file" ]; then
     if [ "$testMode" = "all" ]; then
       log_fail "$testname: FAIL - expected recorded file is missing: $input_file (pulsesrc record testcase failed in same run)"
       fail_count=$((fail_count + 1))
       return 1
     fi
- 
+
     log_warn "$testname: SKIP - recorded file not found: $input_file (run pulsesrc record first)"
     skip_count=$((skip_count + 1))
     return 1
   fi
- 
+
   file_size="$(gstreamer_file_size_bytes "$input_file")"
   if [ "$file_size" -le 1000 ]; then
     if [ "$testMode" = "all" ]; then
@@ -712,43 +712,43 @@ run_playback_pulsesrc_test() {
       fail_count=$((fail_count + 1))
       return 1
     fi
- 
+
     log_warn "$testname: SKIP - recorded file too small: $file_size bytes (pulsesrc recording likely failed)"
     skip_count=$((skip_count + 1))
     return 1
   fi
- 
+
   test_log="$OUTDIR/${testname}.log"
   : >"$test_log"
-  
+
   # pulsesrc recordings are timeout-driven and can be longer than the nominal
   # AUDIO_DURATION. Keep extra headroom here so valid same-run artifacts do not
   # fail intermittently due to playback timeout racing EOS/finalization.
   playback_timeout=$((duration + 20))
   pipeline="$(gstreamer_build_audio_playback_pipeline "$fmt" "$input_file")"
- 
+
   if [ -z "$pipeline" ]; then
     log_fail "$testname: FAIL (could not build playback pipeline)"
     fail_count=$((fail_count + 1))
     return 1
   fi
- 
+
   log_info "Pipeline: $pipeline"
-  
-  if gstreamer_run_gstlaunch_timeout "$playback_timeout" "$pipeline" >>"$test_log" 2>&1; then 
+
+  if gstreamer_run_gstlaunch_timeout "$playback_timeout" "$pipeline" >>"$test_log" 2>&1; then
     gstRc=0
   else
     gstRc=$?
   fi
- 
+
   log_info "$testname: playback timeout budget=${playback_timeout}s"
- 
+
   if ! gstreamer_validate_log "$test_log" "$testname"; then
     log_fail "$testname: FAIL (GStreamer errors detected)"
     fail_count=$((fail_count + 1))
     return 1
   fi
- 
+
   if [ "$gstRc" -eq 0 ]; then
     log_pass "$testname: PASS"
     pass_count=$((pass_count + 1))
@@ -762,12 +762,12 @@ run_playback_pulsesrc_test() {
 # -------------------- Test file playback test function (OGG/MP3) --------------------
 run_playback_ogg_mp3_test() {
   fmt="$1"
-  
+
   testname="playback_sample_${fmt}"
   log_info "=========================================="
   log_info "Running: $testname"
   log_info "=========================================="
-  
+
   # Determine input file based on format
   case "$fmt" in
     ogg)
@@ -782,13 +782,13 @@ run_playback_ogg_mp3_test() {
       return 1
       ;;
   esac
-  
+
   if [ ! -f "$input_file" ]; then
     log_warn "$testname: SKIP - Test file not found: $input_file"
     skip_count=$((skip_count + 1))
     return 1
   fi
-  
+
   # Check if file has minimum content
   file_size="$(gstreamer_file_size_bytes "$input_file")"
   if [ "$file_size" -le 1000 ]; then
@@ -796,36 +796,36 @@ run_playback_ogg_mp3_test() {
     skip_count=$((skip_count + 1))
     return 1
   fi
-  
+
   test_log="$OUTDIR/${testname}.log"
   : >"$test_log"
-  
+
   pipeline="$(gstreamer_build_audio_playback_pipeline "$fmt" "$input_file")"
-  
+
   if [ -z "$pipeline" ]; then
     log_fail "$testname: FAIL (could not build playback pipeline - format not supported or elements missing)"
     fail_count=$((fail_count + 1))
     return 1
   fi
-  
+
   log_info "Pipeline: $pipeline"
-  
+
   # Run playback
   if gstreamer_run_gstlaunch_timeout "$((duration + 10))" "$pipeline" >>"$test_log" 2>&1; then
     gstRc=0
   else
     gstRc=$?
   fi
-  
+
   log_info "Playback exit code: $gstRc"
-  
+
   # Check for GStreamer errors in log
   if ! gstreamer_validate_log "$test_log" "$testname"; then
     log_fail "$testname: FAIL (GStreamer errors detected)"
     fail_count=$((fail_count + 1))
     return 1
   fi
-  
+
   # Check for successful completion
   if [ "$gstRc" -eq 0 ]; then
     log_pass "$testname: PASS"
@@ -1012,7 +1012,7 @@ provision_test_files() {
 
   sample_ogg="$OUTDIR/sample_audio.ogg"
   sample_mp3="$OUTDIR/sample_audio.mp3"
-  
+
   # Refresh once at each provisioning stage boundary.
   # This is intentional: later stages depend on the latest have_ogg/have_mp3
   # values after local-path copy, URL extraction, or best-effort generation.
@@ -1121,9 +1121,9 @@ if [ -n "$testName" ]; then
   log_info "=========================================="
   log_info "INDIVIDUAL TEST MODE: $testName"
   log_info "=========================================="
-  
+
   total_tests=1
-  
+
   case "$testName" in
     record_wav)
       run_record_test "wav" || true
@@ -1156,7 +1156,7 @@ if [ -n "$testName" ]; then
       run_playback_ogg_mp3_test "mp3" || true
       ;;
   esac
-  
+
 # -------------------- Grouped Test Mode (Original) --------------------
 else
   # Run ALL record/encode tests first (4 tests total)
@@ -1184,7 +1184,7 @@ else
   if [ "$testMode" = "all" ] || [ "$testMode" = "playback" ]; then
     # Provision test files only when running playback tests
     provision_test_files "$OUTDIR" "$NUM_BUFFERS" "$duration" "$clipPath" "$clipUrl" "$USER_CLIP_PATH_SET" "$USER_CLIP_URL_SET"
-    
+
     log_info "=========================================="
     log_info "PLAYBACK TESTS"
     log_info "=========================================="
@@ -1202,7 +1202,7 @@ else
       total_tests=$((total_tests + 1))
       run_playback_pulsesrc_test "$fmt" || true
     done
-    
+
     # 5. Playback Test files (2 tests: ogg, mp3)
     log_info "Playing back Test files (OGG/MP3)..."
     for fmt in ogg mp3; do

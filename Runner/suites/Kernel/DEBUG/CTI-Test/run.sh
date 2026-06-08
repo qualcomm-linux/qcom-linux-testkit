@@ -72,7 +72,7 @@ map_cti_trigin() {
 
     log_info "Legacy: mapping trig $trig ch $channel to $ctiname"
     [ -f "$cti_dev/map_trigin" ] && echo "$trig" "$channel" > "$cti_dev/map_trigin" 2>/dev/null
-    
+
     trigin=""
     channelin=""
     [ -f "$cti_dev/show_trigin" ] && trigin=$(cut -b 4 "$cti_dev/show_trigin" 2>/dev/null)
@@ -80,7 +80,7 @@ map_cti_trigin() {
 
     if [ -n "$trigin" ] && [ -n "$channelin" ] && [ "$trig" -eq "$trigin" ] && [ "$channel" -eq "$channelin" ] 2>/dev/null; then
         [ -f "$cti_dev/unmap_trigin" ] && echo "$trig" "$channel" > "$cti_dev/unmap_trigin" 2>/dev/null
-        
+
         trigin=""
         [ -f "$cti_dev/show_trigin" ] && trigin=$(cut -b 4 "$cti_dev/show_trigin" 2>/dev/null)
         if [ -n "$trigin" ]; then
@@ -102,21 +102,21 @@ set_trigin_attach() {
     [ ! -d "$cti_dev/channels" ] && return
 
     log_info "Attach trigin: trig $trig -> ch $channel on $ctiname"
-    
+
     [ -f "$cti_dev/enable" ] && echo 1 > "$cti_dev/enable" 2>/dev/null
     [ -f "$cti_dev/channels/trigin_attach" ] && echo "$channel" "$trig" > "$cti_dev/channels/trigin_attach" 2>/dev/null
     [ -f "$cti_dev/channels/chan_xtrigs_sel" ] && echo "$channel" > "$cti_dev/channels/chan_xtrigs_sel" 2>/dev/null
-    
+
     read_trig=""
     [ -f "$cti_dev/channels/chan_xtrigs_in" ] && read_trig=$(cat "$cti_dev/channels/chan_xtrigs_in" 2>/dev/null)
-    
+
     if [ -n "$read_trig" ] && [ "$trig" -eq "$read_trig" ] 2>/dev/null; then
         [ -f "$cti_dev/channels/trigin_detach" ] && echo "$channel" "$trig" > "$cti_dev/channels/trigin_detach" 2>/dev/null
         [ -f "$cti_dev/channels/chan_xtrigs_sel" ] && echo "$channel" > "$cti_dev/channels/chan_xtrigs_sel" 2>/dev/null
-        
+
         read_trig=""
         [ -f "$cti_dev/channels/chan_xtrigs_in" ] && read_trig=$(cat "$cti_dev/channels/chan_xtrigs_in" 2>/dev/null)
-        
+
         if [ -n "$read_trig" ]; then
              log_warn "Failed to detach trigin on $ctiname"
              FAIL_COUNT=$((FAIL_COUNT + 1))
@@ -127,7 +127,7 @@ set_trigin_attach() {
         FAIL_COUNT=$((FAIL_COUNT + 1))
         [ -f "$cti_dev/channels/chan_xtrigs_reset" ] && echo 1 > "$cti_dev/channels/chan_xtrigs_reset" 2>/dev/null
     fi
-    
+
     [ -f "$cti_dev/enable" ] && echo 0 > "$cti_dev/enable" 2>/dev/null
 }
 
@@ -138,21 +138,21 @@ set_trigout_attach() {
     [ ! -d "$cti_dev/channels" ] && return
 
     log_info "Attach trigout: trig $trig -> ch $channel on $ctiname"
-    
+
     [ -f "$cti_dev/enable" ] && echo 1 > "$cti_dev/enable" 2>/dev/null
     [ -f "$cti_dev/channels/trigout_attach" ] && echo "$channel" "$trig" > "$cti_dev/channels/trigout_attach" 2>/dev/null
     [ -f "$cti_dev/channels/chan_xtrigs_sel" ] && echo "$channel" > "$cti_dev/channels/chan_xtrigs_sel" 2>/dev/null
-    
+
     read_trig=""
     [ -f "$cti_dev/channels/chan_xtrigs_out" ] && read_trig=$(cat "$cti_dev/channels/chan_xtrigs_out" 2>/dev/null)
-    
+
     if [ -n "$read_trig" ] && [ "$trig" -eq "$read_trig" ] 2>/dev/null; then
         [ -f "$cti_dev/channels/trigout_detach" ] && echo "$channel" "$trig" > "$cti_dev/channels/trigout_detach" 2>/dev/null
         [ -f "$cti_dev/channels/chan_xtrigs_sel" ] && echo "$channel" > "$cti_dev/channels/chan_xtrigs_sel" 2>/dev/null
-        
+
         read_trig=""
         [ -f "$cti_dev/channels/chan_xtrigs_out" ] && read_trig=$(cat "$cti_dev/channels/chan_xtrigs_out" 2>/dev/null)
-        
+
         if [ -n "$read_trig" ]; then
              log_warn "Failed to detach trigout on $ctiname"
              FAIL_COUNT=$((FAIL_COUNT + 1))
@@ -163,7 +163,7 @@ set_trigout_attach() {
         FAIL_COUNT=$((FAIL_COUNT + 1))
         [ -f "$cti_dev/channels/chan_xtrigs_reset" ] && echo 1 > "$cti_dev/channels/chan_xtrigs_reset" 2>/dev/null
     fi
-    
+
     [ -f "$cti_dev/enable" ] && echo 0 > "$cti_dev/enable" 2>/dev/null
 }
 
@@ -208,7 +208,7 @@ done
 
 for cti in $CTI_DEVICES; do
     cti_path="$CS_BASE/$cti"
-    
+
     if [ $NEW_VER -eq 1 ]; then
         if [ -f "$cti_path/mgmt/devid" ]; then
             devid=$(cat "$cti_path/mgmt/devid" 2>/dev/null)
