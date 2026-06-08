@@ -2579,39 +2579,46 @@ ethLinkDetected() {
 
 ethIsLinkUp() {
     iface=$1
+    carrier=""
+    st=""
+    ld=""
+ 
     [ -n "$iface" ] || return 1
  
-    # 1) If carrier says 1, we are good (fast path)
+    # 1) If carrier says 1, we are good.
+    # Some drivers return EINVAL while MAC/PHY attach is broken or incomplete.
+    # Suppress stderr to avoid noisy LAVA stdout.
     if [ -r "/sys/class/net/$iface/carrier" ]; then
-        [ "$(cat "/sys/class/net/$iface/carrier" 2>/dev/null)" = "1" ] && return 0
-        # If carrier is 0, do NOT return yet — fall through to other hints.
+        carrier="$(cat "/sys/class/net/$iface/carrier" 2>/dev/null || true)"
+        [ "$carrier" = "1" ] && return 0
     fi
  
-    # 2) If helper exists and says up, accept it (but don't fail early)
+    # 2) If helper exists and says up, accept it.
     if command -v is_link_up >/dev/null 2>&1; then
-        is_link_up "$iface" && return 0
+        is_link_up "$iface" >/dev/null 2>&1 && return 0
     fi
  
-    # 3) operstate can sometimes reflect link sooner than carrier in some stacks
+    # 3) operstate can sometimes reflect link sooner than carrier.
     if [ -r "/sys/class/net/$iface/operstate" ]; then
-        st=$(cat "/sys/class/net/$iface/operstate" 2>/dev/null || true)
+        st="$(cat "/sys/class/net/$iface/operstate" 2>/dev/null || true)"
         [ "$st" = "up" ] && return 0
     fi
  
-    # 4) ip link LOWER_UP (physical) is a good signal if ip exists
+    # 4) ip link LOWER_UP is a useful physical-link signal.
     if command -v ip >/dev/null 2>&1; then
         ip link show "$iface" 2>/dev/null | grep -qw "LOWER_UP" && return 0
     fi
  
-    # 5) Last resort: ethtool parse
+    # 5) Last resort: ethtool parse.
     if command -v ethtool >/dev/null 2>&1; then
-        ld=$(ethtool "$iface" 2>/dev/null | awk -F': ' '/^[[:space:]]*Link detected:/ {print $2; exit 0}' || true)
+        ld="$(ethtool "$iface" 2>/dev/null |
+            awk -F': ' '/^[[:space:]]*Link detected:/ {print $2; exit 0}' || true)"
         [ "$ld" = "yes" ] && return 0
     fi
  
     return 1
 }
- 
+
 ethWaitLinkUp() {
     iface=$1
     timeout_s=$2

@@ -13,11 +13,10 @@ jobs:
     steps:
     - uses: actions/stale@v10
       with:
-        stale-issue-message: '@qualcomm/qualcomm-linux-testing.triage This issue has been marked as stale due to 30 days of inactivity.'
-        stale-pr-message: '@ualcomm/qualcomm-linux-testing.triage This pull request has been marked as stale due to 30 days of inactivity.'
-
+        stale-issue-message: '@qualcomm/qualcomm-linux-testing.triage This issue has been marked as stale due to 30 days of inactivity and will automatically close after an additional 5 days'
+        stale-pr-message: '@ualcomm/qualcomm-linux-testing.triage This pull request has been marked as stale due to 30 days of inactivity and will automatically close after an additional 5 days.'
         days-before-stale: 30
-        days-before-close: -1
+        days-before-close: 5
         remove-stale-when-updated: true
         remove-issue-stale-when-updated: true
         remove-pr-stale-when-updated: true

@@ -48,6 +48,7 @@ fi
 RES_FILE="./${TESTNAME}.res"
 EFI_LIST_LOG="./efi_vars.list"
 EFI_WRITE_LOG="./efi_var_write.log"
+EFI_TRIAL_BEFORE_PRINT_LOG="./efi_trial_boot_status_before_write.log"
 EFI_TRIAL_PRINT_LOG="./efi_trial_boot_status_print.log"
 EFI_IND_PRINT_LOG="./efi_os_indications_supported_print.log"
 EFI_DATA_FILE="./efi_trial_boot_status.bin"
@@ -56,6 +57,7 @@ EFI_REMOUNT_LOG="./efi_efivarfs_remount.log"
 rm -f "$RES_FILE" \
       "$EFI_LIST_LOG" \
       "$EFI_WRITE_LOG" \
+      "$EFI_TRIAL_BEFORE_PRINT_LOG" \
       "$EFI_TRIAL_PRINT_LOG" \
       "$EFI_IND_PRINT_LOG" \
       "$EFI_DATA_FILE" \
@@ -67,13 +69,88 @@ CONFIG_EFI_ESRT=y
 CONFIG_EFIVAR_FS=y
 "
 
+efi_log_efivarfs_mount_state() {
+    log_info "efivarfs mount state:"
+
+    if command -v findmnt >/dev/null 2>&1; then
+        findmnt "$EFIVARFS_PATH" 2>/dev/null |
+            while IFS= read -r line || [ -n "$line" ]; do
+                [ -n "$line" ] || continue
+                log_info "[efivarfs-findmnt] $line"
+            done
+    fi
+
+    mount 2>/dev/null |
+        grep -E 'efivarfs|/sys/firmware/efi/efivars' |
+        while IFS= read -r line || [ -n "$line" ]; do
+            [ -n "$line" ] || continue
+            log_info "[efivarfs-mount] $line"
+        done
+
+    efi_mount_opts="$(efi_mount_options 2>/dev/null || true)"
+    [ -n "$efi_mount_opts" ] || efi_mount_opts="<unavailable>"
+    log_info "efivarfs mount options: $efi_mount_opts"
+}
+
+efi_log_variable_file_state() {
+    efi_var_file="$EFIVARFS_PATH/$OS_TRIAL_BOOT_STATUS_VAR"
+
+    if [ -e "$efi_var_file" ]; then
+        log_info "efivarfs node exists: $efi_var_file"
+
+        if command -v print_path_meta >/dev/null 2>&1; then
+            print_path_meta "$efi_var_file" 2>/dev/null |
+                while IFS= read -r line || [ -n "$line" ]; do
+                    [ -n "$line" ] || continue
+                    log_info "[efivarfs-node] $line"
+                done
+        fi
+
+        if command -v lsattr >/dev/null 2>&1; then
+            lsattr "$efi_var_file" 2>/dev/null |
+                while IFS= read -r line || [ -n "$line" ]; do
+                    [ -n "$line" ] || continue
+                    log_info "[efivarfs-attr] $line"
+                done
+        fi
+    else
+        log_info "efivarfs node does not exist yet: $efi_var_file"
+    fi
+}
+
+efi_log_recent_kernel_messages() {
+    log_info "Recent EFI/efivar kernel messages:"
+
+    get_kernel_log 2>/dev/null |
+        grep -Ei 'efi|efivar|efivars|SetVariable|OsTrialBootStatus|firmware|runtime' |
+        tail -80 |
+        while IFS= read -r line || [ -n "$line" ]; do
+            [ -n "$line" ] || continue
+            log_info "[efi-kernel] $line"
+        done
+}
+
+efi_log_existing_trial_boot_status() {
+    log_info "Checking existing EFI variable state, ${OS_TRIAL_BOOT_STATUS_VAR}"
+
+    if efivar -n "$OS_TRIAL_BOOT_STATUS_VAR" -p > "$EFI_TRIAL_BEFORE_PRINT_LOG" 2>&1; then
+        log_info "Existing ${OS_TRIAL_BOOT_STATUS_VAR} is readable before write"
+        system_log_file_excerpt "efivar-before-write" "$EFI_TRIAL_BEFORE_PRINT_LOG" 60
+    else
+        log_warn "${OS_TRIAL_BOOT_STATUS_VAR} is not readable before write or does not exist"
+        system_log_file_excerpt "efivar-before-write" "$EFI_TRIAL_BEFORE_PRINT_LOG" 60
+    fi
+
+    efi_log_variable_file_state
+}
+
 efi_install_restore_trap
 
 log_info "-----------------------------------------------------------------------------------------"
 log_info "------------------- Starting ${TESTNAME} Testcase ----------------------------"
 log_info "==== Test Initialization ===="
 
-if ! CHECK_DEPS_NO_EXIT=1 check_dependencies efivar grep sed awk printf mount wc; then
+if ! CHECK_DEPS_NO_EXIT=1 check_dependencies efivar grep sed awk printf mount wc tail; then
     system_write_result_and_exit "SKIP" "$TESTNAME SKIP, missing required dependencies"
 fi
 
@@ -112,11 +189,16 @@ if ! efivar -l > "$EFI_LIST_LOG" 2>&1; then
     system_write_result_and_exit "FAIL" "efivar -l failed"
 fi
 
-efi_var_count="$(grep -c '.' "$EFI_LIST_LOG" 2>/dev/null || echo 0)"
-if [ "$efi_var_count" -le 0 ]; then
-    system_write_result_and_exit "SKIP" "$TESTNAME SKIP, efivar -l returned no EFI variables"
+efi_var_count="$(awk 'NF { count++ } END { print count + 0 }' "$EFI_LIST_LOG" 2>/dev/null)"
+if ! system_is_uint "$efi_var_count"; then
+    efi_var_count=0
 fi
-log_pass "efivar -l returned ${efi_var_count} EFI variables"
+
+if [ "$efi_var_count" -le 0 ]; then
+    log_warn "efivar -l returned no EFI variables; continuing with mandatory OsTrialBootStatus validation"
+else
+    log_pass "efivar -l returned ${efi_var_count} EFI variables"
+fi
 
 log_info "Showing first EFI variables, capped at 20 lines"
 system_log_file_excerpt "efi-var" "$EFI_LIST_LOG" 20
@@ -126,26 +208,30 @@ if ! efi_write_trial_boot_status_payload; then
     system_write_result_and_exit "FAIL" "Could not prepare OsTrialBootStatus payload file"
 fi
 
-payload_size="$(wc -c < "$EFI_DATA_FILE" 2>/dev/null || echo 0)"
+payload_size="$(wc -c < "$EFI_DATA_FILE" 2>/dev/null | awk '{ print $1 + 0 }')"
 if [ "$payload_size" -ne 8 ]; then
     system_write_result_and_exit "FAIL" "OsTrialBootStatus payload size is invalid, expected 8 bytes, got ${payload_size}"
 fi
 log_pass "OsTrialBootStatus payload prepared, size ${payload_size} bytes"
 
 log_info "Checking efivarfs write access"
+efi_log_efivarfs_mount_state
+
 if ! efi_mount_is_rw; then
     if ! efi_try_remount_rw; then
-        system_write_result_and_exit "SKIP" "$TESTNAME SKIP, efivarfs is read-only and could not be remounted read-write"
+        efi_log_efivarfs_mount_state
+        system_write_result_and_exit "FAIL" "$TESTNAME FAIL, efivarfs is read-only and could not be remounted read-write"
     fi
 fi
 
+efi_log_existing_trial_boot_status
+
 log_info "Writing EFI variable, ${OS_TRIAL_BOOT_STATUS_VAR}"
 if ! efivar -n "$OS_TRIAL_BOOT_STATUS_VAR" -f "$EFI_DATA_FILE" -w > "$EFI_WRITE_LOG" 2>&1; then
-    system_log_file_excerpt "efivar-write" "$EFI_WRITE_LOG" 40
-
-    if efi_error_is_write_restricted "$EFI_WRITE_LOG"; then
-        system_write_result_and_exit "SKIP" "$TESTNAME SKIP, EFI variable write is restricted on this platform"
-    fi
+    system_log_file_excerpt "efivar-write" "$EFI_WRITE_LOG" 80
+    efi_log_efivarfs_mount_state
+    efi_log_variable_file_state
+    efi_log_recent_kernel_messages
 
     system_write_result_and_exit "FAIL" "Write failed for ${OS_TRIAL_BOOT_STATUS_VAR}"
 fi
@@ -153,11 +239,13 @@ log_pass "Write succeeded for ${OS_TRIAL_BOOT_STATUS_VAR}"
 
 log_info "Printing EFI variable, ${OS_TRIAL_BOOT_STATUS_VAR}"
 if ! efivar -n "$OS_TRIAL_BOOT_STATUS_VAR" -p > "$EFI_TRIAL_PRINT_LOG" 2>&1; then
-    system_log_file_excerpt "efivar-trial-print" "$EFI_TRIAL_PRINT_LOG" 40
+    system_log_file_excerpt "efivar-trial-print" "$EFI_TRIAL_PRINT_LOG" 80
+    efi_log_variable_file_state
+    efi_log_recent_kernel_messages
     system_write_result_and_exit "FAIL" "Print failed for ${OS_TRIAL_BOOT_STATUS_VAR}"
 fi
 
-system_log_file_excerpt "efivar-trial-print" "$EFI_TRIAL_PRINT_LOG" 40
+system_log_file_excerpt "efivar-trial-print" "$EFI_TRIAL_PRINT_LOG" 80
 
 if ! system_require_grep_in_file "GUID: ${EFI_GLOBAL_GUID}" \
         "$EFI_TRIAL_PRINT_LOG" \
@@ -245,4 +333,4 @@ else
     log_warn "OsIndicationsSupported value is firmware-specific, continuing without failing"
 fi
 
-system_finish_pass "$TESTNAME, EFI kernel config, write/read validation, and EFI variable attribute checks passed"
+system_finish_pass "$TESTNAME, EFI kernel config, OsTrialBootStatus write/read validation, and EFI variable attribute checks passed"

@@ -151,6 +151,33 @@ for iface in $ETH_IFACES; do
         ip link show "$iface" 2>/dev/null | while IFS= read -r l; do [ -n "$l" ] && log_info "[ip-link] $l"; done
         ethtool "$iface" 2>/dev/null | sed -n '1,80p' | while IFS= read -r l; do [ -n "$l" ] && log_info "[ethtool] $l"; done
 
+        eth_dmesg_errors="./${iface}_ethernet_dmesg_errors.log"
+        rm -f ./dmesg_errors.log ./dmesg_snapshot.log ./dmesg_errors_*.log "$eth_dmesg_errors" 2>/dev/null || true
+
+        log_info "$iface: scanning kernel log for Ethernet MAC/PHY/phylink errors before classifying no-link"
+
+        scan_dmesg_errors \
+            "$test_path" \
+            "qcom-ethqos|stmmac|phylink|QCA808|qca808|qca808x|2500base|2500base-x|sgmii|xgmac|dwmac" \
+            "Link is Down|Link down|Link detected: no|carrier lost|no carrier|Network is down|Register MEM_TYPE_PAGE_POOL" || true
+
+        if [ -s ./dmesg_errors.log ]; then
+            cp ./dmesg_errors.log "$eth_dmesg_errors" 2>/dev/null || true
+
+            log_fail "$iface: Ethernet driver/PHY errors detected; not treating as no-cable"
+            log_info "$iface: filtered Ethernet kernel errors follow:"
+            log_info "$iface: source=$eth_dmesg_errors"
+
+            while IFS= read -r line || [ -n "$line" ]; do
+                [ -n "$line" ] || continue
+                log_info "[eth-kernel:$iface] $line"
+            done < ./dmesg_errors.log
+
+            echo "$iface: FAIL (Ethernet MAC/PHY/phylink kernel errors during link bring-up)" >>"$summary_file"
+            any_tested=1
+            continue
+        fi
+
         if [ "$carrier" = "0" ]; then
             log_warn "$iface: no link detected (carrier=0); treating as no-cable and skipping"
             echo "$iface: SKIP (no cable/link; carrier=0)" >>"$summary_file"
