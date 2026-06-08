@@ -114,3 +114,27 @@ jobs:
             exit "$rc"
           ' sh < "$files_list"
 
+      - name: Check for trailing whitespace in .sh files (pull_request)
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_BRANCH: ${{ github.base_ref }}
+        run: |
+          set -eu
+
+          if [ -z "$BASE_BRANCH" ]; then
+            echo "BASE_BRANCH is empty"
+            exit 1
+          fi
+
+          if ! git check-ref-format --branch "$BASE_BRANCH" >/dev/null 2>&1; then
+            echo "Invalid base branch name: $BASE_BRANCH"
+            exit 1
+          fi
+
+          git fetch --no-tags origin "+refs/heads/${BASE_BRANCH}:refs/remotes/origin/${BASE_BRANCH}"
+
+          MERGE_BASE="$(git merge-base HEAD "refs/remotes/origin/${BASE_BRANCH}")"
+
+          git diff --check "${MERGE_BASE}"...HEAD \
+            && echo "No trailing whitespace found." \
+            || { echo "ERROR: Trailing whitespace or space/tab conflict found!"; exit 1; }
