@@ -59,7 +59,7 @@ dataset_map(){
 mode_atrr(){
     mode=$1
     fail_flag=0
-    
+
     for attr_file in "$cs_base/$tpdm_device/$mode"*; do
         if [ -f "$attr_file" ] && [ -r "$attr_file" ]; then
             if ! cat "$attr_file" >/dev/null 2>&1; then
@@ -95,31 +95,31 @@ for tpdm_path in "$cs_base"/tpdm* "$cs_base"/coresight-tpdm*; do
     [ ! -d "$tpdm_path" ] && continue
     tpdm_device=$(basename "$tpdm_path")
     tpdm_found=$((tpdm_found + 1))
-    
+
     if echo "$tpdm_device" | grep -q "tpdm-turing-llm"; then
         log_info "Skipping unsupported source: $tpdm_device"
         continue
     fi
-    
+
     if [ ! -f "$tpdm_path/enable_source" ]; then
         continue
     fi
-    
+
     log_info "Testing device: $tpdm_device"
-    
+
     echo 1 > "$tpdm_path/enable_source" 2>/dev/null
-    
+
     datasets=$(cat "$tpdm_path/enable_datasets" 2>/dev/null)
     set_mode=$(printf "%d" "0x$datasets" 2>/dev/null || echo 0)
     dataset_map "$set_mode"
-    
+
     log_info "  Default datasets: $datasets (Mode: $set_mode) -> Configurations: $mode_config"
-    
+
     for mode in $mode_config; do
         if [ "$mode" = "none" ]; then
             continue
         fi
-        
+
         mode_atrr "$mode"
         if mode_atrr "$mode"; then
             log_pass "  PASS: $mode attributes"
@@ -128,7 +128,7 @@ for tpdm_path in "$cs_base"/tpdm* "$cs_base"/coresight-tpdm*; do
             fail_count=$((fail_count + 1))
         fi
     done
-    
+
     echo 0 > "$tpdm_path/enable_source" 2>/dev/null
 done
 
@@ -153,20 +153,20 @@ log_info "--- Phase 2: Readable attributes check ---"
 for tpdm_path in "$cs_base"/tpdm* "$cs_base"/coresight-tpdm*; do
     [ ! -d "$tpdm_path" ] && continue
     tpdm_device=$(basename "$tpdm_path")
-    
+
     if echo "$tpdm_device" | grep -q "tpdm-turing-llm"; then
         continue
     fi
-    
+
     if_count=0
     for attr_file in "$tpdm_path"/*; do
         if [ -f "$attr_file" ] && [ -r "$attr_file" ]; then
             if_count=$((if_count + 1))
         fi
     done
-    
+
     log_info "Reading $if_count accessible nodes under $tpdm_device"
-    
+
     for attr_file in "$tpdm_path"/*; do
         if [ -f "$attr_file" ] && [ -r "$attr_file" ]; then
             cat "$attr_file" >/dev/null 2>&1
@@ -188,4 +188,4 @@ else
     echo "$TESTNAME FAIL" > "$res_file"
 fi
 
-log_info "-------------------$TESTNAME Testcase Finished----------------------------" 
+log_info "-------------------$TESTNAME Testcase Finished----------------------------"

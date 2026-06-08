@@ -344,11 +344,11 @@ video_find_module_file() {
     # Prefers: modinfo -n, then .../updates/, then general search (and KO_DIRS/KO_TREE if provided).
     m="$1"
     kr="$(uname -r 2>/dev/null)"
- 
+
     if [ -z "$kr" ]; then
         kr="$(find /lib/modules -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | head -n 1)"
     fi
- 
+
     if video_exist_cmd modinfo; then
         p="$(modinfo -n "$m" 2>/dev/null)"
         if [ -n "$p" ] && [ -f "$p" ]; then
@@ -357,11 +357,11 @@ video_find_module_file() {
             return 0
         fi
     fi
- 
+
     m_us="$m"
     m_hy="$(printf '%s' "$m" | tr '_' '-')"
     m_alt="$(printf '%s' "$m" | tr '-' '_')"
- 
+
     # Helper to scan KO_DIRS (bounded search)
     scan_ko_dirs() {
         modbase="$1" # without .ko*
@@ -386,7 +386,7 @@ video_find_module_file() {
         IFS="$OLD_IFS"
         return 1
     }
- 
+
     # Optional order: prefer KO_DIRS first if requested
     if [ "$KO_PREFER_CUSTOM" -eq 1 ] 2>/dev/null; then
         for pat in "$m_us" "$m_hy" "$m_alt"; do
@@ -395,7 +395,7 @@ video_find_module_file() {
             fi
         done
     fi
- 
+
     # Optional altroot tree (KO_TREE) first, if provided
     if [ -n "$KO_TREE" ] && [ -d "$KO_TREE" ]; then
         for pat in "$m_us" "$m_hy" "$m_alt"; do
@@ -407,7 +407,7 @@ video_find_module_file() {
             fi
         done
     fi
- 
+
     for pat in "$m_us" "$m_hy" "$m_alt"; do
         p="$(find "/lib/modules/$kr/updates" -type f -name "${pat}.ko*" 2>/dev/null | head -n 1)"
         if [ -n "$p" ]; then
@@ -416,7 +416,7 @@ video_find_module_file() {
             return 0
         fi
     done
- 
+
     for pat in "$m_us" "$m_hy" "$m_alt"; do
         p="$(find "/lib/modules/$kr" -type f -name "${pat}.ko*" 2>/dev/null | head -n 1)"
         if [ -n "$p" ]; then
@@ -425,7 +425,7 @@ video_find_module_file() {
             return 0
         fi
     done
- 
+
     # If not preferred-first, still try KO_DIRS at the end
     if [ "$KO_PREFER_CUSTOM" -ne 1 ] 2>/dev/null; then
         for pat in "$m_us" "$m_hy" "$m_alt"; do
@@ -434,7 +434,7 @@ video_find_module_file() {
             fi
         done
     fi
- 
+
     return 1
 }
 
@@ -668,41 +668,41 @@ video_normalize_stack() {
 video_detect_platform() {
     model=""
     compat=""
- 
+
     if [ -r /proc/device-tree/model ]; then
         model=$(tr -d '\000' </proc/device-tree/model 2>/dev/null)
     fi
- 
+
     if [ -r /proc/device-tree/compatible ]; then
         compat=$(tr -d '\000' </proc/device-tree/compatible 2>/dev/null)
     fi
- 
+
     s=$(printf '%s\n%s\n' "$model" "$compat" | tr '[:upper:]' '[:lower:]')
- 
+
     # Monaco: qcs8300-ride, iq-8275-evk, qcs8275, generic qcs8300, or ride-sx+8300
     monaco_pat='qcs8300-ride|iq-8275-evk|qcs8275|qcs8300|ride-sx.*8300|8300.*ride-sx'
- 
+
     # LeMans: qcs9100-ride, qcs9075, generic qcs9100, or ride-sx+9100
     lemans_pat='qcs9100-ride|qcs9075|qcs9100|ride-sx.*9100|9100.*ride-sx'
- 
+
     # Kodiak: qcs6490, qcm6490, or rb3+6490
     kodiak_pat='qcs6490|qcm6490|rb3.*6490|6490.*rb3'
- 
+
     if printf '%s' "$s" | grep -Eq "$lemans_pat"; then
         printf '%s\n' "lemans"
         return 0
     fi
- 
+
     if printf '%s' "$s" | grep -Eq "$monaco_pat"; then
         printf '%s\n' "monaco"
         return 0
     fi
- 
+
     if printf '%s' "$s" | grep -Eq "$kodiak_pat"; then
         printf '%s\n' "kodiak"
         return 0
     fi
- 
+
     printf '%s\n' "unknown"
 }
 
@@ -711,11 +711,11 @@ video_detect_platform() {
 # -----------------------------------------------------------------------------
 video_validate_upstream_loaded() {
     plat="$1"
- 
+
     if [ -z "$plat" ]; then
         plat="$(video_detect_platform)"
     fi
- 
+
     case "$plat" in
         lemans|monaco)
             # Any upstream build has qcom_iris present
@@ -724,21 +724,21 @@ video_validate_upstream_loaded() {
             fi
             return 1
             ;;
- 
+
         kodiak)
             # Upstream valid if Venus trio present OR pure qcom_iris-only present
             if video_has_module_loaded venus_core && video_has_module_loaded venus_dec && video_has_module_loaded venus_enc; then
                 return 0
             fi
- 
+
             if video_has_module_loaded qcom_iris && ! video_has_module_loaded iris_vpu; then
                 return 0
             fi
- 
+
             return 1
             ;;
     esac
- 
+
     return 1
 }
 
@@ -811,11 +811,11 @@ video_assert_stack() {
 
 video_stack_status() {
     plat="$1"
- 
+
     if [ -z "$plat" ]; then
         plat="$(video_detect_platform)"
     fi
- 
+
     case "$plat" in
         lemans|monaco)
             # Upstream accepted if:
@@ -825,19 +825,19 @@ video_stack_status() {
                 printf '%s\n' "upstream"
                 return 0
             fi
- 
+
             if video_has_module_loaded qcom_iris && video_has_module_loaded iris_vpu; then
                 printf '%s\n' "upstream"
                 return 0
             fi
- 
+
             # Downstream if only iris_vpu is present (no qcom_iris)
             if video_has_module_loaded iris_vpu && ! video_has_module_loaded qcom_iris; then
                 printf '%s\n' "downstream"
                 return 0
             fi
             ;;
- 
+
         kodiak)
             # Upstream accepted if:
             # - Venus trio present (canonical upstream on Kodiak), OR
@@ -846,12 +846,12 @@ video_stack_status() {
                 printf '%s\n' "upstream"
                 return 0
             fi
- 
+
             if video_has_module_loaded qcom_iris && ! video_has_module_loaded iris_vpu; then
                 printf '%s\n' "upstream"
                 return 0
             fi
- 
+
             # Downstream if iris_vpu present and Venus core not loaded
             if video_has_module_loaded iris_vpu && ! video_has_module_loaded venus_core; then
                 printf '%s\n' "downstream"
@@ -859,7 +859,7 @@ video_stack_status() {
             fi
             ;;
     esac
- 
+
     printf '%s\n' "unknown"
     return 1
 }
@@ -1006,13 +1006,13 @@ video_hot_switch_modules() {
 video_ensure_stack() {
     want_raw="$1" # upstream|downstream|auto|base|overlay|up|down
     plat="$2"
- 
+
     if [ -z "$plat" ]; then
         plat="$(video_detect_platform)"
     fi
- 
+
     want="$(video_normalize_stack "$want_raw")"
- 
+
     if [ "$want" = "auto" ]; then
         pref="$(video_auto_preference_from_blacklist "$plat")"
         if [ "$pref" != "unknown" ]; then
@@ -1027,7 +1027,7 @@ video_ensure_stack() {
         fi
         log_info "AUTO stack selection => $want"
     fi
- 
+
     # ----------------------------------------------------------------------
     # Early no-op: if current state already equals desired, do NOT hot switch.
     # This covers:
@@ -1037,7 +1037,7 @@ video_ensure_stack() {
     # Still allow Kodiak downstream FW swap without touching modules.
     # ----------------------------------------------------------------------
     cur_state="$(video_stack_status "$plat")"
- 
+
     if [ "$cur_state" = "$want" ]; then
         if [ "$plat" = "kodiak" ] && [ "$want" = "downstream" ] && [ -n "$VIDEO_FW_DS" ] && [ -f "$VIDEO_FW_DS" ]; then
             log_info "Kodiak: downstream already active; applying FW swap + live reload without hot switch."
@@ -1046,7 +1046,7 @@ video_ensure_stack() {
         printf '%s\n' "$cur_state"
         return 0
     fi
- 
+
     # Fast paths (retain existing logic; these also help when cur_state was unknown)
     case "$want" in
         upstream|up|base)
@@ -1084,20 +1084,20 @@ video_ensure_stack() {
             fi
             ;;
     esac
- 
+
     # Only reach here if a switch is actually required.
     video_apply_blacklist_for_stack "$plat" "$want" || return 1
     video_usleep "${MOD_SETTLE_SLEEP}"
- 
+
     video_hot_switch_modules "$plat" "$want" || true
- 
+
     if [ "$plat" = "kodiak" ] && [ "$want" = "downstream" ] && [ -n "$VIDEO_FW_DS" ] && [ -f "$VIDEO_FW_DS" ]; then
         if video_validate_downstream_loaded "$plat"; then
             log_info "Kodiak: downstream active and FW override detected — ensuring FW swap + live reload."
             video_kodiak_swap_and_reload "$VIDEO_FW_DS" || log_warn "Kodiak: post-switch FW swap/reload failed (continuing)"
         fi
     fi
- 
+
     if [ "$want" = "upstream" ]; then
         if video_validate_upstream_loaded "$plat"; then
             printf '%s\n' "upstream"
@@ -1109,7 +1109,7 @@ video_ensure_stack() {
             return 0
         fi
     fi
- 
+
     printf '%s\n' "unknown"
     return 1
 }
@@ -1144,12 +1144,12 @@ video_clean_and_refresh_v4l() {
         udevadm trigger --subsystem-match=media --action=change 2>/dev/null || true
         udevadm settle 2>/dev/null || true
     fi
- 
+
     # Recreate missing /dev nodes using /sys/dev/char mapping.
     # Additive-only: never modify existing nodes (no chmod/chgrp on existing).
     for sysdev in /sys/dev/char/*; do
         [ -e "$sysdev" ] || continue
- 
+
         majmin=$(basename "$sysdev")
         case "$majmin" in
             *:*)
@@ -1160,42 +1160,42 @@ video_clean_and_refresh_v4l() {
                 continue
                 ;;
         esac
- 
+
         case "$major" in ''|*[!0-9]*) continue ;; esac
         case "$minor" in ''|*[!0-9]*) continue ;; esac
- 
+
         tgt=$(readlink -f "$sysdev" 2>/dev/null || true)
         [ -n "$tgt" ] || continue
- 
+
         # Media controller nodes
         case "$tgt" in
             */media[0-9]*)
                 bn=$(basename "$tgt")   # e.g. media0
                 devnode="/dev/$bn"
- 
+
                 # Never touch if it already exists
                 if [ -e "$devnode" ]; then
                     continue
                 fi
- 
+
                 log_info "Recreating missing node: $devnode (c $major $minor)"
                 mknod "$devnode" c "$major" "$minor" 2>/dev/null || true
                 chgrp video "$devnode" 2>/dev/null || true
                 chmod 660 "$devnode" 2>/dev/null || true
                 ;;
         esac
- 
+
         # V4L2 video nodes
         case "$tgt" in
             */video4linux/video[0-9]*)
                 bn=$(basename "$tgt")   # e.g. video0
                 devnode="/dev/$bn"
- 
+
                 # Never touch if it already exists
                 if [ -e "$devnode" ]; then
                     continue
                 fi
- 
+
                 log_info "Recreating missing node: $devnode (c $major $minor)"
                 mknod "$devnode" c "$major" "$minor" 2>/dev/null || true
                 chgrp video "$devnode" 2>/dev/null || true

@@ -951,18 +951,18 @@ perf_baseline_get() {
     key=$1
     file=$2
     [ -f "$file" ] || { echo ""; return 0; }
- 
+
     awk -v k="$key" '
       {
         line=$0
         sub(/^[ \t]*/, "", line)
- 
+
         # exact prefix match on key (string compare, not regex)
         kl = length(k)
         if (substr(line, 1, kl) != k) next
- 
+
         rest = substr(line, kl + 1)
- 
+
         # allow optional spaces then ":" or "=" then optional spaces
         if (rest ~ /^[ \t]*[=:][ \t]*/) {
           sub(/^[ \t]*[=:][ \t]*/, "", rest)
@@ -1088,7 +1088,7 @@ run_sysbench_case() {
 sysbench_mib_to_mb() {
   v=$1
   [ -z "$v" ] && { echo ""; return 0; }
- 
+
   if command -v perf_f_mul >/dev/null 2>&1; then
     perf_f_mul "$v" "1.048576"
   else
@@ -1486,11 +1486,11 @@ perf_sysbench_csv_append() {
 perf_baseline_get_value() {
     f=$1
     key=$2
- 
+
     [ -n "$f" ] || return 0
     [ -f "$f" ] || return 0
     [ -n "$key" ] || return 0
- 
+
     awk -v k="$key" '
         /^[[:space:]]*#/ {next}
         /^[[:space:]]*$/ {next}
@@ -1548,12 +1548,12 @@ perf_f_le() { awk -v a="$1" -v b="$2" 'BEGIN{exit !((a+0) <= (b+0))}'; }
 # - time_sec: lower is better
 perf_metric_direction() {
     m=$1
- 
+
     # Lower is better only for explicit time metrics
     case "$m" in
         *time_sec*) echo "lower"; return 0 ;;
     esac
- 
+
     # Everything else (mem_mbps, fileio_*_mbps, etc.) is higher-is-better
     echo "higher"
     return 0
@@ -1566,12 +1566,12 @@ perf_metric_direction() {
 perf_sysbench_baseline_get() {
     file=$1
     key=$2
- 
+
     [ -f "$file" ] || { printf '%s' ""; return 0; }
     [ -n "$key" ] || { printf '%s' ""; return 0; }
- 
+
     key_esc=$(perf_sed_escape_bre "$key")
- 
+
     # Match "key = value" (value is first token-ish number)
     v=$(
         sed -n \
@@ -1608,30 +1608,30 @@ perf_sysbench_gate_eval() {
     metric=$4
     value=$5
     delta=$6
- 
+
     PERF_GATE_KEY="${case_name}_${metric}.t${threads}"
     PERF_GATE_OP=""
     PERF_GATE_BASELINE=""
     PERF_GATE_GOAL=""
     PERF_GATE_SCORE_PCT=""
     PERF_GATE_STATUS="SKIP"
- 
+
     # Export for external consumers (run.sh) → fixes SC2034
     export PERF_GATE_KEY PERF_GATE_OP PERF_GATE_BASELINE PERF_GATE_GOAL PERF_GATE_SCORE_PCT PERF_GATE_STATUS
- 
+
     [ -f "$file" ] || return 2
     [ -n "$case_name" ] || return 2
     [ -n "$threads" ] || return 2
     [ -n "$metric" ] || return 2
     [ -n "$value" ] || return 2
     [ -n "$delta" ] || delta=0
- 
+
     base=$(perf_sysbench_baseline_get "$file" "$PERF_GATE_KEY")
     [ -n "$base" ] || return 2
- 
+
     PERF_GATE_BASELINE="$base"
     export PERF_GATE_BASELINE
- 
+
     # Decide direction:
     # - Throughput (mem_mbps): higher is better
     # - time_sec: lower is better
@@ -1639,7 +1639,7 @@ perf_sysbench_gate_eval() {
     if [ "$metric" = "mem_mbps" ] || echo "$metric" | grep -q "mbps"; then
         higher_is_better=1
     fi
- 
+
     if [ "$higher_is_better" -eq 1 ]; then
         PERF_GATE_OP=">="
         goal=$(awk -v b="$base" -v d="$delta" 'BEGIN{printf "%.6f", (b*(1-d))}')
@@ -1647,7 +1647,7 @@ perf_sysbench_gate_eval() {
         score=$(awk -v b="$base" -v v="$value" 'BEGIN{ if (b==0) print ""; else printf "%.2f", (v/b*100) }')
         PERF_GATE_SCORE_PCT="$score"
         export PERF_GATE_OP PERF_GATE_GOAL PERF_GATE_SCORE_PCT
- 
+
         pass=$(awk -v v="$value" -v g="$goal" 'BEGIN{print (v+0 >= g+0) ? 1 : 0}')
     else
         PERF_GATE_OP="<="
@@ -1657,16 +1657,16 @@ perf_sysbench_gate_eval() {
         score=$(awk -v b="$base" -v v="$value" 'BEGIN{ if (v==0) print ""; else printf "%.2f", (b/v*100) }')
         PERF_GATE_SCORE_PCT="$score"
         export PERF_GATE_OP PERF_GATE_GOAL PERF_GATE_SCORE_PCT
- 
+
         pass=$(awk -v v="$value" -v g="$goal" 'BEGIN{print (v+0 <= g+0) ? 1 : 0}')
     fi
- 
+
     if [ "$pass" -eq 1 ]; then
         PERF_GATE_STATUS="PASS"
         export PERF_GATE_STATUS
         return 0
     fi
- 
+
     PERF_GATE_STATUS="FAIL"
     export PERF_GATE_STATUS
     return 1
@@ -1705,21 +1705,21 @@ perf_sysbench_gate_eval_line() {
     metric=$4
     avg=$5
     delta=$6
- 
+
     if [ -z "$avg" ]; then
         echo "status=NO_AVG baseline=NA goal=NA op=NA score_pct=NA key=NA"
         return 2
     fi
- 
+
     key=$(perf_sysbench_baseline_key "$sb_case" "$metric" "$thr")
     base=$(perf_baseline_get_value "$f" "$key")
     if [ -z "$base" ]; then
         echo "status=NO_BASELINE baseline=NA goal=NA op=NA score_pct=NA key=$key"
         return 2
     fi
- 
+
     dir=$(perf_metric_direction "$metric")
- 
+
     if [ "$dir" = "higher" ]; then
         one_minus=$(perf_f_sub "1.0" "$delta")
         goal=$(perf_f_mul "$base" "$one_minus")
@@ -1731,7 +1731,7 @@ perf_sysbench_gate_eval_line() {
         echo "status=FAIL baseline=$base goal=$goal op=>= score_pct=${score:-NA} key=$key"
         return 1
     fi
- 
+
     # lower-is-better
     one_plus=$(perf_f_add "1.0" "$delta")
     goal=$(perf_f_mul "$base" "$one_plus")
@@ -1821,30 +1821,30 @@ perf_sysbench_fileio_prepare() {
     iomode=$7
     extra=$8
     out_log=$9
- 
+
     [ -n "$dir" ] || return 1
     mkdir -p "$dir" 2>/dev/null || true
- 
+
     (
         cd "$dir" 2>/dev/null || exit 1
- 
+
         set -- sysbench --rand-seed="$seed" --threads="$threads" fileio \
           --file-total-size="$total" \
           --file-num="$num" \
           --file-block-size="$blksz" \
           --file-io-mode="$iomode" \
           --file-test-mode=seqwr
- 
+
         if [ -n "$extra" ]; then
           # shellcheck disable=SC2086
           set -- "$@" $extra
         fi
- 
+
         set -- "$@" prepare
         perf_run_cmd_tee "$out_log" "$@"
     )
 }
- 
+
 perf_sysbench_fileio_cleanup() {
     dir=$1
     total=$2
@@ -1852,30 +1852,30 @@ perf_sysbench_fileio_cleanup() {
     blksz=$4
     iomode=$5
     extra=$6
- 
+
     [ -n "$dir" ] || return 0
- 
+
     (
         cd "$dir" 2>/dev/null || exit 0
- 
+
         set -- sysbench fileio \
           --file-total-size="$total" \
           --file-num="$num" \
           --file-block-size="$blksz" \
           --file-io-mode="$iomode" \
           --file-test-mode=seqwr
- 
+
         if [ -n "$extra" ]; then
           # shellcheck disable=SC2086
           set -- "$@" $extra
         fi
- 
+
         set -- "$@" cleanup
         "$@" >/dev/null 2>&1 || true
     )
     return 0
 }
- 
+
 # Runs one fileio mode and prints one line of kv tokens:
 #   mode=seqwr mibps=0.40 gbps=0.0004
 perf_sysbench_fileio_run_mode() {
@@ -1890,28 +1890,28 @@ perf_sysbench_fileio_run_mode() {
     extra=$9
     mode=${10}
     out_log=${11}
- 
+
     [ -n "$dir" ] || { echo ""; return 1; }
- 
+
     (
         cd "$dir" 2>/dev/null || exit 1
- 
+
         set -- sysbench --time="$time" --rand-seed="$seed" --threads="$threads" fileio \
           --file-total-size="$total" \
           --file-num="$num" \
           --file-block-size="$blksz" \
           --file-io-mode="$iomode" \
           --file-test-mode="$mode"
- 
+
         if [ -n "$extra" ]; then
           # shellcheck disable=SC2086
           set -- "$@" $extra
         fi
- 
+
         set -- "$@" run
         perf_run_cmd_tee "$out_log" "$@"
     ) || true
- 
+
     case "$mode" in
       seqrd)
         r=$(perf_sysbench_parse_fileio_read_mibps "$out_log")
@@ -2100,7 +2100,7 @@ tiotest_extract_mbps() {
   # Args: <logfile> <label_regex>   (ex: "Write" or "Read")
   logf=$1
   lbl=$2
- 
+
   awk -v lbl="$lbl" '
     BEGIN{v=""}
     /^[[:space:]]*\|/ && $0 ~ lbl {
@@ -2146,13 +2146,13 @@ tiotest_extract_iops() {
 tiotest_extract_latency_block() {
   logf=$1
   item=$2   # "Write" / "Read" / "Random Write" / "Random Read"
- 
+
   awk -v item="$item" '
     BEGIN { inblk=0; la=""; lm=""; p2=""; p10="" }
- 
+
     /^Tiotest latency results/ { inblk=1; next }
     inblk==1 && /^`/ { inblk=0 }                  # end of ascii table (best-effort)
- 
+
     # Match the latency row for the requested item
     inblk==1 && $0 ~ /^\|/ && $0 ~ ("|[[:space:]]*" item "[[:space:]]*\\|") {
       # Extract numbers that appear *after* the item label.
@@ -2170,7 +2170,7 @@ tiotest_extract_latency_block() {
         }
       }
     }
- 
+
     END {
       # Print only numeric fields; empty means "not found"
       printf "%s\t%s\t%s\t%s\n", la, lm, p2, p10
@@ -2185,14 +2185,14 @@ tiotest_metrics_append() {
 }
 
 # ---------------- perf helpers: normalize/validate numeric metrics ----------------
- 
+
 perf_norm_metric() {
   case "${1:-}" in
     ""|"unknown"|"UNKNOWN"|"NA"|"N/A"|"n/a") printf "%s" "NA" ;;
     *) printf "%s" "$1" ;;
   esac
 }
- 
+
 perf_is_number() {
   # integer or decimal (e.g., 10, 10.5, 0.000)
   echo "${1:-}" | awk '
@@ -2200,7 +2200,7 @@ perf_is_number() {
     { exit 1 }
   '
 }
- 
+
 perf_append_if_number() {
   # $1=file $2=value
   if perf_is_number "${2:-}"; then
@@ -2248,20 +2248,20 @@ perf_tiotest_run_seq_pair() {
   hide_lat=$7; terse=$8; wphase=$9; syncw=${10}; cons=${11}; dbg=${12}
   offmb=${13}; ofirst=${14}
   logf=${15}; metrics=${16}
- 
+
   : >"$logf" 2>/dev/null || true
- 
+
   common=$(tiotest_build_common_args "$tt" "$dir" "$use_raw" "$bs" "$fmb" "" \
     "$hide_lat" "$terse" "$wphase" "$syncw" "$cons" "$dbg" "$offmb" "$ofirst")
- 
+
   log_info "RUN: $bin $common -k 1 -k 3"
   # shellcheck disable=SC2086
   "$bin" $common -k 1 -k 3 >>"$logf" 2>&1 || true
- 
+
   # ---------------- MB/s ----------------
   seqwr_mbps=$(tiotest_extract_mbps "$logf" "Write" 2>/dev/null || true)
   seqrd_mbps=$(tiotest_extract_mbps "$logf" "Read" 2>/dev/null || true)
- 
+
   # ---------------- IOPS estimate ----------------
   seqwr_iops=""
   seqrd_iops=""
@@ -2273,7 +2273,7 @@ perf_tiotest_run_seq_pair() {
       seqrd_iops=$(awk -v mbps="$seqrd_mbps" -v b="$bs" 'BEGIN{ if (b>0) printf "%.0f", (mbps*1024*1024)/b }' 2>/dev/null)
     fi
   fi
- 
+
   # ---------------- Latency (best-effort) ----------------
   # Strictly parse numeric columns from:
   # | Write | <avg> ms | <max> ms | <pct2> | <pct10> |
@@ -2281,7 +2281,7 @@ perf_tiotest_run_seq_pair() {
   # Ensures we never output "Write"/"|" into metrics.tsv.
   seqwr_latavg=""; seqwr_latmax=""; seqwr_pct2=""; seqwr_pct10=""
   seqrd_latavg=""; seqrd_latmax=""; seqrd_pct2=""; seqrd_pct10=""
- 
+
   row=$(awk '
     BEGIN { inlat=0; la=""; lm=""; p2=""; p10="" }
     /^Tiotest latency results/ { inlat=1; next }
@@ -2302,7 +2302,7 @@ perf_tiotest_run_seq_pair() {
       printf "%s\t%s\t%s\t%s\n", la, lm, p2, p10
     }
   ' "$logf" 2>/dev/null || true)
- 
+
   if [ -n "$row" ]; then
     # split by tabs
     seqwr_latavg=$(printf '%s' "$row" | awk -F'\t' '{print $1}')
@@ -2310,7 +2310,7 @@ perf_tiotest_run_seq_pair() {
     seqwr_pct2=$(printf '%s' "$row" | awk -F'\t' '{print $3}')
     seqwr_pct10=$(printf '%s' "$row" | awk -F'\t' '{print $4}')
   fi
- 
+
   row=$(awk '
     BEGIN { inlat=0; la=""; lm=""; p2=""; p10="" }
     /^Tiotest latency results/ { inlat=1; next }
@@ -2331,21 +2331,21 @@ perf_tiotest_run_seq_pair() {
       printf "%s\t%s\t%s\t%s\n", la, lm, p2, p10
     }
   ' "$logf" 2>/dev/null || true)
- 
+
   if [ -n "$row" ]; then
     seqrd_latavg=$(printf '%s' "$row" | awk -F'\t' '{print $1}')
     seqrd_latmax=$(printf '%s' "$row" | awk -F'\t' '{print $2}')
     seqrd_pct2=$(printf '%s' "$row" | awk -F'\t' '{print $3}')
     seqrd_pct10=$(printf '%s' "$row" | awk -F'\t' '{print $4}')
   fi
- 
+
   # ---------------- Emit metrics (8 columns) ----------------
   tiotest_metrics_append "$metrics" "seqwr" "$tt" "$seqwr_mbps" "$seqwr_iops" \
     "$seqwr_latavg" "$seqwr_latmax" "$seqwr_pct2" "$seqwr_pct10"
- 
+
   tiotest_metrics_append "$metrics" "seqrd" "$tt" "$seqrd_mbps" "$seqrd_iops" \
     "$seqrd_latavg" "$seqrd_latmax" "$seqrd_pct2" "$seqrd_pct10"
- 
+
   if [ -z "$seqwr_mbps" ] && [ -z "$seqrd_mbps" ]; then
     return 1
   fi
@@ -2364,31 +2364,31 @@ perf_tiotest_run_rnd_pair() {
   hide_lat=$8; terse=$9; wphase=${10}; syncw=${11}; cons=${12}; dbg=${13}
   offmb=${14}; ofirst=${15}
   logf=${16}; metrics=${17}
- 
+
   : >"$logf" 2>/dev/null || true
- 
+
   common=$(tiotest_build_common_args "$tt" "$dir" "$use_raw" "$bs" "$fmb" "$rops" \
     "$hide_lat" "$terse" "$wphase" "$syncw" "$cons" "$dbg" "$offmb" "$ofirst")
- 
+
   tmp_both="${logf}.rndboth.tmp"
   tmp_wr="${logf}.rndwr.tmp"
   tmp_rd="${logf}.rndrd.tmp"
   : >"$tmp_both" 2>/dev/null || true
   : >"$tmp_wr" 2>/dev/null || true
   : >"$tmp_rd" 2>/dev/null || true
- 
+
   rndwr_mbps=""; rndwr_iops=""; rndwr_latavg=""; rndwr_latmax=""; rndwr_pct2=""; rndwr_pct10=""
   rndrd_mbps=""; rndrd_iops=""; rndrd_latavg=""; rndrd_latmax=""; rndrd_pct2=""; rndrd_pct10=""
- 
+
   # ---------------- Primary: BOTH random write + random read ----------------
   log_info "RUN (rnd both): $bin $common -k 1 -k 3"
   # shellcheck disable=SC2086
   "$bin" $common -k 1 -k 3 >"$tmp_both" 2>&1 || true
   cat "$tmp_both" >>"$logf" 2>/dev/null || true
- 
+
   rndwr_mbps=$(tiotest_extract_mbps "$tmp_both" "Write" 2>/dev/null || true)
   rndrd_mbps=$(tiotest_extract_mbps "$tmp_both" "Read" 2>/dev/null || true)
- 
+
   # Latency parsing (best-effort): strict match "| Write |" and "| Read |"
   row=$(awk '
     BEGIN { inlat=0; la=""; lm=""; p2=""; p10="" }
@@ -2416,7 +2416,7 @@ perf_tiotest_run_rnd_pair() {
     rndwr_pct2=$(printf '%s' "$row" | awk -F'\t' '{print $3}')
     rndwr_pct10=$(printf '%s' "$row" | awk -F'\t' '{print $4}')
   fi
- 
+
   row=$(awk '
     BEGIN { inlat=0; la=""; lm=""; p2=""; p10="" }
     /^Tiotest latency results/ { inlat=1; next }
@@ -2443,28 +2443,28 @@ perf_tiotest_run_rnd_pair() {
     rndrd_pct2=$(printf '%s' "$row" | awk -F'\t' '{print $3}')
     rndrd_pct10=$(printf '%s' "$row" | awk -F'\t' '{print $4}')
   fi
- 
+
   # If Read missing, fallback to legacy probing
   if [ -z "$rndrd_mbps" ]; then
     log_info "rndrd missing in primary run; falling back to legacy probing"
- 
+
     # Phase 1: try to collect write
     log_info "RUN (rndwr fallback): $bin $common -k 0 -k 2 -k 3"
     # shellcheck disable=SC2086
     "$bin" $common -k 0 -k 2 -k 3 >"$tmp_wr" 2>&1 || true
     cat "$tmp_wr" >>"$logf" 2>/dev/null || true
     [ -z "$rndwr_mbps" ] && rndwr_mbps=$(tiotest_extract_mbps "$tmp_wr" "Write" 2>/dev/null || true)
- 
+
     # Phase 2: prep + attempt read (best-effort)
     log_info "RUN (rndrd+prep fallback): $bin -t $tt -d $dir -b $bs -f $fmb -k 1 -k 2 -k 3 ; then $bin $common -k 0 -k 1 -k 2"
     "$bin" -t "$tt" -d "$dir" -b "$bs" -f "$fmb" -k 1 -k 2 -k 3 >>"$tmp_rd" 2>&1 || true
     # shellcheck disable=SC2086
     "$bin" $common -k 0 -k 1 -k 2 >>"$tmp_rd" 2>&1 || true
     cat "$tmp_rd" >>"$logf" 2>/dev/null || true
- 
+
     [ -z "$rndwr_mbps" ] && rndwr_mbps=$(tiotest_extract_mbps "$tmp_rd" "Write" 2>/dev/null || true)
     rndrd_mbps=$(tiotest_extract_mbps "$tmp_rd" "Read" 2>/dev/null || true)
- 
+
     # Latency from fallback read log (if any)
     if [ -z "$rndwr_latavg" ]; then
       row=$(awk '
@@ -2491,7 +2491,7 @@ perf_tiotest_run_rnd_pair() {
         rndwr_pct10=$(printf '%s' "$row" | awk -F'\t' '{print $4}')
       fi
     fi
- 
+
     if [ -z "$rndrd_latavg" ]; then
       row=$(awk '
         BEGIN { inlat=0; la=""; lm=""; p2=""; p10="" }
@@ -2518,7 +2518,7 @@ perf_tiotest_run_rnd_pair() {
       fi
     fi
   fi
- 
+
   # ---------------- IOPS estimation ----------------
   if [ -n "$bs" ] && [ "$bs" -gt 0 ] 2>/dev/null; then
     if [ -n "$rndwr_mbps" ]; then
@@ -2528,16 +2528,16 @@ perf_tiotest_run_rnd_pair() {
       rndrd_iops=$(awk -v mbps="$rndrd_mbps" -v b="$bs" 'BEGIN{ if (b>0) printf "%.0f", (mbps*1024*1024)/b }' 2>/dev/null)
     fi
   fi
- 
+
   # ---------------- Emit metrics (8 columns) ----------------
   tiotest_metrics_append "$metrics" "rndwr" "$tt" "$rndwr_mbps" "$rndwr_iops" \
     "$rndwr_latavg" "$rndwr_latmax" "$rndwr_pct2" "$rndwr_pct10"
- 
+
   tiotest_metrics_append "$metrics" "rndrd" "$tt" "$rndrd_mbps" "$rndrd_iops" \
     "$rndrd_latavg" "$rndrd_latmax" "$rndrd_pct2" "$rndrd_pct10"
- 
+
   rm -f "$tmp_both" "$tmp_wr" "$tmp_rd" 2>/dev/null || true
- 
+
   # Success if we got rndwr or rndrd
   [ -n "$rndwr_mbps" ] && return 0
   [ -n "$rndrd_mbps" ] && return 0
@@ -2766,24 +2766,24 @@ perf_run_cmd_with_progress() {
   heartbeat_secs=$3
   label=$4
   shift 4
- 
+
   mkdir -p "${outdir:-.}" 2>/dev/null || true
   : >"$run_log" 2>/dev/null || true
- 
+
   case "${heartbeat_secs:-}" in
     ""|*[!0-9]*) heartbeat_secs=15 ;;
   esac
   if [ "$heartbeat_secs" -lt 1 ] 2>/dev/null; then
     heartbeat_secs=15
   fi
- 
+
   if [ "${1:-}" != "--" ]; then
     log_warn "perf_run_cmd_with_progress: missing -- separator, falling back to tee"
     perf_run_cmd_tee_safe "$run_log" -- "$@"
     return $?
   fi
   shift
- 
+
   tmpdir=$(mktemp -d "$outdir/.perftmp.XXXXXX" 2>/dev/null)
   if [ -z "${tmpdir:-}" ] || [ ! -d "$tmpdir" ]; then
     tmpdir=$(mktemp -d 2>/dev/null)
@@ -2793,29 +2793,29 @@ perf_run_cmd_with_progress() {
     perf_run_cmd_tee_safe "$run_log" -- "$@"
     return $?
   fi
- 
+
   fifo="$tmpdir/fifo"
   status_file="$tmpdir/status"
   : >"$status_file" 2>/dev/null || true
- 
+
   if ! mkfifo "$fifo" 2>/dev/null; then
     rm -rf "$tmpdir" 2>/dev/null || true
     log_warn "perf_run_cmd_with_progress: mkfifo failed, falling back to tee"
     perf_run_cmd_tee_safe "$run_log" -- "$@"
     return $?
   fi
- 
+
   log_info "Progress, $label, started"
   log_info "Progress, command, $*"
   printf "%s\n" "$label, invoked, waiting for output" >"$status_file" 2>/dev/null || true
- 
+
   if command -v stdbuf >/dev/null 2>&1; then
     (stdbuf -oL -eL "$@" >"$fifo" 2>&1) &
   else
     ("$@" >"$fifo" 2>&1) &
   fi
   pid=$!
- 
+
   (
     while kill -0 "$pid" 2>/dev/null; do
       sleep "$heartbeat_secs" 2>/dev/null || break
@@ -2828,15 +2828,15 @@ perf_run_cmd_with_progress() {
     done
   ) &
   hbpid=$!
- 
+
   mode=""
   sc=0
   mc=0
- 
+
   while IFS= read -r line; do
     printf "%s\n" "$line"
     printf "%s\n" "$line" >>"$run_log" 2>/dev/null || true
- 
+
     case "$line" in
       "Single-Core")
         mode="Single-Core"
@@ -2868,7 +2868,7 @@ perf_run_cmd_with_progress() {
         continue
         ;;
     esac
- 
+
     if [ -n "$mode" ]; then
       name=$(
         printf "%s\n" "$line" |
@@ -2892,7 +2892,7 @@ perf_run_cmd_with_progress() {
             }
           ' 2>/dev/null
       )
- 
+
       if [ -n "${name:-}" ]; then
         if [ "$mode" = "Single-Core" ]; then
           sc=$((sc + 1))
@@ -2906,21 +2906,21 @@ perf_run_cmd_with_progress() {
       fi
     fi
   done <"$fifo"
- 
+
   wait "$pid"
   rc=$?
- 
+
   kill "$hbpid" 2>/dev/null || true
   wait "$hbpid" 2>/dev/null || true
- 
+
   rm -rf "$tmpdir" 2>/dev/null || true
- 
+
   if [ "$rc" -eq 0 ]; then
     log_info "Progress, $label, completed, rc, 0"
   else
     log_warn "Progress, $label, completed, rc, $rc"
   fi
- 
+
   return "$rc"
 }
 
@@ -2934,7 +2934,7 @@ perf_parse_geekbench_summary_scores() {
   logfile=$1
   [ -n "$logfile" ] || return 1
   [ -f "$logfile" ] || return 1
- 
+
   awk '
     function clean(line) {
       gsub(/\r/, "", line)
@@ -2951,25 +2951,25 @@ perf_parse_geekbench_summary_scores() {
       }
       return ""
     }
- 
+
     BEGIN{
       in_summary=0
       cur=""
       st=""; si=""; sf=""
       mt=""; mi=""; mf=""
     }
- 
+
     { $0 = clean($0) }
- 
+
     # Start summary (allow indentation)
     /^[[:space:]]*Benchmark Summary[[:space:]]*$/ { in_summary=1; cur=""; next }
- 
+
     in_summary==1 {
       # If a new big header begins, stop
       if ($0 ~ /^[[:space:]]*System Information[[:space:]]*$/) { in_summary=0; next }
       if ($0 ~ /^[[:space:]]*CPU Information[[:space:]]*$/) { in_summary=0; next }
       if ($0 ~ /^[[:space:]]*Memory Information[[:space:]]*$/) { in_summary=0; next }
- 
+
       if (index($0, "Single-Core Score") > 0) {
         v = last_int($0)
         if (v != "") { st=v; cur="single" }
@@ -2980,7 +2980,7 @@ perf_parse_geekbench_summary_scores() {
         if (v != "") { mt=v; cur="multi" }
         next
       }
- 
+
       if (index($0, "Integer Score") > 0) {
         v = last_int($0)
         if (v != "") {
@@ -2999,7 +2999,7 @@ perf_parse_geekbench_summary_scores() {
       }
       next
     }
- 
+
     END{
       if (st!="" || mt!="") {
         printf "%s|%s|%s|%s|%s|%s\n", st, si, sf, mt, mi, mf
@@ -3093,11 +3093,11 @@ perf_geekbench_write_iter_summary_txt() {
   st=$1; si=$2; sf=$3
   mt=$4; mi=$5; mf=$6
   outfile=$7
- 
+
   [ -n "$outfile" ] || return 1
- 
+
   : >"$outfile" 2>/dev/null || true
- 
+
   if [ -n "${st:-}" ]; then
     echo "Benchmark Summary" >>"$outfile"
     echo "  Single-Core Score: ${st}" >>"$outfile"
@@ -3105,7 +3105,7 @@ perf_geekbench_write_iter_summary_txt() {
     [ -n "${sf:-}" ] && echo "    Floating Point Score: ${sf}" >>"$outfile"
     echo "" >>"$outfile"
   fi
- 
+
   if [ -n "${mt:-}" ]; then
     echo "Benchmark Summary" >>"$outfile"
     echo "  Multi-Core Score: ${mt}" >>"$outfile"
@@ -3113,11 +3113,11 @@ perf_geekbench_write_iter_summary_txt() {
     [ -n "${mf:-}" ] && echo "    Floating Point Score: ${mf}" >>"$outfile"
     echo "" >>"$outfile"
   fi
- 
+
   if [ -z "${st:-}" ] && [ -z "${mt:-}" ]; then
     echo "Benchmark Summary present but totals could not be parsed." >>"$outfile"
   fi
- 
+
   return 0
 }
 
@@ -3183,7 +3183,7 @@ perf_geekbench_write_iter_subscores_txt() {
 perf_geekbench_scores_to_vars() {
   s=$1
   [ -n "$s" ] || return 1
- 
+
   # Split without relying on bash arrays
   st=$(printf '%s' "$s" | awk -F'|' '{print $1}')
   si=$(printf '%s' "$s" | awk -F'|' '{print $2}')
@@ -3191,7 +3191,7 @@ perf_geekbench_scores_to_vars() {
   mt=$(printf '%s' "$s" | awk -F'|' '{print $4}')
   mi=$(printf '%s' "$s" | awk -F'|' '{print $5}')
   mf=$(printf '%s' "$s" | awk -F'|' '{print $6}')
- 
+
   # Quote values safely for eval. Values are numeric/empty, but keep it robust.
   printf "st='%s'\n" "$(printf '%s' "$st" | sed "s/'/'\\\\''/g")"
   printf "si='%s'\n" "$(printf '%s' "$si" | sed "s/'/'\\\\''/g")"
@@ -3264,11 +3264,11 @@ perf_geekbench_pick_bin() {
   # Optional override: can be a directory or a file or a command name
   # Backward compatible: if not given, uses $GEEKBENCH_BIN then PATH.
   spec=$1
- 
+
   if [ -z "${spec:-}" ]; then
     spec=${GEEKBENCH_BIN:-}
   fi
- 
+
   # If user provided a directory, pick executable inside it and fix +x
   if [ -n "${spec:-}" ] && [ -d "$spec" ]; then
     # try common names inside bundle
@@ -3292,7 +3292,7 @@ perf_geekbench_pick_bin() {
     echo ""
     return 1
   fi
- 
+
   # If user provided a file path, chmod +x if needed
   if [ -n "${spec:-}" ] && [ -f "$spec" ]; then
     if [ ! -x "$spec" ]; then
@@ -3305,7 +3305,7 @@ perf_geekbench_pick_bin() {
     echo ""
     return 1
   fi
- 
+
   # If user provided a command name present in PATH
   if [ -n "${spec:-}" ] && command -v "$spec" >/dev/null 2>&1; then
     p=$(command -v "$spec" 2>/dev/null)
@@ -3318,7 +3318,7 @@ perf_geekbench_pick_bin() {
       return 0
     fi
   fi
- 
+
   # Default PATH lookup
   if command -v geekbench_aarch64 >/dev/null 2>&1; then
     p=$(command -v geekbench_aarch64 2>/dev/null)
@@ -3330,7 +3330,7 @@ perf_geekbench_pick_bin() {
       return 0
     fi
   fi
- 
+
   if command -v geekbench >/dev/null 2>&1; then
     p=$(command -v geekbench 2>/dev/null)
     if [ -n "${p:-}" ] && [ -f "$p" ] && [ ! -x "$p" ]; then
@@ -3341,7 +3341,7 @@ perf_geekbench_pick_bin() {
       return 0
     fi
   fi
- 
+
   echo ""
   return 1
 }
@@ -3353,7 +3353,7 @@ perf_geekbench_fix_exec_perms_dir() {
   d=$1
   [ -n "$d" ] || return 1
   [ -d "$d" ] || return 1
- 
+
   # Best effort: known names in Geekbench bundles
   for f in \
     "$d/geekbench_aarch64" \
@@ -3367,13 +3367,13 @@ perf_geekbench_fix_exec_perms_dir() {
   done
   return 0
 }
- 
+
 # perf_geekbench_resolve_bin_and_fix_perms REQUESTED
 # - REQUESTED can be: empty, command, file path, or directory path
 # - Prints resolved executable path to stdout
 perf_geekbench_resolve_bin_and_fix_perms() {
   req=$1
- 
+
   # empty -> try PATH candidates
   if [ -z "${req:-}" ]; then
     if command -v geekbench_aarch64 >/dev/null 2>&1; then
@@ -3386,11 +3386,11 @@ perf_geekbench_resolve_bin_and_fix_perms() {
     fi
     return 1
   fi
- 
+
   # directory provided
   if [ -d "$req" ]; then
     perf_geekbench_fix_exec_perms_dir "$req" 2>/dev/null || true
- 
+
     if [ -f "$req/geekbench_aarch64" ]; then
       [ -x "$req/geekbench_aarch64" ] || chmod +x "$req/geekbench_aarch64" 2>/dev/null || true
       echo "$req/geekbench_aarch64"
@@ -3401,7 +3401,7 @@ perf_geekbench_resolve_bin_and_fix_perms() {
       echo "$req/geekbench"
       return 0
     fi
- 
+
     # last resort: pick first file matching geekbench*
     for f in "$req"/geekbench* "$req"/Geekbench*; do
       [ -f "$f" ] || continue
@@ -3411,14 +3411,14 @@ perf_geekbench_resolve_bin_and_fix_perms() {
     done
     return 1
   fi
- 
+
   # file provided
   if [ -f "$req" ]; then
     [ -x "$req" ] || chmod +x "$req" 2>/dev/null || true
     echo "$req"
     return 0
   fi
- 
+
   # command provided
   if command -v "$req" >/dev/null 2>&1; then
     p=$(command -v "$req" 2>/dev/null)
@@ -3426,7 +3426,7 @@ perf_geekbench_resolve_bin_and_fix_perms() {
     echo "$p"
     return 0
   fi
- 
+
   return 1
 }
 

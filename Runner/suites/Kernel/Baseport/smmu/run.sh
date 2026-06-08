@@ -34,12 +34,12 @@ fi
 
 TESTNAME="smmu"
 test_path="$(find_test_case_by_name "$TESTNAME")"
- 
+
 if [ -z "$test_path" ] || [ ! -d "$test_path" ]; then
     log_fail "$TESTNAME, test directory not found"
     exit 1
 fi
- 
+
 cd "$test_path" || exit 1
 res_file="./$TESTNAME.res"
 rm -f "$res_file"
@@ -80,13 +80,13 @@ else
 fi
 
 log_info "Checking IOMMU groups path"
- 
+
 if ! wait_for_path "/sys/kernel/iommu_groups" 3; then
     log_fail "/sys/kernel/iommu_groups is not present"
     echo "$TESTNAME FAIL" > "$res_file"
     exit 0
 fi
- 
+
 log_pass "/sys/kernel/iommu_groups is present"
 
 group_count="$(find /sys/kernel/iommu_groups -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | awk '{print $1}')"

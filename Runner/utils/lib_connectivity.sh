@@ -20,27 +20,27 @@ wait_for_wifi_interface() {
     waited=0
     iface=""
     settle_done=0
- 
+
     case "$max_wait" in
         ''|*[!0-9]*)
             max_wait=60
             ;;
     esac
- 
+
     case "$sleep_step" in
         ''|*[!0-9]*)
             sleep_step=2
             ;;
     esac
- 
+
     if [ "$max_wait" -le 0 ] 2>/dev/null; then
         max_wait=60
     fi
- 
+
     if [ "$sleep_step" -le 0 ] 2>/dev/null; then
         sleep_step=2
     fi
- 
+
     # Keep stdout reserved only for the detected interface name because callers
     # commonly use command substitution:
     #   wifi_iface="$(wait_for_wifi_interface ...)"
@@ -48,24 +48,24 @@ wait_for_wifi_interface() {
     # All diagnostics must go to stderr to avoid contaminating the returned
     # interface name.
     log_info "Waiting up to ${max_wait}s for WiFi interface creation" >&2
- 
+
     while [ "$waited" -lt "$max_wait" ]; do
         wifi_unblock_rfkill
- 
+
         iface="$(get_wifi_interface 2>/dev/null || true)"
         if [ -n "$iface" ]; then
             printf '%s\n' "$iface"
             return 0
         fi
- 
+
         if [ "$settle_done" -eq 0 ]; then
             settle_done=1
- 
+
             if command -v udevadm >/dev/null 2>&1; then
                 log_info "No WiFi interface yet; triggering net add uevents and waiting for udev settle" >&2
                 udevadm trigger --action=add --subsystem-match=net >/dev/null 2>&1 || true
                 udevadm settle --timeout=5 >/dev/null 2>&1 || true
- 
+
                 iface="$(get_wifi_interface 2>/dev/null || true)"
                 if [ -n "$iface" ]; then
                     printf '%s\n' "$iface"
@@ -73,15 +73,15 @@ wait_for_wifi_interface() {
                 fi
             fi
         fi
- 
+
         sleep "$sleep_step"
         waited=$((waited + sleep_step))
- 
+
         if [ "$waited" -gt 0 ] && [ $((waited % 10)) -eq 0 ]; then
             log_info "Still waiting for WiFi interface... waited=${waited}s/${max_wait}s" >&2
         fi
     done
- 
+
     return 1
 }
 
@@ -96,16 +96,16 @@ wifi_dt_present() {
 wifi_log_module_info() {
     mod=""
     mod_path=""
- 
+
     for mod in "$@"; do
         [ -n "$mod" ] || continue
- 
+
         if is_module_loaded "$mod"; then
             log_pass "Module loaded: $mod"
         else
             log_info "Module not loaded: $mod"
         fi
- 
+
         mod_path="$(find_kernel_module "$mod" 2>/dev/null | awk '/^\// { print; exit }' || true)"
         if [ -n "$mod_path" ]; then
             log_info "[module-path] $mod -> $mod_path"
@@ -492,7 +492,7 @@ wifi_firmware_loaded() {
             return 1
             ;;
     esac
-    
+
     matches="$(get_kernel_log 2>/dev/null | grep -Ei "$pattern" | \
     grep -Eiv 'failed|failure|error|timeout|unable|crash|fatal|Modules linked in' | tail -n 40 || true)"
 

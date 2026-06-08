@@ -86,7 +86,7 @@ display__debugfs_mode_for_crtc_name() {
     crtc_name="$2"
     [ -r "$st" ] || return 1
     [ -n "$crtc_name" ] || return 1
- 
+
     awk -v want="$crtc_name" '
         function is_hz(x){ v=x+0.0; return (v>=20.0 && v<=240.0) }
         $0 ~ /^crtc\[[0-9]+\]:/ {
@@ -264,11 +264,11 @@ display_connected_summary() {
 display_debug_snapshot() {
     ds_tag="$1"
     [ -n "$ds_tag" ] || ds_tag="snapshot"
- 
+
     log_info "----- Display snapshot: $ds_tag -----"
- 
+
     debugfs_try_mount >/dev/null 2>&1 || true
- 
+
     if [ -d /dev/dri ]; then
         ds_nodes=""
         set -- /dev/dri/*
@@ -282,27 +282,27 @@ display_debug_snapshot() {
     else
         log_warn "/dev/dri not present"
     fi
- 
+
     ds_base="/sys/class/drm"
     if [ -d "$ds_base" ]; then
         for ds_path in "$ds_base"/card*-*; do
             [ -e "$ds_path" ] || continue
             ds_name=$(basename "$ds_path")
- 
+
             case "$ds_name" in
                 renderD*|card[0-9]) continue ;;
             esac
- 
+
             ds_status="unknown"
             if [ -r "$ds_path/status" ]; then
                 ds_status=$(tr -d '[:space:]' 2>/dev/null <"$ds_path/status")
             fi
- 
+
             ds_enabled="unknown"
             if [ -r "$ds_path/enabled" ]; then
                 ds_enabled=$(tr -d '[:space:]' 2>/dev/null <"$ds_path/enabled")
             fi
- 
+
             ds_ctype="Other"
             case "$ds_name" in
                 *HDMI*) ds_ctype="HDMI-A" ;;
@@ -310,7 +310,7 @@ display_debug_snapshot() {
                 *DP*) ds_ctype="DP" ;;
                 *LVDS*) ds_ctype="LVDS" ;;
             esac
- 
+
             ds_nmodes=0
             ds_first_mode="<none>"
             if [ -r "$ds_path/modes" ]; then
@@ -319,19 +319,19 @@ display_debug_snapshot() {
                 [ -n "$ds_first_mode" ] || ds_first_mode="<none>"
                 [ -n "$ds_nmodes" ] || ds_nmodes=0
             fi
- 
+
             ds_cur="$(display_connector_cur_mode "$ds_name" 2>/dev/null || true)"
             [ -n "$ds_cur" ] || ds_cur="-"
- 
+
             log_info "DRM: $ds_name status=$ds_status enabled=$ds_enabled type=$ds_ctype modes=$ds_nmodes first=$ds_first_mode cur=$ds_cur"
         done
     else
         log_warn "display_debug_snapshot: $ds_base not found"
     fi
- 
+
     ds_summary=$(display_connected_summary)
     log_info "Connected summary (sysfs): $ds_summary"
- 
+
     log_info "----- End display snapshot: $ds_tag -----"
     return 0
 }
@@ -769,27 +769,27 @@ weston_wait_ready() {
 # Starts socket/service first, then falls back to weston_start, and waits until ready.
 weston_restore_runtime() {
     timeout="${1:-15}"
- 
+
     if command -v weston_is_running >/dev/null 2>&1; then
         if weston_is_running >/dev/null 2>&1 && weston_runtime_socket_exists; then
             return 0
         fi
     fi
- 
+
     if command -v systemctl >/dev/null 2>&1; then
         systemctl start weston.socket >/dev/null 2>&1 || true
         systemctl start weston.service >/dev/null 2>&1 || \
         systemctl start weston@root.service >/dev/null 2>&1 || true
     fi
- 
+
     if weston_wait_ready 3; then
         return 0
     fi
- 
+
     if command -v weston_start >/dev/null 2>&1; then
         weston_start >/dev/null 2>&1 || true
     fi
- 
+
     weston_wait_ready "$timeout"
 }
 
@@ -916,43 +916,43 @@ weston_ini_force_primary_1080p60_if_not_60() {
 weston_get_primary_refresh_hz() {
     primary_sysfs=$(display_select_primary_connector 2>/dev/null || true)
     [ -n "$primary_sysfs" ] || return 1
- 
+
     mode=$(display_connector_cur_mode "$primary_sysfs" 2>/dev/null || true)
     [ -n "$mode" ] || return 1
- 
+
     hz=$(printf '%s\n' "$mode" | awk -F@ 'NF>=2{print $2; exit 0}')
     [ -n "$hz" ] || return 1
- 
+
     printf '%s\n' "$hz"
 }
 
 display_cur_size_from_state_msm() {
     state="$(display_find_dri_state_file 2>/dev/null || true)"
- 
+
     if [ -z "$state" ] || [ ! -r "$state" ]; then
         echo "-"
         return 0
     fi
- 
+
     awk '
     BEGIN { good=0; crtc=0; fb=0; sz=""; }
- 
+
     /^plane\[/ { good=0; crtc=0; fb=0; sz=""; next }
- 
+
     /allocated by[[:space:]]*=/ { good=1; next }
- 
+
     /^[[:space:]]*crtc=crtc-/ {
         if ($0 !~ /\(null\)/) crtc=1
         next
     }
- 
+
     /^[[:space:]]*fb=/ {
         s=$0
         sub(/^[[:space:]]*fb=/, "", s)
         fb = s + 0
         next
     }
- 
+
     /^[[:space:]]*size=/ {
         s=$0
         sub(/^[[:space:]]*size=/, "", s)
@@ -961,7 +961,7 @@ display_cur_size_from_state_msm() {
         if (good && crtc && fb > 0 && sz != "") { print sz; exit 0 }
         next
     }
- 
+
     /^[[:space:]]*dst\[0\]=/ {
         s=$0
         sub(/^[[:space:]]*dst\[0\]=/, "", s)
@@ -971,32 +971,32 @@ display_cur_size_from_state_msm() {
         }
         next
     }
- 
+
     END {
         if (sz != "") print sz;
         else print "-";
     }' "$state" 2>/dev/null
 }
- 
+
 display_connector_cur_mode() {
     sysfs_name="$1"
     [ -n "$sysfs_name" ] || { echo "-"; return 0; }
- 
+
     debugfs_try_mount >/dev/null 2>&1 || true
- 
+
     idx=$(printf '%s\n' "$sysfs_name" | sed -n 's/^card\([0-9][0-9]*\)-.*/\1/p')
     case "$idx" in ""|*[!0-9]*) echo "-"; return 0 ;; esac
- 
+
     st="/sys/kernel/debug/dri/$idx/state"
     if [ ! -r "$st" ]; then
         echo "-"
         return 0
     fi
- 
+
     prefix="card${idx}-"
     cname=${sysfs_name#"$prefix"}
     [ -n "$cname" ] || { echo "-"; return 0; }
- 
+
     awk -v want="$cname" '
         function first_hz(line, i, v) {
             for (i=1; i<=NF; i++) {
@@ -1007,44 +1007,44 @@ display_connector_cur_mode() {
             }
             return ""
         }
- 
+
         BEGIN {
             cur_crtc_id=""; cur_crtc_name=""; in_crtc=0;
             in_conn=0; target_crtc_name=""; target_crtc_id="";
         }
- 
+
         # -------- CRTC blocks (come earlier in your file) --------
         /^[[:space:]]*crtc\[[0-9]+\]:/ {
             in_crtc=1
- 
+
             line=$0
             sub(/^[[:space:]]*crtc\[/, "", line)
             cur_crtc_id=line
             sub(/\].*$/, "", cur_crtc_id)
- 
+
             cur_crtc_name=$0
             sub(/^[[:space:]]*crtc\[[0-9]+\]:[[:space:]]*/, "", cur_crtc_name)
             next
         }
- 
+
         in_crtc && $1=="mode:" {
             res=$2
             gsub(/"/, "", res)
             sub(/:$/, "", res)
             hz=first_hz($0)
- 
+
             if (res ~ /^[0-9]+x[0-9]+$/ && hz != "") {
                 mode_by_id[cur_crtc_id] = res "@" hz
                 mode_by_name[cur_crtc_name] = res "@" hz
             }
             next
         }
- 
+
         # stop CRTC block when next top-level block starts
         in_crtc && /^[[:space:]]*[A-Za-z_]+\[[0-9]+\]:/ && $0 !~ /^[[:space:]]*crtc\[/ {
             in_crtc=0
         }
- 
+
         # -------- Connector blocks --------
         /^[[:space:]]*connector\[[0-9]+\]:/ {
             in_conn=0
@@ -1053,7 +1053,7 @@ display_connector_cur_mode() {
             if (conn_name == want) in_conn=1
             next
         }
- 
+
         in_conn {
             # your format: "crtc=crtc-0" or "crtc=(null)"
             if ($0 ~ /^[[:space:]]*crtc=/) {
@@ -1065,7 +1065,7 @@ display_connector_cur_mode() {
             }
             next
         }
- 
+
         END {
             if (target_crtc_name != "" && (target_crtc_name in mode_by_name)) {
                 print mode_by_name[target_crtc_name]
@@ -1269,18 +1269,18 @@ egli_glvnd_icd_from_json() {
   # Prints the value (e.g., libEGL_adreno.so.1) or empty on failure.
   f="$1"
   [ -r "$f" ] || { printf '%s\n' ""; return 0; }
- 
+
   # Match a line containing "library_path" : "...."
   # Keep it resilient to whitespace.
   sed -n 's/.*"library_path"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$f" | head -n 1
 }
- 
+
 egli_derive_driver_name() {
   # Best-effort for log readability only.
   # Inputs: gl_vendor gl_renderer
   v="$1"
   r="$2"
- 
+
   # Qualcomm/Adreno path
   if printf '%s %s\n' "$v" "$r" | grep -Eqi '(qualcomm|adreno)'; then
     icd=""
@@ -1294,7 +1294,7 @@ egli_derive_driver_name() {
     printf '%s\n' "adreno"
     return 0
   fi
- 
+
   # Mesa path
   if printf '%s %s\n' "$v" "$r" | grep -Eqi '(mesa|llvmpipe|softpipe|swrast|lavapipe)'; then
     icd=""
@@ -1308,7 +1308,7 @@ egli_derive_driver_name() {
     printf '%s\n' "mesa"
     return 0
   fi
- 
+
   printf '%s\n' "unknown"
   return 0
 }
@@ -1396,7 +1396,7 @@ egli_classify_pipeline() {
 egli_wayland_socket_ok() {
   wd="${WAYLAND_DISPLAY:-}"
   [ -n "$wd" ] || return 1
- 
+
   case "$wd" in
     /*)
       [ -S "$wd" ] && return 0
@@ -1408,12 +1408,12 @@ egli_wayland_socket_ok() {
         [ -S "$xrd/$wd" ] && return 0
         return 1
       fi
- 
+
       # Fallbacks when XDG_RUNTIME_DIR is unset (common in minimal shells)
       [ -S "/run/user/0/$wd" ] && return 0
       [ -S "/run/user/1000/$wd" ] && return 0
       [ -S "/run/$wd" ] && return 0
- 
+
       return 1
       ;;
   esac

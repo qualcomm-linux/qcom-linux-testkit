@@ -60,10 +60,10 @@ toggle_etm_all() {
     state=$1
     count=0
     toggledcount=0
-    
+
     while [ "$count" -lt "$CORES" ]; do
         skip=0
-        
+
         if [ -f "${CPU_PATH}${count}/online" ]; then
             read -r is_online < "${CPU_PATH}${count}/online"
             if [ "$is_online" = "0" ]; then
@@ -74,7 +74,7 @@ toggle_etm_all() {
 
         if [ "$skip" -eq 0 ]; then
             etm=""
-            
+
             if [ -f "$cs_base/ete$count/enable_source" ]; then
                 etm="$cs_base/ete$count/enable_source"
             elif [ -f "$cs_base/coresight-ete$count/enable_source" ]; then
@@ -128,7 +128,7 @@ fi
 
 for sinkname in $SINKS; do
     log_info "Testing Sink: $sinkname"
-    
+
     cs_global_reset
     OUTPUT_BIN="/tmp/$sinkname.bin"
     rm -f "$OUTPUT_BIN"
@@ -166,4 +166,4 @@ for sinkname in $SINKS; do
     toggle_etm_all 0
 done
 
-cs_global_reset 
+cs_global_reset

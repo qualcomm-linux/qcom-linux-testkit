@@ -52,12 +52,12 @@ initial_votes=$(extract_votes)
 log_info "$initial_votes"
 log_info "$initial_votes"
 
-log_info "Running bw_mem tool..." 
+log_info "Running bw_mem tool..."
 bw_mem 4000000000 frd &
 
 sleep 2
 
-log_info "Vote check while bw_mem tool is running:" 
+log_info "Vote check while bw_mem tool is running:"
 final_votes=$(extract_votes)
 log_info "$final_votes"
 
@@ -81,7 +81,7 @@ done
 
 if $incremented; then
     log_pass "$TESTNAME : Test Passed"
-    echo "$TESTNAME PASS" > "$res_file" 
+    echo "$TESTNAME PASS" > "$res_file"
     exit 0
 else
     log_fail "$TESTNAME : Test Failed"

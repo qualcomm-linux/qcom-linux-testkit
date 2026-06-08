@@ -120,11 +120,11 @@ done
 # ---------- DT / platform readiness ----------
 # Print both sensor and CAMSS/ISP matches if they exist; skip only if neither is present.
 log_info "Verifying the availability of DT nodes, this process may take some time."
- 
+
 PATTERNS="sony,imx577 imx577 isp cam camss"
 found_any=0
 missing_list=""
- 
+
 for pat in $PATTERNS; do
   out="$(dt_confirm_node_or_compatible "$pat" 2>/dev/null || true)"
   if [ -n "$out" ]; then
@@ -134,7 +134,7 @@ for pat in $PATTERNS; do
     [ -n "$missing_list" ] && missing_list="$missing_list, $pat" || missing_list="$pat"
   fi
 done
- 
+
 if [ "$found_any" -eq 1 ]; then
   log_info "DT nodes present (see matches above)."
 else
@@ -177,13 +177,13 @@ SENSOR_COUNT="$(libcam_list_sensors_count 2>/dev/null)"
 # harden: ensure numeric
 case "$SENSOR_COUNT" in ''|*[!0-9]*) SENSOR_COUNT=0 ;; esac
 log_info "[cam -l] detected ${SENSOR_COUNT} camera(s)"
- 
+
 if [ "$SENSOR_COUNT" -lt 1 ]; then
     log_skip "No sensors reported by 'cam -l' - marking SKIP"
     echo "$TESTNAME SKIP" > "$RES_FILE"
     exit 0
 fi
- 
+
 
 # ---------- Resolve indices (supports: auto | all | 0,2,5) ----------
 INDICES="$(libcam_resolve_indices "$CAM_INDEX")"

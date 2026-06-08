@@ -27,7 +27,7 @@ SCRIPT_DIR="$(
   cd "$(dirname "$0")" || exit 1
   pwd
 )"
- 
+
 INIT_ENV=""
 SEARCH="$SCRIPT_DIR"
 while [ "$SEARCH" != "/" ]; do
@@ -37,13 +37,13 @@ while [ "$SEARCH" != "/" ]; do
   fi
   SEARCH=$(dirname "$SEARCH")
 done
- 
+
 if [ -z "${INIT_ENV:-}" ]; then
   echo "[ERROR] Could not find init_env (starting at $SCRIPT_DIR)" >&2
   echo "$TESTNAME SKIP" >"$RES_FILE" 2>/dev/null || true
   exit 0
 fi
- 
+
 if [ -z "${__INIT_ENV_LOADED:-}" ]; then
   # shellcheck disable=SC1090
   . "$INIT_ENV"
@@ -118,10 +118,10 @@ while [ $# -gt 0 ]; do
           echo "$TESTNAME SKIP" >"$RES_FILE"
           exit 0
         fi
-        
+
         width="${2%%x*}"
         height="${2#*x}"
-        
+
         # Validate both width and height are numeric
         if ! echo "$width" | grep -q "^[0-9]\+$" || ! echo "$height" | grep -q "^[0-9]\+$"; then
           log_warn "Width and height must be numeric values (got width='$width', height='$height')"
