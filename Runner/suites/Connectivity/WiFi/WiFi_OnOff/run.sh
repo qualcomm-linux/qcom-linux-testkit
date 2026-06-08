@@ -164,18 +164,18 @@ wifi_iface="$(wait_for_wifi_interface "$WIFI_WAIT_SECS" "$WIFI_WAIT_STEP_SECS" |
 
 if [ -z "$wifi_iface" ]; then
     log_info "No WiFi interface detected after wait/recovery. Collecting diagnostics..."
- 
+
     run_with_line_args wifi_dump_debug_info "$WIFI_DT_PATTERNS"
     run_with_line_args wifi_log_module_info "$WIFI_DRIVER_MODULES"
- 
+
     if wifi_has_probe_failures "$WIFI_PROBE_LOG_DIR" "$WIFI_PROBE_LOG_TAG"; then
         log_fail_exit "$TESTNAME" "WiFi driver probe/runtime failures detected and no usable WiFi interface was found." ""
     fi
- 
+
     if wifi_stack_present; then
         log_fail_exit "$TESTNAME" "WiFi runtime stack is present, but no usable WiFi interface was found after retries." ""
     fi
- 
+
     log_warn "WiFi modules may be loaded, but no WiFi phy/netdev/runtime object is exposed."
     log_skip_exit "$TESTNAME" "No usable WiFi interface or runtime WiFi phy/netdev was found. Skipping." ""
 fi

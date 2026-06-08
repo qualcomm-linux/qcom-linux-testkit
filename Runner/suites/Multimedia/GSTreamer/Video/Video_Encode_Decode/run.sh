@@ -19,7 +19,7 @@ LOG_DIR="${SCRIPT_DIR}/logs"
 OUTDIR="$LOG_DIR/$TESTNAME"
 GST_LOG="$OUTDIR/gst.log"
 DMESG_DIR="$OUTDIR/dmesg"
- 
+
 INIT_ENV=""
 SEARCH="$SCRIPT_DIR"
 while [ "$SEARCH" != "/" ]; do
@@ -29,13 +29,13 @@ while [ "$SEARCH" != "/" ]; do
   fi
   SEARCH=$(dirname "$SEARCH")
 done
- 
+
 if [ -z "${INIT_ENV:-}" ]; then
   echo "[ERROR] Could not find init_env (starting at $SCRIPT_DIR)" >&2
   echo "$RESULT_TESTNAME SKIP" >"$RES_FILE" 2>/dev/null || true
   exit 0
 fi
- 
+
 if [ -z "${__INIT_ENV_LOADED:-}" ]; then
   # shellcheck disable=SC1090
   . "$INIT_ENV"
@@ -102,7 +102,7 @@ for param in VIDEO_DURATION RUNTIMESEC VIDEO_FRAMERATE VIDEO_GST_DEBUG GST_DEBUG
 
   if [ -n "$val" ]; then
     case "$val" in
-      ''|*[!0-9]*) 
+      ''|*[!0-9]*)
         log_warn "$param must be numeric (got '$val')"
         echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
         exit 0
@@ -193,7 +193,7 @@ while [ $# -gt 0 ]; do
       fi
       if [ -n "$2" ]; then
         case "$2" in
-          ''|*[!0-9]*) 
+          ''|*[!0-9]*)
             log_warn "Invalid --framerate '$2' (must be numeric)"
             echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
             exit 0
@@ -369,7 +369,7 @@ case "$gstDebugLevel" in 1|2|3|4|5|6|7|8|9) : ;; *)
 esac
 
 case "$duration" in
-  ''|*[!0-9]*) 
+  ''|*[!0-9]*)
     log_warn "Invalid duration '$duration' (must be numeric)"
     echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
     exit 0
@@ -384,7 +384,7 @@ case "$duration" in
 esac
 
 case "$framerate" in
-  ''|*[!0-9]*) 
+  ''|*[!0-9]*)
     log_warn "Invalid framerate '$framerate' (must be numeric)"
     echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
     exit 0
@@ -447,12 +447,12 @@ run_encode_test() {
   resolution="$2"
   width="$3"
   height="$4"
-  
+
   testname="encode_${codec}_${resolution}"
   log_info "=========================================="
   log_info "Running: $testname"
   log_info "=========================================="
-  
+
   # Check if encoder is available
   encoder=$(gstreamer_v4l2_encoder_for_codec "$codec")
   if [ -z "$encoder" ]; then
@@ -460,48 +460,48 @@ run_encode_test() {
     skip_count=$((skip_count + 1))
     return 1
   fi
-  
+
   ext=$(gstreamer_container_ext_for_codec "$codec")
   output_file="$ENCODED_DIR/${testname}.${ext}"
   test_log="$OUTDIR/${testname}.log"
-  
+
   : >"$test_log"
-  
+
   # Calculate bitrate based on resolution
   bitrate=$(gstreamer_bitrate_for_resolution "$width" "$height")
-  
+
   # Build pipeline using library function
   pipeline=$(gstreamer_build_v4l2_encode_pipeline "$codec" "$width" "$height" "$duration" "$framerate" "$bitrate" "$output_file" "$detected_stack")
-  
+
   if [ -z "$pipeline" ]; then
     log_fail "$testname: FAIL (could not build pipeline)"
     fail_count=$((fail_count + 1))
     return 1
   fi
-  
+
   log_info "Pipeline: $pipeline"
-  
+
   # Run encoding
   if gstreamer_run_gstlaunch_timeout "$((duration + 10))" "$pipeline" >>"$test_log" 2>&1; then
     gstRc=0
   else
     gstRc=$?
   fi
-  
+
   log_info "Encode exit code: $gstRc"
-  
+
   # Check for GStreamer errors in log
   if ! gstreamer_validate_log "$test_log" "$testname"; then
     log_fail "$testname: FAIL (GStreamer errors detected)"
     fail_count=$((fail_count + 1))
     return 1
   fi
-  
+
   # Check if output file was created and has content
   if [ -f "$output_file" ] && [ -s "$output_file" ]; then
     file_size=$(gstreamer_file_size_bytes "$output_file")
     log_info "Encoded file: $output_file (size: $file_size bytes)"
-    
+
     if [ "$file_size" -gt 1000 ]; then
       log_pass "$testname: PASS"
       pass_count=$((pass_count + 1))
@@ -522,12 +522,12 @@ run_encode_test() {
 run_decode_test() {
   codec="$1"
   resolution="$2"
-  
+
   testname="decode_${codec}_${resolution}"
   log_info "=========================================="
   log_info "Running: $testname"
   log_info "=========================================="
-  
+
   # Check if decoder is available
   decoder=$(gstreamer_v4l2_decoder_for_codec "$codec")
   if [ -z "$decoder" ]; then
@@ -535,9 +535,9 @@ run_decode_test() {
     skip_count=$((skip_count + 1))
     return 1
   fi
-  
+
   ext=$(gstreamer_container_ext_for_codec "$codec")
-  
+
   # For VP9, use WebM clip directly; for others, use encoded file
   if [ "$codec" = "vp9" ]; then
     input_file="$OUTDIR/VP9_640x480_10s.webm"
@@ -554,37 +554,37 @@ run_decode_test() {
       return 1
     fi
   fi
-  
+
   test_log="$OUTDIR/${testname}.log"
   : >"$test_log"
-  
+
   # Build pipeline using library function
   pipeline=$(gstreamer_build_v4l2_decode_pipeline "$codec" "$input_file" "$detected_stack")
-  
+
   if [ -z "$pipeline" ]; then
     log_fail "$testname: FAIL (could not build pipeline)"
     fail_count=$((fail_count + 1))
     return 1
   fi
-  
+
   log_info "Pipeline: $pipeline"
-  
+
   # Run decoding
   if gstreamer_run_gstlaunch_timeout "$((duration + 10))" "$pipeline" >>"$test_log" 2>&1; then
     gstRc=0
   else
     gstRc=$?
   fi
-  
+
   log_info "Decode exit code: $gstRc"
-  
+
   # Check for GStreamer errors in log
   if ! gstreamer_validate_log "$test_log" "$testname"; then
     log_fail "$testname: FAIL (GStreamer errors detected)"
     fail_count=$((fail_count + 1))
     return 1
   fi
-  
+
   # Check for successful completion
   if [ "$gstRc" -eq 0 ]; then
     log_pass "$testname: PASS"
@@ -619,9 +619,9 @@ if [ "$need_vp9_clip" -eq 1 ] && [ "$testMode" != "encode" ]; then
   log_info "=========================================="
   log_info "VP9 CLIP PREP"
   log_info "=========================================="
-  
+
   vp9_clip_webm="$OUTDIR/VP9_640x480_10s.webm"
-  
+
   # Check if WebM file already exists
   if [ -f "$vp9_clip_webm" ]; then
     log_info "VP9 WebM clip already exists: $vp9_clip_webm"
@@ -660,14 +660,14 @@ if [ "$testMode" = "all" ] || [ "$testMode" = "encode" ]; then
   log_info "=========================================="
   log_info "ENCODE TESTS"
   log_info "=========================================="
-  
+
   for codec in $codecs; do
     # Skip VP9 for encode tests (no v4l2vp9enc support in this test)
     if [ "$codec" = "vp9" ]; then
       log_info "Skipping VP9 encode (not supported)"
       continue
     fi
-    
+
     for res in $resolutions; do
       params=$(gstreamer_resolution_to_wh "$res")
 
@@ -689,7 +689,7 @@ if [ "$testMode" = "all" ] || [ "$testMode" = "decode" ]; then
   log_info "=========================================="
   log_info "DECODE TESTS"
   log_info "=========================================="
-  
+
   for codec in $codecs; do
     if [ "$codec" = "vp9" ]; then
       total_tests=$((total_tests + 1))
@@ -714,7 +714,7 @@ exclude_regex="dummy regulator|supply [^ ]+ not found|using dummy regulator"
 
 if command -v scan_dmesg_errors >/dev/null 2>&1; then
   scan_dmesg_errors "$DMESG_DIR" "$module_regex" "$exclude_regex" || true
-  
+
   if [ -s "$DMESG_DIR/dmesg_errors.log" ]; then
     log_warn "dmesg scan found video-related warnings or errors in $DMESG_DIR/dmesg_errors.log"
   else

@@ -124,19 +124,19 @@ log_info "=== Phase 1: STM Only Test ==="
 
 for sink in $sink_list; do
     log_info "Testing Sink: $(basename "$sink")"
-    
+
     reset_devices
     echo 1 > "$sink/enable_sink"
     echo 1 > "$stm_path/enable_source"
     sleep 1
-    
+
     if ! check_sink_status "$sink" 1 "Phase1_STM_Enable"; then
         fail=$((fail + 1))
     fi
-    
+
     echo 0 > "$stm_path/enable_source"
     sleep 1
-    
+
     echo 0 > "$sink/enable_sink"
     if ! check_sink_status "$sink" 0 "Phase1_STM_Disable"; then
         fail=$((fail + 1))
@@ -162,24 +162,24 @@ fi
 if [ "$has_etm" -eq 1 ]; then
     for sink in $sink_list; do
         log_info "Testing Sink (Multi-Source): $(basename "$sink")"
-        
+
         reset_devices
         echo 1 > "$sink/enable_sink"
-        
+
         echo 1 > "$stm_path/enable_source"
         echo 1 > "$etm_path/enable_source"
         sleep 1
-        
+
         if ! check_sink_status "$sink" 1 "Phase2_Both_Enable"; then
             fail=$((fail + 1))
         fi
-        
+
         echo 0 > "$stm_path/enable_source"
-        
+
         if ! check_sink_status "$sink" 1 "Phase2_STM_Disable_ETM_Active"; then
             fail=$((fail + 1))
         fi
-        
+
         reset_devices
     done
 else
@@ -196,4 +196,4 @@ else
     echo "$TESTNAME FAIL" > "$res_file"
 fi
 
-log_info "-------------------$TESTNAME Testcase Finished----------------------------" 
+log_info "-------------------$TESTNAME Testcase Finished----------------------------"

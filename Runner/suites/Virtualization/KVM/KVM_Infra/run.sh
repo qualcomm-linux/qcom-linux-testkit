@@ -138,7 +138,7 @@ log_info "=== KVM/QEMU Dmesg Advisory Scan ==="
 if ! kvm_check_boot_dmesg_errors "$DMESG_DIR"; then
     log_warn "$TESTNAME WARN - KVM/EL2 dmesg issues detected; not failing due to possible CI dmesg flooding"
 fi
- 
+
 log_pass "$TESTNAME PASS - QEMU/KVM host infrastructure is available"
 echo "$TESTNAME PASS" >"$res_file"
 

@@ -811,7 +811,7 @@ check_dt_nodes() {
             found=true
         fi
     done
- 
+
     if [ "$found" = true ]; then
         return 0
     else
@@ -856,20 +856,20 @@ detect_runner_root() {
 # Function is to check for network connectivity status
 check_network_status() {
     echo "[INFO] Checking network connectivity..."
- 
+
     # Prefer the egress/source IP chosen by the routing table (most accurate).
     ip_addr=$(ip -4 route get 1.1.1.1 2>/dev/null \
               | awk 'NR==1{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')
- 
+
     # Fallback: first global IPv4 on any UP interface (works even without a default route).
     if [ -z "$ip_addr" ]; then
         ip_addr=$(ip -o -4 addr show scope global up 2>/dev/null \
                   | awk 'NR==1{split($4,a,"/"); print a[1]}')
     fi
- 
+
     if [ -n "$ip_addr" ]; then
         echo "[PASS] Network is active. IP address: $ip_addr"
- 
+
         # Quick reachability probe (single ICMP). BusyBox-compatible flags.
         if ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1; then
             echo "[PASS] Internet is reachable."
@@ -889,14 +889,14 @@ ensure_reasonable_clock() {
     now="$(date +%s 2>/dev/null || echo 0)"
     cutoff="$(date -d '2020-01-01 UTC' +%s 2>/dev/null || echo 1577836800)"
     [ -z "$cutoff" ] && cutoff=1577836800
- 
+
     [ "$now" -ge "$cutoff" ] 2>/dev/null && return 0
- 
+
     log_warn "System clock looks invalid (epoch=$now). Trying local time sources (no network)..."
- 
+
     # Optional diagnostics file (caller may set this, e.g. CLOCK_DIAG_FILE="$OUT_DIR/clock_diag.txt")
     diag_file="${CLOCK_DIAG_FILE:-}"
- 
+
     # ---- Diagnostics (only when invalid clock) ----
     if [ -n "$diag_file" ]; then
         {
@@ -906,7 +906,7 @@ ensure_reasonable_clock() {
             echo
         } >>"$diag_file" 2>/dev/null || true
     fi
- 
+
     # Log minimal summaries to stdout; write full outputs to diag file.
     # date summary
     date_out="$(date 2>&1 || true)"
@@ -918,7 +918,7 @@ ensure_reasonable_clock() {
         } >>"$diag_file" 2>/dev/null || true
     fi
     log_info "date: $(printf '%s' "$date_out" | head -n 1)"
- 
+
     # timedatectl summaries + full dump
     if command -v timedatectl >/dev/null 2>&1; then
         td_status="$(timedatectl status 2>&1 || true)"
@@ -929,18 +929,18 @@ ensure_reasonable_clock() {
                 echo
             } >>"$diag_file" 2>/dev/null || true
         fi
- 
+
         # minimal, stable-ish summaries
         td_local="$(printf '%s\n' "$td_status" | sed -n 's/^[[:space:]]*Local time:[[:space:]]*//p' | head -n 1)"
         td_sync="$(printf '%s\n' "$td_status" | sed -n 's/^[[:space:]]*System clock synchronized:[[:space:]]*//p' | head -n 1)"
         td_ntp="$(printf '%s\n' "$td_status" | sed -n 's/^[[:space:]]*NTP service:[[:space:]]*//p' | head -n 1)"
         td_rtc="$(printf '%s\n' "$td_status" | sed -n 's/^[[:space:]]*RTC time:[[:space:]]*//p' | head -n 1)"
- 
+
         [ -n "$td_local" ] && log_info "timedatectl: Local time: $td_local"
         [ -n "$td_rtc" ] && log_info "timedatectl: RTC time: $td_rtc"
         [ -n "$td_sync" ] && log_info "timedatectl: System clock synchronized: $td_sync"
         [ -n "$td_ntp" ] && log_info "timedatectl: NTP service: $td_ntp"
- 
+
         td_show="$(timedatectl show-timesync --all 2>&1 || true)"
         if [ -n "$diag_file" ]; then
             {
@@ -949,12 +949,12 @@ ensure_reasonable_clock() {
                 echo
             } >>"$diag_file" 2>/dev/null || true
         fi
- 
+
         td_server="$(printf '%s\n' "$td_show" | sed -n 's/^ServerName=//p' | head -n 1)"
         td_addr="$(printf '%s\n' "$td_show" | sed -n 's/^ServerAddress=//p' | head -n 1)"
         td_sysntp="$(printf '%s\n' "$td_show" | sed -n 's/^SystemNTPServers=//p' | head -n 1)"
         td_fallback="$(printf '%s\n' "$td_show" | sed -n 's/^FallbackNTPServers=//p' | head -n 1)"
- 
+
         if [ -n "$td_server" ] || [ -n "$td_addr" ]; then
             log_info "timesync: server=${td_server:-NA} addr=${td_addr:-NA}"
         fi
@@ -966,7 +966,7 @@ ensure_reasonable_clock() {
             short_fb="$(printf '%s' "$td_fallback" | awk '{print $1" "$2" "$3" "$4}')"
             log_info "timesync: FallbackNTPServers: ${short_fb:-NA}"
         fi
- 
+
         td_ts="$(timedatectl timesync-status 2>&1 || true)"
         if [ -n "$diag_file" ]; then
             {
@@ -975,7 +975,7 @@ ensure_reasonable_clock() {
                 echo
             } >>"$diag_file" 2>/dev/null || true
         fi
- 
+
         td_pkt="$(printf '%s\n' "$td_ts" | sed -n 's/^[[:space:]]*Packet count:[[:space:]]*//p' | head -n 1)"
         td_srvline="$(printf '%s\n' "$td_ts" | sed -n 's/^[[:space:]]*Server:[[:space:]]*//p' | head -n 1)"
         [ -n "$td_srvline" ] && log_info "timesync-status: Server: $td_srvline"
@@ -986,7 +986,7 @@ ensure_reasonable_clock() {
             echo "timedatectl: not available" >>"$diag_file" 2>/dev/null || true
         fi
     fi
- 
+
     # systemctl status summaries + full dump
     if command -v systemctl >/dev/null 2>&1; then
         sdts="$(systemctl status systemd-timesyncd --no-pager --full 2>&1 || true)"
@@ -997,7 +997,7 @@ ensure_reasonable_clock() {
                 echo
             } >>"$diag_file" 2>/dev/null || true
         fi
- 
+
         sd_active="$(printf '%s\n' "$sdts" | sed -n 's/^[[:space:]]*Active:[[:space:]]*//p' | head -n 1)"
         sd_pid="$(printf '%s\n' "$sdts" | sed -n 's/^[[:space:]]*Main PID:[[:space:]]*//p' | head -n 1)"
         [ -n "$sd_active" ] && log_info "systemd-timesyncd: Active: $sd_active"
@@ -1008,7 +1008,7 @@ ensure_reasonable_clock() {
             echo "systemctl: not available" >>"$diag_file" 2>/dev/null || true
         fi
     fi
- 
+
     # 1) Try RTC (if it is sane)
     if command -v hwclock >/dev/null 2>&1 && [ -e /dev/rtc0 ]; then
         hwclock -s 2>/dev/null || true
@@ -1017,7 +1017,7 @@ ensure_reasonable_clock() {
             log_pass "Clock restored from RTC."
             return 0
         fi
- 
+
         if [ -r /sys/class/rtc/rtc0/since_epoch ]; then
             rtc_epoch="$(tr -cd 0-9 < /sys/class/rtc/rtc0/since_epoch 2>/dev/null)"
             if [ -n "$rtc_epoch" ]; then
@@ -1043,7 +1043,7 @@ ensure_reasonable_clock() {
             echo "RTC: hwclock or /dev/rtc0 not available" >>"$diag_file" 2>/dev/null || true
         fi
     fi
- 
+
     # 2) Try kernel build timestamp from /proc/version or uname -v
     kb="$(uname -v 2>/dev/null || cat /proc/version 2>/dev/null || true)"
     if [ -n "$diag_file" ]; then
@@ -1053,11 +1053,11 @@ ensure_reasonable_clock() {
             echo
         } >>"$diag_file" 2>/dev/null || true
     fi
- 
+
     kb_date="$(printf '%s\n' "$kb" | sed -n \
         's/.*\([A-Z][a-z][a-z] [A-Z][a-z][a-z] [ 0-9][0-9] [0-9][0-9]:[0-9][0-9]:[0-9][0-9] [A-Z][A-Za-z0-9+:-]* [0-9][0-9][0-9][0-9]\).*/\1/p' \
         | head -n 1)"
- 
+
     if [ -n "$kb_date" ]; then
         log_info "kernel-build-time: parsed='$kb_date'"
         kb_epoch="$(date -d "$kb_date" +%s 2>/dev/null || echo 0)"
@@ -1072,7 +1072,7 @@ ensure_reasonable_clock() {
     else
         log_info "kernel-build-time: could not parse from uname -v / /proc/version"
     fi
- 
+
     log_warn "Clock still invalid; continuing (timestamps may be epoch)."
     return 1
 }
@@ -1082,7 +1082,7 @@ extract_tar_from_url() {
     url="$1"
     outdir="${LOG_DIR:-.}"
     mkdir -p "$outdir" 2>/dev/null || true
- 
+
     case "$url" in
         /*)
             tarfile="$url"
@@ -1096,13 +1096,13 @@ extract_tar_from_url() {
     esac
     markfile="${tarfile}.extracted"
     skip_sentinel="${outdir}/.asset_fetch_skipped"
- 
+
     # If a previous run already marked "assets unavailable", honor it and SKIP.
     if [ -f "$skip_sentinel" ]; then
         log_info "Previous run marked assets unavailable on this system (${skip_sentinel}); skipping download."
         return 2
     fi
- 
+
     tar_already_extracted() {
         tf="$1"
         od="$2"
@@ -1131,7 +1131,7 @@ extract_tar_from_url() {
         fi
         return 1
     }
- 
+
     if command -v check_tar_file >/dev/null 2>&1; then
         check_tar_file "$url"
         status=$?
@@ -1146,12 +1146,12 @@ extract_tar_from_url() {
             status=1
         fi
     fi
- 
+
     ensure_reasonable_clock || {
         log_warn "Proceeding in limited-network mode."
         limited_net=1
     }
- 
+
     is_busybox_wget() {
         if command -v wget >/dev/null 2>&1; then
             if wget --help 2>&1 | head -n 1 | grep -qi busybox; then
@@ -1160,7 +1160,7 @@ extract_tar_from_url() {
         fi
         return 1
     }
- 
+
     tls_capable_fetcher_available() {
         scheme_https=0
         case "$url" in
@@ -1189,13 +1189,13 @@ extract_tar_from_url() {
         fi
         return 1
     }
- 
+
     try_download() {
         src="$1"
         dst="$2"
         part="${dst}.part.$$"
         ca=""
- 
+
         for cand in \
             /etc/ssl/certs/ca-certificates.crt \
             /etc/ssl/cert.pem \
@@ -1206,7 +1206,7 @@ extract_tar_from_url() {
                 break
             fi
         done
- 
+
         if command -v curl >/dev/null 2>&1; then
             if [ -n "$ca" ]; then
                 curl -4 -L --fail --retry 3 --retry-delay 2 --connect-timeout 10 \
@@ -1227,7 +1227,7 @@ extract_tar_from_url() {
                     ;;
             esac
         fi
- 
+
         if command -v aria2c >/dev/null 2>&1; then
             aria2c -x4 -s4 -m3 --connect-timeout=10 \
                    -o "$(basename "$part")" --dir="$(dirname "$part")" "$src"
@@ -1238,7 +1238,7 @@ extract_tar_from_url() {
             fi
             rm -f "$part" 2>/dev/null || true
         fi
- 
+
         if command -v wget >/dev/null 2>&1; then
             if is_busybox_wget; then
                 wget -O "$part" -T 15 "$src"
@@ -1278,15 +1278,15 @@ extract_tar_from_url() {
                 return $rc
             fi
         fi
- 
+
         return 127
     }
- 
+
     if [ "$status" -eq 0 ]; then
         log_info "Already extracted. Skipping download."
         return 0
     fi
- 
+
     if [ "$status" -eq 2 ]; then
         log_info "File exists and is valid, but not yet extracted. Proceeding to extract."
     else
@@ -1304,7 +1304,7 @@ extract_tar_from_url() {
                     if [ -n "${VIDEO_ASSET_DIR:-}" ]; then prestage_dirs="$prestage_dirs $VIDEO_ASSET_DIR"; fi
                     if [ -n "${AUDIO_ASSET_DIR:-}" ]; then prestage_dirs="$prestage_dirs $AUDIO_ASSET_DIR"; fi
                     prestage_dirs="$prestage_dirs . $outdir ${ROOT_DIR:-} ${ROOT_DIR:-}/cache /var/Runner /var/Runner/cache"
- 
+
                     for d in $prestage_dirs; do
                         if [ -d "$d" ] && [ -f "$d/$(basename "$tarfile")" ]; then
                             log_info "Using pre-staged tarball: $d/$(basename "$tarfile")"
@@ -1312,7 +1312,7 @@ extract_tar_from_url() {
                             break
                         fi
                     done
- 
+
                     if [ ! -s "$tarfile" ]; then
                         for top in /mnt /media; do
                             if [ -d "$top" ]; then
@@ -1327,21 +1327,21 @@ extract_tar_from_url() {
                         done
                     fi
                 fi
- 
+
                 if [ ! -s "$tarfile" ]; then
                     if [ -n "$limited_net" ]; then
                         log_warn "Limited network, cannot fetch media bundle. Marking SKIP for callers."
                         : > "$skip_sentinel" 2>/dev/null || true
                         return 2
                     fi
- 
+
                     if ! tls_capable_fetcher_available; then
                         log_warn "No TLS-capable downloader available on this minimal build, cannot fetch: $url"
                         log_warn "Pre-stage $(basename "$url") locally or use a file:// URL."
                         : > "$skip_sentinel" 2>/dev/null || true
                         return 2
                     fi
- 
+
                     log_info "Downloading $url -> $tarfile"
                     if ! try_download "$url" "$tarfile"; then
                         rc=$?
@@ -1357,7 +1357,7 @@ extract_tar_from_url() {
                 ;;
         esac
     fi
- 
+
     log_info "Extracting $(basename "$tarfile")..."
     if tar -xvf "$tarfile"; then
         : > "$markfile" 2>/dev/null || true
@@ -1365,7 +1365,7 @@ extract_tar_from_url() {
         if [ -f "$skip_sentinel" ]; then
             rm -f "$skip_sentinel" 2>/dev/null || true
         fi
- 
+
         first_entry="$(tar -tf "$tarfile" 2>/dev/null | head -n 1 | sed 's#/$##')"
         if [ -n "$first_entry" ]; then
             if [ -e "$first_entry" ] || [ -e "$outdir/$first_entry" ]; then
@@ -1376,7 +1376,7 @@ extract_tar_from_url() {
         log_warn "Extraction finished but couldn't verify entries. Assuming success."
         return 0
     fi
- 
+
     log_fail "Failed to extract $(basename "$tarfile")"
     return 1
 }
@@ -1387,14 +1387,14 @@ check_tar_file() {
     url="$1"
     outdir="${LOG_DIR:-.}"
     mkdir -p "$outdir" 2>/dev/null || true
- 
+
     case "$url" in
         /*)       tarfile="$url" ;;
         file://*) tarfile="${url#file://}" ;;
         *)        tarfile="$outdir/$(basename "$url")" ;;
     esac
     markfile="${tarfile}.extracted"
- 
+
     # 1) Existence & basic validity
     if [ ! -f "$tarfile" ]; then
         log_info "File $(basename "$tarfile") does not exist in $outdir."
@@ -1408,13 +1408,13 @@ check_tar_file() {
         log_warn "File $(basename "$tarfile") is not a valid tar archive."
         return 1
     fi
- 
+
     # 2) Already extracted? (marker first)
     if [ -f "$markfile" ]; then
         log_pass "$(basename "$tarfile") has already been extracted (marker present)."
         return 0
     fi
- 
+
     # 3) Heuristic: check multiple entries from the tar exist on disk
     tmp_list="${outdir}/.tar_ls.$$"
     if tar -tf "$tarfile" 2>/dev/null | head -n 20 >"$tmp_list"; then
@@ -1429,14 +1429,14 @@ check_tar_file() {
             fi
         done < "$tmp_list"
         rm -f "$tmp_list" 2>/dev/null || true
- 
+
         # If we find a reasonable portion of entries, assume it's extracted
         if [ "$present" -ge 3 ] || { [ "$total" -gt 0 ] && [ $((present * 100 / total)) -ge 50 ]; }; then
             log_pass "$(basename "$tarfile") already extracted ($present/$total entries found)."
             return 0
         fi
     fi
- 
+
     # 4) Exists and valid, but not yet extracted
     log_info "$(basename "$tarfile") exists and is valid, but not yet extracted."
     return 2
@@ -1632,12 +1632,12 @@ overlay_start_weston_drm() {
             break
         fi
     done
- 
+
     if [ -n "$EGL_JSON" ]; then
         export __EGL_VENDOR_LIBRARY_FILENAMES="$EGL_JSON"
         log_info "Overlay EGL: using vendor JSON: $EGL_JSON"
     fi
- 
+
     RUNTIME_DIR="/dev/socket/weston"
     if ! mkdir -p "$RUNTIME_DIR"; then
         log_warn "Failed to create runtime dir $RUNTIME_DIR; falling back to /run/user/0"
@@ -1645,23 +1645,23 @@ overlay_start_weston_drm() {
         mkdir -p "$RUNTIME_DIR" || true
     fi
     chmod 700 "$RUNTIME_DIR" 2>/dev/null || true
- 
+
     XDG_RUNTIME_DIR="$RUNTIME_DIR"
     export XDG_RUNTIME_DIR
- 
+
     # Do NOT force a specific WAYLAND_DISPLAY; let Weston decide.
     unset WAYLAND_DISPLAY
- 
+
     log_dir=${1:-$PWD}
     WESTON_LOG="$log_dir/weston.log"
     log_info "Overlay Weston start: XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR (WAYLAND_DISPLAY=<auto>)"
     log_info "Weston log: $WESTON_LOG"
- 
+
     # Start Weston in the background; we intentionally do not track the PID
     # here to avoid killing it while clients are still using the socket.
     weston --continue-without-input --idle-time=0 --log="$WESTON_LOG" \
         >/dev/null 2>&1 &
- 
+
     # Best-effort check: see if ANY wayland-* socket appears, but do not kill Weston.
     i=0
     sock_found=""
@@ -1675,13 +1675,13 @@ overlay_start_weston_drm() {
         sleep 1
         i=$((i + 1))
     done
- 
+
     if [ -n "$sock_found" ]; then
         log_info "Overlay Weston created Wayland socket at $sock_found"
         # Caller can discover/adopt env via discover_wayland_socket_anywhere + adopt_wayland_env_from_socket.
         return 0
     fi
- 
+
     log_warn "Overlay Weston did not create a Wayland socket under $XDG_RUNTIME_DIR (see $WESTON_LOG)"
     return 1
 }
@@ -1852,18 +1852,18 @@ wayland_can_connect() {
 weston_pick_env_or_start() {
     ctx="${1:-weston_pick_env_or_start}"
     sock=""
- 
+
     # Honor WESTON_LOG_DIR for any Weston logs that helpers might write
     log_dir="${WESTON_LOG_DIR:-/tmp}"
     log_info "$ctx: Weston logs (if any) will be under: $log_dir"
- 
+
     # 0) If env already points to a valid socket, keep it.
     if [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -n "${WAYLAND_DISPLAY:-}" ] \
        && [ -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ]; then
         log_info "$ctx: Using existing Wayland env: $XDG_RUNTIME_DIR/$WAYLAND_DISPLAY"
         return 0
     fi
- 
+
     # 1) Try to discover any existing Wayland socket first.
     if command -v discover_wayland_socket_anywhere >/dev/null 2>&1; then
         sock="$(discover_wayland_socket_anywhere 2>/dev/null | head -n 1)"
@@ -1882,7 +1882,7 @@ weston_pick_env_or_start() {
             fi
         done
     fi
- 
+
     if [ -n "$sock" ]; then
         if adopt_wayland_env_from_socket "$sock"; then
             log_info "$ctx: Selected existing Wayland socket: $sock"
@@ -1891,7 +1891,7 @@ weston_pick_env_or_start() {
         log_warn "$ctx: Failed to adopt env from existing socket: $sock"
         return 1
     fi
- 
+
     # 2) No socket found → restart Weston and wait for a new one.
     if weston_is_running; then
         log_info "$ctx: Weston is running but no socket found; stopping..."
@@ -1902,9 +1902,9 @@ weston_pick_env_or_start() {
             sleep 1
         done
     fi
- 
+
     uid="$(id -u 2>/dev/null || echo 0)"
- 
+
     # Ensure XDG_RUNTIME_DIR before starting Weston (manual mkdir, no external helpers).
     if [ -z "${XDG_RUNTIME_DIR:-}" ]; then
         if mkdir -p "/run/user/$uid" 2>/dev/null; then
@@ -1921,13 +1921,13 @@ weston_pick_env_or_start() {
         chmod 700 "$XDG_RUNTIME_DIR" 2>/dev/null || true
         log_info "$ctx: Using existing XDG_RUNTIME_DIR='$XDG_RUNTIME_DIR' before starting Weston"
     fi
- 
+
     # Never pre-set WAYLAND_DISPLAY; let Weston choose.
     unset WAYLAND_DISPLAY
- 
+
     log_info "$ctx: Starting Weston..."
     weston_start
- 
+
     # 3) Wait up to ~10 seconds for any Wayland socket to appear.
     i=0
     sock=""
@@ -1943,17 +1943,17 @@ weston_pick_env_or_start() {
         sleep 1
         i=$((i + 1))
     done
- 
+
     if [ -z "$sock" ]; then
         log_fail "$ctx: Could not find Wayland socket after starting Weston."
         return 1
     fi
- 
+
     if ! adopt_wayland_env_from_socket "$sock"; then
         log_fail "$ctx: Failed to adopt env from socket: $sock"
         return 1
     fi
- 
+
     log_info "$ctx: Weston started; socket: $sock"
     return 0
 }
@@ -1962,12 +1962,12 @@ weston_pick_env_or_start() {
 # Prints absolute socket paths, one per line, most-preferred first.
 find_wayland_sockets() {
     uid="$(id -u 2>/dev/null || echo 0)"
- 
+
     if [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -n "${WAYLAND_DISPLAY:-}" ] &&
        [ -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ]; then
         echo "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY"
     fi
- 
+
     # Current uid
     for f in "/run/user/$uid/wayland-0" "/run/user/$uid/wayland-1" "/run/user/$uid/wayland-2"; do
         [ -S "$f" ] && echo "$f"
@@ -1975,7 +1975,7 @@ find_wayland_sockets() {
     for f in /run/user/"$uid"/wayland-*; do
         [ -S "$f" ] && echo "$f"
     done 2>/dev/null
- 
+
     # Any other user under /run/user (covers weston as uid 100, 1000, etc.)
     for d in /run/user/*; do
         [ -d "$d" ] || continue
@@ -1984,11 +1984,11 @@ find_wayland_sockets() {
             [ -S "$f" ] && echo "$f"
         done
     done 2>/dev/null
- 
+
     for f in /dev/socket/weston/wayland-*; do
         [ -S "$f" ] && echo "$f"
     done 2>/dev/null
- 
+
     for f in /tmp/wayland-*; do
         [ -S "$f" ] && echo "$f"
     done 2>/dev/null
@@ -2029,7 +2029,7 @@ ensure_wayland_runtime_dir_perms() {
 # Also enforces/fixes XDG_RUNTIME_DIR permissions so clients won’t reject it.
 wayland_connection_ok() {
     sock=""
- 
+
     # Sanity-check the socket path first.
     if [ -z "$XDG_RUNTIME_DIR" ] || [ -z "$WAYLAND_DISPLAY" ]; then
         log_warn "wayland_connection_ok: XDG_RUNTIME_DIR or WAYLAND_DISPLAY not set"
@@ -2041,7 +2041,7 @@ wayland_connection_ok() {
         fi
         log_info "wayland_connection_ok: using socket $sock"
     fi
- 
+
     if command -v wayland-info >/dev/null 2>&1; then
         log_info "Probing Wayland with: wayland-info"
         wayland-info >/dev/null 2>&1
@@ -2052,7 +2052,7 @@ wayland_connection_ok() {
         [ "$rc" -eq 124 ] && return 0
         return 1
     fi
- 
+
     if command -v weston-info >/dev/null 2>&1; then
         log_info "Probing Wayland with: weston-info"
         weston-info >/dev/null 2>&1
@@ -2062,7 +2062,7 @@ wayland_connection_ok() {
         [ "$rc" -eq 124 ] && return 0
         return 1
     fi
- 
+
     if command -v weston-simple-egl >/dev/null 2>&1; then
         log_info "Probing Wayland by briefly starting weston-simple-egl"
         (
@@ -2071,26 +2071,26 @@ wayland_connection_ok() {
         )
         pid="$(cat "/tmp/.wsegl.$$" 2>/dev/null || echo '')"
         rm -f "/tmp/.wsegl.$$" 2>/dev/null || true
- 
+
         i=0
         while [ "$i" -lt 2 ]; do
             sleep 1
             i=$((i + 1))
         done
- 
+
         if [ -n "$pid" ]; then
             kill "$pid" 2>/dev/null || true
         fi
         # If it started at all, consider the connection OK (best effort).
         return 0
     fi
- 
+
     # Last resort: trust socket existence alone.
     if [ -n "$sock" ] && [ -S "$sock" ]; then
         log_info "No probe tools present; accepting socket existence as OK."
         return 0
     fi
- 
+
     return 1
 }
 # Very verbose snapshot for debugging (processes, sockets, env, perms).
@@ -2098,7 +2098,7 @@ wayland_debug_snapshot() {
     label="$1"
     [ -n "$label" ] || label="snapshot"
     log_info "----- Wayland/Weston debug snapshot: $label -----"
- 
+
     # Processes
     wpids="$(weston_pids)"
     if [ -n "$wpids" ]; then
@@ -2114,23 +2114,23 @@ wayland_debug_snapshot() {
     else
         log_info "weston PIDs: (none)"
     fi
- 
+
     # Sockets (meta) — use stat instead of ls (SC2012)
     for s in $(find_wayland_sockets | sort -u); do
         log_info "socket: $s"
         stat -c '[stat] %n -> owner=%U:%G mode=%A size=%s mtime=%y' "$s" 2>/dev/null || true
     done
- 
+
     # Current env
     log_info "Env now: XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-<unset>} WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-<unset>}"
     if [ -n "${XDG_RUNTIME_DIR:-}" ]; then
         stat -c '[stat] %n -> owner=%U:%G mode=%A size=%s mtime=%y' "$XDG_RUNTIME_DIR" 2>/dev/null || true
     fi
- 
+
     log_info "Suggested export (current env):"
     log_info "  export XDG_RUNTIME_DIR='${XDG_RUNTIME_DIR:-}'"
     log_info "  export WAYLAND_DISPLAY='${WAYLAND_DISPLAY:-}'"
- 
+
     log_info "----- End snapshot: $label -----"
 }
 
@@ -2165,25 +2165,25 @@ print_path_meta() {
 display_connector_cur_mode() {
     full="$1"
     [ -n "$full" ] || { echo "-"; return; }
- 
+
     card="${full%%-*}"    # card0
     con="${full#*-}"      # HDMI-A-1
     idx="${card#card}"    # 0
- 
+
     state="/sys/kernel/debug/dri/${idx}/state"
- 
+
     # debugfs may not be mounted; best-effort mount (ignore failures)
     if [ ! -r "$state" ] && [ -r /proc/mounts ] && command -v mount >/dev/null 2>&1; then
         if ! grep -q " /sys/kernel/debug " /proc/mounts 2>/dev/null; then
             mount -t debugfs debugfs /sys/kernel/debug 2>/dev/null || true
         fi
     fi
- 
+
     [ -r "$state" ] || { echo "-"; return; }
- 
+
     awk -v CON="$con" '
     BEGIN { crtc=""; in_conn=0; in_crtc=0; mode=""; vr=""; active="" }
- 
+
     # Connector block -> capture bound CRTC id
     $0 ~ /^connector/ {
         in_conn=0
@@ -2193,7 +2193,7 @@ display_connector_cur_mode() {
         if (match($0, /[0-9]+/, m)) crtc=m[0]
     }
     in_conn && $0 ~ /^$/ { in_conn=0 }
- 
+
     # CRTC block -> capture active + mode + refresh
     crtc != "" && $0 ~ /^crtc/ {
         in_crtc=0
@@ -2209,7 +2209,7 @@ display_connector_cur_mode() {
         if (match($0, /[0-9]+(\.[0-9]+)?/, m)) vr=m[0]
     }
     in_crtc && $0 ~ /^$/ { in_crtc=0 }
- 
+
     END {
         if (crtc == "" || mode == "" || active != "1") { print "-"; exit }
         if (vr != "") print mode "@" vr
@@ -2226,19 +2226,19 @@ display_list_connectors() {
         [ -f "$d/status" ] || continue
         name="$(basename "$d")"
         status="$(tr -d '\r\n' <"$d/status" 2>/dev/null)"
- 
+
         # enabled (best-effort; may not exist on some kernels)
         enabled="unknown"
         if [ -f "$d/enabled" ]; then
             enabled="$(tr -d '\r\n' <"$d/enabled" 2>/dev/null)"
             [ -z "$enabled" ] && enabled="unknown"
         fi
- 
+
         # Derive connector type from name: cardX-<TYPE>-N
         typ="$(printf '%s' "$name" \
             | sed -n 's/^card[0-9]\+-\([A-Za-z0-9+]\+\(-[A-Za-z0-9+]\+\)*\)-[0-9]\+/\1/p')"
         [ -z "$typ" ] && typ="unknown"
- 
+
         # Modes
         modes_file="$d/modes"
         if [ -f "$modes_file" ]; then
@@ -2250,11 +2250,11 @@ display_list_connectors() {
             mc=0
             fm="<none>"
         fi
- 
+
         # Current mode (best-effort via debugfs helper)
         cur="$(display_connector_cur_mode "$name")"
         [ -z "$cur" ] && cur="-"
- 
+
         # NOTE: 7 columns: name status enabled typ mc fm cur
         printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
             "$name" "$status" "$enabled" "$typ" "$mc" "$fm" "$cur"
@@ -2344,7 +2344,7 @@ display_debug_snapshot() {
     ctx="$1"
     [ -z "$ctx" ] && ctx="display-snapshot"
     log_info "----- Display snapshot: $ctx -----"
- 
+
     have=0
     while IFS="$(printf '\t')" read -r name status enabled typ mc fm cur; do
         [ -n "$name" ] || continue
@@ -2356,7 +2356,7 @@ display_debug_snapshot() {
 $(display_list_connectors 2>/dev/null || true)
 EOF
     [ "$have" -eq 1 ] || log_warn "No DRM connectors in /sys/class/drm."
- 
+
     log_info "----- End display snapshot: $ctx -----"
 }
 
@@ -2474,7 +2474,7 @@ runWithTimeoutIfSet() {
       t=0
       ;;
   esac
- 
+
   if [ "$t" -gt 0 ] && command -v run_with_timeout >/dev/null 2>&1; then
     # Correct signature: run_with_timeout <seconds> <cmd> [args...]
     run_with_timeout "$t" "$@"
@@ -2516,16 +2516,16 @@ run_dhcp_client() {
 try_dhcp_client_safe() {
     iface=$1
     timeout=${2:-10}
- 
+
     [ -n "$iface" ] || return 1
- 
+
     # Debug breadcrumb: track which path we took
     dhcp_path="unknown"
     dhcp_note=""
- 
+
     # Ensure interface is up (best-effort)
     ip link set "$iface" up >/dev/null 2>&1 || true
- 
+
     # If link is down/no cable, don't try DHCP
     if command -v is_link_up >/dev/null 2>&1; then
         if ! is_link_up "$iface"; then
@@ -2538,7 +2538,7 @@ try_dhcp_client_safe() {
             return 1
         fi
     fi
- 
+
     current_ip=$(get_ip_address "$iface")
     if [ -n "$current_ip" ] && ! echo "$current_ip" | grep -q '^169\.254'; then
         dhcp_path="skip_existing_ip"
@@ -2546,7 +2546,7 @@ try_dhcp_client_safe() {
         log_info "$iface already has valid IP: $current_ip. Skipping DHCP."
         return 0
     fi
- 
+
     # If NetworkManager/systemd-networkd is active, avoid fighting it:
     # just wait for IP to appear.
     if command -v systemctl >/dev/null 2>&1; then
@@ -2571,13 +2571,13 @@ try_dhcp_client_safe() {
             return 1
         fi
     fi
- 
+
     # Minimal/kernel-only builds might not have udhcpc. Try other clients first if needed.
     if ! command -v udhcpc >/dev/null 2>&1; then
         log_warn "udhcpc not found (kernel/minimal build). Trying fallback DHCP clients..."
         dhcp_path="fallback_clients"
         log_info "$iface DHCP path: ${dhcp_path} (trying dhclient/dhcpcd)"
- 
+
         if command -v dhclient >/dev/null 2>&1; then
             dhcp_note="dhclient"
             log_info "$iface DHCP path: ${dhcp_path}/${dhcp_note} (timeout=${timeout}s)"
@@ -2587,14 +2587,14 @@ try_dhcp_client_safe() {
             else
                 dhclient -1 -v "$iface" >/dev/null 2>&1 || true
             fi
- 
+
             current_ip=$(get_ip_address "$iface")
             if [ -n "$current_ip" ] && ! echo "$current_ip" | grep -q '^169\.254'; then
                 log_info "$iface DHCP path: ${dhcp_path}/${dhcp_note} success (ip=${current_ip})"
                 return 0
             fi
         fi
- 
+
         if command -v dhcpcd >/dev/null 2>&1; then
             dhcp_note="dhcpcd"
             log_info "$iface DHCP path: ${dhcp_path}/${dhcp_note} (timeout=${timeout}s)"
@@ -2606,18 +2606,18 @@ try_dhcp_client_safe() {
             fi
             # Avoid leaving daemon running if it spawned
             dhcpcd -k "$iface" >/dev/null 2>&1 || true
- 
+
             current_ip=$(get_ip_address "$iface")
             if [ -n "$current_ip" ] && ! echo "$current_ip" | grep -q '^169\.254'; then
                 log_info "$iface DHCP path: ${dhcp_path}/${dhcp_note} success (ip=${current_ip})"
                 return 0
             fi
         fi
- 
+
         log_warn "$iface DHCP path: ${dhcp_path} failed (no client succeeded)"
         return 1
     fi
- 
+
     # Safe udhcpc script:
     # - Avoid aggressive flushes
     # - Remove only link-local (169.254/16) if present
@@ -2663,7 +2663,7 @@ mask_to_prefix() {
             ;;
     esac
 }
- 
+
 case "$1" in
     bound|renew)
         # Drop link-local if present
@@ -2672,7 +2672,7 @@ case "$1" in
             [ -n "$cidr" ] || continue
             ip addr del "$cidr" dev "$interface" >/dev/null 2>&1 || true
         done
- 
+
         # Add/replace address (best-effort)
         if [ -n "$ip" ]; then
             pfx=""
@@ -2685,7 +2685,7 @@ case "$1" in
                 ip addr add "$ip" dev "$interface" >/dev/null 2>&1 || true
             fi
         fi
- 
+
         # Default route
         if [ -n "$router" ]; then
             ip route replace default via "$router" dev "$interface" >/dev/null 2>&1 || true
@@ -2702,7 +2702,7 @@ case "$1" in
 esac
 EOF
     chmod +x "$safe_dhcp_script"
- 
+
     dhcp_path="udhcpc_safe_script"
     log_info "$iface DHCP path: ${dhcp_path} (timeout=${timeout}s)"
     log_info "Attempting DHCP on $iface (udhcpc) for up to ${timeout}s..."
@@ -2712,9 +2712,9 @@ EOF
         # Best-effort bounded retries if run_with_timeout isn't available
         udhcpc -i "$iface" -n -q -t 3 -T 3 -s "$safe_dhcp_script" >/dev/null 2>&1 || true
     fi
- 
+
     rm -f "$safe_dhcp_script" >/dev/null 2>&1 || true
- 
+
     # Verify outcome
     current_ip=$(get_ip_address "$iface")
     if [ -n "$current_ip" ] && ! echo "$current_ip" | grep -q '^169\.254'; then
@@ -2722,7 +2722,7 @@ EOF
         log_info "$iface DHCP path: ${dhcp_path} success (ip=${current_ip})"
         return 0
     fi
- 
+
     log_warn "$iface still has no valid IP after DHCP attempt"
     log_warn "$iface DHCP path: ${dhcp_path} failed (no valid IP after attempt)"
     return 1
@@ -2743,9 +2743,9 @@ ethIsLinkUp() {
     carrier=""
     st=""
     ld=""
- 
+
     [ -n "$iface" ] || return 1
- 
+
     # 1) If carrier says 1, we are good.
     # Some drivers return EINVAL while MAC/PHY attach is broken or incomplete.
     # Suppress stderr to avoid noisy LAVA stdout.
@@ -2753,30 +2753,30 @@ ethIsLinkUp() {
         carrier="$(cat "/sys/class/net/$iface/carrier" 2>/dev/null || true)"
         [ "$carrier" = "1" ] && return 0
     fi
- 
+
     # 2) If helper exists and says up, accept it.
     if command -v is_link_up >/dev/null 2>&1; then
         is_link_up "$iface" >/dev/null 2>&1 && return 0
     fi
- 
+
     # 3) operstate can sometimes reflect link sooner than carrier.
     if [ -r "/sys/class/net/$iface/operstate" ]; then
         st="$(cat "/sys/class/net/$iface/operstate" 2>/dev/null || true)"
         [ "$st" = "up" ] && return 0
     fi
- 
+
     # 4) ip link LOWER_UP is a useful physical-link signal.
     if command -v ip >/dev/null 2>&1; then
         ip link show "$iface" 2>/dev/null | grep -qw "LOWER_UP" && return 0
     fi
- 
+
     # 5) Last resort: ethtool parse.
     if command -v ethtool >/dev/null 2>&1; then
         ld="$(ethtool "$iface" 2>/dev/null |
             awk -F': ' '/^[[:space:]]*Link detected:/ {print $2; exit 0}' || true)"
         [ "$ld" = "yes" ] && return 0
     fi
- 
+
     return 1
 }
 
@@ -2784,10 +2784,10 @@ ethWaitLinkUp() {
     iface=$1
     timeout_s=$2
     i=0
- 
+
     [ -n "$iface" ] || return 1
     [ -n "$timeout_s" ] || timeout_s=5
- 
+
     while [ "$i" -lt "$timeout_s" ]; do
         if ethIsLinkUp "$iface"; then
             return 0
@@ -2795,7 +2795,7 @@ ethWaitLinkUp() {
         i=$((i + 1))
         sleep 1
     done
- 
+
     return 1
 }
 
@@ -2848,11 +2848,11 @@ ethRestartAutoneg() {
 ethForceSpeedMbps() {
     iface=$1
     mbps=$2
- 
+
     [ -n "$iface" ] || return 1
     command -v ethtool >/dev/null 2>&1 || return 1
     case "$mbps" in ""|*[!0-9]*) return 1 ;; esac
- 
+
     ethtool -s "$iface" speed "$mbps" duplex full autoneg off >/dev/null 2>&1 || return 1
     return 0
 }
@@ -2870,11 +2870,11 @@ ethEnableAutoneg() {
 ethSupportsSpeedMbps() {
     iface=$1
     mbps=$2
- 
+
     [ -n "$iface" ] || return 1
     case "$mbps" in ""|*[!0-9]*) return 1 ;; esac
     command -v ethtool >/dev/null 2>&1 || return 1
- 
+
     ethtool "$iface" 2>/dev/null | grep -Eq "[[:space:]]${mbps}baseT/Full|[[:space:]]${mbps}baseT1/Full|[[:space:]]${mbps}baseX/Full"
 }
 
@@ -2928,7 +2928,7 @@ ethEnsureLinkUpWithFallback() {
     [ -n "$iface" ] || return 1
     [ -n "$timeout_s" ] || timeout_s=5
     init_autoneg=$(ethGetAutonegState "$iface" 2>/dev/null || echo "unknown")
-    
+
     # Bring interface up using existing helper (admin-up)
     if command -v bringup_interface >/dev/null 2>&1; then
         bringup_interface "$iface" 3 2 >/dev/null 2>&1 || true
@@ -2936,18 +2936,18 @@ ethEnsureLinkUpWithFallback() {
         ip link set "$iface" up >/dev/null 2>&1 || true
         sleep 1
     fi
- 
+
     # Let PHY settle a bit after admin-up
     sleep 1
- 
+
     # 1) Wait for normal autoneg link
     if ethWaitLinkUp "$iface" "$timeout_s"; then
         return 0
     fi
- 
+
     # If no ethtool, we cannot do fallback forcing
     command -v ethtool >/dev/null 2>&1 || return 1
- 
+
     # 2) Try restarting autoneg once
     if ethRestartAutoneg "$iface"; then
         # Give retrain a moment before polling
@@ -2956,18 +2956,18 @@ ethEnsureLinkUpWithFallback() {
             return 0
         fi
     fi
- 
+
     # 3) Force speeds (smart order: may try 100 first for 100M-only setups)
     force_order=$(ethPickForceOrder "$iface" 2>/dev/null || echo "1000 100")
     for sp in $force_order; do
         if ethForceSpeedMbps "$iface" "$sp"; then
             # After forcing speed, some PHYs need a short settle window
             sleep 1
- 
+
             # Best-effort retrain
             ethtool -r "$iface" >/dev/null 2>&1 || true
             sleep 1
- 
+
             if ethWaitLinkUp "$iface" "$timeout_s"; then
                 # IMPORTANT: Do NOT restore autoneg here.
                 # If we had to force speed (autoneg off), keeping it avoids regression
@@ -2976,7 +2976,7 @@ ethEnsureLinkUpWithFallback() {
             fi
         fi
     done
- 
+
     # Bring-up failed:
     # If autoneg was originally on, restore it (best-effort) so we don't leave user in forced mode.
     if [ "$init_autoneg" = "on" ]; then
@@ -2994,7 +2994,7 @@ ethEnsureLinkUpWithFallback() {
 get_remoteproc_by_firmware() {
     fw="$1"
     out="$2"      # optional: filepath to append results
-    list_all="$3" # set to "all" to continue past first match 
+    list_all="$3" # set to "all" to continue past first match
 
     [ -n "$fw" ] || return 3 # misuse if no firmware provided
 
@@ -3045,35 +3045,35 @@ get_remoteproc_by_firmware() {
 dt_has_remoteproc_fw() {
     fw="$1"
     [ -n "$fw" ] || return 3
- 
+
     base="/proc/device-tree"
     [ -d "$base" ] || return 1
- 
+
     # lower-case match key
     fw_lc=$(printf '%s\n' "$fw" | tr '[:upper:]' '[:lower:]')
- 
+
     # new fast-path (any smp2p-<fw>* or remoteproc-<fw>* directory)
     found=0
     for d in "$base"/smp2p-"$fw"* "$base"/remoteproc-"$fw"*; do
         [ -d "$d" ] && found=1 && break
     done
     [ "$found" -eq 1 ] && return 0
- 
+
     # 2) Shallow find (<depth 2) for any node/prop name containing fw
     if find "$base" -maxdepth 2 -iname "*$fw_lc*" -print -quit 2>/dev/null | grep -q .; then
         return 0
     fi
- 
+
     # 3) Grep soc@0 and aliases for a first match
     if grep -Iq -m1 -F "$fw_lc" "$base/soc@0" "$base/aliases" 2>/dev/null; then
         return 0
     fi
- 
+
     # 4) Fallback: grep entire DT tree
     if grep -Iq -m1 -F "$fw_lc" "$base" 2>/dev/null; then
         return 0
     fi
- 
+
     return 1
 }
 
@@ -3084,14 +3084,14 @@ dt_has_remoteproc_fw() {
 #   - Subtract 1 → remoteproc index → /sys/class/remoteproc/remoteproc${idx}
 get_remoteproc_path_by_firmware() {
     name=$1
- 
+
     [ -n "$name" ] || return 1
     [ -d /sys/class/remoteproc ] || return 1
- 
+
     for fw in /sys/class/remoteproc/remoteproc*/firmware; do
         # Skip if glob didn't match any file
         [ -f "$fw" ] || continue
- 
+
         # Read first line from firmware file without using cat
         if IFS= read -r fwname <"$fw"; then
             case "$fwname" in
@@ -3106,7 +3106,7 @@ get_remoteproc_path_by_firmware() {
             esac
         fi
     done
- 
+
     return 1
 }
 
@@ -3114,12 +3114,12 @@ get_remoteproc_path_by_firmware() {
 get_remoteproc_state() {
     rp="$1"
     [ -z "$rp" ] && { printf '\n'; return 1; }
- 
+
     case "$rp" in
         /sys/*) rpath="$rp" ;;
         *)      rpath="/sys/class/remoteproc/$rp" ;;
     esac
- 
+
     state_file="$rpath/state"
     if [ -r "$state_file" ]; then
         IFS= read -r state < "$state_file" || state=""
@@ -3133,17 +3133,17 @@ get_remoteproc_state() {
 # wait_remoteproc_state <sysfs-path> <desired_state> <timeout_s> <poll_interval_s>
 wait_remoteproc_state() {
     rp="$1"; want="$2"; to=${3:-10}; poll=${4:-1}
- 
+
     case "$rp" in
         /sys/*) rpath="$rp" ;;
         *)      rpath="/sys/class/remoteproc/$rp" ;;
     esac
- 
+
     start_ts=$(date +%s)
     while :; do
         cur=$(get_remoteproc_state "$rpath")
         [ "$cur" = "$want" ] && return 0
- 
+
         now_ts=$(date +%s)
         [ $((now_ts - start_ts)) -ge "$to" ] && {
             log_info "Waiting for state='$want' timed out (got='$cur')..."
@@ -3156,40 +3156,40 @@ wait_remoteproc_state() {
 # Stop remoteproc
 stop_remoteproc() {
     rproc_path="$1"
- 
+
     # Resolve to a real sysfs dir if only a name was given
     case "$rproc_path" in
         /sys/*) path="$rproc_path" ;;
         remoteproc*) path="/sys/class/remoteproc/$rproc_path" ;;
         *) path="$rproc_path" ;;  # last resort, assume caller passed full path
     esac
- 
+
     statef="$path/state"
     if [ ! -w "$statef" ]; then
         log_warn "stop_remoteproc: state file not found/writable: $statef"
         return 1
     fi
- 
+
     printf 'stop\n' >"$statef" 2>/dev/null || return 1
     wait_remoteproc_state "$path" offline 6
 }
- 
+
 # Start remoteproc
 start_remoteproc() {
     rproc_path="$1"
- 
+
     case "$rproc_path" in
         /sys/*) path="$rproc_path" ;;
         remoteproc*) path="/sys/class/remoteproc/$rproc_path" ;;
         *) path="$rproc_path" ;;
     esac
- 
+
     statef="$path/state"
     if [ ! -w "$statef" ]; then
         log_warn "start_remoteproc: state file not found/writable: $statef"
         return 1
     fi
- 
+
     printf 'start\n' >"$statef" 2>/dev/null || return 1
     wait_remoteproc_state "$path" running 6
 }
@@ -3366,21 +3366,21 @@ rpmsg_create_ep_generic() {
     name="${2:-gen-test}"   # generic endpoint name
     src="${3:-0}"
     dst="${4:-0}"
- 
+
     create_file="$(readlink -f "$ctrl_sys")/create"
     [ -w "$create_file" ] || return 1
- 
+
     # Request endpoint creation
     printf '%s %s %s\n' "$name" "$src" "$dst" >"$create_file" 2>/dev/null || return 1
- 
+
     # Pick the newest rpmsg* sysfs node without using 'ls -t' (SC2012)
     new_sys=$(
         find -L /sys/class/rpmsg -maxdepth 1 -type l -name 'rpmsg[0-9]*' \
             -printf '%T@ %p\n' 2>/dev/null | sort -nr | awk 'NR==1{print $2}'
     )
- 
+
     [ -n "$new_sys" ] || return 1
- 
+
     rpmsg_sys_to_dev "$new_sys"
 }
 
@@ -4240,19 +4240,19 @@ $val" ;;
 configure_pipeline_block() {
     MEDIA_NODE="$1"
     USER_FORMAT="$2"
- 
+
     # Reset graph
     if ! media-ctl -d "$MEDIA_NODE" reset >/dev/null 2>&1; then
         media-ctl -d "$MEDIA_NODE" -r >/dev/null 2>&1 || true
     fi
- 
+
     # Apply pad formats (MBUS, never *P). Also strip 'field:*'.
     printf "%s\n" "$MEDIA_CTL_V_LIST" | while IFS= read -r vline || [ -n "$vline" ]; do
         [ -z "$vline" ] && continue
- 
+
         curfmt="$(printf "%s" "$vline" | sed -n 's/.*fmt:\([^/]*\)\/.*/\1/p')"
         newfmt="$curfmt"
- 
+
         if [ -n "$USER_FORMAT" ]; then
             case "$USER_FORMAT" in
                 *P) newfmt="${USER_FORMAT%P}" ;;
@@ -4264,18 +4264,18 @@ configure_pipeline_block() {
                  *) newfmt="$curfmt" ;;
             esac
         fi
- 
+
         vline_new="$(printf "%s" "$vline" | sed -E "s/fmt:[^/]+/fmt:${newfmt}/")"
         vline_new="$(printf "%s" "$vline_new" | sed -E 's/ field:[^]]*//g')"
- 
+
         if [ -n "$YAVTA_W" ] && [ -n "$YAVTA_H" ]; then
             vline_new="$(printf "%s" "$vline_new" \
                 | sed -E "s/(fmt:[^/]+\/)[0-9]+x[0-9]+/\1${YAVTA_W}x${YAVTA_H}/")"
         fi
- 
+
         media-ctl -d "$MEDIA_NODE" -V "$vline_new" >/dev/null 2>&1
     done
- 
+
     # Apply ONLY the two links (no fragile case patterns; avoids ShellCheck parse issues).
     printf "%s\n" "$MEDIA_CTL_L_LIST" | while IFS= read -r lline || [ -n "$lline" ]; do
         [ -z "$lline" ] && continue
@@ -4288,10 +4288,10 @@ configure_pipeline_block() {
             : # ignore others
         fi
     done
- 
+
     sleep 0.15
 }
- 
+
 # Executes yavta capture with the same semantics as your manual call.
 # Return codes:
 #   0: PASS (>=1 frame captured)
@@ -4373,13 +4373,13 @@ execute_capture_block() {
 print_planned_commands() {
     media_node="$1"
     pixfmt="$2"
- 
+
     # Pads should use MBUS code (strip trailing 'P' if present)
     padfmt="$(printf '%s' "$pixfmt" | sed 's/P$//')"
- 
+
     log_info "[CI] Planned sequence:"
     log_info " media-ctl -d $media_node --reset"
- 
+
     # Pad formats: show MBUS (non-P) on -V lines
     if [ -n "$MEDIA_CTL_V_LIST" ]; then
         printf '%s\n' "$MEDIA_CTL_V_LIST" | while IFS= read -r vline; do
@@ -4388,7 +4388,7 @@ print_planned_commands() {
             log_info " media-ctl -d $media_node -V '$vline_out'"
         done
     fi
- 
+
     # Links unchanged
     if [ -n "$MEDIA_CTL_L_LIST" ]; then
         printf '%s\n' "$MEDIA_CTL_L_LIST" | while IFS= read -r lline; do
@@ -4396,7 +4396,7 @@ print_planned_commands() {
             log_info " media-ctl -d $media_node -l '$lline'"
         done
     fi
- 
+
     # Any pre/post yavta register writes (unchanged)
     if [ -n "$YAVTA_CTRL_PRE_LIST" ]; then
         printf '%s\n' "$YAVTA_CTRL_PRE_LIST" | while IFS= read -r ctrl; do
@@ -4408,7 +4408,7 @@ print_planned_commands() {
               log_info " yavta --no-query -w '$reg $val' $dev"
         done
     fi
- 
+
     size_arg=""
     if [ -n "$YAVTA_W" ] && [ -n "$YAVTA_H" ]; then
         size_arg="-s ${YAVTA_W}x${YAVTA_H}"
@@ -4417,7 +4417,7 @@ print_planned_commands() {
         # Show pixel format (SRGGB10P) only on the video node
         log_info " yavta -B capture-mplane -c -I -n $FRAMES -f $pixfmt $size_arg -F $YAVTA_DEV --capture=$FRAMES --file='frame-#.bin'"
     fi
- 
+
     if [ -n "$YAVTA_CTRL_POST_LIST" ]; then
         printf '%s\n' "$YAVTA_CTRL_POST_LIST" | while IFS= read -r ctrl; do
             [ -z "$ctrl" ] && continue
@@ -4455,33 +4455,33 @@ detect_platform() {
     PLATFORM_ARCH="$(uname -m 2>/dev/null)"
     PLATFORM_UNAME_S="$(uname -s 2>/dev/null)"
     PLATFORM_HOSTNAME="$(hostname 2>/dev/null)"
- 
+
     # --- soc0 details ---
     if [ -r /sys/devices/soc0/machine ]; then
         PLATFORM_SOC_MACHINE="$(cat /sys/devices/soc0/machine 2>/dev/null)"
     else
         PLATFORM_SOC_MACHINE=""
     fi
- 
+
     if [ -r /sys/devices/soc0/soc_id ]; then
         PLATFORM_SOC_ID="$(cat /sys/devices/soc0/soc_id 2>/dev/null)"
     else
         PLATFORM_SOC_ID=""
     fi
- 
+
     if [ -r /sys/devices/soc0/family ]; then
         PLATFORM_SOC_FAMILY="$(cat /sys/devices/soc0/family 2>/dev/null)"
     else
         PLATFORM_SOC_FAMILY=""
     fi
- 
+
     # --- Device Tree model / compatible (strip NULs) ---
     if [ -r /proc/device-tree/model ]; then
         PLATFORM_DT_MODEL="$(tr -d '\000' </proc/device-tree/model 2>/dev/null | head -n 1)"
     else
         PLATFORM_DT_MODEL=""
     fi
- 
+
     PLATFORM_DT_COMPAT=""
     if [ -d /proc/device-tree ]; then
         for f in /proc/device-tree/compatible /proc/device-tree/*/compatible; do
@@ -4491,7 +4491,7 @@ detect_platform() {
             fi
         done
     fi
- 
+
     # --- OS (parse, do not source /etc/os-release) ---
     PLATFORM_OS_LIKE=""
     PLATFORM_OS_NAME=""
@@ -4508,11 +4508,11 @@ detect_platform() {
             awk -F= '$1=="PRETTY_NAME"{gsub(/"/,"",$2); print $2}' /etc/os-release 2>/dev/null
         )"
     fi
- 
+
     # --- Target guess (mutually-exclusive; generic names only) ---
     lc_compat="$(printf '%s %s' "$PLATFORM_DT_MODEL" "$PLATFORM_DT_COMPAT" \
                  | tr '[:upper:]' '[:lower:]')"
- 
+
     case "$lc_compat" in
         # Kodiak: qcs6490 / RB3 Gen2
         *qcs6490*|*kodiak*|*rb3gen2*|*rb3-gen2*|*rb3*gen2*)
@@ -4538,7 +4538,7 @@ detect_platform() {
             PLATFORM_TARGET="unknown"
             ;;
     esac
- 
+
     # --- Human-friendly machine name ---
     if [ -n "$PLATFORM_DT_MODEL" ]; then
         PLATFORM_MACHINE="$PLATFORM_DT_MODEL"
@@ -4549,14 +4549,14 @@ detect_platform() {
             PLATFORM_MACHINE="$PLATFORM_HOSTNAME"
         fi
     fi
- 
+
     # Export for callers (and to silence SC2034 in this file)
     export \
       PLATFORM_KERNEL PLATFORM_ARCH PLATFORM_UNAME_S PLATFORM_HOSTNAME \
       PLATFORM_SOC_MACHINE PLATFORM_SOC_ID PLATFORM_SOC_FAMILY \
       PLATFORM_DT_MODEL PLATFORM_DT_COMPAT PLATFORM_OS_LIKE PLATFORM_OS_NAME \
       PLATFORM_TARGET PLATFORM_MACHINE
- 
+
     return 0
 }
 
@@ -4596,9 +4596,9 @@ tryremountrw() {
 #   FASTRPC_AUTOREMOUNT_RO=yes|no  (default: yes) remount ro after linking
 ensure_usr_lib_dsp_symlinks() {
   [ "${FASTRPC_DSP_AUTOLINK:-yes}" = "yes" ] || { log_info "DSP autolink disabled"; return 0; }
- 
+
   dsptgt="/usr/lib/dsp"
- 
+
   # If already populated, skip
   if [ -d "$dsptgt" ]; then
     if find "$dsptgt" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null | grep -q .; then
@@ -4606,7 +4606,7 @@ ensure_usr_lib_dsp_symlinks() {
       return 0
     fi
   fi
- 
+
   # Choose source: explicit env wins, else discover
   if [ -n "${FASTRPC_DSP_SRC:-}" ] && [ -d "$FASTRPC_DSP_SRC" ]; then
     dspsrc="$FASTRPC_DSP_SRC"
@@ -4616,7 +4616,7 @@ ensure_usr_lib_dsp_symlinks() {
     hintstr="$(printf '%s %s %s %s' \
       "${PLATFORM_SOC_ID:-}" "${PLATFORM_DT_MODEL:-}" "${PLATFORM_DT_COMPAT:-}" "${PLATFORM_TARGET:-}" \
       | tr '[:upper:]' '[:lower:]')"
- 
+
     candidateslist="$(find /usr/share/qcom -maxdepth 6 -type d -name dsp 2>/dev/null | sort)"
     best=""; bestscore=-1; bestcount=-1
     IFS='
@@ -4640,18 +4640,18 @@ ensure_usr_lib_dsp_symlinks() {
     unset IFS
     dspsrc="$best"
   fi
- 
+
   if [ -z "$dspsrc" ]; then
     log_warn "No DSP skeleton source found under /usr/share/qcom, skipping autolink."
     return 0
   fi
- 
+
   # Must be root on Yocto (no sudo). If not root, skip safely.
   if ! isroot; then
     log_warn "Not root; cannot write to $dsptgt on Yocto (no sudo). Skipping DSP autolink."
     return 0
   fi
- 
+
   # Ensure target dir exists; handle read-only rootfs if requested
   remounted=""
   mountpt=""
@@ -4674,7 +4674,7 @@ ensure_usr_lib_dsp_symlinks() {
       return 0
     fi
   fi
- 
+
   # If something appeared meanwhile, stop (idempotent)
   if find "$dsptgt" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null | grep -q .; then
     log_info "$dsptgt now contains entries, not linking from $dspsrc"
@@ -4683,7 +4683,7 @@ ensure_usr_lib_dsp_symlinks() {
     fi
     return 0
   fi
- 
+
   # Link both files and directories; don't clobber existing names
   log_info "Linking DSP artifacts from: $dspsrc → $dsptgt"
   linked=0
@@ -4698,7 +4698,7 @@ ensure_usr_lib_dsp_symlinks() {
       fi
     fi
   done
- 
+
   # Final visibility + sanity
   if find "$dsptgt" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null | grep -q .; then
     log_info "DSP autolink complete ($linked link(s))"
@@ -4711,7 +4711,7 @@ ensure_usr_lib_dsp_symlinks() {
   else
     log_warn "DSP autolink finished but $dsptgt is still empty, source may contain only nested content or FS is RO."
   fi
- 
+
   # Optionally restore read-only
   if [ -n "$remounted" ] && [ -n "$mountpt" ] && [ "${FASTRPC_AUTOREMOUNT_RO:-yes}" = "yes" ]; then
     mount -o remount,ro "$mountpt" 2>/dev/null || true
@@ -5055,11 +5055,11 @@ sanitize_pid() {
 
 get_pids_by_name() {
     name="$1"
- 
+
     if [ -z "$name" ]; then
         return 1
     fi
- 
+
     # Print one PID per line (sanitized), for all processes whose basename matches $name
     ps -ef 2>/dev/null | awk -v n="$name" '
         NR==1 { next }
@@ -5074,7 +5074,7 @@ get_pids_by_name() {
             fi
         done
 }
- 
+
 # get_one_pid_by_name <name> [all]
 #
 # Without 'all': prints the lowest (oldest) matching PID, returns 1 if none found.
@@ -5086,29 +5086,29 @@ get_one_pid_by_name() {
     gopn_mode="${2:-}"
     gopn_pids=""
     gopn_first_pid=""
- 
+
     for gopn_d in /proc/[0-9]*; do
         [ -r "$gopn_d/comm" ] || continue
         gopn_comm=$(tr -d '\r\n' <"$gopn_d/comm" 2>/dev/null)
         [ "$gopn_comm" = "$gopn_name" ] || continue
- 
+
         gopn_pid=${gopn_d#/proc/}
         gopn_pid=$(sanitize_pid "$gopn_pid")
         [ -n "$gopn_pid" ] || continue
- 
+
         if [ -z "$gopn_first_pid" ] || [ "$gopn_pid" -lt "$gopn_first_pid" ]; then
             gopn_first_pid="$gopn_pid"
         fi
- 
+
         if [ -z "$gopn_pids" ]; then
             gopn_pids="$gopn_pid"
         else
             gopn_pids="$gopn_pids $gopn_pid"
         fi
     done
- 
+
     [ -n "$gopn_pids" ] || return 1
- 
+
     if [ "$gopn_mode" = "all" ]; then
         printf '%s\n' "$gopn_pids"
     else
@@ -5120,14 +5120,14 @@ get_one_pid_by_name() {
 wait_pid_alive() {
     pid="$1"
     timeout="${2:-10}"
- 
+
     pid=$(sanitize_pid "$pid")
     case "$pid" in
         ''|*[!0-9]*)
             return 1
             ;;
     esac
- 
+
     i=0
     while [ "$i" -lt "$timeout" ]; do
         if kill -0 "$pid" 2>/dev/null; then
@@ -5145,40 +5145,40 @@ kill_process() {
     KILL_TERM_GRACE="${KILL_TERM_GRACE:-5}"
     KILL_KILL_GRACE="${KILL_KILL_GRACE:-5}"
     SELF_PID="$$"
- 
+
     case "$PID" in
         ''|*[!0-9]*)
             log_warn "Refusing to kill non-numeric PID '$PID'"
             return 1
             ;;
     esac
- 
+
     # Safety checks
     if [ "$PID" -eq 1 ] || [ "$PID" -eq "$SELF_PID" ]; then
         log_warn "Refusing to kill PID $PID (init or self)"
         return 1
     fi
- 
+
     if ! kill -0 "$PID" 2>/dev/null; then
         log_info "Process $PID not running"
         return 0
     fi
- 
+
     log_info "Sending SIGTERM to PID $PID"
     kill -TERM "$PID" 2>/dev/null
     sleep "$KILL_TERM_GRACE"
- 
+
     if kill -0 "$PID" 2>/dev/null; then
         log_info "Sending SIGKILL to PID $PID"
         kill -KILL "$PID" 2>/dev/null
         sleep "$KILL_KILL_GRACE"
     fi
- 
+
     if kill -0 "$PID" 2>/dev/null; then
         log_warn "Failed to kill process $PID"
         return 1
     fi
- 
+
     log_info "Process $PID terminated successfully"
     return 0
 }
@@ -5195,38 +5195,38 @@ kill_process() {
 #  - If multiple instances exist, logs the PID list as a summary.
 is_process_running() {
     ipr_name="$1"
- 
+
     ipr_pids=$(get_one_pid_by_name "$ipr_name" all 2>/dev/null) || {
         log_info "Process '$ipr_name' is not running."
         return 1
     }
- 
+
     log_info "Process '$ipr_name' is running."
- 
+
     # Extra summary only if multiple instances exist
     case "$ipr_pids" in
         *" "*)
             log_info "Process '$ipr_name' instances: $ipr_pids"
             ;;
     esac
- 
+
     # Always print PID -> cmdline/comm for CI debug (single or multiple)
     # ShellCheck-safe iteration: split spaces to newlines.
     printf '%s\n' "$ipr_pids" | tr ' ' '\n' | while IFS= read -r ipr_pid; do
         ipr_pid=$(sanitize_pid "$ipr_pid")
         [ -n "$ipr_pid" ] || continue
- 
+
         # PID may have exited between collection and inspection
         if [ ! -d "/proc/$ipr_pid" ]; then
             log_info "Process '$ipr_name' PID $ipr_pid is no longer present in /proc"
             continue
         fi
- 
+
         ipr_cmd=""
         if [ -r "/proc/$ipr_pid/cmdline" ]; then
             ipr_cmd=$(tr '\000' ' ' <"/proc/$ipr_pid/cmdline" 2>/dev/null)
         fi
- 
+
         if [ -n "$ipr_cmd" ]; then
             log_info "Process '$ipr_name' PID $ipr_pid cmdline: $ipr_cmd"
         else
@@ -5237,7 +5237,7 @@ is_process_running() {
             log_info "Process '$ipr_name' PID $ipr_pid comm: ${ipr_comm:-unknown}"
         fi
     done
- 
+
     return 0
 }
 
@@ -6180,20 +6180,20 @@ cpu_hotplug_try_offline_with_retry() {
     retry_delay="$3"
     out_dir="$4"
     attempt=1
- 
+
     while [ "$attempt" -le "$retries" ]; do
         log_info "CPU$cpu_index offline attempt $attempt/$retries"
- 
+
         offline_output="$(cpu_hotplug_write_state "$cpu_index" 0 "offline_attempt${attempt}" "$out_dir" 2>&1)"
         offline_rc=$?
- 
+
         if [ "$offline_rc" -eq 0 ]; then
             log_info "CPU$cpu_index offline request accepted on attempt $attempt"
             return 0
         fi
- 
+
         log_warn "CPU$cpu_index offline attempt $attempt failed: ${offline_output:-<no stderr>}"
- 
+
         if printf '%s\n' "$offline_output" | grep -qi 'Device or resource busy'; then
             log_warn "CPU$cpu_index offline returned EBUSY"
             cpu_hotplug_log_dmesg_tail "$cpu_index" "offline_ebusy_attempt${attempt}" "$out_dir"
@@ -6202,15 +6202,15 @@ cpu_hotplug_try_offline_with_retry() {
             cpu_hotplug_log_dmesg_tail "$cpu_index" "offline_error_attempt${attempt}" "$out_dir"
             return 1
         fi
- 
+
         attempt=$((attempt + 1))
- 
+
         if [ "$attempt" -le "$retries" ]; then
             log_info "Waiting ${retry_delay}s before retrying CPU$cpu_index offline"
             sleep "$retry_delay"
         fi
     done
- 
+
     log_warn "CPU$cpu_index offline returned EBUSY after $retries attempts; caller may defer retry"
     return 2
 }

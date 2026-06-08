@@ -934,7 +934,7 @@ else
       if [ -z "$clip" ]; then
         log_warn "[$case_name] No clip mapping for format=$fmt duration=$dur"
         echo "$case_name SKIP (no clip mapping)" >> "$LOGDIR/summary.txt"
-	skip=$((skip + 1)) 
+	skip=$((skip + 1))
         continue
       fi
 

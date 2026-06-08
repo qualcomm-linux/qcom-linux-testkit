@@ -460,7 +460,7 @@ log_info "Overall counts: PASS=$PASS FAIL=$FAIL SKIP=$SKIP"
 # - Else -> overall SKIP (everything skipped)
 if [ "$FAIL" -gt 0 ]; then
   echo "$TESTNAME FAIL" >"$RES_FILE"
-  exit 1 
+  exit 1
 fi
 if [ "$PASS" -gt 0 ]; then
   echo "$TESTNAME PASS" >"$RES_FILE"

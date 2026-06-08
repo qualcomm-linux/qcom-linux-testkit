@@ -196,7 +196,7 @@ done
 #  GStreamer pipelines
 # ----------------------------------------------------------------------
 DETECTION_PIPELINE='filesrc location='"${test_path}"'/assets/video.mp4 ! qtdemux ! queue ! h264parse ! v4l2h264dec capture-io-mode=4 output-io-mode=4 ! queue ! tee name=split split. ! queue ! qtivcomposer name=mixer ! queue ! waylandsink sync=true fullscreen=true split. ! queue ! qtimlvconverter ! queue ! qtimltflite delegate=external external-delegate-path=libQnnTFLiteDelegate.so external-delegate-options="QNNExternalDelegate,backend_type=htp;" model='"${test_path}"'/assets/yolox_quantized.tflite ! queue ! qtimlpostprocess module=yolov8 labels='"${test_path}"'/assets/labels_ga16/labels/yolox.json settings="{\"confidence\": 50.0}" ! video/x-raw,format=BGRA,width=640,height=360 ! queue ! mixer.'
-# gst-launch-1.0 -e 
+# gst-launch-1.0 -e
 CLASSIFICATION_PIPELINE='filesrc location='"${test_path}"'/assets/video.mp4 ! qtdemux ! queue ! h264parse ! v4l2h264dec capture-io-mode=4 output-io-mode=4 ! video/x-raw,format=NV12_Q08C ! queue ! tee name=split ! queue ! qtimetamux name=metamux ! queue ! qtivoverlay ! queue ! v4l2h264enc capture-io-mode=4 output-io-mode=5 ! h264parse ! queue ! mp4mux ! queue ! filesink location='"${ENCODED_VIDEO_PATH}"' split. ! queue ! qtimlvconverter ! queue ! qtimltflite delegate=external external-delegate-path=libQnnTFLiteDelegate.so external-delegate-options="QNNExternalDelegate,backend_type=htp;" model='"${test_path}"'/assets/inception_v3_quantized.tflite ! queue ! qtimlpostprocess results=5 module=mobilenet-softmax labels='"${test_path}"'/assets/labels_ga15/labels/imagenet_labels.txt settings="{\"confidence\": 31.0}" ! text/x-raw ! queue ! metamux.'
 
 # ----------------------------------------------------------------------

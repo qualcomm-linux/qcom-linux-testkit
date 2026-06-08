@@ -171,16 +171,16 @@ wifi_dt_present() {
 wifi_log_module_info() {
     mod=""
     mod_path=""
- 
+
     for mod in "$@"; do
         [ -n "$mod" ] || continue
- 
+
         if is_module_loaded "$mod"; then
             log_pass "Module loaded: $mod"
         else
             log_info "Module not loaded: $mod"
         fi
- 
+
         mod_path="$(find_kernel_module "$mod" 2>/dev/null | awk '/^\// { print; exit }' || true)"
         if [ -n "$mod_path" ]; then
             log_info "[module-path] $mod -> $mod_path"
@@ -585,7 +585,7 @@ wifi_firmware_loaded() {
             return 1
             ;;
     esac
-    
+
     matches="$(get_kernel_log 2>/dev/null | grep -Ei "$pattern" | \
     grep -Eiv 'failed|failure|error|timeout|unable|crash|fatal|Modules linked in' | tail -n 40 || true)"
 

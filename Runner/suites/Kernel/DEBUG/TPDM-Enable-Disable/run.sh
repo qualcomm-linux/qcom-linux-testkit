@@ -29,7 +29,7 @@ fi
 # shellcheck disable=SC1090,SC1091
 . "$TOOLS/functestlib.sh"
 # shellcheck disable=SC1090,SC1091
-. "$TOOLS/coresight_helper.sh" 
+. "$TOOLS/coresight_helper.sh"
 
 TESTNAME="TPDM-Enable-Disable"
 res_file="./$TESTNAME.res"
@@ -64,27 +64,27 @@ reset_devices
 
 while [ "$i" -le 50 ]; do
     iter_fail=0
-    
+
     for node_path in "$cs_base"/tpdm* "$cs_base"/coresight-tpdm*; do
         [ ! -d "$node_path" ] && continue
-        
+
         node_name=$(basename "$node_path")
-        
+
         if echo "$node_name" | grep -q "tpdm-turing-llm"; then
             continue
         fi
-        
+
         if [ ! -f "$node_path/enable_source" ]; then
             continue
         fi
-        
+
         echo 1 > "$node_path/enable_source" 2>/dev/null
         if [ "$(cat "$node_path/enable_source" 2>/dev/null)" != "1" ]; then
             iter_fail=1
             log_fail "Iter $i: Failed to enable $node_name"
             echo "$TESTNAME FAIL" > "$res_file"
         fi
-        
+
         echo 0 > "$node_path/enable_source" 2>/dev/null
         if [ "$(cat "$node_path/enable_source" 2>/dev/null)" = "1" ]; then
             iter_fail=1
@@ -92,14 +92,14 @@ while [ "$i" -le 50 ]; do
             echo "$TESTNAME FAIL" > "$res_file"
         fi
     done
-    
+
     if [ "$iter_fail" -eq 0 ]; then
         log_info "Iteration: $i - PASS"
     else
         log_fail "Iteration: $i - FAIL"
         fail=1
     fi
-    
+
     i=$((i+1))
 done
 
@@ -114,4 +114,4 @@ else
     echo "$TESTNAME FAIL" > "$res_file"
 fi
 
-log_info "-------------------$TESTNAME Testcase Finished----------------------------" 
+log_info "-------------------$TESTNAME Testcase Finished----------------------------"
