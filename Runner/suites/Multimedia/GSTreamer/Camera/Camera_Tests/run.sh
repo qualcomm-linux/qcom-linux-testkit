@@ -25,7 +25,7 @@ ENCODED_DIR="$OUTDIR/encoded"
 mkdir -p "$OUTDIR" "$DMESG_DIR" "$ENCODED_DIR" >/dev/null 2>&1 || true
 : >"$RES_FILE"
 : >"$GST_LOG"
- 
+
 INIT_ENV=""
 SEARCH="$SCRIPT_DIR"
 while [ "$SEARCH" != "/" ]; do
@@ -35,13 +35,13 @@ while [ "$SEARCH" != "/" ]; do
   fi
   SEARCH=$(dirname "$SEARCH")
 done
- 
+
 if [ -z "${INIT_ENV:-}" ]; then
   echo "[ERROR] Could not find init_env (starting at $SCRIPT_DIR)" >&2
   echo "$RESULT_TESTNAME SKIP" >"$RES_FILE" 2>/dev/null || true
   exit 0
 fi
- 
+
 if [ -z "${__INIT_ENV_LOADED:-}" ]; then
   # shellcheck disable=SC1090
   . "$INIT_ENV"
@@ -90,7 +90,7 @@ for param in CAMERA_DURATION CAMERA_FRAMERATE CAMERA_GST_DEBUG GST_DEBUG_LEVEL; 
 
   if [ -n "$val" ]; then
     case "$val" in
-      ''|*[!0-9]*) 
+      ''|*[!0-9]*)
         log_warn "$param must be numeric (got '$val')"
         echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
         exit 0
@@ -181,7 +181,7 @@ while [ $# -gt 0 ]; do
       fi
       if [ -n "$2" ]; then
         case "$2" in
-          ''|*[!0-9]*) 
+          ''|*[!0-9]*)
             log_warn "Invalid --framerate '$2' (must be numeric)"
             echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
             exit 0
@@ -250,7 +250,7 @@ OVERVIEW:
   source plugins:
   - qtiqmmfsrc (Qualcomm CAMX downstream) - 12 tests
   - libcamerasrc (upstream) - 9 tests
-  
+
   Tests run in sequence to progressively validate different camera capabilities.
 
 TEST SEQUENCES:
@@ -367,11 +367,11 @@ TEST DETAILS:
     Fakesink (2):
       - fakesink_nv12  : NV12 format, 720p, no encoding
       - fakesink_ubwc  : UBWC format, 720p, no encoding
-    
+
     Preview (2):
       - preview_nv12_4k : NV12 format, 4K, Weston display
       - preview_ubwc_4k : UBWC format, 4K, Weston display
-    
+
     Encode (6):
       - encode_nv12_720p   : NV12, 1280x720, H.264 encode
       - encode_nv12_1080p  : NV12, 1920x1080, H.264 encode
@@ -379,7 +379,7 @@ TEST DETAILS:
       - encode_ubwc_720p   : UBWC, 1280x720, H.264 encode
       - encode_ubwc_1080p  : UBWC, 1920x1080, H.264 encode
       - encode_ubwc_4k     : UBWC, 3840x2160, H.264 encode
-    
+
     Snapshot (2):
       - snapshot_1080p : NV12, 1920x1080, JPEG still capture (2 images)
       - snapshot_4k    : NV12, 3840x2160, JPEG still capture (2 images)
@@ -388,16 +388,16 @@ TEST DETAILS:
     Fakesink (2):
       - libcam_720p_Fakesink    : 720p, no encoding
       - libcam_1080p_Fakesink   : 1080p, no encoding
-    
+
     Preview (2):
       - libcam_720p_Preview    : 720p, Weston display
       - libcam_1080p_Preview   : 1080p, Weston display
-    
+
     Encode (3):
       - libcam_720p_NV12_Encode  : NV12, 1280x720, H.264 encode
       - libcam_1080p_NV12_Encode : NV12, 1920x1080, H.264 encode
       - libcam_4k_NV12_Encode    : NV12, 3840x2160, H.264 encode
-    
+
     Snapshot (2):
       - libcam_1080p_Snapshot : 1920x1080, JPEG still capture (2 images)
       - libcam_4k_Snapshot    : 3840x2160, JPEG still capture (5 images)
@@ -432,7 +432,7 @@ PREREQUISITES:
       - qtiqmmfsrc (Qualcomm camera source)
       - v4l2h264enc (V4L2 H.264 encoder, for encode)
       - waylandsink (Wayland display, for preview)
-    
+
     For libcamerasrc (9 tests):
       - libcamerasrc (Upstream camera source)
       - videoconvert (Video format converter, required)
@@ -566,10 +566,10 @@ camera_preflight_checks() {
   log_info "=========================================="
   log_info "CAMERA PRE-FLIGHT CHECKS"
   log_info "=========================================="
-  
+
   checks_passed=0
   checks_failed=0
-  
+
   # Check 1: GStreamer plugin validation (CRITICAL)
   log_info "[1/3] GStreamer plugin validation..."
   if has_element "$camera_source"; then
@@ -579,7 +579,7 @@ camera_preflight_checks() {
     log_fail "  ✗ GStreamer plugin missing: $camera_source"
     checks_failed=$((checks_failed + 1))
   fi
-  
+
   # Check 2: Required encoder plugin (only if encode tests are requested)
   if echo "$testModeList" | grep -q "encode"; then
     log_info "[2/3] H.264 encoder plugin check..."
@@ -593,26 +593,26 @@ camera_preflight_checks() {
     log_info "[2/3] H.264 encoder plugin check... skipped (encode tests not requested)"
     checks_passed=$((checks_passed + 1))
   fi
-  
+
   # Check 3: Required snapshot plugins (only if snapshot tests are requested)
   if echo "$testModeList" | grep -q "snapshot"; then
     log_info "[3/3] Snapshot plugin checks..."
     snapshot_checks_failed=0
-    
+
     if has_element jpegenc; then
       log_pass "  ✓ jpegenc available"
     else
       log_fail "  ✗ jpegenc not available (required for snapshot tests)"
       snapshot_checks_failed=$((snapshot_checks_failed + 1))
     fi
-    
+
     if has_element multifilesink; then
       log_pass "  ✓ multifilesink available"
     else
       log_fail "  ✗ multifilesink not available (required for snapshot tests)"
       snapshot_checks_failed=$((snapshot_checks_failed + 1))
     fi
-    
+
     # For libcamerasrc, also check videoconvert
     if [ "$camera_source" = "libcamerasrc" ]; then
       if has_element videoconvert; then
@@ -622,7 +622,7 @@ camera_preflight_checks() {
         snapshot_checks_failed=$((snapshot_checks_failed + 1))
       fi
     fi
-    
+
     if [ "$snapshot_checks_failed" -eq 0 ]; then
       checks_passed=$((checks_passed + 1))
     else
@@ -632,15 +632,15 @@ camera_preflight_checks() {
     log_info "[3/3] Snapshot plugin checks... skipped (snapshot tests not requested)"
     checks_passed=$((checks_passed + 1))
   fi
-  
+
   log_info "=========================================="
   log_info "Pre-flight summary: $checks_passed passed, $checks_failed failed"
   log_info "=========================================="
-  
+
   if [ "$checks_failed" -gt 0 ]; then
     return 1
   fi
-  
+
   return 0
 }
 
@@ -648,11 +648,11 @@ camera_preflight_checks() {
 diagnose_camera_failure() {
   testname="$1"
   log_file="$2"
-  
+
   log_info "=========================================="
   log_info "FAILURE DIAGNOSTICS: $testname"
   log_info "=========================================="
-  
+
   # Check for common GStreamer errors
   if grep -qi "Could not open camera\|cannot open camera\|failed to open camera" "$log_file"; then
     log_fail "Issue: Camera device not accessible"
@@ -668,7 +668,7 @@ diagnose_camera_failure() {
       log_info "    $line"
     done
   fi
-  
+
   if grep -qi "not-negotiated\|negotiation failed\|could not negotiate" "$log_file"; then
     log_fail "Issue: Format negotiation failed"
     log_info "Possible causes:"
@@ -676,17 +676,17 @@ diagnose_camera_failure() {
     log_info "  - Pipeline element incompatibility"
     log_info "  - Missing caps filter or incorrect format string"
     log_info ""
-    
+
     # Show what was requested
     if grep -q "video/x-raw" "$log_file"; then
       requested=$(grep -o "video/x-raw[^!]*" "$log_file" | head -1)
       log_info "  Requested caps: $requested"
     fi
   fi
-  
+
   if grep -qi "firmware" "$log_file"; then
     log_fail "Issue: Firmware-related error detected"
-    
+
     if command -v camx_find_icp_firmware >/dev/null 2>&1; then
       icp_fw=$(camx_find_icp_firmware 2>/dev/null || echo "")
       if [ -z "$icp_fw" ]; then
@@ -698,12 +698,12 @@ diagnose_camera_failure() {
       fi
     fi
   fi
-  
+
   if grep -qi "device.*not.*found\|no such device" "$log_file"; then
     log_fail "Issue: Device not found"
     log_info ""
     log_info "Hardware check:"
-    
+
     # Check Device Tree camera nodes
     if command -v camx_fdtdump_has_cam_nodes >/dev/null 2>&1; then
       if camx_fdtdump_has_cam_nodes >/dev/null 2>&1; then
@@ -713,7 +713,7 @@ diagnose_camera_failure() {
         log_info "    Hardware may not be properly configured"
       fi
     fi
-    
+
     # Check video devices
     # shellcheck disable=SC2012
     video_count=$(ls /dev/video* 2>/dev/null | wc -l)
@@ -724,7 +724,7 @@ diagnose_camera_failure() {
       log_info "  ✓ Video devices present: $video_count"
     fi
   fi
-  
+
   if grep -qi "timeout\|timed out" "$log_file"; then
     log_fail "Issue: Operation timeout"
     log_info "Possible causes:"
@@ -732,20 +732,20 @@ diagnose_camera_failure() {
     log_info "  - Driver issue or hang"
     log_info "  - Insufficient system resources"
   fi
-  
+
   if grep -qi "permission denied\|access denied" "$log_file"; then
     log_fail "Issue: Permission denied"
     log_info "Solution: Add user to video group:"
     log_info "  sudo usermod -a -G video \$USER"
     log_info "  (logout and login required)"
   fi
-  
+
   # Check for UBWC-specific issues
   if echo "$testname" | grep -q "ubwc" && grep -qi "format.*not.*supported" "$log_file"; then
     log_fail "Issue: UBWC format not supported"
     log_info "Verify pipeline includes: qtiqmmfsrc ! video/x-raw,format=NV12_Q08C"
   fi
-  
+
   # Check kernel logs for related errors
   if [ -d "$DMESG_DIR" ] && [ -f "$DMESG_DIR/dmesg_errors.log" ]; then
     if grep -qi "camera\|video\|v4l2" "$DMESG_DIR/dmesg_errors.log"; then
@@ -755,7 +755,7 @@ diagnose_camera_failure() {
       done
     fi
   fi
-  
+
   log_info "=========================================="
 }
 
@@ -771,7 +771,7 @@ if ! camera_preflight_checks; then
   log_fail "  2. Verify camera hardware is connected"
   log_fail "  3. Check camera driver is loaded"
   log_fail "=========================================="
-  
+
   echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
   exit 0
 fi
@@ -793,48 +793,57 @@ run_camera_test() {
   testname="$1"
   pipeline="$2"
   output_file="${3:-}"
-  
+  restart_cam_server="${4:-no}"
+
   log_info "=========================================="; log_info "Running: $testname"; log_info "=========================================="
-  
+
+  # Restart cam-server if requested (temporary workaround for qtiqmmfsrc only)
+  # libcamerasrc doesn't use cam-server, so this is skipped for libcamerasrc tests
+  if [ "$restart_cam_server" = "yes" ] && [ "$camera_source" = "qtiqmmfsrc" ]; then
+    log_info "Restarting cam-server..."
+    systemctl restart cam-server >/dev/null 2>&1 || log_warn "Failed to restart cam-server (may not be critical)"
+    sleep 1
+  fi
+
   test_log="$OUTDIR/${testname}.log"
   : >"$test_log"
-  
+
   if [ -z "$pipeline" ]; then
     log_warn "$testname: Failed to build pipeline"; skip_count=$((skip_count + 1)); return 1
   fi
-  
+
   log_info "Pipeline: gst-launch-1.0 -e $pipeline"
-  
+
   # Run pipeline with timeout
   if gstreamer_run_gstlaunch_timeout "$((duration + 10))" "$pipeline" >>"$test_log" 2>&1; then gstRc=0; else gstRc=$?; fi
-  
+
   # Validate log
   if ! gstreamer_validate_log "$test_log" "$testname"; then
     diagnose_camera_failure "$testname" "$test_log"
     log_fail "$testname: FAIL"; fail_count=$((fail_count + 1)); return 1
   fi
-  
+
   # Check for output file if encode test
   if [ -n "$output_file" ]; then
     if [ -f "$output_file" ] && [ -s "$output_file" ]; then
       file_size=$(gstreamer_file_size_bytes "$output_file")
       # Treat timeout (124) as success if file was created - test is designed to run until timeout
-      if [ "$file_size" -gt 1000 ] && { [ "$gstRc" -eq 0 ] || [ "$gstRc" -eq 124 ]; }; then 
+      if [ "$file_size" -gt 1000 ] && { [ "$gstRc" -eq 0 ] || [ "$gstRc" -eq 124 ]; }; then
         log_info "Output file size: $file_size bytes ($(awk "BEGIN {printf \"%.2f\", $file_size/1024/1024}") MB)"
         log_pass "$testname: PASS"; pass_count=$((pass_count + 1)); return 0
-      else 
+      else
         diagnose_camera_failure "$testname" "$test_log"
         log_fail "$testname: FAIL (file too small or bad exit code)"; fail_count=$((fail_count + 1)); return 1
       fi
-    else 
+    else
       diagnose_camera_failure "$testname" "$test_log"
       log_fail "$testname: FAIL (no output)"; fail_count=$((fail_count + 1)); return 1
     fi
   else
     # Non-encode test: treat timeout (124) as success
-    if [ "$gstRc" -eq 0 ] || [ "$gstRc" -eq 124 ]; then 
+    if [ "$gstRc" -eq 0 ] || [ "$gstRc" -eq 124 ]; then
       log_pass "$testname: PASS"; pass_count=$((pass_count + 1)); return 0
-    else 
+    else
       diagnose_camera_failure "$testname" "$test_log"
       log_fail "$testname: FAIL (rc=$gstRc)"; fail_count=$((fail_count + 1)); return 1
     fi
@@ -844,16 +853,16 @@ run_camera_test() {
 # qtiqmmfsrc Fakesink test
 run_qtiqmmf_fakesink_test() {
   format="$1"
-  
+
   case "$format" in
     nv12) format_name="NV12" ;;
     ubwc) format_name="UBWC" ;;
     *) log_warn "Unknown format: $format"; skip_count=$((skip_count + 1)); return 1 ;;
   esac
-  
+
   testname="fakesink_${format}"
   log_info "Format: $format_name"
-  
+
   pipeline=$(camera_build_qtiqmmfsrc_fakesink_pipeline "$cameraId" "$format" 1280 720 "$framerate")
   run_camera_test "$testname" "$pipeline"
 }
@@ -861,21 +870,21 @@ run_qtiqmmf_fakesink_test() {
 # qtiqmmfsrc Preview test
 run_qtiqmmf_preview_test() {
   format="$1"
-  
+
   case "$format" in
     nv12) format_name="NV12" ;;
     ubwc) format_name="UBWC" ;;
     *) log_warn "Unknown format: $format"; skip_count=$((skip_count + 1)); return 1 ;;
   esac
-  
+
   if ! has_element waylandsink; then
     log_warn "waylandsink not available, skipping preview test"
     skip_count=$((skip_count + 1)); return 1
   fi
-  
+
   testname="preview_${format}_4k"
   log_info "Format: $format_name"
-  
+
   pipeline=$(camera_build_qtiqmmfsrc_preview_pipeline "$cameraId" "$format" 3840 2160 "$framerate")
   run_camera_test "$testname" "$pipeline"
 }
@@ -886,24 +895,24 @@ run_qtiqmmf_encode_test() {
   resolution="$2"
   width="$3"
   height="$4"
-  
+
   case "$format" in
     nv12) format_name="NV12" ;;
     ubwc) format_name="UBWC" ;;
     *) log_warn "Unknown format: $format"; skip_count=$((skip_count + 1)); return 1 ;;
   esac
-  
+
   if ! has_element v4l2h264enc; then
     log_warn "v4l2h264enc not available, skipping encode test"
     skip_count=$((skip_count + 1)); return 1
   fi
-  
+
   testname="encode_${format}_${resolution}"
   output_file="$ENCODED_DIR/${testname}.mp4"
-  
+
   log_info "Format: $format_name"
   log_info "Resolution: $resolution (${width}x${height})"
-  
+
   pipeline=$(camera_build_qtiqmmfsrc_encode_pipeline "$cameraId" "$format" "$width" "$height" "$framerate" "$output_file")
   run_camera_test "$testname" "$pipeline" "$output_file"
 }
@@ -914,69 +923,74 @@ run_qtiqmmf_snapshot_test() {
   width="$2"
   height="$3"
   max_files="${4:-2}"
-  
+
   if ! has_element jpegenc; then
     log_fail "jpegenc not available - required for snapshot test"
     fail_count=$((fail_count + 1)); return 1
   fi
-  
+
   if ! has_element multifilesink; then
     log_fail "multifilesink not available - required for snapshot test"
     fail_count=$((fail_count + 1)); return 1
   fi
-  
+
   testname="snapshot_${resolution}"
   output_pattern="$ENCODED_DIR/camera${cameraId}_${resolution}_image%d.jpg"
-  
+
   log_info "Resolution: $resolution (${width}x${height})"
   log_info "Max snapshots: $max_files"
-  
+
   # Clean up old snapshot files from previous runs to avoid false positives
   if ls "$ENCODED_DIR"/camera"${cameraId}"_"${resolution}"_image*.jpg >/dev/null 2>&1; then
     log_info "Cleaning up old snapshot files..."
     rm -f "$ENCODED_DIR"/camera"${cameraId}"_"${resolution}"_image*.jpg
   fi
-  
+
   pipeline=$(camera_build_qtiqmmfsrc_snapshot_pipeline "$cameraId" "$width" "$height" "$framerate" "$output_pattern" "$max_files")
-  
+
   # For snapshot tests, we check if at least one snapshot file was created
   # Run the test with a shorter timeout since we're only capturing a few frames
   snapshot_timeout=$((max_files + 5))
-  
+
   log_info "=========================================="; log_info "Running: $testname"; log_info "=========================================="
-  
+
+  # Restart cam-server before snapshot test (qtiqmmfsrc only)
+  log_info "Restarting cam-server..."
+  systemctl restart cam-server >/dev/null 2>&1 || log_warn "Failed to restart cam-server (may not be critical)"
+  sleep 1
+
   test_log="$OUTDIR/${testname}.log"
   : >"$test_log"
-  
+
   if [ -z "$pipeline" ]; then
     log_warn "$testname: Failed to build pipeline"; skip_count=$((skip_count + 1)); return 1
   fi
-  
+
   log_info "Pipeline: gst-launch-1.0 -e $pipeline"
-  
+
   # Run pipeline with timeout
   gstreamer_run_gstlaunch_timeout "$snapshot_timeout" "$pipeline" >>"$test_log" 2>&1
-  
+
   # Wait for filesystem to sync
   sleep 5
-  
+
   # Validate log
   if ! gstreamer_validate_log "$test_log" "$testname"; then
     diagnose_camera_failure "$testname" "$test_log"
     log_fail "$testname: FAIL"; fail_count=$((fail_count + 1)); return 1
   fi
-  
+
   # Check if at least one snapshot file was created (any number, not just 0)
   # multifilesink may continue numbering from previous runs
   snapshot_files=$(find "$ENCODED_DIR" -name "camera${cameraId}_${resolution}_image*.jpg" -type f 2>/dev/null)
   snapshot_count=$(printf '%s\n' "$snapshot_files" | grep -c .)
-  
+
   if [ "$snapshot_count" -gt 0 ]; then
     # Get the first file found (any number)
     first_snapshot=$(printf '%s\n' "$snapshot_files" | head -n 1)
     file_size=$(gstreamer_file_size_bytes "$first_snapshot")
     log_info "Found snapshot file: $(basename "$first_snapshot")"
-    
+
     # Check if file size is reasonable for a JPEG
     if [ "$file_size" -gt "$SNAPSHOT_MIN_BYTES" ]; then
       log_info "Snapshots created: $snapshot_count (file size: $file_size bytes)"
@@ -995,7 +1009,7 @@ run_qtiqmmf_snapshot_test() {
 run_libcam_fakesink_test() {
   width="$1"
   height="$2"
-  
+
   # Determine test name based on resolution
   if [ "$width" -eq 0 ] 2>/dev/null || [ "$height" -eq 0 ] 2>/dev/null; then
     testname="libcam_Default_Fakesink"
@@ -1004,9 +1018,9 @@ run_libcam_fakesink_test() {
     testname="libcam_${width}x${height}_Fakesink"
     res_name="${width}x${height}"
   fi
-  
+
   log_info "Resolution: $res_name"
-  
+
   pipeline=$(camera_build_libcamera_fakesink_pipeline "$width" "$height" "$framerate")
   run_camera_test "$testname" "$pipeline"
 }
@@ -1015,17 +1029,17 @@ run_libcam_fakesink_test() {
 run_libcam_preview_test() {
   width="$1"
   height="$2"
-  
+
   if ! has_element waylandsink; then
     log_warn "waylandsink not available, skipping libcam preview test"
     skip_count=$((skip_count + 1)); return 1
   fi
-  
+
   if ! has_element videoconvert; then
     log_warn "videoconvert not available, skipping libcam preview test"
     skip_count=$((skip_count + 1)); return 1
   fi
-  
+
   # Determine test name based on resolution
   if [ "$width" -eq 0 ] 2>/dev/null || [ "$height" -eq 0 ] 2>/dev/null; then
     testname="libcam_Default_Preview"
@@ -1040,9 +1054,9 @@ run_libcam_preview_test() {
     testname="libcam_${width}x${height}_Preview"
     res_name="${width}x${height}"
   fi
-  
+
   log_info "Resolution: $res_name"
-  
+
   pipeline=$(camera_build_libcamera_preview_pipeline "$width" "$height" "$framerate")
   run_camera_test "$testname" "$pipeline"
 }
@@ -1052,22 +1066,22 @@ run_libcam_encode_test() {
   width="$1"
   height="$2"
   resolution_name="$3"
-  
+
   if ! has_element v4l2h264enc; then
     log_warn "v4l2h264enc not available, skipping libcam encode test"
     skip_count=$((skip_count + 1)); return 1
   fi
-  
+
   if ! has_element videoconvert; then
     log_warn "videoconvert not available, skipping libcam encode test"
     skip_count=$((skip_count + 1)); return 1
   fi
-  
+
   testname="libcam_${resolution_name}_NV12_Encode"
   output_file="$ENCODED_DIR/sample_${resolution_name}.mp4"
-  
+
   log_info "Resolution: $resolution_name (${width}x${height})"
-  
+
   pipeline=$(camera_build_libcamera_encode_pipeline "$width" "$height" "$output_file" "$framerate")
   run_camera_test "$testname" "$pipeline" "$output_file"
 }
@@ -1078,74 +1092,74 @@ run_libcam_snapshot_test() {
   height="$2"
   resolution_name="$3"
   max_files="${4:-5}"
-  
+
   if ! has_element videoconvert; then
     log_fail "videoconvert not available - required for snapshot test"
     fail_count=$((fail_count + 1)); return 1
   fi
-  
+
   if ! has_element jpegenc; then
     log_fail "jpegenc not available - required for snapshot test"
     fail_count=$((fail_count + 1)); return 1
   fi
-  
+
   if ! has_element multifilesink; then
     log_fail "multifilesink not available - required for snapshot test"
     fail_count=$((fail_count + 1)); return 1
   fi
-  
+
   testname="libcam_${resolution_name}_Snapshot"
   output_pattern="$ENCODED_DIR/snapshot_${resolution_name}_%d.jpg"
-  
+
   log_info "Resolution: $resolution_name (${width}x${height})"
   log_info "Max snapshots: $max_files"
-  
+
   # Clean up old snapshot files from previous runs to avoid false positives
   if ls "$ENCODED_DIR"/snapshot_"${resolution_name}"_*.jpg >/dev/null 2>&1; then
     log_info "Cleaning up old snapshot files..."
     rm -f "$ENCODED_DIR"/snapshot_"${resolution_name}"_*.jpg
   fi
-  
+
   pipeline=$(camera_build_libcamera_snapshot_pipeline "$width" "$height" "$output_pattern" "$max_files")
-  
+
   # For snapshot tests, we check if at least one snapshot file was created
   # Run the test with a shorter timeout since we're only capturing a few frames
   snapshot_timeout=$((max_files + 5))
-  
+
   log_info "=========================================="; log_info "Running: $testname"; log_info "=========================================="
-  
+
   test_log="$OUTDIR/${testname}.log"
   : >"$test_log"
-  
+
   if [ -z "$pipeline" ]; then
     log_warn "$testname: Failed to build pipeline"; skip_count=$((skip_count + 1)); return 1
   fi
-  
+
   log_info "Pipeline: gst-launch-1.0 -e $pipeline"
-  
+
   # Run pipeline with timeout
   gstreamer_run_gstlaunch_timeout "$snapshot_timeout" "$pipeline" >>"$test_log" 2>&1
-  
+
   # Wait for filesystem to sync
   sleep 5
-  
+
   # Validate log
   if ! gstreamer_validate_log "$test_log" "$testname"; then
     diagnose_camera_failure "$testname" "$test_log"
     log_fail "$testname: FAIL"; fail_count=$((fail_count + 1)); return 1
   fi
-  
+
   # Check if at least one snapshot file was created (any number, not just 0)
   # multifilesink may continue numbering from previous runs
   snapshot_files=$(find "$ENCODED_DIR" -name "snapshot_${resolution_name}_*.jpg" -type f 2>/dev/null)
   snapshot_count=$(printf '%s\n' "$snapshot_files" | grep -c .)
-  
+
   if [ "$snapshot_count" -gt 0 ]; then
     # Get the first file found (any number)
     first_snapshot=$(printf '%s\n' "$snapshot_files" | head -n 1)
     file_size=$(gstreamer_file_size_bytes "$first_snapshot")
     log_info "Found snapshot file: $(basename "$first_snapshot")"
-    
+
     # Check if file size is reasonable for a JPEG
     if [ "$file_size" -gt "$SNAPSHOT_MIN_BYTES" ]; then
       log_info "Snapshots created: $snapshot_count (file size: $file_size bytes)"
@@ -1161,19 +1175,19 @@ run_libcam_snapshot_test() {
 # -------------------- Main test execution --------------------
 if [ "$camera_source" = "libcamerasrc" ]; then
   log_info "Starting libcamerasrc tests: fakesink -> preview -> encode -> snapshot"
-  
+
   # Parse test modes and resolutions for libcamerasrc
   test_modes=$(printf '%s' "$testModeList" | tr ',' ' ')
   resolutions=$(printf '%s' "$resolutionList" | tr ',' ' ')
-  
+
   # Wayland/Weston environment setup for libcamerasrc preview tests
   log_info "=========================================="
   log_info "LIBCAMERA - WAYLAND SETUP"
   log_info "=========================================="
-  
+
   wayland_ready=0
   camera_setup_wayland_environment "Libcamera_Tests"
-  
+
   # Run tests based on test modes filter
   for mode in $test_modes; do
     case "$mode" in
@@ -1181,7 +1195,7 @@ if [ "$camera_source" = "libcamerasrc" ]; then
         log_info "=========================================="
         log_info "LIBCAMERA FAKESINK TESTS"
         log_info "=========================================="
-        
+
         # Run fakesink tests based on resolution filter (only 720p and 1080p supported)
         for res in $resolutions; do
           case "$res" in
@@ -1200,14 +1214,14 @@ if [ "$camera_source" = "libcamerasrc" ]; then
           esac
         done
         ;;
-      
+
       preview)
         # Preview tests - require Wayland
         if [ "$wayland_ready" -eq 1 ]; then
           log_info "=========================================="
           log_info "LIBCAMERA PREVIEW TESTS"
           log_info "=========================================="
-          
+
           # Run preview tests based on resolution filter (only 720p and 1080p supported)
           for res in $resolutions; do
             case "$res" in
@@ -1239,12 +1253,12 @@ if [ "$camera_source" = "libcamerasrc" ]; then
           done
         fi
         ;;
-      
+
       encode)
         log_info "=========================================="
         log_info "LIBCAMERA ENCODE TESTS"
         log_info "=========================================="
-        
+
         # Run encode tests based on resolution filter
         for res in $resolutions; do
           case "$res" in
@@ -1266,12 +1280,12 @@ if [ "$camera_source" = "libcamerasrc" ]; then
           esac
         done
         ;;
-      
+
       snapshot)
         log_info "=========================================="
         log_info "LIBCAMERA SNAPSHOT TESTS"
         log_info "=========================================="
-        
+
         # Run snapshot tests for 1080p and 4K only
         for res in $resolutions; do
           case "$res" in
@@ -1290,21 +1304,21 @@ if [ "$camera_source" = "libcamerasrc" ]; then
           esac
         done
         ;;
-      
+
       *)
         log_warn "Unknown test mode for libcamerasrc: $mode"
         ;;
     esac
   done
-  
+
 else
   # qtiqmmfsrc tests
   log_info "Starting camera tests in sequence: fakesink -> preview -> encode -> snapshot"
-  
+
   test_modes=$(printf '%s' "$testModeList" | tr ',' ' ')
   formats=$(printf '%s' "$formatList" | tr ',' ' ')
   resolutions=$(printf '%s' "$resolutionList" | tr ',' ' ')
-  
+
   for mode in $test_modes; do
     case "$mode" in
       fakesink)
@@ -1320,11 +1334,11 @@ else
         log_info "=========================================="
         log_info "PREVIEW TESTS - WAYLAND SETUP"
         log_info "=========================================="
-        
+
         # Wayland/Weston environment setup for preview tests
         wayland_ready=0
         camera_setup_wayland_environment "Camera_Preview"
-        
+
         # Run preview tests if Wayland is ready
         if [ "$wayland_ready" -eq 1 ]; then
           log_info "=========================================="
@@ -1365,7 +1379,7 @@ else
         log_info "=========================================="
         log_info "QTIQMMFSRC SNAPSHOT TESTS"
         log_info "=========================================="
-        
+
         # Run snapshot tests for 1080p and 4K only
         for res in $resolutions; do
           case "$res" in

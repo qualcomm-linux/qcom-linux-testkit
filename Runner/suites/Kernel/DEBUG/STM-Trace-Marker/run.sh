@@ -46,7 +46,7 @@ log_info "Checking if required tools are available"
 for tool in timeout stat seq; do
     if ! command -v "$tool" >/dev/null 2>&1; then
         log_skip "Required tool '$tool' not found. Skipping test."
-        echo "$TESTNAME SKIP" > "$res_file" 
+        echo "$TESTNAME SKIP" > "$res_file"
         exit 0
     fi
 done
@@ -90,16 +90,16 @@ etf_path=$(find_first_existing_path "tmc_etf0" "tmc_etf" "tmc_etf1")
 
 cleanup_trace_marker() {
     log_info "Cleaning up Ftrace and STM settings..."
-    
+
     [ -f "$debugfs/tracing/tracing_on" ] && echo 0 > "$debugfs/tracing/tracing_on" 2>/dev/null
-    
+
     [ -f "$debugfs/tracing/events/sched/sched_switch/enable" ] && \
         echo 0 > "$debugfs/tracing/events/sched/sched_switch/enable" 2>/dev/null
 
     if [ -n "$stm_path" ] && [ -f "$stm_path/enable_source" ]; then
         echo 0 > "$stm_path/enable_source" 2>/dev/null
     fi
-    
+
     if [ -n "$etf_path" ] && [ -f "$etf_path/enable_sink" ]; then
         echo 0 > "$etf_path/enable_sink" 2>/dev/null
     fi
@@ -187,7 +187,7 @@ fi
 if [ -s "$tmp_out" ]; then
     bin_size=$(stat -c%s "$tmp_out")
     log_info "Captured binary size: $bin_size bytes"
-    
+
     if [ "$bin_size" -ge 65536 ]; then
         log_pass "Successfully captured STM trace data ($bin_size bytes)"
         echo "$TESTNAME PASS" > "$res_file"
@@ -202,4 +202,4 @@ fi
 
 cleanup_trace_marker
 
-log_info "-------------------$TESTNAME Testcase Finished----------------------------" 
+log_info "-------------------$TESTNAME Testcase Finished----------------------------"

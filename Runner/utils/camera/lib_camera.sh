@@ -111,7 +111,7 @@ libcam_file_list_and_seq() {
 # Usage: libcam_sample_uniques "<file>" "<N>"
 libcam_sample_uniques() {
     f="$1"; n="$2"
- 
+
     # Prefer BusyBox-compatible od -b
     if command -v od >/dev/null 2>&1; then
         dd if="$f" bs=1 count="$n" status=none 2>/dev/null \
@@ -129,7 +129,7 @@ libcam_sample_uniques() {
         '
         return
     fi
- 
+
     # Fallback: hexdump (some BusyBox builds lack -e)
     if command -v hexdump >/dev/null 2>&1; then
         dd if="$f" bs=1 count="$n" status=none 2>/dev/null \
@@ -149,7 +149,7 @@ libcam_sample_uniques() {
         '
         return
     fi
- 
+
     # Last-chance optimistic fallback
     echo 256
 }
@@ -176,7 +176,7 @@ libcam_files_and_seq() {
     dir="$1"; strict="$2"
     MAP="$dir/.file_seq_map.txt"
     : > "$MAP"
- 
+
     for f in "$dir"/frame-*.bin "$dir"/frame-*.ppm; do
         [ -e "$f" ] || continue
         base="${f##*/}"
@@ -184,7 +184,7 @@ libcam_files_and_seq() {
         seq="${seq##*-}"
         printf '%s %s\n' "$f" "$seq" >> "$MAP"
     done
- 
+
     if [ "$strict" = "yes" ]; then
         awk '{print $2+0}' "$MAP" | sort -n | libcam_check_contiguous >/dev/null 2>&1 || {
             log_warn "non-contiguous sequences in files"
@@ -261,13 +261,13 @@ EOF
 # Returns: 0 = OK, 1 = problems found
 libcam_validate_bin() {
     dir="$1"; run_log="$2"; bin_sample_bytes="$3"; BIN_TOL_PCT="$4"; DUP_MAX_RATIO="$5"
- 
+
     BAD=0
- 
+
     # Extract bytesused lines from the run log (may be 0 lines; that's fine)
     BU_TXT="$dir/.bytesused.txt"
     sed -n 's/.*bytesused:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$run_log" > "$BU_TXT" 2>/dev/null || :
- 
+
     # List BIN files & sizes (BusyBox-compatible: no -printf)
     SIZES_TXT="$dir/.bin_sizes.txt"
     : > "$SIZES_TXT"
@@ -276,14 +276,14 @@ libcam_validate_bin() {
             sz="$(stat -c %s "$f" 2>/dev/null || stat -f %z "$f" 2>/dev/null || wc -c <"$f")"
             printf '%s %s\n' "$f" "$sz" >> "$SIZES_TXT"
         done
- 
+
     # Size tolerance check vs. closest bytesused
     if [ -s "$BU_TXT" ] && [ -s "$SIZES_TXT" ]; then
         while IFS= read -r line; do
             f=$(printf '%s\n' "$line" | cut -d' ' -f1)
             sz=$(printf '%s\n' "$line" | cut -d' ' -f2)
             [ -n "$sz" ] || continue
- 
+
             target=$(
                 sort -n "$BU_TXT" 2>/dev/null \
                 | awk -v S="$sz" '
@@ -301,7 +301,7 @@ libcam_validate_bin() {
             fi
         done < "$SIZES_TXT"
     fi
- 
+
     # Content entropy quick check: sample first N bytes, count unique byte values.
     # On BusyBox, avoid 'od -A'; use plain 'od' or 'hexdump' fallback.
     if [ -s "$SIZES_TXT" ]; then
@@ -324,14 +324,14 @@ libcam_validate_bin() {
             fi
         done < "$SIZES_TXT"
     fi
- 
+
     # Duplicate detection by hash (optional, best-effort)
     if [ -s "$SIZES_TXT" ]; then
         hash_cmd=""
         if command -v sha256sum >/dev/null 2>&1; then hash_cmd="sha256sum"
         elif command -v md5sum >/dev/null 2>&1; then hash_cmd="md5sum"
         fi
- 
+
         if [ -n "$hash_cmd" ]; then
             DUPS_TXT="$dir/.hashes.txt"
             : > "$DUPS_TXT"
@@ -341,11 +341,11 @@ libcam_validate_bin() {
             done <<EOF_HASHLIST
 $(awk '{print $1}' "$SIZES_TXT")
 EOF_HASHLIST
- 
+
             if [ -s "$DUPS_TXT" ]; then
                 SORTED="$dir/.hashes.sorted"
                 sort "$DUPS_TXT" > "$SORTED" 2>/dev/null || cp "$DUPS_TXT" "$SORTED"
- 
+
                 total=$(wc -l <"$SORTED" 2>/dev/null | tr -d ' ')
                 maxdup=$(awk '
                     { cnt[$1]++ }
@@ -353,7 +353,7 @@ EOF_HASHLIST
                         m=0; for (k in cnt) if (cnt[k]>m) m=cnt[k];
                         print m+0
                     }' "$SORTED")
- 
+
                 if [ "${total:-0}" -gt 0 ] && [ "${maxdup:-0}" -gt 0 ]; then
                     ratio=$(awk -v m="$maxdup" -v t="$total" 'BEGIN{ if(t==0) print "0"; else printf "%.3f", m/t }')
                     if awk -v r="$ratio" -v lim="$DUP_MAX_RATIO" 'BEGIN{ exit !(r>lim) }'; then
@@ -364,7 +364,7 @@ EOF_HASHLIST
             fi
         fi
     fi
- 
+
     [ "$BAD" -eq 0 ]
 }
 
@@ -386,9 +386,9 @@ libcam_validate_content() {
 libcam_scan_errors() {
     run_log="$1"
     strict="$2"
- 
+
     [ "$strict" = "yes" ] || { log_info "[scan] ERR_STRICT=no; skipping fatal scan"; return 0; }
- 
+
     # Build a filtered view that removes known-benign noise we see on imx577 / simple pipeline.
     # We keep this BusyBox/grep-basic-friendly (no PCRE features).
     tmpf="$(mktemp)" || return 1
@@ -400,7 +400,7 @@ libcam_scan_errors() {
     grep -viE \
         'CameraSensor|PixelArray|ActiveAreas|crop rectangle|Rotation control|No sensor delays|CameraSensorProperties|IPAProxy|configuration file.*yaml|SoftwareIsp|IPASoft|SimplePipeline' \
         "$run_log" >"$tmpf" || true
- 
+
     # Fatal patterns: keep simple & portable; focus on truly bad states.
     # (No generic "error" catch-all here.)
     if grep -Eiq \
@@ -410,7 +410,7 @@ libcam_scan_errors() {
         rm -f "$tmpf"
         return 1
     fi
- 
+
     log_info "[scan] No fatal errors after noise suppression"
     rm -f "$tmpf"
     return 0
@@ -426,11 +426,11 @@ libcam_scan_errors() {
 # Prefer /sys/devices/soc0/soc_id. Normalize to lowercase and trim.
 camx_read_soc_id() {
   soc=""
- 
+
   if [ -r /sys/devices/soc0/soc_id ]; then
     soc="$(tr -d '\r\n[:space:]' </sys/devices/soc0/soc_id 2>/dev/null | tr '[:upper:]' '[:lower:]')"
   fi
- 
+
   [ -n "$soc" ] || return 1
   echo "$soc"
   return 0
@@ -445,7 +445,7 @@ camx_find_icp_firmware() {
   token_list=""
   token=""
   cand=""
- 
+
   if [ -r /proc/device-tree/compatible ]; then
     token_list="$(
       tr '\0' '\n' </proc/device-tree/compatible 2>/dev/null \
@@ -454,7 +454,7 @@ camx_find_icp_firmware() {
         | sort -u
     )"
   fi
- 
+
   for token in $token_list; do
     if [ -d "/lib/firmware/qcom/$token" ]; then
       for cand in \
@@ -466,7 +466,7 @@ camx_find_icp_firmware() {
           return 0
         fi
       done
- 
+
       cand="$(
         find "/lib/firmware/qcom/$token" -maxdepth 1 -type f \
           \( -name 'CAMERA_ICP*.mbn' -o -name 'CAMERA_ICP*.elf' \) \
@@ -478,7 +478,7 @@ camx_find_icp_firmware() {
       fi
     fi
   done
- 
+
   cand="$(
     find /lib/firmware/qcom -type f \
       \( -name 'CAMERA_ICP.mbn' -o -name 'CAMERA_ICP.elf' -o -name 'CAMERA_ICP*.mbn' -o -name 'CAMERA_ICP*.elf' \) \
@@ -488,7 +488,7 @@ camx_find_icp_firmware() {
     printf '%s\n' "$cand"
     return 0
   fi
- 
+
   cand="$(
     find /lib/firmware -type f \
       \( -name 'CAMERA_ICP.mbn' -o -name 'CAMERA_ICP.elf' -o -name 'CAMERA_ICP*.mbn' -o -name 'CAMERA_ICP*.elf' \) \
@@ -498,7 +498,7 @@ camx_find_icp_firmware() {
     printf '%s\n' "$cand"
     return 0
   fi
- 
+
   return 1
 }
 # -----------------------------------------------------------------------------
@@ -506,28 +506,28 @@ camx_find_icp_firmware() {
 # -----------------------------------------------------------------------------
 camx_opkg_list_camx() {
   out=""
- 
+
   if command -v opkg >/dev/null 2>&1; then
     out="$(opkg list-installed 2>/dev/null | grep -i '^camx' || true)"
     [ -n "$out" ] || return 1
     printf '%s\n' "$out"
     return 0
   fi
- 
+
   if command -v dnf >/dev/null 2>&1; then
     out="$(dnf list installed 2>/dev/null | grep -i '^camx' || true)"
     [ -n "$out" ] || return 1
     printf '%s\n' "$out"
     return 0
   fi
- 
+
   if command -v rpm >/dev/null 2>&1; then
     out="$(rpm -qa 2>/dev/null | grep -i '^camx' || true)"
     [ -n "$out" ] || return 1
     printf '%s\n' "$out"
     return 0
   fi
- 
+
   return 1
 }
 
@@ -856,15 +856,15 @@ run_cmd_live_to_log() {
 camx_pick_camera_module() {
   compat_list=""
   model_str=""
- 
+
   if [ -r /proc/device-tree/compatible ]; then
     compat_list="$(tr '\0' '\n' </proc/device-tree/compatible 2>/dev/null | tr '[:upper:]' '[:lower:]')"
   fi
- 
+
   if [ -r /proc/device-tree/model ]; then
     model_str="$(tr '[:upper:]' '[:lower:]' </proc/device-tree/model 2>/dev/null)"
   fi
- 
+
   case "$compat_list
 $model_str" in
     *rb3gen2*|*qcm6490*|*qcs6490*)
@@ -880,7 +880,7 @@ $model_str" in
       return 0
       ;;
   esac
- 
+
   return 1
 }
 

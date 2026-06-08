@@ -81,7 +81,7 @@ case "$IRQ_SKIP_ISOLATED" in
 esac
 
 deps_list="awk sed grep tr sleep taskset"
- 
+
 log_info "Checking dependencies: $deps_list"
 if ! check_dependencies "$deps_list"; then
     log_skip "$TESTNAME SKIP - missing one or more dependencies: $deps_list"
