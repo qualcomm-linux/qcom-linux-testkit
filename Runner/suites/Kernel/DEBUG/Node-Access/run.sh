@@ -46,12 +46,12 @@ reset_source_sink() {
     log_info "Dynamically finding and resetting all Coresight sources and sinks..."
     for _dev in "$CS_BASE"/*; do
         [ -e "$_dev" ] || continue
-        
+
         # Disable if it's a source
         if [ -f "$_dev/enable_source" ]; then
             echo 0 > "$_dev/enable_source" 2>/dev/null || true
         fi
-        
+
         # Disable if it's a sink
         if [ -f "$_dev/enable_sink" ]; then
             echo 0 > "$_dev/enable_sink" 2>/dev/null || true

@@ -57,7 +57,7 @@ check_audio_daemon() {
 resolve_clip() {
   fmt="$1"; dur="$2"
   base="${AUDIO_CLIPS_BASE_DIR:-AudioClips}"
-  
+
   case "$fmt:$dur" in
     wav:short|wav:medium|wav:long)
       # Try hardcoded clip first (backward compatibility)
@@ -66,7 +66,7 @@ resolve_clip() {
         printf '%s\n' "$clip"
         return 0
       fi
-      
+
       # Fallback: discover first available clip
       first_clip="$(find "$base" -maxdepth 1 -name "*.wav" -type f 2>/dev/null | head -n1)"
       if [ -n "$first_clip" ] && [ -f "$first_clip" ]; then
@@ -74,7 +74,7 @@ resolve_clip() {
         printf '%s\n' "$first_clip"
         return 0
       fi
-      
+
       # No clips available
       log_error "No audio clips found in $base" >&2
       printf '%s\n' ""
@@ -298,7 +298,7 @@ dump_mixers() {
     else
       echo "(wpctl not found)"
     fi
- 
+
     echo "---- pactl list ----"
     if command -v pactl >/dev/null 2>&1; then
       audio_exec_with_timeout 3s pactl list 2>&1 || echo "(pactl list failed/timeout)"
@@ -314,10 +314,10 @@ dump_mixers() {
 # Returns child's exit code. For the fallback-kill path, returns 143 on timeout.
 audio_timeout_run() {
   tmo="$1"; shift
- 
+
   # 0/empty => run without a watchdog (do NOT background/kill)
   case "$tmo" in ""|0|"0s"|"0S") "$@"; return $? ;; esac
- 
+
   # Use project-provided wrappers if available
   if command -v run_with_timeout >/dev/null 2>&1; then
     run_with_timeout "$tmo" "$@"; return $?
@@ -328,14 +328,14 @@ audio_timeout_run() {
   if command -v timeout >/dev/null 2>&1; then
     timeout "$tmo" "$@"; return $?
   fi
- 
+
   # Last-resort busybox-safe watchdog
   # Normalize "15s" -> 15
   sec="$(printf '%s' "$tmo" | sed 's/[sS]$//')"
   [ -z "$sec" ] && sec="$tmo"
   # If parsing failed for some reason, just run directly
   case "$sec" in ''|*[!0-9]* ) "$@"; return $? ;; esac
- 
+
   "$@" &
   pid=$!
   t=0
@@ -353,29 +353,29 @@ audio_timeout_run() {
 audio_restart_services_best_effort() {
   uid="$(id -u 2>/dev/null || echo 0)"
   rt="${XDG_RUNTIME_DIR:-/run/user/$uid}"
- 
+
   # Ensure runtime dir exists (some LAVA/minimal images may not have it)
   if [ ! -d "$rt" ] && [ -n "$rt" ]; then
     mkdir -p "$rt" 2>/dev/null || true
     chmod 700 "$rt" 2>/dev/null || true
   fi
   [ -d "$rt" ] && export XDG_RUNTIME_DIR="$rt"
- 
+
   # systemd user + system (best effort, bounded time)
   if command -v systemctl >/dev/null 2>&1; then
     # optional reloads (some images need this after overlay / unit changes)
     audio_exec_with_timeout 10s systemctl --user daemon-reload >/dev/null 2>&1 || true
     audio_exec_with_timeout 10s systemctl daemon-reload >/dev/null 2>&1 || true
- 
+
     audio_exec_with_timeout 10s systemctl --user restart pipewire pipewire-pulse wireplumber pulseaudio >/dev/null 2>&1 || true
     audio_exec_with_timeout 10s systemctl restart pipewire pipewire-pulse wireplumber pulseaudio >/dev/null 2>&1 || true
   fi
- 
+
   # If control-plane is OK already, stop here (accept PW or PA)
   if audio_pw_ctl_ok 2>/dev/null || audio_pa_ctl_ok 2>/dev/null; then
     return 0
   fi
- 
+
   # hard reset (works without systemd/user session)
   if command -v pkill >/dev/null 2>&1; then
     pkill -x wireplumber >/dev/null 2>&1 || true
@@ -385,9 +385,9 @@ audio_restart_services_best_effort() {
   elif command -v killall >/dev/null 2>&1; then
     killall -q wireplumber pipewire-pulse pipewire pulseaudio 2>/dev/null || true
   fi
- 
+
   sleep 1
- 
+
   # stale sockets/locks
   if [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -d "$XDG_RUNTIME_DIR" ]; then
     rm -f "$XDG_RUNTIME_DIR/pipewire-0" \
@@ -397,26 +397,26 @@ audio_restart_services_best_effort() {
           "$XDG_RUNTIME_DIR/pulse/cookie" \
           2>/dev/null || true
   fi
- 
+
   # respawn (best effort, ShellCheck-clean)
   if command -v pipewire >/dev/null 2>&1; then
     pipewire >/dev/null 2>&1 &
   fi
- 
+
   if command -v wireplumber >/dev/null 2>&1; then
     wireplumber >/dev/null 2>&1 &
   elif command -v pipewire-media-session >/dev/null 2>&1; then
     pipewire-media-session >/dev/null 2>&1 &
   fi
- 
+
   if command -v pipewire-pulse >/dev/null 2>&1; then
     pipewire-pulse >/dev/null 2>&1 &
   fi
- 
+
   if command -v pulseaudio >/dev/null 2>&1; then
     pulseaudio --start >/dev/null 2>&1 || true
   fi
- 
+
   return 0
 }
 
@@ -505,30 +505,30 @@ audio_restart_pipewire_service() {
 # and does not restart PipeWire, so distro regressions are not hidden by tests.
 setup_overlay_audio_environment() {
   PIPEWIRE_READY_TIMEOUT="${PIPEWIRE_READY_TIMEOUT:-120}"
- 
+
   if ! command -v lsmod >/dev/null 2>&1; then
     log_fail "lsmod command not available, cannot detect overlay audio modules"
     return 1
   fi
- 
+
   audio_modules="$(lsmod 2>/dev/null)" || {
     log_fail "lsmod failed, cannot detect overlay audio modules"
     return 1
   }
- 
+
   if ! printf '%s\n' "$audio_modules" | awk '$1 ~ /^audioreach/ { found=1; exit } END { exit !found }'; then
     log_info "Base build detected, no audioreach modules, skipping overlay setup"
     return 0
   fi
- 
+
   log_info "Overlay build detected, validating distro-provided audio prerequisites"
- 
+
   if [ ! -e /dev/dma_heap/system ]; then
     log_fail "/dev/dma_heap/system is missing"
     log_fail "Distro should provide dma_heap system node for overlay audio"
     return 1
   fi
- 
+
   if command -v stat >/dev/null 2>&1; then
     dma_heap_mode="$(stat -c '%a' /dev/dma_heap/system 2>/dev/null || echo unknown)"
     dma_heap_owner="$(stat -c '%U:%G' /dev/dma_heap/system 2>/dev/null || echo unknown)"
@@ -536,7 +536,7 @@ setup_overlay_audio_environment() {
   else
     log_info "stat command not available, skipping /dev/dma_heap/system mode and owner dump"
   fi
- 
+
   if [ -r /dev/dma_heap/system ] && [ -w /dev/dma_heap/system ]; then
     log_pass "/dev/dma_heap/system is accessible"
   else
@@ -544,7 +544,7 @@ setup_overlay_audio_environment() {
     log_fail "Distro should provide correct dma_heap permissions, test will not chmod it"
     return 1
   fi
- 
+
   log_info "Waiting for PipeWire readiness, timeout ${PIPEWIRE_READY_TIMEOUT}s"
   if audio_wait_audio_ready "$PIPEWIRE_READY_TIMEOUT" pipewire; then
     log_pass "PipeWire is ready"
@@ -553,7 +553,7 @@ setup_overlay_audio_environment() {
     log_fail "Distro should start PipeWire correctly, test will not restart it during overlay setup"
     return 1
   fi
- 
+
   log_pass "Overlay audio prerequisites are ready"
   return 0
 }
@@ -570,7 +570,7 @@ pwctl_inspect_safe() {
 # ---------- PipeWire: sinks (playback) ----------
 pw_default_speakers() {
   st="$(pwctl_status_safe 2>/dev/null)" || { printf '%s\n' ""; return 0; }
- 
+
   _block="$(printf '%s\n' "$st" | sed -n '/Sinks:/,/Sources:/p')"
   _id="$(printf '%s\n' "$_block" \
         | grep -i -E 'speaker|headphone' \
@@ -629,7 +629,7 @@ pw_set_default_sink() {
 # ---------- PipeWire: sources (record) ----------
 pw_default_mic() {
   st="$(pwctl_status_safe 2>/dev/null)" || { printf '%s\n' ""; return 0; }
- 
+
   blk="$(printf '%s\n' "$st" | sed -n '/Sources:/,/^$/p')"
   id="$(printf '%s\n' "$blk" | grep -i 'mic' | sed -n 's/^[^0-9]*\([0-9][0-9]*\)\..*/\1/p' | head -n1)"
   [ -n "$id" ] || id="$(printf '%s\n' "$blk" | sed -n 's/^[^0-9]*\([0-9][0-9]*\)\..*/\1/p' | head -n1)"
@@ -638,7 +638,7 @@ pw_default_mic() {
 
 pw_default_null_source() {
   st="$(pwctl_status_safe 2>/dev/null)" || { printf '%s\n' ""; return 0; }
- 
+
   blk="$(printf '%s\n' "$st" | sed -n '/Sources:/,/^$/p')"
   id="$(printf '%s\n' "$blk" | grep -i 'null\|dummy' | sed -n 's/^[^0-9]*\([0-9][0-9]*\)\..*/\1/p' | head -n1)"
   printf '%s\n' "$id"
@@ -754,7 +754,7 @@ audio_evidence_pw_streaming() {
   fi
   echo 0
 }
- 
+
 # 2) PulseAudio streaming - safe when PA is absent (returns 0 without forcing FAIL)
 #Return 1 if PulseAudio is actively streaming (sink-inputs, source-outputs, or RUNNING sink),
 # else 0. Works even when the PA daemon is a different user by trying sockets + cookies.
@@ -767,7 +767,7 @@ audio_evidence_pa_streaming() {
     fi
     echo 0; return
   }
- 
+
   # build candidate socket + cookie pairs
   cand=""
   # per-user runtime dir sockets
@@ -790,7 +790,7 @@ audio_evidence_pa_streaming() {
   done
   # also try current env (no explicit socket)
   cand="$cand|::env::|"
- 
+
   # try pactl first with cookie if available
   if command -v pactl >/dev/null 2>&1; then
     IFS='|' read -r _ sock cookie rest <<EOF
@@ -832,7 +832,7 @@ $rest
 EOF
     done
   fi
- 
+
   # fall back to pacmd if pactl didn't work
   if command -v pacmd >/dev/null 2>&1; then
     IFS='|' read -r _ sock cookie rest <<EOF
@@ -863,15 +863,15 @@ $rest
 EOF
     done
   fi
- 
+
   # Last resort: infer from our player/recorder logs
   if [ -n "${AUDIO_LOGCTX:-}" ] && [ -s "$AUDIO_LOGCTX" ]; then
     grep -qiE 'Connected to PulseAudio|Opening audio stream|Stream started|Starting recording|Playing' "$AUDIO_LOGCTX" && { echo 1; return; }
   fi
- 
+
   echo 0
 }
- 
+
 # 3) ALSA RUNNING - sample a few times to beat teardown race
 audio_evidence_alsa_running_any() {
   found=0
@@ -887,29 +887,29 @@ audio_evidence_alsa_running_any() {
 audio_evidence_asoc_path_on() {
   base="/sys/kernel/debug/asoc"
   [ -d "$base" ] || { echo 0; return; }
- 
+
   # Fast path: any explicit "On" marker in any dapm node
   if grep -RIlq --binary-files=text -E '(^|\s)\[on\]|\:\s*On(\s|$)' "$base"/*/dapm 2>/dev/null; then
     echo 1; return
   fi
- 
+
   # Many QCS boards expose lots of Playback/Capture endpoints; if any of them say "On", mark active
   dapm_pc_files="$(grep -RIl --binary-files=text -E '/dapm/.*(Playback|Capture)$' "$base"/*/dapm 2>/dev/null)"
   if [ -n "$dapm_pc_files" ]; then
     echo "$dapm_pc_files" | xargs -r grep -I -q -E ':\s*On(\s|$)' 2>/dev/null && { echo 1; return; }
   fi
- 
+
   # Some kernels only flip bias level when any path is active
   if grep -RIlq --binary-files=text '/dapm/bias_level$' "$base"/*/dapm 2>/dev/null; then
     grep -RIl --binary-files=text '/dapm/bias_level$' "$base"/*/dapm 2>/dev/null \
       | xargs -r grep -I -q -E 'On|Standby' 2>/dev/null && { echo 1; return; }
   fi
- 
+
   # Fallback heuristic: if ALSA says a PCM substream is RUNNING, assume DAPM is up
   if audio_evidence_alsa_running_any 2>/dev/null | grep -qx 1; then
     echo 1; return
   fi
- 
+
   echo 0
 }
 # 5) PW log evidence (optional, from AUDIO_LOGCTX)
@@ -991,7 +991,7 @@ audio_parse_secs() {
 # --- Local watchdog that always honors the first argument (e.g. "15" or "15s") ---
 audio_exec_with_timeout() {
   dur="$1"; shift
- 
+
   # normalize: allow "15" or "15s"
   case "$dur" in
     ""|"0") dur_norm=0 ;;
@@ -999,20 +999,20 @@ audio_exec_with_timeout() {
     *) dur_norm="$dur" ;;
   esac
   case "$dur_norm" in *[!0-9]*|"") dur_norm=0 ;; esac
- 
+
   # no watchdog
   if [ "$dur_norm" -le 0 ] 2>/dev/null; then
     "$@"
     return $?
   fi
- 
+
   # Run in background and enforce our own bounded timeout (don't rely on external timeout)
   "$@" &
   pid=$!
- 
+
   start="$(date +%s 2>/dev/null || echo 0)"
   deadline=$((start + dur_norm))
- 
+
   # Wait until exit or deadline
   while kill -0 "$pid" 2>/dev/null; do
     now="$(date +%s 2>/dev/null || echo 0)"
@@ -1021,31 +1021,31 @@ audio_exec_with_timeout() {
     fi
     sleep 1
   done
- 
+
   # Timed out: try terminate/kill, but never block forever
   if kill -0 "$pid" 2>/dev/null; then
     kill -TERM "$pid" 2>/dev/null || true
     sleep 1
     kill -KILL "$pid" 2>/dev/null || true
- 
+
     # bounded grace wait (handles normal killable cases)
     grace=0
     while kill -0 "$pid" 2>/dev/null && [ "$grace" -lt 3 ]; do
       sleep 1
       grace=$((grace + 1))
     done
- 
+
     # Still alive -> likely D-state. Do NOT wait forever.
     if kill -0 "$pid" 2>/dev/null; then
       return 124
     fi
- 
+
     wait "$pid" 2>/dev/null
     rc=$?
     [ "$rc" -eq 143 ] 2>/dev/null && rc=124
     return "$rc"
   fi
- 
+
   # Exited naturally before timeout
   wait "$pid" 2>/dev/null
   return $?
@@ -1116,7 +1116,7 @@ pwctl_status_safe() {
   [ "$rc" -eq 0 ] || return 1
   printf '%s\n' "$out"
 }
- 
+
 audio_pw_ctl_ok() {
   pwctl_status_safe >/dev/null 2>&1
 }
@@ -1153,15 +1153,15 @@ file_size_bytes() {
 # Returns: 0=success, 1=unable to parse duration
 extract_clip_duration() {
   filename="$1"
-  
+
   # Extract duration field from pattern: _RATE_DURATIONs_BITS_CHANNELS.wav
   # Use sed to match the exact 4-field structure
   duration_str="$(printf '%s' "$filename" | sed -n 's/.*_[0-9.][0-9.]*KHz_\([0-9][0-9]*\)s_[0-9][0-9]*b_[0-9][0-9]*ch\.wav$/\1/p')"
-  
+
   if [ -z "$duration_str" ]; then
     return 1
   fi
-  
+
   printf '%s\n' "$duration_str"
   return 0
 }
@@ -1263,7 +1263,7 @@ audio_check_clips_available() {
 # Returns descriptive test case name for given config
 map_config_to_testcase() {
   config="$1"
-  
+
   # Extract config number if using playback_config format
   config_num=""
   case "$config" in
@@ -1290,7 +1290,7 @@ map_config_to_testcase() {
       config_num="$config"
       ;;
   esac
-  
+
   # Map config number to test case name
   case "$config_num" in
     1)  printf 'play_8KHz_8b_1ch\n' ;;
@@ -1314,22 +1314,22 @@ map_config_to_testcase() {
 # Exit codes: 0=success, 1=directory not found or no clips
 discover_audio_clips() {
   clips_dir="${AUDIO_CLIPS_BASE_DIR:-AudioClips}"
-  
+
   # Check directory exists
   if [ ! -d "$clips_dir" ]; then
     log_error "Clips directory not found: $clips_dir" >&2
     return 1
   fi
-  
+
   # Find .wav files (only in top level, not recursive)
   clips="$(find "$clips_dir" -maxdepth 1 -name "*.wav" -type f 2>/dev/null | sort)"
-  
+
   # Check if any clips found
   if [ -z "$clips" ]; then
     log_error "No .wav files found in $clips_dir" >&2
     return 1
   fi
-  
+
   # Output basenames only to stdout
   for clip in $clips; do
     basename "$clip"
@@ -1343,29 +1343,29 @@ discover_audio_clips() {
 # Returns: 0=success, 1=parse failure
 parse_clip_metadata() {
   filename="$1"
-  
+
   # Extract rate, bits, and channels in one sed call
   # Pattern matches exact 4-field structure from end: _RATE_DURATIONs_BITS_CHANNELS.wav
   # Anchored to .wav extension to ensure we're matching the correct fields
   metadata="$(printf '%s' "$filename" | sed -n 's/.*_\([0-9.][0-9.]*KHz\)_\([0-9][0-9]*s\)_\([0-9][0-9]*b\)_\([0-9][0-9]*ch\)\.wav$/\1 \3 \4/p')"
-  
+
   # Validate extraction succeeded
   if [ -z "$metadata" ]; then
     log_warn "Cannot parse metadata from: $filename (skipping)"
     return 1
   fi
-  
+
   # Split extracted fields (rate bits channels)
   # shellcheck disable=SC2086 # Intentional field splitting of generated key=value triplet.
   set -- $metadata
   rate="$1"; bits="$2"; channels="$3"
-  
+
   # Validate all components present
   if [ -z "$rate" ] || [ -z "$bits" ] || [ -z "$channels" ]; then
     log_warn "Cannot parse metadata from: $filename (skipping)"
     return 1
   fi
-  
+
   printf 'rate=%s bits=%s channels=%s\n' "$rate" "$bits" "$channels"
   return 0
 }
@@ -1376,17 +1376,17 @@ parse_clip_metadata() {
 # Returns: 0=success, 1=parse failure
 generate_clip_testcase_name() {
   filename="$1"
-  
+
   # Parse metadata (returns "rate=48KHz bits=16b channels=2ch")
   metadata="$(parse_clip_metadata "$filename")" || return 1
-  
+
   # Extract values using positional parameters and prefix stripping
   # shellcheck disable=SC2086 # Intentional field splitting of generated key=value triplet.
   set -- $metadata
   rate="${1#rate=}"
   bits="${2#bits=}"
   channels="${3#channels=}"
-  
+
   # Generate test case name
   printf 'play_%s_%s_%s\n' "$rate" "$bits" "$channels"
   return 0
@@ -1399,7 +1399,7 @@ generate_clip_testcase_name() {
 resolve_clip_by_name() {
   name="$1"
   clips_dir="${AUDIO_CLIPS_BASE_DIR:-AudioClips}"
-  
+
   # If name already looks like a filename, try direct path
   if printf '%s' "$name" | grep -F -q -- '.wav'; then
     clip_path="$clips_dir/$name"
@@ -1408,22 +1408,22 @@ resolve_clip_by_name() {
       return 0
     fi
   fi
-  
+
   # Strip "play_" prefix if present
   search_name="$(printf '%s' "$name" | sed 's/^play_//')"
-  
+
   # Search for matching clip using literal string matching
   for clip_file in "$clips_dir"/*.wav; do
     [ -f "$clip_file" ] || continue
     clip_basename="$(basename "$clip_file")"
-    
+
     # Check if clip contains the search pattern (literal string match)
     if printf '%s' "$clip_basename" | grep -F -q -- "$search_name"; then
       printf '%s\n' "$clip_file"
       return 0
     fi
   done
-  
+
   return 1
 }
 
@@ -1435,7 +1435,7 @@ resolve_clip_by_name() {
 validate_clip_name() {
   requested_name="$1"
   available_clips="$2"
-  
+
   # Check if requested_name is a generic config name (playback_config1, Config1, etc.)
   # Support both formats for backward compatibility
   config_num=""
@@ -1447,20 +1447,20 @@ validate_clip_name() {
       config_num="$(printf '%s' "$requested_name" | sed -n 's/^[Cc]onfig\([0-9][0-9]*\)$/\1/p')"
       ;;
   esac
-  
+
   if [ -n "$config_num" ]; then
     # Generic config name - map to clip by index (1-based)
     # Count total clips first using POSIX-compliant approach
     # shellcheck disable=SC2086 # Intentional field splitting of generated key=value triplet.
     set -- $available_clips
     idx=$#
-    
+
     # Validate config number is positive and within range
     if [ "$config_num" -le 0 ] 2>/dev/null || [ "$config_num" -gt "$idx" ] 2>/dev/null; then
       log_error "Invalid config number: $requested_name. Available range: Config1 to Config$idx. Please check again." >&2
       return 1
     fi
-    
+
     # Get clip by index (1-based) using POSIX-compliant approach
     current_idx=0
     for clip in $available_clips; do
@@ -1470,12 +1470,12 @@ validate_clip_name() {
         return 0
       fi
     done
-    
+
     # This shouldn't happen, but just in case
     log_error "Invalid config number: $requested_name. Available range: Config1 to Config$idx. Please check again." >&2
     return 1
   fi
-  
+
   # Try exact match for specific clip names (play_48KHz_16b_2ch format)
   for clip in $available_clips; do
     test_name="$(generate_clip_testcase_name "$clip" 2>/dev/null)" || continue
@@ -1484,12 +1484,12 @@ validate_clip_name() {
       return 0
     fi
   done
-  
+
   # No match found - count available clips for helpful message using POSIX-compliant approach
   # shellcheck disable=SC2086 # Intentional field splitting of space-separated clip list.
   set -- $available_clips
   idx=$#
-  
+
   # No match found - provide helpful error message with range
   log_error "Wrong clip name: '$requested_name'. Available range: playback_config1 to playback_config$idx. Please check again." >&2
   return 1
@@ -1501,13 +1501,13 @@ validate_clip_name() {
 apply_clip_filter() {
   filter="$1"
   available_clips="$2"
-  
+
   # If no filter, return all clips
   if [ -z "$filter" ]; then
     printf '%s\n' "$available_clips"
     return 0
   fi
-  
+
   # Apply filter
   filtered=""
   for clip in $available_clips; do
@@ -1520,10 +1520,10 @@ apply_clip_filter() {
       fi
     done
   done
-  
+
   # Remove leading space
   filtered="$(printf '%s' "$filtered" | sed 's/^ //')"
-  
+
   # Check if filter matched anything
   if [ -z "$filtered" ]; then
     log_error "Filter '$filter' matched no clips" >&2
@@ -1533,7 +1533,7 @@ apply_clip_filter() {
     done
     return 1
   fi
-  
+
   printf '%s\n' "$filtered"
   return 0
 }
@@ -1543,26 +1543,26 @@ apply_clip_filter() {
 # Returns: 0=valid, 1=invalid
 validate_clip_file() {
   clip_path="$1"
-  
+
   # Check exists
   if [ ! -f "$clip_path" ]; then
     log_error "Clip file not found: $clip_path"
     return 1
   fi
-  
+
   # Check readable
   if [ ! -r "$clip_path" ]; then
     log_error "Clip file not readable: $clip_path"
     return 1
   fi
-  
+
   # Check not empty using portable file size helper
   size="$(file_size_bytes "$clip_path")"
   if [ -z "$size" ] || [ "$size" -le 0 ] 2>/dev/null; then
     log_error "Clip file is empty: $clip_path"
     return 1
   fi
-  
+
   return 0
 }
 
@@ -1574,18 +1574,18 @@ validate_clip_file() {
 discover_and_filter_clips() {
   clip_names="$1"
   clip_filter="$2"
-  
+
   # Discover all available clips (logs go to stderr automatically)
   available_clips="$(discover_audio_clips)" || {
     log_error "Failed to discover audio clips" >&2
     return 1
   }
-  
+
   # If explicit clip names provided, validate and use them
   if [ -n "$clip_names" ]; then
     validated=""
     failed_names=""
-    
+
     for name in $clip_names; do
       # Validate clip name - let error messages display to stderr
       if clip="$(validate_clip_name "$name" "$available_clips")"; then
@@ -1594,24 +1594,24 @@ discover_and_filter_clips() {
         failed_names="$failed_names $name"
       fi
     done
-    
+
     validated="$(printf '%s' "$validated" | sed 's/^ //')"
     failed_names="$(printf '%s' "$failed_names" | sed 's/^ //')"
-    
+
     if [ -z "$validated" ]; then
       # Don't repeat the error - validate_clip_name already showed it
       return 1
     fi
-    
+
     # Warn about any failed names (only if there are some valid ones)
     if [ -n "$failed_names" ]; then
       log_warn "Invalid clip/config names skipped: $failed_names" >&2
     fi
-    
+
     printf '%s\n' "$validated"
     return 0
   fi
-  
+
   # Apply filter if provided
   if [ -n "$clip_filter" ]; then
     filtered="$(apply_clip_filter "$clip_filter" "$available_clips" 2>/dev/null)" || {
@@ -1621,7 +1621,7 @@ discover_and_filter_clips() {
     printf '%s\n' "$filtered"
     return 0
   fi
-  
+
   # No filter - return all clips
   printf '%s\n' "$available_clips"
   return 0
@@ -1643,7 +1643,7 @@ discover_record_configs() {
 # Returns: 0=success, 1=invalid config
 get_record_config_params() {
   config_name="$1"
-  
+
   # Normalize config name to handle both formats (record_config1 and record_config01)
   normalized_name="$config_name"
   case "$config_name" in
@@ -1657,7 +1657,7 @@ get_record_config_params() {
       # If config_num is empty, normalized_name stays as original config_name
       ;;
   esac
-  
+
   case "$normalized_name" in
     record_config1|record_8KHz_1ch)      printf '%s\n' "8000 1" ;;
     record_config2|record_16KHz_1ch)     printf '%s\n' "16000 1" ;;
@@ -1680,7 +1680,7 @@ get_record_config_params() {
 # Returns: 0=success, 1=invalid config
 generate_record_testcase_name() {
   config_name="$1"
-  
+
   # Normalize config name to handle both formats (record_config1 and record_config01)
   normalized_name="$config_name"
   case "$config_name" in
@@ -1690,7 +1690,7 @@ generate_record_testcase_name() {
       normalized_name="record_config$config_num"
       ;;
   esac
-  
+
   case "$normalized_name" in
     record_config1)  printf '%s\n' "record_8KHz_1ch" ;;
     record_config2)  printf '%s\n' "record_16KHz_1ch" ;;
@@ -1715,7 +1715,7 @@ generate_record_filename() {
   testcase_base="$1"
   rate="$2"
   channels="$3"
-  
+
   # Convert rate to KHz format
   rate_khz="$rate"
   case "$rate" in
@@ -1734,7 +1734,7 @@ generate_record_filename() {
     384000) rate_khz="384KHz" ;;
     *) rate_khz="${rate}Hz" ;;  # Fallback for unknown rates
   esac
-  
+
   printf '%s_%s_%sch.wav\n' "$testcase_base" "$rate_khz" "$channels"
   return 0
 }
@@ -1744,13 +1744,13 @@ generate_record_filename() {
 # Returns: 0=valid, 1=invalid (with helpful error message)
 validate_record_config_name() {
   requested_name="$1"
-  
+
   # Validate by checking if get_record_config_params() supports it
   # This eliminates redundant pattern matching that could be misleading
   if get_record_config_params "$requested_name" >/dev/null 2>&1; then
     return 0
   fi
-  
+
   log_error "Invalid record config name: $requested_name" >&2
   log_error "Available configs: record_config1-record_config10, record_8KHz_1ch, record_16KHz_1ch, record_16KHz_2ch, record_24KHz_1ch, record_32KHz_2ch, record_44.1KHz_2ch, record_48KHz_2ch, record_48KHz_6ch, record_96KHz_2ch, record_96KHz_6ch" >&2
   return 1
@@ -1763,19 +1763,19 @@ validate_record_config_name() {
 apply_record_config_filter() {
   filter="$1"
   available_configs="$2"
-  
+
   # If no filter, return all configs
   if [ -z "$filter" ]; then
     printf '%s\n' "$available_configs"
     return 0
   fi
-  
+
   # Apply filter
   filtered=""
   for config in $available_configs; do
     # Generate descriptive name for matching
     desc_name="$(generate_record_testcase_name "$config" 2>/dev/null)" || continue
-    
+
     for pattern in $filter; do
       # Match against config name or descriptive name
       if printf '%s %s' "$config" "$desc_name" | grep -F -q -- "$pattern"; then
@@ -1784,17 +1784,17 @@ apply_record_config_filter() {
       fi
     done
   done
-  
+
   # Remove leading space
   filtered="$(printf '%s' "$filtered" | sed 's/^ //')"
-  
+
   # Check if filter matched anything
   if [ -z "$filtered" ]; then
     log_error "Filter '$filter' matched no record configs" >&2
     log_info "Available configs: record_config1 to record_config10" >&2
     return 1
   fi
-  
+
   printf '%s\n' "$filtered"
   return 0
 }
@@ -1807,15 +1807,15 @@ apply_record_config_filter() {
 discover_and_filter_record_configs() {
   config_names="$1"
   config_filter="$2"
-  
+
   # Get all available configs
   available_configs="$(discover_record_configs)"
-  
+
   # If explicit config names provided, validate and use them
   if [ -n "$config_names" ]; then
     validated=""
     failed_names=""
-    
+
     for name in $config_names; do
       if validate_record_config_name "$name"; then
         validated="$validated $name"
@@ -1823,30 +1823,30 @@ discover_and_filter_record_configs() {
         failed_names="$failed_names $name"
       fi
     done
-    
+
     validated="$(printf '%s' "$validated" | sed 's/^ //')"
     failed_names="$(printf '%s' "$failed_names" | sed 's/^ //')"
-    
+
     if [ -z "$validated" ]; then
       return 1
     fi
-    
+
     # Warn about any failed names (only if there are some valid ones)
     if [ -n "$failed_names" ]; then
       log_warn "Invalid record config names skipped: $failed_names" >&2
     fi
-    
+
     printf '%s\n' "$validated"
     return 0
   fi
-  
+
   # Apply filter if provided
   if [ -n "$config_filter" ]; then
     filtered="$(apply_record_config_filter "$config_filter" "$available_configs")" || return 1
     printf '%s\n' "$filtered"
     return 0
   fi
-  
+
   # No filter - return all configs
   printf '%s\n' "$available_configs"
   return 0

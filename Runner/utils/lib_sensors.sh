@@ -194,18 +194,18 @@ sensors_run_cmd_with_progress() {
 sensors_see_workhorse_passed() {
   logf="$1"
   [ -r "$logf" ] || return 1
- 
+
   # Decide verdict by the *last* PASS/FAIL marker in the log.
   # This handles duplicate PASS lines and any earlier noise.
   last="$(grep -E '^(PASS|FAIL)[[:space:]]+see_workhorse' "$logf" 2>/dev/null | tail -n 1 | awk '{print $1}')"
- 
+
   if [ "$last" = "PASS" ]; then
     return 0
   fi
   if [ "$last" = "FAIL" ]; then
     return 1
   fi
- 
+
   # Fallback if no explicit markers found:
   # consider non-empty log as "likely ran", but you can make this stricter if needed.
   [ -s "$logf" ] && return 0

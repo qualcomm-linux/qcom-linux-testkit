@@ -90,7 +90,7 @@ GEEKBENCH_ARGS="${GEEKBENCH_ARGS:-}"
 usage() {
   cat <<EOF
 Usage: $0 [script options] [-- geekbench options...]
- 
+
 Script options (handled by this wrapper):
   -h|--help|-help                 Show this help and exit (does NOT run Geekbench)
   --outdir DIR                    Output directory (default: $OUTDIR_DEFAULT)
@@ -101,7 +101,7 @@ Script options (handled by this wrapper):
   --unlock EMAIL KEY              Unlock Geekbench (if supported)
   --no-perf-gov                   Do not force CPU governor to performance
   --progress-heartbeat N          Progress heartbeat seconds (default: ${PROGRESS_HEARTBEAT_SECS})
- 
+
 Geekbench convenience options (parsed/validated by this wrapper, then passed to Geekbench if supported):
   --no-upload                     Default behavior (if supported)
   --upload
@@ -127,16 +127,16 @@ Geekbench convenience options (parsed/validated by this wrapper, then passed to 
   --cpu-workers N
   --iterations N
   --workload-gap N
- 
+
 Forwarding rules:
   - Unknown options are forwarded to Geekbench.
   - Use "--" to pass raw Geekbench args without wrapper parsing.
- 
+
 Examples:
   $0 --bin /var/Geekbench/geekbench_aarch64 --single-core
   $0 --runs 3 --core-list 0-3 -- --no-upload --single-core
   $0 -- --help        # show Geekbench's own help
- 
+
 Notes:
   - Script always exits 0 and writes PASS/FAIL/SKIP to .res
 EOF

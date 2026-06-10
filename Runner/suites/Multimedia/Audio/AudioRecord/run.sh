@@ -517,16 +517,16 @@ esac
 # after creating empty files.
 if [ -z "$SRC_ID" ] && [ "$SRC_CHOICE" = "mic" ] && [ "$AUDIO_BACKEND" = "pipewire" ]; then
   log_warn "$TESTNAME: no concrete PipeWire mic source found; probing direct ALSA capture path"
- 
+
   if audio_probe_alsa_capture_profile; then
     ALSA_CAPTURE_PROBED=1
     AUDIO_BACKEND="alsa"
     AUDIO_SYSTEMD_MANAGED=0
     export AUDIO_SYSTEMD_MANAGED
- 
+
     SRC_ID="$AUDIO_ALSA_CAPTURE_DEVICE"
     SRC_LABEL="$SRC_ID"
- 
+
     log_warn "$TESTNAME: falling back to direct ALSA capture device: $SRC_ID"
   else
     log_skip "$TESTNAME SKIP - no real capture source available; PipeWire mic source missing and ALSA capture probe failed: ${AUDIO_ALSA_CAPTURE_REASON:-capture path unavailable}"
@@ -534,11 +534,11 @@ if [ -z "$SRC_ID" ] && [ "$SRC_CHOICE" = "mic" ] && [ "$AUDIO_BACKEND" = "pipewi
     exit 0
   fi
 fi
- 
+
 if [ -z "$SRC_ID" ] && [ "$SRC_CHOICE" = "mic" ] && [ "$AUDIO_BACKEND" != "pipewire" ]; then
   for b in $BACKENDS_TO_TRY; do
     [ "$b" = "$AUDIO_BACKEND" ] && continue
- 
+
     case "$b" in
       pipewire)
         cand="$(pw_default_mic)"
@@ -564,10 +564,10 @@ if [ -z "$SRC_ID" ] && [ "$SRC_CHOICE" = "mic" ] && [ "$AUDIO_BACKEND" != "pipew
           AUDIO_BACKEND="alsa"
           AUDIO_SYSTEMD_MANAGED=0
           export AUDIO_SYSTEMD_MANAGED
- 
+
           SRC_ID="$AUDIO_ALSA_CAPTURE_DEVICE"
           SRC_LABEL="$SRC_ID"
- 
+
           log_info "Falling back to backend: alsa (device=$SRC_ID)"
           break
         fi
@@ -575,7 +575,7 @@ if [ -z "$SRC_ID" ] && [ "$SRC_CHOICE" = "mic" ] && [ "$AUDIO_BACKEND" != "pipew
     esac
   done
 fi
- 
+
 if [ -z "$SRC_ID" ]; then
   log_skip "$TESTNAME SKIP - requested source '$SRC_CHOICE' not available on any backend (${BACKENDS_TO_TRY:-unknown})"
   echo "$RESULT_TESTNAME SKIP" > "$RES_FILE"
