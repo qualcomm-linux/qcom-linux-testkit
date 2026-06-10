@@ -800,6 +800,23 @@ check_kernel_config() {
     return 0
 }
 
+# Check each given kernel config is set to y/m in /proc/config.gz, logs result, returns 0/1.
+check_optional_config() {
+    cfgs=$1
+    missing=0
+ 
+    for config_key in $cfgs; do
+        if check_kernel_config "$config_key" >/dev/null 2>&1; then
+            log_pass "Optional Kernel config $config_key is enabled"
+        else
+            log_warn "Optional Kernel config $config_key is missing or not enabled"
+            missing=1
+        fi
+    done
+ 
+    return "$missing"
+}
+
 check_dt_nodes() {
     node_paths="$1"
     log_info "$node_paths"
