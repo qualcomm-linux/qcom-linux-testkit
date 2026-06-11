@@ -147,33 +147,52 @@ check_dependencies() {
         # shellcheck disable=SC2086
         set -- $1
     fi
-
+ 
     missing=0
     missing_cmds=""
-
+ 
+    if [ -n "${TOOLS:-}" ] && [ -f "$TOOLS/lib_pkg_provider.sh" ]; then
+        # shellcheck disable=SC1091
+        . "$TOOLS/lib_pkg_provider.sh"
+    fi
+ 
     for cmd in "$@"; do
         [ -n "$cmd" ] || continue
-        if ! command -v "$cmd" >/dev/null 2>&1; then
-            log_warn "Required command '$cmd' not found in PATH."
-            missing=1
-            missing_cmds="$missing_cmds $cmd"
+ 
+        if command -v "$cmd" >/dev/null 2>&1; then
+            continue
         fi
+ 
+        if command -v pkg_check_dependencies_recover_enabled >/dev/null 2>&1; then
+            if pkg_check_dependencies_recover_enabled; then
+                if pkg_ensure_command "$cmd"; then
+                    if command -v "$cmd" >/dev/null 2>&1; then
+                        continue
+                    fi
+                fi
+            fi
+        fi
+ 
+        log_warn "Required command '$cmd' not found in PATH."
+        missing=1
+        missing_cmds="$missing_cmds $cmd"
     done
-
+ 
     if [ "$missing" -ne 0 ]; then
         testname="${TESTNAME:-UnknownTest}"
         log_skip "$testname SKIP missing dependencies$missing_cmds"
         if [ -n "${TESTNAME:-}" ]; then
             echo "$TESTNAME SKIP" > "./$TESTNAME.res" 2>/dev/null || true
         fi
-
-        # Default: exit like today. Allow opt-out for callers that want a return code.
+ 
+        # Preserve existing escape hatch for callers that expect return code.
         if [ "${CHECK_DEPS_NO_EXIT:-0}" = "1" ]; then
             return 1
         fi
+ 
         exit 0
     fi
-
+ 
     return 0
 }
 
