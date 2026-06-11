@@ -20,7 +20,7 @@ if [ -z "$INIT_ENV" ]; then
 fi
 
 # Only source if not already loaded (idempotent)
-if [ -z "$__INIT_ENV_LOADED" ]; then
+if [ -z "${__INIT_ENV_LOADED:-}" ]; then
     # shellcheck disable=SC1090
     . "$INIT_ENV"
 fi
@@ -38,30 +38,54 @@ log_info "----------------------------------------------------------------------
 log_info "-------------------Starting $TESTNAME Testcase----------------------------"
 log_info "=== Test Initialization ==="
 
-log_info "Getting the number of subsystems aavailable"
-
 detect_platform
 
-available_rprocs=$(cat /sys/class/remoteproc/remoteproc*/firmware)
-
-# Check if any line contains "modem"
-if printf '%s\n' "$available_rprocs" | grep -q "modem" && [ "${PLATFORM_TARGET}" = "Kodiak" ]; then
-    subsystem_count=$(printf '%s\n' "$available_rprocs" | grep -vc "modem")
-else
-    # "modem" not found, count all lines
-    subsystem_count=$(printf '%s\n' "$available_rprocs" | wc -l)
+if [ ! -d "/sys/class/remoteproc" ]; then
+    log_skip "$TESTNAME : remoteproc sysfs not found (/sys/class/remoteproc missing), skipping test"
+    echo "$TESTNAME SKIP" > "$res_file"
+    exit 0
 fi
 
-# Execute the command and get the output
-log_info "Checking if all the remoteprocs are in running state"
-output=$(cat /sys/class/remoteproc/remoteproc*/state)
+rproc_count=$(find /sys/class/remoteproc -maxdepth 1 -name "remoteproc*" 2>/dev/null | wc -l)
+if [ "$rproc_count" -eq 0 ]; then
+    log_skip "$TESTNAME : No remoteproc entries found under /sys/class/remoteproc, skipping test"
+    echo "$TESTNAME SKIP" > "$res_file"
+    exit 0
+fi
 
-# Count the number of "running" values
-count=$(echo "$output" | grep -c "running")
-log_info "rproc subsystems in running state : $count, expected subsystems : $subsystem_count"
+all_pass=true
+
+# Iterate over each remoteproc instance
+for rproc_dir in /sys/class/remoteproc/remoteproc*; do
+    rproc_name=$(basename "$rproc_dir")
+    firmware=$(cat "$rproc_dir/firmware" 2>/dev/null)
+    state=$(cat "$rproc_dir/state" 2>/dev/null)
+
+    # Skip modem subsystem on Kodiak platform
+    if printf '%s' "$firmware" | grep -q "modem" && [ "${PLATFORM_TARGET}" = "Kodiak" ]; then
+        log_info "Skipping modem subsystem ($rproc_name) on Kodiak platform"
+        continue
+    fi
+
+    # soccp is expected to be in 'attached' state, all others in 'running' state
+    if printf '%s' "$firmware" | grep -q "soccp"; then
+        expected_state="attached"
+    else
+        expected_state="running"
+    fi
+
+    log_info "$rproc_name | firmware: $firmware | state: $state | expected: $expected_state"
+
+    if [ "$state" = "$expected_state" ]; then
+        log_info "$rproc_name is in expected state '$expected_state' : PASS"
+    else
+        log_fail "$rproc_name is in state '$state', expected '$expected_state' : FAIL"
+        all_pass=false
+    fi
+done
 
 # Print overall test result
-if [ "$count" -eq "$subsystem_count" ]; then
+if [ "$all_pass" = "true" ]; then
     log_pass "$TESTNAME : Test Passed"
     echo "$TESTNAME PASS" > "$res_file"
     exit 0
