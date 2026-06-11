@@ -1,0 +1,24 @@
+metadata:
+  name: audio-record-hamoa-headset
+  format: "Lava-Test Test Definition 1.0"
+  description: "Audio Hamoa headset recording validation (headset microphone)"
+  os:
+    - linux
+  scope:
+    - functional
+
+params:
+  DEVICE: "headset"  # Device to test: handset, headset, or all, default: headset
+  CONFIG_NAME: "record_config1"  # Record configuration name (e.g., record_config1), default: record_config1
+  DURATION: 5  # Recording duration in seconds, default: 5
+  SKIP_ACTUAL_RECORDING: 0  # Skip actual audio recording, only test mixer configuration (0=record audio, 1=skip), default: 0
+  VERBOSE: 0  # Enable verbose logging, default: 0
+  RES_SUFFIX: "Headset"  # Suffix for unique result file, default: Headset
+  LAVA_TESTCASE_ID: "AudioRecord_Hamoa_Headset"  # Unique testcase ID for LAVA, default: AudioRecord_Hamoa_Headset
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Multimedia/Audio/Audio_Hamoa/AudioRecord/
+    - ./run.sh --device "${DEVICE}" --config-name "${CONFIG_NAME}" --duration "${DURATION}" --skip-actual-recording "${SKIP_ACTUAL_RECORDING}" --verbose "${VERBOSE}" --res-suffix "${RES_SUFFIX}" --lava-testcase-id "${LAVA_TESTCASE_ID}" || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh AudioRecord_Hamoa${RES_SUFFIX:+_${RES_SUFFIX}}.res
