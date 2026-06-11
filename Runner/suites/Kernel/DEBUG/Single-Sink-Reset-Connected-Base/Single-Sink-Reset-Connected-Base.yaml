@@ -1,0 +1,16 @@
+metadata:
+  name: Single-Sink-Reset-Connected-Base
+  format: "Lava-Test Test Definition 1.0"
+  description: "Validates the robustness of CoreSight sinks when a reset occurs while trace sources are actively streaming data, specifically targeting STM/ETM writing into TMC sinks (ETR/ETF)."
+  os:
+    - linux
+  scope:
+    - coresight
+    - kernel
+
+run:
+  steps:
+    - REPO_PATH=$PWD || true
+    - cd Runner/suites/Kernel/DEBUG/Single-Sink-Reset-Connected-Base || true
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh Single-Sink-Reset-Connected-Base.res || true
