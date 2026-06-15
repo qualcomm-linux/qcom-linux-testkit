@@ -1,0 +1,15 @@
+metadata:
+  name: Kvm-Setup
+  format: "Lava-Test Test Definition 1.0"
+  description: "This test validates the initial provisioning, configuration, and booting lifecycle of KVM virtual machines managed via `virsh`."
+  os:
+    - linux
+  scope:
+    - functional
+
+run:
+  steps:
+    - REPO_PATH=$PWD || true
+    - cd Runner/suites/Kernel/Virtualization/Kvm-Setup || true
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh Kvm-Setup.res || true

@@ -1,0 +1,15 @@
+metadata:
+  name: Kvm-Resume
+  format: "Lava-Test Test Definition 1.0"
+  description: "This test validates the resume (unpause) functionality for KVM virtual machines managed via `virsh`."
+  os:
+    - linux
+  scope:
+    - functional
+
+run:
+  steps:
+    - REPO_PATH=$PWD || true
+    - cd Runner/suites/Kernel/Virtualization/Kvm-Resume || true
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh Kvm-Resume.res || true
