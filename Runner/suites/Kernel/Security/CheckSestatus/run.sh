@@ -1,7 +1,8 @@
 #!/bin/sh
 
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
-# SPDX-License-Identifier: BSD-3-Clause# Robustly find and source init_env
+# SPDX-License-Identifier: BSD-3-Clause
+# Robustly find and source init_env
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 INIT_ENV=""
 SEARCH="$SCRIPT_DIR"
@@ -48,7 +49,6 @@ log_info "=== Test Initialization ==="
 
 op=$(sestatus)
 log_info "sestatus output: $op"
-
 
 if echo "$op" | grep -qiE "Current mode:\s*(enforcing|permissive)"; then
     mode=$(echo "$op" | awk -F: '/Current mode/ {gsub(/^[ \t]+/, "", $2); print $2}')
