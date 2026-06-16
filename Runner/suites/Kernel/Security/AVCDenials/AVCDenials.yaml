@@ -1,7 +1,7 @@
 metadata:
   name: AVCDenials
   format: "Lava-Test Test Definition 1.0"
-  description: "Collect logs, fetch and parse AVC Denials."
+  description: "Collect logs, fetch and parse AVC Denials"
   os:
     - linux
   scope:

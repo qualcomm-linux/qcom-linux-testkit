@@ -1,7 +1,8 @@
 #!/bin/sh
 
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
-# SPDX-License-Identifier: BSD-3-Clause# Robustly find and source init_env
+# SPDX-License-Identifier: BSD-3-Clause
+# Robustly find and source init_env
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 INIT_ENV=""
 SEARCH="$SCRIPT_DIR"
@@ -40,12 +41,27 @@ rm -f "$AVC_Denials"
 
 if [ -f /var/log/audit/audit.log ]; then
     log_info "Using audit.log"
-elif CHECK_DEPS_NO_EXIT=1 check_dependencies dmesg; then
-    log_info "Using dmesg as audit source"
+elif CHECK_DEPS_NO_EXIT=1 check_dependencies dmesg getenforce; then
+    log_info "Using dmesg as audit source and selinux is enabled"
 else
     log_skip "$TESTNAME SKIP: No audit source available"
     echo "$TESTNAME SKIP" > "$RES_FILE"
     exit 0
+fi
+
+if ! CHECK_DEPS_NO_EXIT=1 check_dependencies grep dmesg; then
+    log_skip "$TESTNAME SKIP: missing dependencies"
+    echo "$TESTNAME SKIP" > "$RES_FILE"
+    exit 0
+fi
+
+default_mode=$(getenforce)
+
+if echo "$default_mode" | grep -qiE "disabled"; then
+    log_info "SELinux is $default_mode. Testcase Unsupported."
+    log_skip "$TESTNAME SKIP: selinux disabled"
+    echo "$TESTNAME SKIP" > "$RES_FILE"
+    exit 1
 fi
 
 log_info "-----------------------------------------------------------------------------------------"
@@ -54,9 +70,9 @@ log_info "=== Test Initialization ==="
 
 # Fetch from audit.log
 if [ -f /var/log/audit/audit.log ]; then
-  den=$(cat /var/log/audit/audit.log | grep avc)
+  den=$(grep avc /var/log/audit/audit.log)
   log_info "Denials in audit.log: "
-  log.info "$den"
+  log_info "$den"
   echo "$den" > "$AVC_Denials"
 fi
 
@@ -64,7 +80,7 @@ fi
 if CHECK_DEPS_NO_EXIT=1 check_dependencies dmesg; then
   den=$(dmesg | grep avc)
   log_info "Denials in audit.log: "
-  log.info "$den"
+  log_info "$den"
   echo "$den" >> "$AVC_Denials"
 fi
 
