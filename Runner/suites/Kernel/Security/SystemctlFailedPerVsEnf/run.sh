@@ -1,7 +1,8 @@
 #!/bin/sh
 
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
-# SPDX-License-Identifier: BSD-3-Clause# Robustly find and source init_env
+# SPDX-License-Identifier: BSD-3-Clause
+# Robustly find and source init_env
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 INIT_ENV=""
 SEARCH="$SCRIPT_DIR"
@@ -39,11 +40,11 @@ FS_Permissive="./failedServices_permissive.txt"
 rm -f "$FS_Permissive"
 echo 0 > "$FS_Permissive"
 
-FS_Enforcing="./failedServices_permissive.txt"
+FS_Enforcing="./failedServices_enforcing.txt"
 rm -f "$FS_Enforcing"
 echo 0 > "$FS_Enforcing"
 
-if ! CHECK_DEPS_NO_EXIT=1 check_dependencies getenforce setenforce systemctl; then
+if ! CHECK_DEPS_NO_EXIT=1 check_dependencies getenforce setenforce systemctl grep echo awk; then
     log_skip "$TESTNAME SKIP: missing dependencies"
     echo "$TESTNAME SKIP" > "$RES_FILE"
     exit 0
@@ -56,13 +57,20 @@ log_info "=== Test Initialization ==="
 default_mode=$(getenforce)
 log_info "Default Selinux Mode is $default_mode"
 
+if echo "$default_mode" | grep -qiE "disabled"; then
+    log_info "SELinux is $default_mode. Testcase Unsupported."
+    log_skip "$TESTNAME SKIP: selinux disabled"
+    echo "$TESTNAME SKIP" > "$RES_FILE"
+    exit 1
+fi
+
 # Get results for permissive mode
 setenforce 0
 failedServices=$(systemctl list-units --state failed)
 echo "$failedServices" | awk '/^\*/ {print $2}' > "$FS_Permissive"
 
 # Get failed service count
-count=$(echo '$failedServices' | grep 'loaded units listed')
+count=$(echo "$failedServices" | grep "loaded units listed")
 echo "Systemctl list-units failed in Permissive mode: "
 echo "$count"
 
@@ -72,7 +80,7 @@ failedServices=$(systemctl list-units --state failed)
 echo "$failedServices" | awk '/^\*/ {print $2}' > "$FS_Enforcing"
 
 # Get failed service count
-count=$(echo '$failedServices' | grep 'loaded units listed')
+count=$(echo "$failedServices" | grep "loaded units listed")
 echo "Systemctl list-units failed in Enforcing mode: "
 echo "$count"
 
@@ -80,11 +88,11 @@ echo "$count"
 
 log_info "Failed for Enforcing but loaded in Permissive:"
 diff1=$(grep -Fxv -f "$FS_Permissive" "$FS_Enforcing")
-log_info $diff1
+log_info "$diff1"
 
 log_info "Failed for Permissive but loaded in Enforcing:"
 diff2=$(grep -Fxv -f "$FS_Enforcing" "$FS_Permissive")
-log_info $diff2
+log_info "$diff2"
 
 
 if [ -z "$diff1" ] && [ -z "$diff2" ]; then
@@ -95,20 +103,9 @@ else
   echo "$TESTNAME FAIL" > "$RES_FILE"
 fi
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+# Set back to default
+if echo "$default_mode" | grep -iq "^permissive$"; then
+  setenforce 0
+else
+  setenforce 1
+fi
