@@ -57,13 +57,11 @@ if [ "$op" = "Enforcing" ] || [ "$op" = "Permissive" ]; then
 elif [ "$op" = "Disabled" ]; then
     log_info "SELinux is Disabled. Testcase FAIL."
     log_fail "$TESTNAME : FAIL"
-    pass=false
     echo "$TESTNAME FAIL" > "$RES_FILE"
     exit 1
 else
     log_fail "Unknown SELinux state: $op. Testcase FAIL."
     log_fail "$TESTNAME : FAIL"
-    pass=false
     echo "$TESTNAME FAIL" > "$RES_FILE"
     exit 1
 fi
