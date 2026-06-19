@@ -127,7 +127,7 @@ if [ -z "$ADAPTER" ]; then
     else
         ADAPTER=""
     fi
- 
+
     if [ -n "$ADAPTER" ]; then
         if [ -n "$BT_ADAPTER" ]; then
             bt_log_selected_adapter "$ADAPTER" "BT_ADAPTER/CLI"
@@ -233,7 +233,7 @@ fi
 
 if [ -z "$ADAPTER" ]; then
     log_warn "No HCI adapter found."
- 
+
     if [ "$FAIL_COUNT" -gt 0 ]; then
         echo "$TESTNAME FAIL" > "$RES_FILE"
     else

@@ -55,24 +55,24 @@ fi
 RETRY_COUNT=$(cat "$RETRY_FILE")
 
 log_info "--------------------------------------------"
-log_info "Boot Health Check Started - $(date)" 
+log_info "Boot Health Check Started - $(date)"
 log_info "Current Retry Count: $RETRY_COUNT"
 
 # Health Check: You can expand this check
 if [ "$(whoami)" = "root" ]; then
     log_pass "System booted successfully and root shell obtained."
     log_info "Test Completed Successfully after $RETRY_COUNT retries."
-    
+
     # Optional: clean retry counter after success
     echo "0" > "$RETRY_FILE"
-    
+
     exit 0
 else
     log_fail "Root shell not available!"
-    
+
     RETRY_COUNT=$((RETRY_COUNT + 1))
     echo "$RETRY_COUNT" > "$RETRY_FILE"
-    
+
     if [ "$RETRY_COUNT" -ge "$MAX_RETRIES" ]; then
         log_error "[ERROR] Maximum retries ($MAX_RETRIES) reached. Stopping test."
         exit 1

@@ -1039,11 +1039,11 @@ rt_stop_heartbeat() {
     kill "$RT_HEARTBEAT_PID" 2>/dev/null || true
     wait "$RT_HEARTBEAT_PID" 2>/dev/null || true
   fi
- 
+
   if [ "${RT_HEARTBEAT_INLINE:-0}" -eq 1 ] 2>/dev/null && [ -n "${RT_HEARTBEAT_TTY:-}" ]; then
     printf '\n' >"$RT_HEARTBEAT_TTY"
   fi
- 
+
   RT_HEARTBEAT_PID=""
   RT_HEARTBEAT_INLINE=0
   RT_HEARTBEAT_TTY=""

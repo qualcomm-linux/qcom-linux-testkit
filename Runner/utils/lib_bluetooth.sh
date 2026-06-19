@@ -136,22 +136,22 @@ bt_scan_devices_expect() {
     duration="${SCAN_SECONDS:-10}"
     mac_id="${MAC_ID:-}"
     [ -z "${mac_id}" ] && [ -n "${1:-}" ] && mac_id="$1"   # allow positional MAC
- 
+
     # Detect adapter; hciconfig prints "hci0:"; strip trailing colon.
     if [ -z "${adapter}" ]; then
         adapter="$(hciconfig 2>/dev/null | awk '/^hci[0-9]+/ {print $1}' | head -n1)"
     fi
     adapter="${adapter%:}"
- 
+
     if [ -z "${adapter}" ]; then
         log_error "No Bluetooth adapter found"
         return 1
     fi
- 
+
     log_info "Using Bluetooth adapter: ${adapter}"
     hciconfig "${adapter}" up 2>/dev/null || true
     sleep 1
- 
+
     # Expect flow (prompt-tolerant, in-memory capture)
     scan_raw="$(expect -c "
 log_user 1
@@ -175,10 +175,10 @@ expect -re {#|\\\[.*\\\]#} {}
 send \"quit\\r\"
 expect { timeout {} eof {} }
 " 2>&1)"
- 
+
     log_info "scan_raw size: $(printf '%s' "${scan_raw}" | wc -c) bytes"
     printf '%s\n' "${scan_raw}" | head -n 3 | sed 's/^/[RAW] /' >&2
- 
+
     # Clean CRs; sanity check for "Device " lines
     scan_clean="$(printf '%s' "${scan_raw}" | tr -d '\r')"
     if ! printf '%s' "${scan_clean}" | grep -q 'Device '; then
@@ -187,7 +187,7 @@ expect { timeout {} eof {} }
     fi
     log_info "scan_clean size: $(printf '%s' "${scan_clean}" | wc -c) bytes"
     printf '%s\n' "${scan_clean}" | head -n 3 | sed 's/^/[CLN] /' >&2
- 
+
     # Build unique "MAC NAME" lines (BusyBox-safe MAC check)
     found_lines="$(
         printf '%s\n' "${scan_clean}" |
@@ -222,12 +222,12 @@ expect { timeout {} eof {} }
           }
         ' | sort -u
     )"
- 
+
     if [ -z "${found_lines}" ]; then
         log_warn "Parsed 0 devices (format/parser issue?)."
         return 1
     fi
- 
+
     if [ -n "${mac_id}" ]; then
         if match_line="$(printf '%s\n' "${found_lines}" | awk -v t="${mac_id}" 'BEGIN{IGNORECASE=1} $1==t {print; exit 0} END{exit 1}')"; then
             printf '%s\n' "${match_line}"
@@ -236,7 +236,7 @@ expect { timeout {} eof {} }
         log_warn "MAC_ID not found: ${mac_id}"
         return 1
     fi
- 
+
     printf '%s\n' "${found_lines}"
     return 0
 }
@@ -267,21 +267,21 @@ bt_scan_devices_interactive_fallback() {
     adapter="$1"
     scan_window="${2:-10}"
     mac_id_up="${3:-}"
- 
+
     case "$scan_window" in
         ""|*[!0-9]*)
             scan_window=10
             ;;
     esac
- 
+
     if [ "$scan_window" -le 0 ] 2>/dev/null; then
         scan_window=10
     fi
- 
+
     total_timeout=$((scan_window + 15))
- 
+
     log_warn "bt_scan_devices: trying interactive bluetoothctl fallback on $adapter for ${scan_window}s"
- 
+
     if command -v timeout >/dev/null 2>&1; then
         fallback_out="$(
             {
@@ -315,12 +315,12 @@ bt_scan_devices_interactive_fallback() {
             } | bluetoothctl 2>&1 | sanitize_bt_output || true
         )"
     fi
- 
+
     cache_out="$(
         bt_list_devices_raw 2>/dev/null \
             | sanitize_bt_output || true
     )"
- 
+
     found_lines="$(
         {
             printf '%s\n' "$fallback_out"
@@ -329,33 +329,33 @@ bt_scan_devices_interactive_fallback() {
             function is_hex_pair(s) {
                 return s ~ /^[0-9A-Fa-f][0-9A-Fa-f]$/
             }
- 
+
             function is_mac(m, a,n,i) {
                 n = split(m, a, ":")
                 if (n != 6) {
                     return 0
                 }
- 
+
                 for (i = 1; i <= 6; i++) {
                     if (!is_hex_pair(a[i])) {
                         return 0
                     }
                 }
- 
+
                 return 1
             }
- 
+
             function is_property_token(s) {
                 return s ~ /^(RSSI|UUIDs:|TxPower|ManufacturerData|ManufacturerData\.|Paired|Connected|Advertising|Flags:|ServiceData|Alias:|Class:|Icon:|Modalias:|Services)/
             }
- 
+
             function emit_device(mac, name) {
                 mac = toupper(mac)
- 
+
                 if (name == "") {
                     name = "<unknown>"
                 }
- 
+
                 if (!(mac in seen)) {
                     seen[mac] = name
                     order[++count] = mac
@@ -363,11 +363,11 @@ bt_scan_devices_interactive_fallback() {
                     seen[mac] = name
                 }
             }
- 
+
             {
                 mac = ""
                 start = 0
- 
+
                 if ($1 == "[NEW]" && $2 == "Device" && is_mac($3)) {
                     mac = $3
                     start = 4
@@ -383,33 +383,33 @@ bt_scan_devices_interactive_fallback() {
                         }
                     }
                 }
- 
+
                 if (mac == "") {
                     next
                 }
- 
+
                 name = ""
                 for (i = start; i <= NF; i++) {
                     if (is_property_token($i)) {
                         break
                     }
- 
+
                     if ($i == "") {
                         continue
                     }
- 
+
                     name = name (name == "" ? "" : " ") $i
                 }
- 
+
                 sub(/[[:space:]]+$/, "", name)
- 
+
                 if (name ~ /^[0-9A-Fa-f][0-9A-Fa-f]-[0-9A-Fa-f][0-9A-Fa-f]-[0-9A-Fa-f][0-9A-Fa-f]-[0-9A-Fa-f][0-9A-Fa-f]-[0-9A-Fa-f][0-9A-Fa-f]-[0-9A-Fa-f][0-9A-Fa-f]$/) {
                     name = "<unknown>"
                 }
- 
+
                 emit_device(mac, name)
             }
- 
+
             END {
                 for (i = 1; i <= count; i++) {
                     mac = order[i]
@@ -418,7 +418,7 @@ bt_scan_devices_interactive_fallback() {
             }
         '
     )"
- 
+
     if [ -z "$found_lines" ]; then
         log_warn "bt_scan_devices: interactive fallback parsed no devices"
         log_info "bt_scan_devices: interactive fallback output tail:"
@@ -427,16 +427,16 @@ bt_scan_devices_interactive_fallback() {
         done
         return 1
     fi
- 
+
     log_info "bt_scan_devices: devices seen during interactive fallback"
     printf '%s\n' "$found_lines" | while IFS= read -r line; do
         [ -n "$line" ] && log_info " $line"
     done
- 
+
     if [ -n "${SCAN_RESULT:-}" ]; then
         printf '%s\n' "$found_lines" > "$SCAN_RESULT"
     fi
- 
+
     if [ -n "$mac_id_up" ]; then
         match_line="$(
             printf '%s\n' "$found_lines" \
@@ -446,7 +446,7 @@ bt_scan_devices_interactive_fallback() {
                         found = 1
                         exit
                     }
- 
+
                     END {
                         if (found != 1) {
                             exit 1
@@ -454,15 +454,15 @@ bt_scan_devices_interactive_fallback() {
                     }
                 '
         )"
- 
+
         if [ -n "$match_line" ]; then
             return 0
         fi
- 
+
         log_warn "bt_scan_devices: target MAC not seen during interactive fallback: $mac_id_up"
         return 1
     fi
- 
+
     return 0
 }
 
@@ -833,9 +833,9 @@ bt_pair_with_mac() {
         log_error "Usage: bt_pair_with_mac <MAC> [adapter]"
         return 1
     fi
- 
+
     mac=$1
- 
+
     # Optional second arg: adapter; otherwise use default helper or hci0
     if [ $# -ge 2 ]; then
         adapter=$2
@@ -846,17 +846,17 @@ bt_pair_with_mac() {
             adapter="hci0"
         fi
     fi
- 
+
     if ! command -v bluetoothctl >/dev/null 2>&1; then
         log_error "bt_pair_with_mac: bluetoothctl not found in PATH"
         return 1
     fi
- 
+
     # Safe logfile name: MAC with ':' -> '_' (same pattern as your last working snapshot)
     safe_mac=$(printf '%s\n' "$mac" | tr '[:lower:]' '[:upper:]' | tr ':' '_')
     ts=$(date +%Y%m%d_%H%M%S 2>/dev/null || date +%s)
     logfile="bt_pair_${safe_mac}_${ts}.log"
-  
+
     log_info "Ensuring controller is powered on before pairing (adapter=${adapter})..."
     if command -v btpower >/dev/null 2>&1; then
         btpower "$adapter" on >>"$logfile" 2>&1 || \
@@ -864,21 +864,21 @@ bt_pair_with_mac() {
     else
         log_warn "bt_pair_with_mac: 'btpower' helper not found; assuming adapter is powered."
     fi
- 
+
     # ---------------- First attempt: no internal scan ----------------
     log_info "Attempting bluetoothctl 'pair $mac' (no internal scan)..."
     bluetoothctl --timeout 20 pair "$mac" >>"$logfile" 2>&1 || true
- 
+
     # Success = explicit "Pairing successful" only (no 'Paired: yes' check)
     if grep -qi 'Pairing successful' "$logfile"; then
         log_info "bt_pair_with_mac: successfully paired with $mac"
         return 0
     fi
- 
+
     # ---------------- Fallback: only if device was "not available" ----------------
     if grep -qi 'not available' "$logfile"; then
         log_warn "bt_pair_with_mac: device not available; running short scan+retry for $mac"
- 
+
         if command -v bt_scan_devices >/dev/null 2>&1; then
             # Append scan logs to the same file for full context
             bt_scan_devices "$mac" >>"$logfile" 2>&1 || \
@@ -886,17 +886,17 @@ bt_pair_with_mac() {
         else
             log_warn "bt_pair_with_mac: bt_scan_devices helper not found; skipping scan retry."
         fi
- 
+
         log_info "Retrying bluetoothctl 'pair $mac' after scan..."
         bluetoothctl --timeout 20 pair "$mac" >>"$logfile" 2>&1 || true
- 
+
         if grep -qi 'Pairing successful' "$logfile"; then
             log_info "bt_pair_with_mac: successfully paired with $mac after scan retry"
             return 0
         fi
     fi
     # -----------------------------------------------------------------
- 
+
     log_warn "bt_pair_with_mac: bluetoothctl did not report successful pairing for $mac (see $logfile)"
     return 1
 }
@@ -1011,7 +1011,7 @@ bt_post_pair_connect() {
     sanitized_mac=$(echo "$target_mac" | tr ':' '_')
     timestamp=$(date '+%Y%m%d_%H%M%S')
     base_logfile="bt_connect_${sanitized_mac}_${timestamp}"
- 
+
     # Already connected? (like when pair leaves us connected)
     if bluetoothctl info "$target_mac" 2>/dev/null \
         | sanitize_bt_output \
@@ -1021,20 +1021,20 @@ bt_post_pair_connect() {
         log_pass "Post-pair connection successful"
         return 0
     fi
- 
+
     max_attempts=3
     attempt=1
     while [ "$attempt" -le "$max_attempts" ]; do
         logfile="${base_logfile}_attempt${attempt}.log"
         log_info "Attempting bluetoothctl connect (try $attempt/$max_attempts) to $target_mac"
- 
+
         bluetoothctl <<EOF >"$logfile" 2>&1
 power on
 trust $target_mac
 connect $target_mac
 quit
 EOF
- 
+
         if bluetoothctl info "$target_mac" 2>/dev/null \
             | sanitize_bt_output \
             | grep -q 'Connected:[[:space:]]*yes'
@@ -1042,17 +1042,17 @@ EOF
             log_pass "Post-pair connection successful to $target_mac (see $logfile)"
             return 0
         fi
- 
+
         if grep -q "Failed to connect" "$logfile"; then
             log_warn "bluetoothctl reported connect failure for $target_mac (see $logfile)"
         else
             log_warn "No 'Connected: yes' for $target_mac after attempt $attempt (see $logfile)"
         fi
- 
+
         attempt=$((attempt + 1))
         sleep 2
     done
- 
+
     # Final fallback: l2ping (this is what the test ultimately cares about)
     if command -v l2ping >/dev/null 2>&1; then
         l2ping_log="${base_logfile}_l2ping.log"
@@ -1068,7 +1068,7 @@ EOF
     else
         log_warn "l2ping not available, skipping connectivity fallback for $target_mac"
     fi
- 
+
     log_fail "Post-pair connection failed for $target_mac"
     return 1
 }
@@ -1092,18 +1092,18 @@ bt_remove_all_paired_devices() {
 bt_l2ping_check() {
     target_mac="$1"
     logfile="$2"
- 
+
     if ! command -v l2ping >/dev/null 2>&1; then
         log_warn "l2ping command not available - skipping"
         return 1
     fi
- 
+
     # Small grace period after connect so the remote side can settle
     sleep 2
- 
+
     attempts=2
     i=1
- 
+
     while [ "$i" -le "$attempts" ]; do
         log_info "Running l2ping test for $target_mac (attempt $i/$attempts)"
         if l2ping -c 3 -t 5 "$target_mac" >>"$logfile" 2>&1; then
@@ -1114,7 +1114,7 @@ bt_l2ping_check() {
         i=$((i + 1))
         sleep 2
     done
- 
+
     log_warn "l2ping to $target_mac failed after $attempts attempts"
     return 1
 }
@@ -1546,60 +1546,60 @@ findhcisysfs() {
     best_valid=""
     best_visible=""
     best_up=""
- 
+
     for h in /sys/class/bluetooth/hci*; do
         [ -d "$h" ] || continue
- 
+
         dev="$(basename "$h")"
         [ -n "$dev" ] || continue
- 
+
         [ -z "$first" ] && first="$dev"
- 
+
         if btbdok "$dev" >/dev/null 2>&1; then
             if btcontrollervisible "$dev" >/dev/null 2>&1; then
                 best_visible_valid="$dev"
                 break
             fi
- 
+
             [ -z "$best_valid" ] && best_valid="$dev"
         fi
- 
+
         if [ -z "$best_visible" ] && btcontrollervisible "$dev" >/dev/null 2>&1; then
             best_visible="$dev"
         fi
- 
+
         if [ -z "$best_up" ] && hascmd hciconfig; then
             if hciconfig "$dev" 2>/dev/null | grep -q 'UP RUNNING'; then
                 best_up="$dev"
             fi
         fi
     done
- 
+
     if [ -n "$best_visible_valid" ]; then
         printf '%s\n' "$best_visible_valid"
         return 0
     fi
- 
+
     if [ -n "$best_valid" ]; then
         printf '%s\n' "$best_valid"
         return 0
     fi
- 
+
     if [ -n "$best_visible" ]; then
         printf '%s\n' "$best_visible"
         return 0
     fi
- 
+
     if [ -n "$best_up" ]; then
         printf '%s\n' "$best_up"
         return 0
     fi
- 
+
     if [ -n "$first" ]; then
         printf '%s\n' "$first"
         return 0
     fi
- 
+
     return 1
 }
 
@@ -1607,7 +1607,7 @@ findhcisysfs() {
 # ret: 0=ok, 1=not found
 btgetbdaddr() {
     dev="${1:-}"
- 
+
     if command -v hciconfig >/dev/null 2>&1; then
         if [ -n "$dev" ]; then
             addr="$(hciconfig -a "$dev" 2>/dev/null | awk '/BD Address:/ {print $3; exit}')"
@@ -1620,7 +1620,7 @@ btgetbdaddr() {
             return 0
         fi
     fi
- 
+
     # No logging here either, caller will log if needed.
     return 1
 }
@@ -1731,31 +1731,31 @@ bt_controller_visible() {
 #   2 = could not read BD address
 btensurepublicaddr() {
     dev="${1:-}"
- 
+
     # Already visible: nothing to do.
     if btcontrollerpresent || bt_controller_visible "$dev"; then
         log_info "controller already visible via bluetoothctl, skip public-addr"
         return 0
     fi
- 
+
     mac="$(
         btgetbdaddr "$dev" 2>/dev/null \
         | head -n 1 \
         | awk '{print $NF}'
     )"
- 
+
     if [ -z "$mac" ]; then
         log_warn "could not read bd address ${dev:+for $dev} public-addr cannot be applied"
         return 2
     fi
- 
+
     log_info "applying bluetoothctl public-addr $mac"
- 
+
     btctl_script "menu mgmt
 public-addr $mac
 back
 quit" >/dev/null 2>&1 || true
- 
+
     # Poll for controller visibility (BlueZ can be async)
     i=0
     max_wait=15   # was 5; 15 is still small but avoids flakiness
@@ -1767,7 +1767,7 @@ quit" >/dev/null 2>&1 || true
         sleep 1
         i=$((i + 1))
     done
- 
+
     log_warn "controller still not visible after public-addr $mac (after ${max_wait}s)"
     return 1
 }
@@ -1779,12 +1779,12 @@ btcontrollervisible() {
     #   btcontrollervisible 00:11:22:33:44:55
     #
     # Returns: 0 if controller visible to bluetoothctl, else 1
- 
+
     arg="${1:-}"
     addr=""
     dev=""
     out=""
- 
+
     # Normalize arg
     case "$arg" in
         hci[0-9]*)
@@ -1799,7 +1799,7 @@ btcontrollervisible() {
         *)
             ;;
     esac
- 
+
     btctlrun() {
         if command -v timeout >/dev/null 2>&1; then
             timeout 2 bluetoothctl "$@" 2>/dev/null || true
@@ -1807,7 +1807,7 @@ btcontrollervisible() {
             bluetoothctl "$@" 2>/dev/null || true
         fi
     }
- 
+
     # bluetoothctl list
     out="$(btctlrun list)"
     if [ -n "$out" ]; then
@@ -1816,7 +1816,7 @@ btcontrollervisible() {
         fi
         printf '%s\n' "$out" | grep -q '^Controller ' && return 0
     fi
- 
+
     # bluetoothctl show
     out="$(btctlrun show)"
     if [ -n "$out" ]; then
@@ -1825,7 +1825,7 @@ btcontrollervisible() {
         fi
         printf '%s\n' "$out" | grep -q '^Controller ' && return 0
     fi
- 
+
     return 1
 }
 
@@ -1839,19 +1839,19 @@ btcontrollervisible() {
 #   1 = still no controller visible
 bt_ensure_controller_visible() {
     adapter="${1:-}"
- 
+
     # Fast path: already visible
     if btcontrollerpresent || bt_controller_visible "$adapter"; then
         return 0
     fi
- 
+
     # Try to guess adapter from sysfs if not provided
     if [ -z "$adapter" ]; then
         if findhcisysfs >/dev/null 2>&1; then
             adapter="$(findhcisysfs 2>/dev/null || true)"
         fi
     fi
- 
+
     if [ -n "$adapter" ]; then
         log_info "Using adapter for public-addr/bootstrap: $adapter"
         btensurepublicaddr "$adapter" || \
@@ -1859,12 +1859,12 @@ bt_ensure_controller_visible() {
     else
         log_warn "No HCI adapter found in sysfs; cannot apply public-addr."
     fi
- 
+
     # Final controller visibility check
     if btcontrollerpresent || bt_controller_visible "$adapter"; then
         return 0
     fi
- 
+
     return 1
 }
 
@@ -2140,7 +2140,7 @@ bt_pair_once() {
 # Prints one of: yes | no | unknown
 bt_get_discovering() {
     out="$(bluetoothctl show 2>/dev/null | sanitize_bt_output | tr -d '\r')"
- 
+
     case "$out" in
         *"Discovering: yes"*)
             echo "yes"
@@ -2230,7 +2230,7 @@ bt_scan_validate() {
     adapter="$1"
     target_mac="$2" # may be empty
     fail=0
- 
+
     # --- Ensure power ON ---
     initial_power="$(btgetpower "$adapter" 2>/dev/null || echo "unknown")"
     if [ "$initial_power" != "yes" ]; then
@@ -2243,29 +2243,29 @@ bt_scan_validate() {
     else
         log_pass "Power ON verified before scan."
     fi
- 
+
     if [ -n "$target_mac" ]; then
         log_info "Target MAC provided for BT_SCAN: $target_mac"
     else
         log_info "No target MAC provided, BT_SCAN will just verify that some devices are visible."
     fi
- 
+
     # --- Scan ON phase ---
     log_info "Testing scan ON..."
     if ! bt_set_scan on; then
         log_warn "bt_set_scan(on) reported immediate failure; will still poll Discovering/devices."
     fi
- 
+
     # Wait for Discovering=yes (best-effort)
     if bt_wait_discovering yes 10 2; then
         log_info "Observed Discovering=yes during scan ON window."
     else
         log_warn "Never observed Discovering=yes during scan ON polling window (may indicate stack/timing issue)."
     fi
- 
+
     # Give a small extra window for devices to accumulate
     sleep 2
- 
+
     dev_out="$(bt_list_devices_raw)"
     if [ -n "$dev_out" ]; then
         log_info "Devices seen by bluetoothctl after scan ON:"
@@ -2276,7 +2276,7 @@ bt_scan_validate() {
     else
         log_info "Devices seen by bluetoothctl after scan ON: (none)"
     fi
- 
+
     if ! bt_devices_seen "$target_mac"; then
         if [ -n "$target_mac" ]; then
             log_fail "Target MAC $target_mac not found in 'bluetoothctl devices' after scan ON window."
@@ -2292,19 +2292,19 @@ bt_scan_validate() {
         fi
         fail=0
     fi
- 
+
     # --- Scan OFF phase ---
     log_info "Testing scan OFF..."
     if ! bt_set_scan off; then
         log_warn "bt_set_scan(off) reported immediate failure; will still poll Discovering."
     fi
- 
+
     if bt_wait_discovering no 10 2; then
         log_pass "Discovering=no observed after scan OFF polling."
     else
         log_warn "Did not observe Discovering=no within timeout after scan OFF."
     fi
- 
+
     return "$fail"
 }
 
@@ -2362,7 +2362,7 @@ btgetpower() {
     dev="${1-}"
     state=""
     mac=""
- 
+
     # If a specific adapter is provided (e.g. hci0), resolve to BDADDR and use "show <BDADDR>"
     # because "select hci0" is unreliable on some minimal/ramdisk setups.
     if [ -n "$dev" ]; then
@@ -2372,7 +2372,7 @@ btgetpower() {
             | awk '{print $NF}'
         )"
     fi
- 
+
     if [ -n "$mac" ]; then
         out="$(
             {
@@ -2390,7 +2390,7 @@ btgetpower() {
             } | bluetoothctl 2>/dev/null | sanitize_bt_output || true
         )"
     fi
- 
+
     state="$(printf '%s\n' "$out" \
         | awk -F':[[:space:]]*' '
             /^[[:space:]]*Powered:/ {
@@ -2401,7 +2401,7 @@ btgetpower() {
                 exit
             }
         ')"
- 
+
     # Fallback: try default controller if adapter-specific attempt didn’t yield Powered:
     if [ -z "$state" ]; then
         out="$(
@@ -2422,14 +2422,14 @@ btgetpower() {
                 }
             ')"
     fi
- 
+
     [ -n "$state" ] || return 2
- 
+
     if [ "$state" = "yes" ] || [ "$state" = "no" ]; then
         printf '%s\n' "$state"
         return 0
     fi
- 
+
     return 2
 }
 # Usage: btpower hci0 on|off
@@ -2440,7 +2440,7 @@ btgetpower() {
 btpower() {
     dev="${1:-}"
     want="${2:-}"
- 
+
     case "$want" in
         on|off)
             ;;
@@ -2449,45 +2449,45 @@ btpower() {
             return 1
             ;;
     esac
- 
+
     cur_state="$(btgetpower "$dev" 2>/dev/null || true)"
     [ -z "$cur_state" ] && cur_state="unknown"
- 
+
     if [ "$want" = "on" ] && [ "$cur_state" = "yes" ]; then
         log_info "btpower: $dev already Powered=yes; skipping 'power on'."
         return 0
     fi
- 
+
     if [ "$want" = "off" ] && [ "$cur_state" = "no" ]; then
         log_info "btpower: $dev already Powered=no; skipping 'power off'."
         return 0
     fi
- 
+
     log_info "btpower: requesting '$want' on $dev (current=$cur_state)"
- 
+
     # Drive bluetoothctl interactively (works on ramdisk where non-interactive list/show may be empty)
     # Do NOT use "select hci0" (it can say "Controller hci0 not available" even when controller exists).
     btctl_script "power $want" "quit" >/dev/null 2>&1 || true
- 
+
     i=0
     max_tries=10
     state=""
     pstate=""
- 
+
     while [ "$i" -lt "$max_tries" ]; do
         # Read Powered via btgetpower (must be interactive-based implementation)
         state="$(btgetpower "$dev" 2>/dev/null || true)"
- 
+
         if [ "$want" = "on" ] && [ "$state" = "yes" ]; then
             log_info "btpower: $dev Powered=yes after request."
             return 0
         fi
- 
+
         if [ "$want" = "off" ] && [ "$state" = "no" ]; then
             log_info "btpower: $dev Powered=no after request."
             return 0
         fi
- 
+
         # If Powered line is not available yet, try to parse PowerState as an informational fallback
         # (Some stacks lag on Powered; PowerState can show transitions like off-enabling/on-disabling.)
         out="$(
@@ -2497,7 +2497,7 @@ btpower() {
                 printf 'quit\n'
             } | bluetoothctl 2>/dev/null | sanitize_bt_output || true
         )"
- 
+
         pstate="$(printf '%s\n' "$out" \
             | awk -F':[[:space:]]*' '
                 /^[[:space:]]*PowerState:/ {
@@ -2507,18 +2507,18 @@ btpower() {
                     print v;
                     exit
                 }')"
- 
+
         # If Powered was empty but PowerState suggests we reached a stable end state,
         # keep waiting a little more for Powered to update (do not treat pstate as PASS alone).
         sleep 1
         i=$((i + 1))
     done
- 
+
     if [ -z "$state" ]; then
         log_warn "btpower: unable to read Powered state for $dev after request. (PowerState last='$pstate')"
         return 2
     fi
- 
+
     log_warn "btpower: $dev state after request is '$state' (wanted $want). (PowerState last='$pstate')"
     return 1
 }
@@ -2527,10 +2527,10 @@ btfwpresent() {
     dir=""
     pattern=""
     file=""
- 
+
     for d in /lib/firmware/qca /usr/lib/firmware/qca /lib/firmware /usr/lib/firmware; do
         [ -d "$d" ] || continue
- 
+
         for pattern in \
             "msbtfw*.mbn" \
             "msbtfw*.tlv" \
@@ -2553,7 +2553,7 @@ btfwpresent() {
             done
         done
     done
- 
+
     return 1
 }
 
@@ -2562,14 +2562,14 @@ bt_wait_ready() {
     sleep_step="${2:-2}"
     waited=0
     started_service=0
- 
+
     if [ -z "$max_wait" ]; then
         max_wait=60
     fi
     if [ -z "$sleep_step" ]; then
         sleep_step=2
     fi
- 
+
     case "$max_wait" in
         ''|*[!0-9]*)
             max_wait=60
@@ -2580,20 +2580,20 @@ bt_wait_ready() {
             sleep_step=2
             ;;
     esac
- 
+
     if [ "$max_wait" -le 0 ] 2>/dev/null; then
         max_wait=60
     fi
     if [ "$sleep_step" -le 0 ] 2>/dev/null; then
         sleep_step=2
     fi
- 
+
     while [ "$waited" -lt "$max_wait" ]; do
         if btsvcactive && bthcipresent; then
             log_info "Bluetooth runtime became ready after ${waited}s."
             return 0
         fi
- 
+
         if [ "$started_service" -eq 0 ]; then
             if command -v systemctl >/dev/null 2>&1; then
                 if ! btsvcactive; then
@@ -2603,32 +2603,32 @@ bt_wait_ready() {
             fi
             started_service=1
         fi
- 
+
         sleep "$sleep_step"
         waited=$((waited + sleep_step))
     done
- 
+
     log_warn "Bluetooth runtime did not become ready within ${max_wait}s."
     return 1
 }
 
 btfwloaded() {
     adapter="${1:-}"
- 
+
     # ---- Configurable patterns (override via env if needed) ----
     # Success markers:
     # - UART controllers usually log final setup marker.
     # - USB QCA controllers can log rampatch/NVM/QCA patch+firmware markers.
     success_re="${BTFW_SUCCESS_RE:-setup on UART is completed|setup on uart is completed|using rampatch file|using NVM file|QCA: patch.*firmware}"
- 
+
     # Fatal-ish errors. These should be evaluated against the selected adapter
     # when an adapter is provided, so a dead placeholder hci0 does not fail a
     # working hci1 USB controller.
     fatal_re="${BTFW_FATAL_RE:-tx timeout|Reading QCA version information failed|failed to open firmware|firmware file.*not found|download.*firmware.*failed|failed to download.*firmware|timeout waiting for firmware|firmware.*load.*failed}"
- 
+
     # Retry/transient hints.
     transient_re="${BTFW_TRANSIENT_RE:-Retry BT power ON|retry bt power on|reset|re-init|reinit|failed.*\\(-110\\)}"
- 
+
     # ---- Collect recent relevant current-boot kernel log ----
     if command -v get_kernel_log >/dev/null 2>&1; then
         out="$(
@@ -2643,12 +2643,12 @@ btfwloaded() {
             | tail -n "${BTFW_DMESG_TAIL:-600}"
         )"
     fi
- 
+
     if [ -z "$out" ]; then
         log_warn "btfwloaded: no Bluetooth/QCA/WCN messages found in current-boot kernel log."
         return 1
     fi
- 
+
     # If caller provided hciN, evaluate firmware markers for that adapter only.
     # This avoids hci0 UART timeout noise causing a warning/failure when hci1 USB
     # is the selected working controller.
@@ -2657,7 +2657,7 @@ btfwloaded() {
             printf '%s\n' "$out" \
             | grep -i -E "Bluetooth:[[:space:]]+${adapter}:|${adapter}:"
         )"
- 
+
         if [ -n "$adapter_out" ]; then
             out="$adapter_out"
             log_info "btfwloaded: evaluating firmware log for selected adapter $adapter"
@@ -2665,7 +2665,7 @@ btfwloaded() {
             log_warn "btfwloaded: no adapter-specific kernel log found for $adapter; falling back to global BT log"
         fi
     fi
- 
+
     # ---- Find last success line number and last fatal line number ----
     last_success="$(
         printf '%s\n' "$out" \
@@ -2674,7 +2674,7 @@ btfwloaded() {
             END { if (n > 0) print n; else print 0 }
         '
     )"
- 
+
     last_fatal="$(
         printf '%s\n' "$out" \
         | awk -v IGNORECASE=1 -v re="$fatal_re" '
@@ -2682,7 +2682,7 @@ btfwloaded() {
             END { if (n > 0) print n; else print 0 }
         '
     )"
- 
+
     saw_transient="$(
         printf '%s\n' "$out" \
         | awk -v IGNORECASE=1 -v re="$transient_re" '
@@ -2690,34 +2690,34 @@ btfwloaded() {
             END { if (found) print 1; else print 0 }
         '
     )"
- 
+
     # ---- Decision tree ----
     if [ "$last_success" -eq 0 ]; then
         log_warn "btfwloaded: no firmware success marker found${adapter:+ for $adapter} (pattern: $success_re). Recent kernel-log tail:"
         printf '%s\n' "$out" | tail -n 30 >&2
         return 1
     fi
- 
+
     # Fatal after success => FAIL only within the selected adapter scope.
     if [ "$last_fatal" -gt "$last_success" ]; then
         log_warn "btfwloaded: fatal BT/QCA errors occurred after firmware success marker${adapter:+ for $adapter}, treating as FAIL."
         printf '%s\n' "$out" | tail -n 40 >&2
         return 1
     fi
- 
+
     # Fatal before success OR transient hints => WARN.
     if [ "$last_fatal" -gt 0 ] && [ "$last_fatal" -lt "$last_success" ]; then
         log_warn "btfwloaded: transient errors occurred before firmware success marker${adapter:+ for $adapter}, treating as WARN."
         printf '%s\n' "$out" | tail -n 30 >&2
         return 2
     fi
- 
+
     if [ "$saw_transient" -eq 1 ]; then
         log_warn "btfwloaded: retry/transient indicators seen in kernel log${adapter:+ for $adapter}, firmware success marker present, treating as WARN."
         printf '%s\n' "$out" | tail -n 30 >&2
         return 2
     fi
- 
+
     log_info "btfwloaded: firmware load/setup completed cleanly${adapter:+ for $adapter} from current-boot kernel log."
     return 0
 }
@@ -2758,11 +2758,11 @@ bthcipresent() {
 btbdok() {
     dev="${1:-}"
     addr=""
- 
+
     if [ -n "$dev" ] && [ -r "/sys/class/bluetooth/$dev/address" ]; then
         addr="$(cat "/sys/class/bluetooth/$dev/address" 2>/dev/null || true)"
     fi
- 
+
     if [ -z "$addr" ] && command -v hciconfig >/dev/null 2>&1; then
         if [ -n "$dev" ]; then
             addr="$(hciconfig -a "$dev" 2>/dev/null | awk '/BD Address:/ {print $3; exit}')"
@@ -2770,9 +2770,9 @@ btbdok() {
             addr="$(hciconfig -a 2>/dev/null | awk '/BD Address:/ {print $3; exit}')"
         fi
     fi
- 
+
     addr="$(printf '%s' "$addr" | tr '[:lower:]' '[:upper:]' | tr -d '[:space:]')"
- 
+
     case "$addr" in
         '')
             return 1
@@ -2830,7 +2830,7 @@ bt_scan_poll_on() {
         if [ "$disc_state" = "yes" ]; then
             seen_disc_yes=1
         fi
-        
+
 	devices_out="$(bt_list_devices_raw || true)"
         devices_snapshot="$devices_out"
 

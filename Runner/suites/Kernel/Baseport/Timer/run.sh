@@ -39,7 +39,7 @@ Options:
 
 Example:
   $0 --binary-path=/custom/path/posix_timers
-  $0 
+  $0
 
 EOF
 }

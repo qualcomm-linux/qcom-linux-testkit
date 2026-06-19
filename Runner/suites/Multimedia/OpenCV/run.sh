@@ -298,7 +298,7 @@ run_one() {
     echo "$bin_short FAIL" >> "$RESLIST_FILE"
     append_summary "$bin_short" "FAIL" "$run_log"
     log_info "----- END $bin_short (rc=$rc, FAIL) @ $(date '+%Y-%m-%d %H:%M:%S') -----"
-    return 1 
+    return 1
 }
 
 discover_bins() {

@@ -50,5 +50,5 @@ if echo "$output" | grep -q "Reading"; then
 else
     log_fail "$TESTNAME : Test Failed"
     echo "$TESTNAME FAIL" > "$res_file"
-    exit 1 
+    exit 1
 fi

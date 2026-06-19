@@ -74,7 +74,7 @@ gstreamer_shared_artifact_dir() {
 gstreamer_shared_encoded_dir() {
     script_dir="$1"
     outdir="$2"
-    
+
     gstreamer_shared_artifact_dir "VIDEO_SHARED_ENCODE_DIR" "video-encode-decode" "encoded" "$script_dir" "$outdir"
 }
 
@@ -88,7 +88,7 @@ gstreamer_shared_encoded_dir() {
 gstreamer_shared_recorded_dir() {
     script_dir="$1"
     outdir="$2"
-    
+
     gstreamer_shared_artifact_dir "AUDIO_SHARED_RECORDED_DIR" "audio-record-playback" "recorded" "$script_dir" "$outdir"
 }
 # -------------------- Element check --------------------
@@ -835,10 +835,10 @@ gstreamer_resolution_to_wh() {
     printf '%s %s\n' "640" "480"  # Default resolution if none provided
     return 0
   }
-  
+
   # Convert to lowercase for case-insensitive matching
   res=$(printf '%s' "$res" | tr '[:upper:]' '[:lower:]')
-  
+
   case "$res" in
     480p)
       printf '%s %s\n' "640" "480"
@@ -933,7 +933,7 @@ gstreamer_v4l2_decoder_for_codec() {
 # This standardizes container format selection across encode/decode operations:
 #   - H.264/H.265: mp4 container (ISO BMFF/MP4) - encode & decode supported
 #   - VP9: webm container (WebM) - decode-only
-# 
+#
 # The encode pipeline builders (gstreamer_build_v4l2_encode_pipeline) use
 # appropriate muxers (mp4mux for H.264/H.265). VP9 encoding is not supported.
 # The decode pipeline builders (gstreamer_build_v4l2_decode_pipeline) use
@@ -965,7 +965,7 @@ gstreamer_container_ext_for_codec() {
 gstreamer_bitrate_for_resolution() {
   width="$1"
   height="$2"
-  
+
   # Default bitrate calculation
   bitrate=8000000
   if [ "$width" -le 640 ]; then
@@ -975,7 +975,7 @@ gstreamer_bitrate_for_resolution() {
   elif [ "$width" -le 1920 ]; then
     bitrate=4000000
   fi
-  
+
   printf '%s\n' "$bitrate"
 }
 
@@ -984,9 +984,9 @@ gstreamer_bitrate_for_resolution() {
 # Prints: file size in bytes or 0 if file doesn't exist
 gstreamer_file_size_bytes() {
   filepath="$1"
-  
+
   [ -f "$filepath" ] || { printf '%s\n' "0"; return 1; }
-  
+
   # Try BSD stat first, then GNU stat
   file_size=$(stat -f%z "$filepath" 2>/dev/null || stat -c%s "$filepath" 2>/dev/null || echo 0)
   printf '%s\n' "$file_size"
@@ -1005,22 +1005,22 @@ gstreamer_build_v4l2_encode_pipeline() {
   bitrate="$6"
   output_file="$7"
   video_stack="${8:-upstream}"
-  
+
   # Validate numeric parameters
   case "$duration" in
     ''|*[!0-9]*) duration=30 ;; # Default 30s for invalid/non-numeric duration
   esac
-  
+
   case "$framerate" in
     ''|*[!0-9]*) framerate=30 ;; # Default 30fps for invalid/non-numeric framerate
   esac
-  
+
   encoder=$(gstreamer_v4l2_encoder_for_codec "$codec")
   if [ -z "$encoder" ]; then
     printf '%s\n' ""
     return 1
   fi
-  
+
   # Determine parser based on codec
   case "$codec" in
     h264)
@@ -1033,13 +1033,13 @@ gstreamer_build_v4l2_encode_pipeline() {
       parser=""
       ;;
   esac
-  
+
   # Build encoder parameters
   encoder_params="extra-controls=\"controls,video_bitrate=${bitrate}\""
   if [ "$video_stack" = "downstream" ]; then
     encoder_params="${encoder_params} capture-io-mode=4 output-io-mode=4"
   fi
-  
+
   # Calculate total frames with numeric safety
   total_frames=0
   if [ "$duration" -gt 0 ] 2>/dev/null && [ "$framerate" -gt 0 ] 2>/dev/null; then
@@ -1054,7 +1054,7 @@ gstreamer_build_v4l2_encode_pipeline() {
   else
     printf '%s\n' "videotestsrc num-buffers=${total_frames} pattern=smpte ! video/x-raw,width=${width},height=${height},format=NV12,framerate=${framerate}/1 ! ${encoder} ${encoder_params} ! mp4mux ! filesink location=${output_file}"
   fi
-  
+
   return 0
 }
 
@@ -1066,13 +1066,13 @@ gstreamer_build_v4l2_decode_pipeline() {
   codec="$1"
   input_file="$2"
   video_stack="${3:-upstream}"
-  
+
   decoder=$(gstreamer_v4l2_decoder_for_codec "$codec")
   if [ -z "$decoder" ]; then
     printf '%s\n' ""
     return 1
   fi
-  
+
   # Determine parser and container based on codec
   case "$codec" in
     h264)
@@ -1093,13 +1093,13 @@ gstreamer_build_v4l2_decode_pipeline() {
       container="matroskademux"
       ;;
   esac
-  
+
   # Build decoder parameters
   decoder_params=""
   if [ "$video_stack" = "downstream" ]; then
     decoder_params="capture-io-mode=4 output-io-mode=4"
   fi
-  
+
   # Build pipeline based on parser availability
   # All supported formats (h264, h265, vp9) have containers (MP4 or WebM)
   if [ -n "$parser" ]; then
@@ -1117,7 +1117,7 @@ gstreamer_build_v4l2_decode_pipeline() {
       printf '%s\n' "filesrc location=${input_file} ! ${container} ! ${decoder} ! videoconvert ! fakesink"
     fi
   fi
-  
+
   return 0
 }
 
@@ -1462,10 +1462,10 @@ camera_build_qtiqmmfsrc_fakesink_pipeline() {
   width="$3"
   height="$4"
   framerate="$5"
-  
+
   gst_format=$(camera_format_to_gst_string "$format")
   [ -z "$gst_format" ] && return 1
-  
+
   if [ "$format" = "ubwc" ]; then
     printf '%s\n' "qtiqmmfsrc camera=${camera_id} name=camsrc ! video/x-raw,format=${gst_format},width=${width},height=${height},framerate=${framerate}/1,interlace-mode=progressive,colorimetry=bt601 ! queue ! fakesink"
   else
@@ -1482,10 +1482,10 @@ camera_build_qtiqmmfsrc_preview_pipeline() {
   width="$3"
   height="$4"
   framerate="$5"
-  
+
   gst_format=$(camera_format_to_gst_string "$format")
   [ -z "$gst_format" ] && return 1
-  
+
   if [ "$format" = "ubwc" ]; then
     printf '%s\n' "qtiqmmfsrc camera=${camera_id} name=camsrc ! video/x-raw,format=${gst_format},width=${width},height=${height},framerate=${framerate}/1 ! waylandsink fullscreen=true async=true sync=false"
   else
@@ -1503,10 +1503,10 @@ camera_build_qtiqmmfsrc_encode_pipeline() {
   height="$4"
   framerate="$5"
   output_file="$6"
-  
+
   gst_format=$(camera_format_to_gst_string "$format")
   [ -z "$gst_format" ] && return 1
-  
+
   if [ "$format" = "ubwc" ]; then
     printf '%s\n' "qtiqmmfsrc camera=${camera_id} name=camsrc ! video/x-raw,format=${gst_format},width=${width},height=${height},framerate=${framerate}/1,interlace-mode=progressive,colorimetry=bt601 ! queue ! v4l2h264enc capture-io-mode=4 output-io-mode=5 ! h264parse ! mp4mux ! queue ! filesink location=${output_file}"
   else
@@ -1532,7 +1532,7 @@ camera_build_qtiqmmfsrc_snapshot_pipeline() {
   framerate="$4"
   output_location="$5"
   max_files="${6:-2}"
-  
+
   printf '%s\n' "qtiqmmfsrc camera=${camera_id} name=camsrc ! capsfilter caps=\"video/x-raw,format=NV12,width=${width},height=${height},framerate=${framerate}/1\" ! jpegenc ! multifilesink location=\"${output_location}\" max-files=${max_files}"
 }
 
@@ -1548,7 +1548,7 @@ camera_build_libcamera_fakesink_pipeline() {
   width="$1"
   height="$2"
   framerate="${3:-30}"
-  
+
   # If width/height are 0 or empty, build pipeline without caps filter
   if [ -z "$width" ] || [ -z "$height" ] || [ "$width" -eq 0 ] 2>/dev/null || [ "$height" -eq 0 ] 2>/dev/null; then
     printf '%s\n' "libcamerasrc ! fakesink"
@@ -1568,7 +1568,7 @@ camera_build_libcamera_preview_pipeline() {
   width="$1"
   height="$2"
   framerate="${3:-30}"
-  
+
   # If width/height are 0 or empty, build pipeline without caps filter
   if [ -z "$width" ] || [ -z "$height" ] || [ "$width" -eq 0 ] 2>/dev/null || [ "$height" -eq 0 ] 2>/dev/null; then
     printf '%s\n' "libcamerasrc ! videoconvert ! waylandsink fullscreen=true"
@@ -1590,7 +1590,7 @@ camera_build_libcamera_encode_pipeline() {
   height="$2"
   output_file="$3"
   framerate="${4:-30}"
-  
+
   printf '%s\n' "libcamerasrc ! videoconvert ! video/x-raw,format=NV12,width=${width},height=${height},framerate=${framerate}/1 ! v4l2h264enc capture-io-mode=4 output-io-mode=4 ! h264parse ! mp4mux ! filesink location=${output_file}"
 }
 
@@ -1608,7 +1608,7 @@ camera_build_libcamera_snapshot_pipeline() {
   height="$2"
   output_location="$3"
   max_files="${4:-5}"
-  
+
   printf '%s\n' "libcamerasrc name=camsrc src_1::stream-role=still-capture ! video/x-raw,width=${width},height=${height} ! videoconvert ! jpegenc ! multifilesink location=\"${output_location}\" max-files=${max_files}"
 }
 
@@ -1621,10 +1621,10 @@ camera_build_libcamera_snapshot_pipeline() {
 # Returns: 0 if Wayland is ready, 1 otherwise
 camera_setup_wayland_environment() {
   test_name="${1:-Camera_Test}"
-  
+
   wayland_ready=0
   sock=""
-  
+
   # Try to find existing Wayland socket
   if command -v discover_wayland_socket_anywhere >/dev/null 2>&1; then
     sock=$(discover_wayland_socket_anywhere | head -n 1 || true)
@@ -1638,7 +1638,7 @@ camera_setup_wayland_environment() {
       fi
     fi
   fi
-  
+
   # Try starting Weston if no socket found
   if [ "$wayland_ready" -eq 0 ] && [ -z "$sock" ]; then
     if command -v weston_pick_env_or_start >/dev/null 2>&1; then
@@ -1659,7 +1659,7 @@ camera_setup_wayland_environment() {
       fi
     fi
   fi
-  
+
   # Verify Wayland connection
   if [ "$wayland_ready" -eq 1 ] || [ -n "${WAYLAND_DISPLAY:-}" ]; then
     if command -v wayland_connection_ok >/dev/null 2>&1; then
@@ -1676,9 +1676,9 @@ camera_setup_wayland_environment() {
       log_info "Wayland environment set (WAYLAND_DISPLAY=${WAYLAND_DISPLAY})"
     fi
   fi
-  
+
   # Export wayland_ready for caller
   export wayland_ready
-  
+
   return $((1 - wayland_ready))
 }

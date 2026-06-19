@@ -73,7 +73,7 @@ cleanup() {
     rm -f "$PROFILE_TMP_LIST" 2>/dev/null
   fi
 }
- 
+
 trap 'cleanup' EXIT INT TERM
 
 while [ $# -gt 0 ]; do
