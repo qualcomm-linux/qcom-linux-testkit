@@ -16,4 +16,6 @@ run:
         - cd Runner
         - $PWD/suites/Multimedia/CDSP/fastrpc_test/run.sh || true
         - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/CDSP/fastrpc_test/fastrpc_test.res || true
+        - $PWD/suites/Kernel/Baseport/Module_Reload_Validation/run.sh --module fastrpc --iterations 3 --timeout-unload 60 --timeout-load 60 --timeout-settle 20 || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/Module_Reload_Validation/Module_Reload_Validation.res || true
         - $PWD/utils/result_parse.sh
