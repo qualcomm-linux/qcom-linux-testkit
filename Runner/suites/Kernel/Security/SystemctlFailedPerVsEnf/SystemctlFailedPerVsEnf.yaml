@@ -1,0 +1,15 @@
+metadata:
+  name: SystemctlFailedPerVsEnf
+  format: "Lava-Test Test Definition 1.0"
+  description: "Compare the failed services in Permissive and enforcing mode."
+  os:
+    - linux
+  scope:
+    - functional
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Security/SystemctlFailedPerVsEnf
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh SystemctlFailedPerVsEnf.res
