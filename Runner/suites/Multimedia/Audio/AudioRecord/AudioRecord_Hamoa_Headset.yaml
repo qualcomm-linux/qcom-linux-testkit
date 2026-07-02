@@ -1,0 +1,27 @@
+metadata:
+  name: audio-record-hamoa-headset
+  format: "Lava-Test Test Definition 1.0"
+  description: "Audio Hamoa headset capture validation (headset microphone)"
+  os:
+    - linux
+  scope:
+    - functional
+
+params:
+  AUDIO_BACKEND: "alsa"  # Audio backend: alsa, default: alsa
+  ALSA_PROFILE: "hamoa"  # ALSA profile: hamoa, default: hamoa
+  DEVICE: "headset"  # Device to test: handset or headset, default: headset
+  CONFIG_NAMES: "record_config1"  # Test specific configs (e.g., "record_config1 record_config2"), default: record_config1
+  RECORD_SECONDS: "5s"  # Recording duration with unit suffix (e.g., "5s", "10s", "30s"), default: 5s
+  LOOPS: 1  # Number of recording loops, default: 1
+  DMESG_SCAN: 1  # Scan dmesg for errors after recording, default: 1
+  VERBOSE: 0  # Enable verbose logging, default: 0
+  RES_SUFFIX: "Hamoa_Headset"  # Suffix for unique result file, default: Hamoa_Headset
+  LAVA_TESTCASE_ID: "AudioRecord_Hamoa_Headset"  # Unique testcase ID for LAVA, default: AudioRecord_Hamoa_Headset
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Multimedia/Audio/AudioRecord/
+    - ./run.sh --backend "${AUDIO_BACKEND}" --alsa-profile "${ALSA_PROFILE}" --device "${DEVICE}" --config-name "${CONFIG_NAMES}" --record-seconds "${RECORD_SECONDS}" --loops "${LOOPS}" --res-suffix "${RES_SUFFIX}" --lava-testcase-id "${LAVA_TESTCASE_ID}" || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh AudioRecord${RES_SUFFIX:+_${RES_SUFFIX}}.res

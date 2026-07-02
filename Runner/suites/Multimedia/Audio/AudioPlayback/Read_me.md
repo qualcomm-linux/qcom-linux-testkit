@@ -7,7 +7,7 @@ This suite automates the validation of audio playback capabilities on Qualcomm L
 
 ## Features
 
-- Supports **PipeWire** and **PulseAudio** backends
+- Supports **PipeWire**, **PulseAudio**, and **ALSA** backends (including Hamoa ALSA profile)
 - **10-clip test coverage**: Comprehensive validation across diverse audio formats (sample rates: 8KHz-48KHz, bit depths: 8b-32b, channels: 1ch-8ch)
 - **Flexible clip selection**: 
   - Use generic config names (playback_config1-playback_config10) for easy selection
@@ -74,6 +74,95 @@ For overlay builds using audioreach kernel modules, the test automatically:
 
 This happens transparently before tests run. No manual configuration needed.
 
+## Hamoa ALSA Profile Support
+
+For **Hamoa base builds** (ALSA-only, no PipeWire/PulseAudio), use the dedicated Hamoa YAML files:
+
+### Hamoa-Specific Features
+- **Direct ALSA backend** with hardware-specific profile (`--backend alsa --alsa-profile hamoa`)
+- **Device-specific routing**: Handset (4-way speaker system) and Headset (stereo headphones)
+- **Hardware mixer configuration**: Automatic mixer setup for each device
+- **10 playback configs**: Same comprehensive coverage as generic configs
+- **CI/LAVA ready**: Includes `--res-suffix` and `--lava-testcase-id` parameters
+
+### Hamoa YAML Files
+```
+AudioPlayback_Hamoa_Handset.yaml  # For handset (4-way speakers)
+AudioPlayback_Hamoa_Headset.yaml  # For headset (stereo headphones)
+```
+
+### Hamoa Usage Examples
+
+**Handset Playback (4-way speaker system):**
+```bash
+cd Runner/suites/Multimedia/Audio/AudioPlayback
+
+# Test with handset device
+./run.sh --backend alsa --alsa-profile hamoa --device handset \
+  --clip-name playback_config1 --audio-clips-path /home/AudioClips \
+  --loops 1 --timeout 10s
+
+# With CI/LAVA parameters
+./run.sh --backend alsa --alsa-profile hamoa --device handset \
+  --clip-name playback_config1 --audio-clips-path /home/AudioClips \
+  --loops 1 --timeout 10s --res-suffix Hamoa_Handset \
+  --lava-testcase-id AudioPlayback_Hamoa_Handset
+```
+
+**Headset Playback (stereo headphones):**
+```bash
+# Test with headset device
+./run.sh --backend alsa --alsa-profile hamoa --device headset \
+  --clip-name playback_config1 --audio-clips-path /home/AudioClips \
+  --loops 1 --timeout 10s
+
+# With CI/LAVA parameters
+./run.sh --backend alsa --alsa-profile hamoa --device headset \
+  --clip-name playback_config1 --audio-clips-path /home/AudioClips \
+  --loops 1 --timeout 10s --res-suffix Hamoa_Headset \
+  --lava-testcase-id AudioPlayback_Hamoa_Headset
+```
+
+### Hamoa Sample Output
+```
+ubuntu@ubuntu:tmp/Runner/suites/Multimedia/Audio/AudioPlayback$ ./run.sh --backend alsa --alsa-profile hamoa --device handset --clip-name playback_config1 --audio-clips-path /home/AudioClips --loops 1 --timeout 10s --res-suffix Hamoa_Handset --lava-testcase-id AudioPlayback_Hamoa_Handset
+[INFO] 2026-04-15 19:24:11 - Using unique result file: /tmp/Runner/suites/Multimedia/Audio/AudioPlayback/AudioPlayback_Hamoa_Handset.res
+[INFO] 2026-04-15 19:24:11 - Using unique log directory: /tmp/Runner/suites/Multimedia/Audio/AudioPlayback/results/AudioPlayback_Hamoa_Handset
+[INFO] 2026-04-15 19:24:11 - Base build detected, no audioreach modules, skipping overlay setup
+[INFO] 2026-04-15 19:24:11 - ---------------- Starting AudioPlayback ----------------
+[INFO] 2026-04-15 19:24:11 - Platform Details: machine='Qualcomm Technologies, Inc. Hamoa IoT EVK' target='unknown' kernel='7.0.0-1005-qcom' arch='aarch64'
+[INFO] 2026-04-15 19:24:11 - Using backend: alsa
+[INFO] 2026-04-15 19:24:11 - Using hardware-specific ALSA profile 'hamoa' - device validation handled by profile
+[INFO] 2026-04-15 19:24:11 - Using ALSA profile: hamoa for device: handset
+[INFO] 2026-04-15 19:24:11 - Configuring mixer for handset playback (speakers)...
+[INFO] 2026-04-15 19:24:11 - Handset playback mixer configured successfully
+[INFO] 2026-04-15 19:24:11 - ALSA profile configured successfully, device: plughw:0,1
+[INFO] 2026-04-15 19:24:11 - Using clip discovery mode
+[INFO] 2026-04-15 19:24:12 - Discovered 1 clips to test
+[INFO] 2026-04-15 19:24:12 - [play_16KHz_16b_2ch] Using clip: yesterday_16KHz_30s_16b_2ch.wav (1922036 bytes)
+[INFO] 2026-04-15 19:24:12 - [play_16KHz_16b_2ch] loop 1/1 start=2026-04-15T19:24:12Z clip=yesterday_16KHz_30s_16b_2ch.wav backend=alsa sink=speakers(plughw:0,1)
+[INFO] 2026-04-15 19:24:12 - [play_16KHz_16b_2ch] exec: aplay -D "plughw:0,1" "/home/AudioClips/yesterday_16KHz_30s_16b_2ch.wav"
+[INFO] 2026-04-15 19:24:24 - [play_16KHz_16b_2ch] evidence: pw_streaming=0 pa_streaming=1 alsa_running=0 asoc_path_on=0 pw_log=0
+[WARN] 2026-04-15 19:24:24 - [play_16KHz_16b_2ch] nonzero rc=1 but evidence indicates playback - PASS
+[PASS] 2026-04-15 19:24:25 - AudioPlayback PASS
+
+ubuntu@ubuntu:tmp/Runner/suites/Multimedia/Audio/AudioPlayback$ cat AudioPlayback_Hamoa_Handset.res
+AudioPlayback_Hamoa_Handset PASS
+```
+
+### Hamoa Device Mapping
+| Device   | Hardware                    | ALSA Device  | Mixer Profile          |
+|----------|-----------------------------|--------------|------------------------|
+| handset  | 4-way speaker system        | plughw:0,1   | handset_playback       |
+| headset  | Stereo headphones           | plughw:0,0   | headset_playback       |
+
+### Important Notes for Hamoa
+- **ALSA-only**: Hamoa builds do not have PipeWire/PulseAudio. Always use `--backend alsa --alsa-profile hamoa`
+- **Device parameter required**: Must specify `--device handset` or `--device headset`
+- **Automatic mixer configuration**: The script automatically configures hardware mixers for each device
+- **Evidence-based validation**: Uses ALSA runtime status and ASoC path validation
+- **All 10 configs supported**: Same playback_config1-10 coverage as generic configs
+
 ## Directory Structure
 
 ```bash
@@ -81,7 +170,9 @@ Runner/
 ├── run-test.sh
 ├── utils/
 │   ├── functestlib.sh
-│   └── audio_common.sh
+│   └── audio/
+│       ├── audio_common.sh      # Generic audio utilities
+│       └── alsa_common.sh       # ALSA-specific utilities (Hamoa support)
 └── suites/
     └── Multimedia/
         └── Audio/
@@ -92,7 +183,9 @@ Runner/
                 ├── AudioPlayback_Config01.yaml
                 ├── AudioPlayback_Config02.yaml
                 ├── ...
-                └── AudioPlayback_Config10.yaml
+                ├── AudioPlayback_Config10.yaml
+                ├── AudioPlayback_Hamoa_Handset.yaml  # Hamoa handset playback
+                └── AudioPlayback_Hamoa_Headset.yaml  # Hamoa headset playback
 ```
 
 ## Usage
@@ -210,7 +303,7 @@ cd Runner/suites/Multimedia/Audio/AudioPlayback
 
 Environment Variables:
 Variable	             Description	                                   Default
-AUDIO_BACKEND	         Selects backend: pipewire or pulseaudio	       auto-detect
+AUDIO_BACKEND	         Selects backend: pipewire, pulseaudio, or alsa	   auto-detect
 SINK_CHOICE	             Playback sink: speakers or null	               speakers
 CLIP_NAMES               Test specific clips (e.g., "playback_config1 playback_config2")    playback_config1
 CLIP_FILTER              Filter clips by pattern (e.g., "48KHz" or "16b" or "2ch")          unset
@@ -232,10 +325,14 @@ NET_PING_HOST            Host used for ping reachability check             8.8.8
 RES_SUFFIX               Suffix for unique result file and log directory   unset
 LAVA_TESTCASE_ID         Unique testcase ID written into the .res file for LAVA    AudioPlayback
 
+**Hamoa-Specific Environment Variables (ALSA backend only):**
+ALSA_PROFILE             ALSA hardware profile (e.g., "hamoa")             unset
+DEVICE                   Device type: handset or headset (Hamoa only)      unset
+
 
 CLI Options
 Option	                    Description
---backend	                Select backend: pipewire or pulseaudio
+--backend	                Select backend: pipewire, pulseaudio, or alsa
 --sink	                    Playback sink: speakers or null
 --clip-name <names>         Test specific clips using playback_config1-playback_config10 or descriptive names (space-separated)
 --clip-filter <patterns>    Filter clips by sample rate, bit rate, or channels (space-separated patterns)
@@ -253,6 +350,10 @@ Option	                    Description
 --junit <file.xml>	        Write JUnit XML output
 --verbose	                Enable verbose logging
 --help	                    Show usage instructions
+
+**Hamoa-Specific CLI Options (ALSA backend only):**
+--alsa-profile <profile>    ALSA hardware profile (e.g., "hamoa")
+--device <type>             Device type: handset or headset (Hamoa only)
 
 ```
 

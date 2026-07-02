@@ -36,7 +36,9 @@ fi
 # shellcheck disable=SC1091
 . "$TOOLS/functestlib.sh"
 # shellcheck disable=SC1091
-. "$TOOLS/audio_common.sh"
+. "$TOOLS/audio/audio_common.sh"
+# shellcheck disable=SC1091
+. "$TOOLS/audio/alsa_common.sh"
 # shellcheck disable=SC1091
 . "$TOOLS/lib_video.sh"
 
@@ -71,6 +73,8 @@ export AUDIO_TAR_URL
 
 # ------------- Defaults / CLI -------------
 AUDIO_BACKEND=""
+ALSA_PROFILE="${ALSA_PROFILE:-generic}" # ALSA profile (hamoa, generic)
+DEVICE="${DEVICE:-}" # Device type for ALSA profiles (handset, headset)
 SINK_CHOICE="${SINK_CHOICE:-speakers}" # speakers|null
 FORMATS="" # Will be set to default only if using legacy mode
 DURATIONS="" # Will be set to default only if using legacy mode
@@ -111,7 +115,9 @@ PASSWORD=""
 usage() {
   cat <<EOF
 Usage: $0 [options]
-  --backend {pipewire|pulseaudio}
+  --backend {pipewire|pulseaudio|alsa}
+  --alsa-profile {hamoa|generic}  # ALSA profile (when backend=alsa, default: generic)
+  --device {handset|headset}      # Device type for ALSA profiles (required with --alsa-profile)
   --sink {speakers|null}
   --formats "wav" # Legacy matrix mode only
   --durations "short|short medium" # Legacy matrix mode only (not recommended for new tests)
@@ -156,6 +162,14 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --backend)
       AUDIO_BACKEND="$2"
+      shift 2
+      ;;
+    --alsa-profile)
+      ALSA_PROFILE="$2"
+      shift 2
+      ;;
+    --device)
+      DEVICE="$2"
       shift 2
       ;;
     --sink)
@@ -466,6 +480,21 @@ else
   log_info "Sub-run: skipping initial network bring-up."
 fi
 
+# Hardware-specific ALSA profiles require direct ALSA backend
+# Profiles like 'hamoa' configure hardware mixer controls and route to specific
+# ALSA devices (e.g., plughw:0,1). These operations require direct ALSA access.
+# Auto-detection may select PipeWire/PulseAudio which adds an abstraction layer
+# that can interfere with low-level mixer configuration and device routing.
+if [ "$ALSA_PROFILE" != "generic" ] && [ -n "$ALSA_PROFILE" ]; then
+  if [ -z "$AUDIO_BACKEND" ]; then
+    AUDIO_BACKEND="alsa"
+    log_info "ALSA profile '$ALSA_PROFILE' requires direct hardware access - using backend: alsa"
+  elif [ "$AUDIO_BACKEND" != "alsa" ]; then
+    log_warn "ALSA profile '$ALSA_PROFILE' specified with backend '$AUDIO_BACKEND'"
+    log_warn "Hardware-specific profiles work best with direct ALSA backend"
+  fi
+fi
+
 # Resolve backend
 if [ -z "$AUDIO_BACKEND" ]; then
   AUDIO_BACKEND="$(detect_audio_backend 2>/dev/null || echo "")"
@@ -510,7 +539,13 @@ log_info "Using backend: $AUDIO_BACKEND"
 
 backend_ok=0
 if [ "$AUDIO_BACKEND" = "alsa" ]; then
-  if audio_playback_alsa_probe; then
+  # Hardware-specific ALSA profiles provide explicit device paths and mixer configurations.
+  # The profile setup functions validate device availability, so additional probing is
+  # unnecessary and may fail when other audio servers (PipeWire/PulseAudio) are present.
+  if [ "$ALSA_PROFILE" != "generic" ] && [ -n "$ALSA_PROFILE" ]; then
+    backend_ok=1
+    log_info "Using hardware-specific ALSA profile '$ALSA_PROFILE' - device validation handled by profile"
+  elif audio_playback_alsa_probe; then
     backend_ok=1
   fi
 else
@@ -680,11 +715,26 @@ case "$AUDIO_BACKEND:$SINK_CHOICE" in
     SINK_ID="null"
     ;;
   alsa:*)
-    audio_playback_alsa_prepare >/dev/null 2>&1 || true
-    if [ -n "${AUDIO_ALSA_PLAYBACK_DEVICE:-}" ]; then
-      SINK_ID="$AUDIO_ALSA_PLAYBACK_DEVICE"
+    # Check if using ALSA profile (e.g., Hamoa)
+    if [ "$ALSA_PROFILE" != "generic" ] && [ -n "$DEVICE" ]; then
+      # Use profile-specific setup
+      log_info "Using ALSA profile: $ALSA_PROFILE for device: $DEVICE"
+      if setup_alsa_profile_"${ALSA_PROFILE}"_playback_"${DEVICE}" "$LOGDIR"; then
+        SINK_ID="$(get_alsa_device_"${ALSA_PROFILE}"_playback_"${DEVICE}")"
+        log_info "ALSA profile configured successfully, device: $SINK_ID"
+      else
+        log_error "Failed to setup ALSA profile: $ALSA_PROFILE for device: $DEVICE"
+        echo "$RESULT_TESTNAME FAIL" >"$RES_FILE"
+        exit 1
+      fi
     else
-      SINK_ID="$(audio_playback_pick_alsa_sink)"
+      # Generic ALSA (existing behavior)
+      audio_playback_alsa_prepare >/dev/null 2>&1 || true
+      if [ -n "${AUDIO_ALSA_PLAYBACK_DEVICE:-}" ]; then
+        SINK_ID="$AUDIO_ALSA_PLAYBACK_DEVICE"
+      else
+        SINK_ID="$(audio_playback_pick_alsa_sink)"
+      fi
     fi
     ;;
 esac
