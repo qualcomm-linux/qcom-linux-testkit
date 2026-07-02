@@ -4127,3 +4127,1577 @@ dump_debug_file() {
 
   log_info "===== end ${title} ====="
 }
+
+# ---------------------------------------------------------------------------
+# Memory map collection helpers
+# ---------------------------------------------------------------------------
+
+perf_mem_hex_bytes_to_dec() {
+  hex="$1"
+
+  [ -n "$hex" ] || {
+    printf '\n'
+    return 0
+  }
+
+  awk -v hex="$hex" '
+    function hexval(c) {
+      c = tolower(c)
+      if (c >= "0" && c <= "9") return c + 0
+      if (c == "a") return 10
+      if (c == "b") return 11
+      if (c == "c") return 12
+      if (c == "d") return 13
+      if (c == "e") return 14
+      if (c == "f") return 15
+      return 0
+    }
+
+    BEGIN {
+      total = 0
+      for (i = 1; i <= length(hex); i++) {
+        total = (total * 16) + hexval(substr(hex, i, 1))
+      }
+      printf "%.0f\n", total
+    }
+  '
+}
+
+perf_mem_dt_u32_prop() {
+  prop="$1"
+
+  [ -r "$prop" ] || {
+    printf '\n'
+    return 0
+  }
+
+  hex="$(
+    od -An -tx1 -N 4 -v "$prop" 2>/dev/null \
+      | tr -d ' \n'
+  )"
+
+  perf_mem_hex_bytes_to_dec "$hex"
+}
+
+perf_mem_dt_cells_to_bytes() {
+  file_path="$1"
+  start_cell="$2"
+  cell_count="$3"
+
+  [ -r "$file_path" ] || {
+    printf '\n'
+    return 0
+  }
+
+  byte_skip=$((start_cell * 4))
+  byte_count=$((cell_count * 4))
+
+  hex="$(
+    dd if="$file_path" bs=1 skip="$byte_skip" count="$byte_count" 2>/dev/null \
+      | od -An -tx1 -v 2>/dev/null \
+      | tr -d ' \n'
+  )"
+
+  perf_mem_hex_bytes_to_dec "$hex"
+}
+
+perf_mem_dt_reg_total_size_kb() {
+  reg_file="$1"
+  address_cells="$2"
+  size_cells="$3"
+
+  [ -r "$reg_file" ] || {
+    printf '\n'
+    return 0
+  }
+
+  case "$address_cells" in
+    ''|*[!0-9]*) address_cells=2 ;;
+  esac
+
+  case "$size_cells" in
+    ''|*[!0-9]*) size_cells=2 ;;
+  esac
+
+  tuple_cells=$((address_cells + size_cells))
+  total_bytes="$(wc -c <"$reg_file" 2>/dev/null || echo 0)"
+  total_cells=$((total_bytes / 4))
+
+  if [ "$tuple_cells" -le 0 ] || [ "$total_cells" -le 0 ]; then
+    printf '\n'
+    return 0
+  fi
+
+  total="0"
+  cell_index=0
+
+  while [ "$cell_index" -lt "$total_cells" ]; do
+    size_start=$((cell_index + address_cells))
+    size_bytes="$(perf_mem_dt_cells_to_bytes "$reg_file" "$size_start" "$size_cells")"
+
+    if [ -n "$size_bytes" ]; then
+      total="$(
+        awk -v a="$total" -v b="$size_bytes" '
+          BEGIN { printf "%.0f\n", a + b }
+        '
+      )"
+    fi
+
+    cell_index=$((cell_index + tuple_cells))
+  done
+
+  awk -v bytes="$total" '
+    BEGIN { printf "%.0f\n", bytes / 1024 }
+  '
+}
+
+perf_mem_dt_size_prop_total_kb() {
+  prop="$1"
+  size_cells="$2"
+
+  [ -r "$prop" ] || {
+    printf '\n'
+    return 0
+  }
+
+  case "$size_cells" in
+    ''|*[!0-9]*) size_cells=2 ;;
+  esac
+
+  hex="$(
+    od -An -tx1 -v "$prop" 2>/dev/null \
+      | tr -d ' \n'
+  )"
+
+  [ -n "$hex" ] || {
+    printf '\n'
+    return 0
+  }
+
+  awk -v hex="$hex" -v size_cells="$size_cells" '
+    function hexval(c) {
+      c = tolower(c)
+      if (c >= "0" && c <= "9") return c + 0
+      if (c == "a") return 10
+      if (c == "b") return 11
+      if (c == "c") return 12
+      if (c == "d") return 13
+      if (c == "e") return 14
+      if (c == "f") return 15
+      return 0
+    }
+
+    function hex2dec(s, i, n, v) {
+      n = 0
+      for (i = 1; i <= length(s); i++) {
+        v = hexval(substr(s, i, 1))
+        n = (n * 16) + v
+      }
+      return n
+    }
+
+    BEGIN {
+      chars = size_cells * 8
+      if (length(hex) < chars) {
+        exit
+      }
+      size_hex = substr(hex, 1, chars)
+      size_bytes = hex2dec(size_hex)
+      printf "%.0f\n", size_bytes / 1024
+    }
+  '
+}
+
+perf_mem_total_physical_kb_from_dt_memory() {
+  base=""
+
+  if [ -d /sys/firmware/devicetree/base ]; then
+    base="/sys/firmware/devicetree/base"
+  elif [ -d /proc/device-tree ]; then
+    base="/proc/device-tree"
+  fi
+
+  [ -n "$base" ] || {
+    printf '\n'
+    return 0
+  }
+
+  address_cells="$(perf_mem_dt_u32_prop "$base/#address-cells")"
+  size_cells="$(perf_mem_dt_u32_prop "$base/#size-cells")"
+
+  [ -n "$address_cells" ] || address_cells=2
+  [ -n "$size_cells" ] || size_cells=2
+
+  total_kb="0"
+
+  for mem_node in "$base"/memory "$base"/memory@*; do
+    [ -d "$mem_node" ] || continue
+    [ -r "$mem_node/reg" ] || continue
+
+    node_kb="$(perf_mem_dt_reg_total_size_kb "$mem_node/reg" "$address_cells" "$size_cells")"
+
+    if [ -n "$node_kb" ]; then
+      total_kb="$(
+        awk -v a="$total_kb" -v b="$node_kb" '
+          BEGIN { printf "%.0f\n", a + b }
+        '
+      )"
+    fi
+  done
+
+  if [ "$total_kb" = "0" ]; then
+    printf '\n'
+  else
+    printf '%s\n' "$total_kb"
+  fi
+}
+
+perf_mem_reserved_nhlos_kb_from_dt_mode() {
+  out_dir="$1"
+  mode="$2"
+  base=""
+
+  case "$mode" in
+    all)
+      detail_file="$out_dir/nhlos_reserved_memory_dt_all.tsv"
+      ;;
+    non_reusable)
+      detail_file="$out_dir/nhlos_reserved_memory_dt_non_reusable.tsv"
+      ;;
+    *)
+      detail_file="$out_dir/nhlos_reserved_memory_dt_all.tsv"
+      mode="all"
+      ;;
+  esac
+
+  if [ -d /sys/firmware/devicetree/base/reserved-memory ]; then
+    base="/sys/firmware/devicetree/base/reserved-memory"
+  elif [ -d /proc/device-tree/reserved-memory ]; then
+    base="/proc/device-tree/reserved-memory"
+  fi
+
+  {
+    printf 'node\tname\tsource\tsize_kb\tsize_mb\tno_map\treusable\tlinux_cma_default\tincluded\n'
+  } >"$detail_file"
+
+  [ -n "$base" ] || {
+    printf '\n'
+    return 0
+  }
+
+  address_cells="$(perf_mem_dt_u32_prop "$base/#address-cells")"
+  size_cells="$(perf_mem_dt_u32_prop "$base/#size-cells")"
+
+  [ -n "$address_cells" ] || address_cells=2
+  [ -n "$size_cells" ] || size_cells=2
+
+  total_kb="0"
+
+  for node in "$base"/*; do
+    [ -d "$node" ] || continue
+
+    node_base="$(basename "$node")"
+
+    if [ -r "$node/name" ]; then
+      node_name="$(tr -d '\0' <"$node/name" 2>/dev/null)"
+    else
+      node_name="$node_base"
+    fi
+
+    if [ -e "$node/no-map" ]; then
+      no_map="yes"
+    else
+      no_map="no"
+    fi
+
+    if [ -e "$node/reusable" ]; then
+      reusable="yes"
+    else
+      reusable="no"
+    fi
+
+    if [ -e "$node/linux,cma-default" ]; then
+      linux_cma_default="yes"
+    else
+      linux_cma_default="no"
+    fi
+
+    size_kb=""
+    source=""
+
+    if [ -r "$node/reg" ]; then
+      size_kb="$(perf_mem_dt_reg_total_size_kb "$node/reg" "$address_cells" "$size_cells")"
+      source="reg"
+    elif [ -r "$node/size" ]; then
+      size_kb="$(perf_mem_dt_size_prop_total_kb "$node/size" "$size_cells")"
+      source="size"
+    fi
+
+    [ -n "$size_kb" ] || continue
+    [ "$size_kb" != "0" ] || continue
+
+    included="yes"
+    if [ "$mode" = "non_reusable" ]; then
+      if [ "$reusable" = "yes" ] || [ "$linux_cma_default" = "yes" ]; then
+        included="no"
+      fi
+    fi
+
+    size_mb="$(
+      awk -v kb="$size_kb" '
+        BEGIN { printf "%.2f\n", kb / 1024 }
+      '
+    )"
+
+    if [ "$included" = "yes" ]; then
+      total_kb="$(
+        awk -v a="$total_kb" -v b="$size_kb" '
+          BEGIN { printf "%.0f\n", a + b }
+        '
+      )"
+    fi
+
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$node_base" "$node_name" "$source" "$size_kb" "$size_mb" \
+      "$no_map" "$reusable" "$linux_cma_default" "$included" >>"$detail_file"
+  done
+
+  if [ "$total_kb" = "0" ]; then
+    printf '\n'
+  else
+    printf '%s\n' "$total_kb"
+  fi
+}
+
+perf_mem_reserved_nhlos_kb_from_dt() {
+  perf_mem_reserved_nhlos_kb_from_dt_mode "$1" "all"
+}
+
+perf_mem_reserved_nhlos_non_reusable_kb_from_dt() {
+  perf_mem_reserved_nhlos_kb_from_dt_mode "$1" "non_reusable"
+}
+
+perf_mem_dt_gap_nhlos_kb() {
+  memtotal_kb="$1"
+  total_physical_kb="$(perf_mem_total_physical_kb_from_dt_memory)"
+
+  if [ -z "$total_physical_kb" ] || [ -z "$memtotal_kb" ]; then
+    printf '\n'
+    return 0
+  fi
+
+  awk -v total="$total_physical_kb" -v memtotal="$memtotal_kb" '
+    BEGIN {
+      v = total - memtotal
+      if (v < 0) v = 0
+      printf "%.0f\n", v
+    }
+  '
+}
+
+perf_mem_iomem_reserved_regions_all_kb() {
+  iomem_file="$1"
+  detail_file="$2"
+
+  [ -r "$iomem_file" ] || {
+    printf '\n'
+    return 0
+  }
+
+  awk -v detail_file="$detail_file" '
+    function hexval(c) {
+      c = tolower(c)
+      if (c >= "0" && c <= "9") return c + 0
+      if (c == "a") return 10
+      if (c == "b") return 11
+      if (c == "c") return 12
+      if (c == "d") return 13
+      if (c == "e") return 14
+      if (c == "f") return 15
+      return 0
+    }
+
+    function hex2dec(s, i, n, v) {
+      gsub(/^0x/, "", s)
+      n = 0
+      for (i = 1; i <= length(s); i++) {
+        v = hexval(substr(s, i, 1))
+        n = (n * 16) + v
+      }
+      return n
+    }
+
+    function add_top_range(s, e, name, is_system) {
+      if (e < s) return
+
+      all_count++
+      all_starts[all_count] = s
+      all_ends[all_count] = e
+      all_names[all_count] = name
+      all_system[all_count] = is_system
+
+      /*
+       * DDR span is inferred from top-level System RAM plus common Qualcomm
+       * firmware/reserved labels. The final NHLOS is span - System RAM, so
+       * unnamed holes/gaps are counted too.
+       */
+      lname = tolower(name)
+      if (is_system == 1 || lname ~ /(reserved|nomap|no-map|modem|mpss|adsp|cdsp|gpdsp|wpss|slpi|spss|tz|hyp|pil|rmtfs|venus|vpu|video|camera|cam|ipa|gpu|gmu|qsee|secure|xbl|aop|smem|cpucp|memory)/) {
+        if (have_span == 0) {
+          span_start = s
+          span_end = e
+          have_span = 1
+        } else {
+          if (s < span_start) span_start = s
+          if (e > span_end) span_end = e
+        }
+      }
+    }
+
+    BEGIN {
+      printf "item\trange\tname\tstart_dec\tend_dec\tsize_kb\tsize_mb\tincluded\n" > detail_file
+      have_span = 0
+      all_count = 0
+    }
+
+    /*
+     * Use only top-level /proc/iomem ranges. Child lines are indented and
+     * would double count Kernel code/data under System RAM.
+     */
+    /^[0-9a-fA-F]+-[0-9a-fA-F]+[[:space:]]*:/ {
+      split($1, range, "-")
+      start = hex2dec(range[1])
+      end = hex2dec(range[2])
+
+      name = $0
+      sub(/^[0-9a-fA-F]+-[0-9a-fA-F]+[[:space:]]*:[[:space:]]*/, "", name)
+
+      is_system = 0
+      if (tolower(name) == "system ram") {
+        is_system = 1
+      }
+
+      add_top_range(start, end, name, is_system)
+    }
+
+    END {
+      if (all_count == 0 || have_span == 0) {
+        exit
+      }
+
+      sys_count = 0
+
+      for (i = 1; i <= all_count; i++) {
+        if (all_system[i] != 1) {
+          continue
+        }
+
+        if (all_ends[i] < span_start || all_starts[i] > span_end) {
+          continue
+        }
+
+        sys_count++
+        sys_starts[sys_count] = all_starts[i]
+        sys_ends[sys_count] = all_ends[i]
+      }
+
+      if (sys_count == 0) {
+        exit
+      }
+
+      for (i = 1; i <= sys_count; i++) {
+        for (j = i + 1; j <= sys_count; j++) {
+          if (sys_starts[j] < sys_starts[i]) {
+            ts = sys_starts[i]
+            te = sys_ends[i]
+            sys_starts[i] = sys_starts[j]
+            sys_ends[i] = sys_ends[j]
+            sys_starts[j] = ts
+            sys_ends[j] = te
+          }
+        }
+      }
+
+      merged_count = 0
+
+      for (i = 1; i <= sys_count; i++) {
+        if (merged_count == 0) {
+          merged_count = 1
+          mstarts[merged_count] = sys_starts[i]
+          mends[merged_count] = sys_ends[i]
+          continue
+        }
+
+        if (sys_starts[i] <= mends[merged_count] + 1) {
+          if (sys_ends[i] > mends[merged_count]) {
+            mends[merged_count] = sys_ends[i]
+          }
+        } else {
+          merged_count++
+          mstarts[merged_count] = sys_starts[i]
+          mends[merged_count] = sys_ends[i]
+        }
+      }
+
+      system_bytes = 0
+      for (i = 1; i <= merged_count; i++) {
+        system_bytes += mends[i] - mstarts[i] + 1
+      }
+
+      span_bytes = span_end - span_start + 1
+      nhlos_bytes = span_bytes - system_bytes
+
+      if (nhlos_bytes < 0) {
+        nhlos_bytes = 0
+      }
+
+      printf "DDR_SPAN\t%.0f-%.0f\tDDR span inferred from /proc/iomem\t%.0f\t%.0f\t%.0f\t%.2f\tyes\n", \
+        span_start, span_end, span_start, span_end, span_bytes / 1024, span_bytes / 1024 / 1024 >> detail_file
+
+      printf "SYSTEM_RAM_TOTAL\t-\tMerged top-level System RAM\t0\t0\t%.0f\t%.2f\tno\n", \
+        system_bytes / 1024, system_bytes / 1024 / 1024 >> detail_file
+
+      printf "NHLOS_ALL\t-\tDDR span minus System RAM, includes reserved regions and holes\t0\t0\t%.0f\t%.2f\tyes\n", \
+        nhlos_bytes / 1024, nhlos_bytes / 1024 / 1024 >> detail_file
+
+      for (i = 1; i <= all_count; i++) {
+        if (all_ends[i] < span_start || all_starts[i] > span_end) {
+          continue
+        }
+
+        size_bytes = all_ends[i] - all_starts[i] + 1
+        included = "debug"
+
+        if (all_system[i] == 1) {
+          included = "system_ram"
+        } else {
+          included = "non_system_or_reserved"
+        }
+
+        printf "TOP_LEVEL_RANGE\t%.0f-%.0f\t%s\t%.0f\t%.0f\t%.0f\t%.2f\t%s\n", \
+          all_starts[i], all_ends[i], all_names[i], all_starts[i], all_ends[i], \
+          size_bytes / 1024, size_bytes / 1024 / 1024, included >> detail_file
+      }
+
+      printf "%.0f\n", nhlos_bytes / 1024
+    }
+  ' "$iomem_file" 2>/dev/null
+}
+
+perf_mem_nhlos_kb_from_iomem_patterns() {
+  iomem_file="$1"
+
+  [ -r "$iomem_file" ] || {
+    printf '\n'
+    return 0
+  }
+
+  awk '
+    function hexval(c) {
+      c = tolower(c)
+      if (c >= "0" && c <= "9") return c + 0
+      if (c == "a") return 10
+      if (c == "b") return 11
+      if (c == "c") return 12
+      if (c == "d") return 13
+      if (c == "e") return 14
+      if (c == "f") return 15
+      return 0
+    }
+
+    function hex2dec(s, i, n, v) {
+      gsub(/^0x/, "", s)
+      n = 0
+      for (i = 1; i <= length(s); i++) {
+        v = hexval(substr(s, i, 1))
+        n = (n * 16) + v
+      }
+      return n
+    }
+
+    BEGIN {
+      pattern = "modem|mpss|adsp|cdsp|gpdsp|wpss|slpi|spss|tz|hyp|pil|rmtfs|venus|vpu|video|camera|cam|ipa|gpu|gmu|qsee|secure"
+    }
+
+    tolower($0) ~ pattern && $1 ~ /^[0-9a-fA-F]+-[0-9a-fA-F]+$/ {
+      split($1, range, "-")
+      start = hex2dec(range[1])
+      end = hex2dec(range[2])
+
+      if (end >= start) {
+        total += end - start + 1
+      }
+    }
+
+    END {
+      if (total > 0) {
+        printf "%.0f\n", total / 1024
+      }
+    }
+  ' "$iomem_file" 2>/dev/null
+}
+
+perf_mem_roundup_installed_kb() {
+  memtotal_kb="$1"
+
+  case "$memtotal_kb" in
+    ''|*[!0-9.]*)
+      printf '\n'
+      return 0
+      ;;
+  esac
+
+  awk -v kb="$memtotal_kb" '
+    BEGIN {
+      split("512 1024 1536 2048 3072 4096 6144 8192 12288 16384 24576 32768 49152 65536", sizes, " ")
+      mb = kb / 1024
+
+      for (i = 1; i <= length(sizes); i++) {
+        if (mb <= sizes[i]) {
+          printf "%.0f\n", sizes[i] * 1024
+          exit
+        }
+      }
+
+      printf "%.0f\n", mb * 1024
+    }
+  '
+}
+
+perf_mem_collect_file() {
+  src="$1"
+  dst="$2"
+
+  if [ -r "$src" ]; then
+    cat "$src" >"$dst" 2>/dev/null || true
+  else
+    printf 'missing or unreadable: %s\n' "$src" >"$dst"
+  fi
+}
+
+perf_mem_collect_cmd() {
+  dst="$1"
+  shift
+
+  "$@" >"$dst" 2>&1 || true
+}
+
+perf_mem_append_manifest() {
+  out_dir="$1"
+  name="$2"
+  path="$3"
+
+  if [ -e "$path" ]; then
+    size="$(wc -c <"$path" 2>/dev/null || echo 0)"
+    printf '%s\t%s\t%s\n' "$name" "$size" "$path" >>"$out_dir/manifest.tsv"
+  fi
+}
+
+perf_mem_try_mount_debugfs() {
+  mount_debugfs="$1"
+
+  [ "$mount_debugfs" -eq 1 ] 2>/dev/null || return 0
+  [ -d /sys/kernel/debug ] || return 0
+
+  if grep -q ' debugfs /sys/kernel/debug ' /proc/mounts 2>/dev/null; then
+    return 0
+  fi
+
+  mount -t debugfs debugfs /sys/kernel/debug 2>/dev/null || true
+}
+
+perf_mem_dump_process_mem_tsv() {
+  out="$1"
+  tmp="${out}.tmp"
+
+  printf 'pid\tcomm\tuid\tpss_kb\trss_rollup_kb\tswap_pss_kb\tvmrss_kb\trssanon_kb\trssfile_kb\tshmem_kb\tvmdata_kb\tvmpte_kb\tvmswap_kb\tthreads\tcmdline\n' >"$tmp"
+
+  for proc_dir in /proc/[0-9]*; do
+    [ -d "$proc_dir" ] || continue
+
+    pid="${proc_dir#/proc/}"
+    [ -r "$proc_dir/status" ] || continue
+
+    comm="$(cat "$proc_dir/comm" 2>/dev/null || echo unknown)"
+    cmdline="$(tr '\0' ' ' <"$proc_dir/cmdline" 2>/dev/null | sed 's/[[:space:]]*$//')"
+    [ -n "$cmdline" ] || cmdline="[$comm]"
+
+    status_vals="$(
+      awk '
+        /^Uid:/ { uid=$2 }
+        /^Threads:/ { threads=$2 }
+        /^VmRSS:/ { vmrss=$2 }
+        /^RssAnon:/ { rssanon=$2 }
+        /^RssFile:/ { rssfile=$2 }
+        /^RssShmem:/ { shmem=$2 }
+        /^VmData:/ { vmdata=$2 }
+        /^VmPTE:/ { vmpte=$2 }
+        /^VmSwap:/ { vmswap=$2 }
+        END {
+          printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s",
+            uid+0, vmrss+0, rssanon+0, rssfile+0,
+            shmem+0, vmdata+0, vmpte+0, vmswap+0, threads+0
+        }
+      ' "$proc_dir/status" 2>/dev/null
+    )"
+
+    if [ -r "$proc_dir/smaps_rollup" ]; then
+      rollup_vals="$(
+        awk '
+          /^Pss:/ { pss=$2 }
+          /^Rss:/ { rss=$2 }
+          /^SwapPss:/ { swappss=$2 }
+          END {
+            printf "%s\t%s\t%s", pss+0, rss+0, swappss+0
+          }
+        ' "$proc_dir/smaps_rollup" 2>/dev/null
+      )"
+    else
+      rollup_vals="0 0 0"
+    fi
+
+    uid="$(printf '%s\n' "$status_vals" | awk -F '\t' '{print $1}')"
+    vmrss="$(printf '%s\n' "$status_vals" | awk -F '\t' '{print $2}')"
+    rssanon="$(printf '%s\n' "$status_vals" | awk -F '\t' '{print $3}')"
+    rssfile="$(printf '%s\n' "$status_vals" | awk -F '\t' '{print $4}')"
+    shmem="$(printf '%s\n' "$status_vals" | awk -F '\t' '{print $5}')"
+    vmdata="$(printf '%s\n' "$status_vals" | awk -F '\t' '{print $6}')"
+    vmpte="$(printf '%s\n' "$status_vals" | awk -F '\t' '{print $7}')"
+    vmswap="$(printf '%s\n' "$status_vals" | awk -F '\t' '{print $8}')"
+    threads="$(printf '%s\n' "$status_vals" | awk -F '\t' '{print $9}')"
+
+    pss="$(printf '%s\n' "$rollup_vals" | awk -F '\t' '{print $1}')"
+    rss_rollup="$(printf '%s\n' "$rollup_vals" | awk -F '\t' '{print $2}')"
+    swap_pss="$(printf '%s\n' "$rollup_vals" | awk -F '\t' '{print $3}')"
+
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$pid" "$comm" "$uid" "$pss" "$rss_rollup" "$swap_pss" \
+      "$vmrss" "$rssanon" "$rssfile" "$shmem" "$vmdata" "$vmpte" \
+      "$vmswap" "$threads" "$cmdline" >>"$tmp"
+  done
+
+  {
+    head -n 1 "$tmp"
+    tail -n +2 "$tmp" 2>/dev/null | sort -k4,4nr
+  } >"$out"
+
+  rm -f "$tmp"
+}
+
+perf_mem_dump_process_top_pss() {
+  in_file="$1"
+  out_file="$2"
+  count="$3"
+
+  {
+    printf 'Top %s processes by PSS\n' "$count"
+    printf 'pid\tpss_kb\trss_kb\tswap_pss_kb\tcomm\tcmdline\n'
+    awk -F '\t' 'NR > 1 {
+      printf "%s\t%s\t%s\t%s\t%s\t%s\n", $1, $4, $5, $6, $2, $15
+    }' "$in_file" | head -n "$count"
+  } >"$out_file"
+}
+
+perf_mem_dump_process_smaps_availability() {
+  out="$1"
+  total=0
+  readable=0
+
+  for proc_dir in /proc/[0-9]*; do
+    [ -d "$proc_dir" ] || continue
+    total=$((total + 1))
+
+    if [ -r "$proc_dir/smaps_rollup" ]; then
+      readable=$((readable + 1))
+    fi
+  done
+
+  {
+    echo "proc_count=$total"
+    echo "smaps_rollup_readable=$readable"
+  } >"$out"
+}
+
+perf_mem_dump_memory_summary() {
+  out="$1"
+
+  awk '
+    /^MemTotal:/ { memtotal=$2 }
+    /^MemFree:/ { memfree=$2 }
+    /^MemAvailable:/ { memavailable=$2 }
+    /^Buffers:/ { buffers=$2 }
+    /^Cached:/ { cached=$2 }
+    /^SwapCached:/ { swapcached=$2 }
+    /^Active:/ { active=$2 }
+    /^Inactive:/ { inactive=$2 }
+    /^Shmem:/ { shmem=$2 }
+    /^Slab:/ { slab=$2 }
+    /^SReclaimable:/ { sreclaimable=$2 }
+    /^SUnreclaim:/ { sunreclaim=$2 }
+    /^KernelStack:/ { kernelstack=$2 }
+    /^PageTables:/ { pagetables=$2 }
+    /^VmallocUsed:/ { vmallocused=$2 }
+    /^CmaTotal:/ { cmatotal=$2 }
+    /^CmaFree:/ { cmafree=$2 }
+    /^SwapTotal:/ { swaptotal=$2 }
+    /^SwapFree:/ { swapfree=$2 }
+    END {
+      used = memtotal - memavailable
+      filecache = cached + buffers + sreclaimable - shmem
+      if (filecache < 0) filecache = 0
+
+      printf "MemTotal_kB=%d\n", memtotal
+      printf "MemFree_kB=%d\n", memfree
+      printf "MemAvailable_kB=%d\n", memavailable
+      printf "UsedApprox_kB=%d\n", used
+      printf "Buffers_kB=%d\n", buffers
+      printf "Cached_kB=%d\n", cached
+      printf "FileCacheApprox_kB=%d\n", filecache
+      printf "SwapCached_kB=%d\n", swapcached
+      printf "Active_kB=%d\n", active
+      printf "Inactive_kB=%d\n", inactive
+      printf "Shmem_kB=%d\n", shmem
+      printf "Slab_kB=%d\n", slab
+      printf "SReclaimable_kB=%d\n", sreclaimable
+      printf "SUnreclaim_kB=%d\n", sunreclaim
+      printf "KernelStack_kB=%d\n", kernelstack
+      printf "PageTables_kB=%d\n", pagetables
+      printf "VmallocUsed_kB=%d\n", vmallocused
+      printf "CmaTotal_kB=%d\n", cmatotal
+      printf "CmaFree_kB=%d\n", cmafree
+      printf "CmaUsed_kB=%d\n", cmatotal - cmafree
+      printf "SwapTotal_kB=%d\n", swaptotal
+      printf "SwapFree_kB=%d\n", swapfree
+      printf "SwapUsed_kB=%d\n", swaptotal - swapfree
+    }
+  ' /proc/meminfo >"$out" 2>/dev/null || true
+}
+
+perf_mem_dump_reserved_memory_dt() {
+  out="$1"
+  base=""
+
+  if [ -d /sys/firmware/devicetree/base/reserved-memory ]; then
+    base="/sys/firmware/devicetree/base/reserved-memory"
+  elif [ -d /proc/device-tree/reserved-memory ]; then
+    base="/proc/device-tree/reserved-memory"
+  fi
+
+  {
+    printf 'node\tname\tcompatible\tstatus\treg_hex\tsize_hex\tno_map\n'
+
+    if [ -z "$base" ]; then
+      return 0
+    fi
+
+    for node in "$base"/*; do
+      [ -d "$node" ] || continue
+
+      node_name="$(basename "$node")"
+
+      if [ -r "$node/name" ]; then
+        name="$(tr -d '\0' <"$node/name" 2>/dev/null)"
+      else
+        name="$node_name"
+      fi
+
+      if [ -r "$node/compatible" ]; then
+        compatible="$(tr '\0' ',' <"$node/compatible" 2>/dev/null | sed 's/,$//')"
+      else
+        compatible=""
+      fi
+
+      if [ -r "$node/status" ]; then
+        status="$(tr -d '\0' <"$node/status" 2>/dev/null)"
+      else
+        status=""
+      fi
+
+      if [ -r "$node/reg" ]; then
+        reg_hex="$(od -An -tx1 -v "$node/reg" 2>/dev/null | tr -d ' \n')"
+      else
+        reg_hex=""
+      fi
+
+      if [ -r "$node/size" ]; then
+        size_hex="$(od -An -tx1 -v "$node/size" 2>/dev/null | tr -d ' \n')"
+      else
+        size_hex=""
+      fi
+
+      if [ -e "$node/no-map" ]; then
+        no_map="yes"
+      else
+        no_map="no"
+      fi
+
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$node_name" "$name" "$compatible" "$status" "$reg_hex" "$size_hex" "$no_map"
+    done
+  } >"$out" 2>/dev/null || true
+}
+
+perf_mem_dump_dmabuf_fd_owners() {
+  out="$1"
+  tmp="${out}.tmp"
+
+  printf 'pid\tcomm\tfd\ttarget\n' >"$tmp"
+
+  for fd in /proc/[0-9]*/fd/*; do
+    [ -e "$fd" ] || continue
+
+    target="$(readlink "$fd" 2>/dev/null || true)"
+
+    case "$target" in
+      *dmabuf*|*dma-buf*|*dma_buf*)
+        proc_dir="$(dirname "$(dirname "$fd")")"
+        pid="${proc_dir#/proc/}"
+        comm="$(cat "$proc_dir/comm" 2>/dev/null || echo unknown)"
+        fd_num="$(basename "$fd")"
+        printf '%s\t%s\t%s\t%s\n' "$pid" "$comm" "$fd_num" "$target" >>"$tmp"
+        ;;
+    esac
+  done
+
+  sort -k1,1n "$tmp" >"$out" 2>/dev/null || cp "$tmp" "$out"
+  rm -f "$tmp"
+}
+
+perf_mem_dump_dmabuf_summary() {
+  out="$1"
+  raw="$2"
+  owners="$3"
+
+  {
+    echo "debugfs_dma_buf_bufinfo=$raw"
+
+    if [ -s "$raw" ] && ! grep -q '^missing or unreadable:' "$raw" 2>/dev/null; then
+      echo "bufinfo_available=yes"
+      grep -E 'size|exp_name|name|pid|ino|count|refs' "$raw" 2>/dev/null | head -n 80 || true
+    else
+      echo "bufinfo_available=no"
+    fi
+
+    echo
+    echo "dmabuf fd owner count:"
+
+    if [ -s "$owners" ]; then
+      awk -F '\t' 'NR > 1 { count[$2]++ } END { for (c in count) print count[c], c }' "$owners" \
+        | sort -nr | head -n 20
+    else
+      echo "no dma-buf fd owners found from /proc/*/fd"
+    fi
+  } >"$out" 2>/dev/null || true
+}
+
+perf_mem_dump_zram_summary() {
+  out="$1"
+
+  {
+    printf 'device\torig_data_size\tcompr_data_size\tmem_used_total\tmem_limit\tmem_used_max\tsame_pages\tpages_compacted\n'
+
+    for stat in /sys/block/zram*/mm_stat; do
+      [ -r "$stat" ] || continue
+      dev="$(basename "$(dirname "$stat")")"
+
+      awk -v dev="$dev" '{
+        printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", dev, $1, $2, $3, $4, $5, $6, $7
+      }' "$stat"
+    done
+  } >"$out" 2>/dev/null || true
+}
+
+perf_mem_dump_kgsl_summary() {
+  out="$1"
+
+  {
+    echo "KGSL summary"
+
+    if [ ! -d /sys/class/kgsl/kgsl ]; then
+      echo "kgsl_available=no"
+    else
+      echo "kgsl_available=yes"
+
+      for f in \
+        /sys/class/kgsl/kgsl/page_alloc \
+        /sys/class/kgsl/kgsl/vmalloc \
+        /sys/class/kgsl/kgsl/mapped \
+        /sys/class/kgsl/kgsl/mapped_max \
+        /sys/class/kgsl/kgsl/mapped_memtype; do
+        if [ -r "$f" ]; then
+          echo
+          echo "===== $f ====="
+          cat "$f" 2>/dev/null || true
+        fi
+      done
+
+      if [ -d /sys/class/kgsl/kgsl/proc ]; then
+        echo
+        echo "===== /sys/class/kgsl/kgsl/proc ====="
+        ls -la /sys/class/kgsl/kgsl/proc 2>/dev/null || true
+
+        for p in /sys/class/kgsl/kgsl/proc/*; do
+          [ -d "$p" ] || continue
+
+          echo
+          echo "===== $p ====="
+
+          for f in "$p"/*; do
+            [ -r "$f" ] || continue
+            printf '%s: ' "$(basename "$f")"
+            cat "$f" 2>/dev/null || true
+          done
+        done
+      fi
+    fi
+  } >"$out" 2>/dev/null || true
+}
+
+perf_mem_dump_console_file() {
+  title="$1"
+  file_path="$2"
+  max_lines="${3:-80}"
+
+  [ -f "$file_path" ] || return 0
+
+  log_info "===== ${title}: ${file_path} ====="
+
+  awk -v max_lines="$max_lines" '
+    NR <= max_lines {
+      print
+      next
+    }
+    NR == max_lines + 1 {
+      print "... truncated after " max_lines " lines ..."
+      exit
+    }
+  ' "$file_path" 2>/dev/null || true
+
+  log_info "===== end ${title} ====="
+}
+
+perf_mem_get_machine_name() {
+  machine="unknown"
+
+  if [ -r /proc/device-tree/model ]; then
+    machine="$(tr -d '\0' </proc/device-tree/model 2>/dev/null)"
+  elif [ -r /sys/firmware/devicetree/base/model ]; then
+    machine="$(tr -d '\0' </sys/firmware/devicetree/base/model 2>/dev/null)"
+  elif command -v hostname >/dev/null 2>&1; then
+    machine="$(hostname 2>/dev/null || echo unknown)"
+  fi
+
+  [ -n "$machine" ] || machine="unknown"
+  printf '%s\n' "$machine"
+}
+
+perf_mem_read_summary_kb() {
+  file_path="$1"
+  key="$2"
+
+  awk -F '=' -v key="$key" '
+    $1 == key {
+      print $2
+      found = 1
+      exit
+    }
+    END {
+      if (!found) print ""
+    }
+  ' "$file_path" 2>/dev/null
+}
+
+perf_mem_kb_to_mb() {
+  kb="$1"
+
+  case "$kb" in
+    ''|*[!0-9.]*)
+      printf 'unknown\n'
+      return 0
+      ;;
+  esac
+
+  awk -v kb="$kb" 'BEGIN { printf "%.2f\n", kb / 1024 }'
+}
+
+perf_mem_system_ram_kb_from_iomem() {
+  iomem_file="$1"
+
+  [ -r "$iomem_file" ] || {
+    printf '\n'
+    return 0
+  }
+
+  awk '
+    function hexval(c) {
+      c = tolower(c)
+      if (c >= "0" && c <= "9") return c + 0
+      if (c == "a") return 10
+      if (c == "b") return 11
+      if (c == "c") return 12
+      if (c == "d") return 13
+      if (c == "e") return 14
+      if (c == "f") return 15
+      return 0
+    }
+
+    function hex2dec(s, i, n, v) {
+      gsub(/^0x/, "", s)
+      n = 0
+      for (i = 1; i <= length(s); i++) {
+        v = hexval(substr(s, i, 1))
+        n = (n * 16) + v
+      }
+      return n
+    }
+
+    /^[[:space:]]*[0-9a-fA-F]+-[0-9a-fA-F]+[[:space:]]*:[[:space:]]*System RAM([[:space:]]*)$/ {
+      line = $0
+      sub(/^[[:space:]]*/, "", line)
+      split(line, parts, /[[:space:]]+/)
+      split(parts[1], range, "-")
+
+      start = hex2dec(range[1])
+      end = hex2dec(range[2])
+
+      if (end > start) {
+        count++
+        starts[count] = start
+        ends[count] = end
+      }
+    }
+
+    END {
+      if (count == 0) {
+        exit
+      }
+
+      for (i = 1; i <= count; i++) {
+        for (j = i + 1; j <= count; j++) {
+          if (starts[j] < starts[i]) {
+            ts = starts[i]
+            te = ends[i]
+            starts[i] = starts[j]
+            ends[i] = ends[j]
+            starts[j] = ts
+            ends[j] = te
+          }
+        }
+      }
+
+      merged_count = 0
+
+      for (i = 1; i <= count; i++) {
+        if (merged_count == 0) {
+          merged_count = 1
+          mstarts[merged_count] = starts[i]
+          mends[merged_count] = ends[i]
+          continue
+        }
+
+        if (starts[i] <= mends[merged_count] + 1) {
+          if (ends[i] > mends[merged_count]) {
+            mends[merged_count] = ends[i]
+          }
+        } else {
+          merged_count++
+          mstarts[merged_count] = starts[i]
+          mends[merged_count] = ends[i]
+        }
+      }
+
+      total_bytes = 0
+
+      for (i = 1; i <= merged_count; i++) {
+        total_bytes += mends[i] - mstarts[i] + 1
+      }
+
+      if (total_bytes <= 1024) {
+        exit
+      }
+
+      printf "%.0f\n", total_bytes / 1024
+    }
+  ' "$iomem_file" 2>/dev/null
+}
+
+perf_mem_resolve_nhlos_kb() {
+  out_dir="$1"
+  memtotal_kb="$2"
+ 
+  source_file="$out_dir/nhlos_source.txt"
+  iomem_file="$out_dir/iomem.txt"
+ 
+  nhlos_kb=""
+  installed_kb=""
+  systemram_kb=""
+ 
+  installed_kb="$(perf_mem_roundup_installed_kb "$memtotal_kb")"
+  systemram_kb="$(perf_mem_system_ram_kb_from_iomem "$iomem_file")"
+ 
+  if [ -n "$installed_kb" ] && [ -n "$systemram_kb" ]; then
+    nhlos_kb="$(
+      awk -v installed="$installed_kb" -v linux="$systemram_kb" '
+        BEGIN {
+          v = installed - linux
+          if (v < 0) {
+            v = 0
+          }
+          printf "%.0f\n", v
+        }
+      '
+    )"
+    source="installed_total_ram_minus_iomem_system_ram"
+  else
+    nhlos_kb=""
+    source="unavailable_iomem_system_ram"
+    log_warn "Unable to calculate NHLOS: /proc/iomem System RAM is missing/restricted. Run as root."
+  fi
+ 
+  {
+    echo "nhlos_source=$source"
+    echo "formula=Installed Total RAM - Total Linux System RAM from /proc/iomem"
+    echo "nhlos_kb=${nhlos_kb:-unknown}"
+    echo "installed_total_ram_kb=${installed_kb:-unknown}"
+    echo "systemram_kb=${systemram_kb:-unknown}"
+    echo "memtotal_kb=${memtotal_kb:-unknown}"
+  } >"$source_file"
+ 
+  printf '%s\n' "$nhlos_kb"
+}
+
+perf_mem_write_component_summary() {
+  out_dir="$1"
+
+  summary_file="$out_dir/memory_component_summary.txt"
+  machine="$(perf_mem_get_machine_name)"
+
+  mem_summary="$out_dir/memory_summary.txt"
+  iomem_file="$out_dir/iomem.txt"
+
+  memtotal_kb="$(perf_mem_read_summary_kb "$mem_summary" "MemTotal_kB")"
+  memavailable_kb="$(perf_mem_read_summary_kb "$mem_summary" "MemAvailable_kB")"
+  slab_kb="$(perf_mem_read_summary_kb "$mem_summary" "Slab_kB")"
+  pagetables_kb="$(perf_mem_read_summary_kb "$mem_summary" "PageTables_kB")"
+  kernelstack_kb="$(perf_mem_read_summary_kb "$mem_summary" "KernelStack_kB")"
+  vmalloc_kb="$(perf_mem_read_summary_kb "$mem_summary" "VmallocUsed_kB")"
+  cmaused_kb="$(perf_mem_read_summary_kb "$mem_summary" "CmaUsed_kB")"
+  swapused_kb="$(perf_mem_read_summary_kb "$mem_summary" "SwapUsed_kB")"
+
+  systemram_kb="$(perf_mem_system_ram_kb_from_iomem "$iomem_file")"
+  nhlos_kb="$(perf_mem_resolve_nhlos_kb "$out_dir" "$memtotal_kb")"
+
+  total_physical_kb=""
+  if [ -f "$out_dir/nhlos_source.txt" ]; then
+    total_physical_kb="$(
+      sed -n 's/^total_physical_kb=//p' "$out_dir/nhlos_source.txt" 2>/dev/null \
+        | head -n 1
+    )"
+  fi
+
+  if [ -n "$systemram_kb" ] && [ -n "$memtotal_kb" ]; then
+    kernel_static_kb="$(
+      awk -v linux="$systemram_kb" -v memtotal="$memtotal_kb" '
+        BEGIN {
+          v = linux - memtotal
+          if (v < 0) v = 0
+          printf "%.0f\n", v
+        }
+      '
+    )"
+  else
+    kernel_static_kb=""
+    log_warn "Unable to calculate Kernel Static: /proc/iomem System RAM is missing/restricted. Run as root."
+  fi
+
+  if [ -n "$memtotal_kb" ] && [ -n "$memavailable_kb" ]; then
+    apps_framework_kb="$(
+      awk -v memtotal="$memtotal_kb" -v free="$memavailable_kb" '
+        BEGIN {
+          v = memtotal - free
+          if (v < 0) v = 0
+          printf "%.0f\n", v
+        }
+      '
+    )"
+  else
+    apps_framework_kb=""
+  fi
+
+  {
+    printf '%s\n' "------------------------------------------------------------"
+    printf '%-36s %s\n' "Mem Component (in MB)" "$machine"
+    printf '%s\n' "------------------------------------------------------------"
+
+    printf '%-36s %s\n' "NHLOS" "$(perf_mem_kb_to_mb "$nhlos_kb")"
+    printf '%-36s %s\n' "Kernel Static" "$(perf_mem_kb_to_mb "$kernel_static_kb")"
+    printf '%-36s %s\n' "Apps + Framework" "$(perf_mem_kb_to_mb "$apps_framework_kb")"
+    printf '%-36s %s\n' "Free Mem" "$(perf_mem_kb_to_mb "$memavailable_kb")"
+
+    printf '%s\n' "------------------------------------------------------------"
+    printf '%-36s %s\n' "MemTotal" "$(perf_mem_kb_to_mb "$memtotal_kb")"
+    printf '%-36s %s\n' "System RAM" "$(perf_mem_kb_to_mb "$systemram_kb")"
+
+    if [ -n "$total_physical_kb" ] && [ "$total_physical_kb" != "unknown" ]; then
+      printf '%-36s %s\n' "Total Physical" "$(perf_mem_kb_to_mb "$total_physical_kb")"
+    fi
+
+    printf '%-36s %s\n' "Slab" "$(perf_mem_kb_to_mb "$slab_kb")"
+    printf '%-36s %s\n' "PageTables" "$(perf_mem_kb_to_mb "$pagetables_kb")"
+    printf '%-36s %s\n' "KernelStack" "$(perf_mem_kb_to_mb "$kernelstack_kb")"
+    printf '%-36s %s\n' "VmallocUsed" "$(perf_mem_kb_to_mb "$vmalloc_kb")"
+    printf '%-36s %s\n' "CMA Used" "$(perf_mem_kb_to_mb "$cmaused_kb")"
+    printf '%-36s %s\n' "Swap Used" "$(perf_mem_kb_to_mb "$swapused_kb")"
+    printf '%s\n' "------------------------------------------------------------"
+  } >"$summary_file"
+
+  printf '%s\n' "$summary_file"
+}
+
+perf_mem_print_component_summary() {
+  out_dir="$1"
+  summary_file="$out_dir/memory_component_summary.txt"
+
+  [ -f "$summary_file" ] || return 0
+
+  printf '\n'
+  cat "$summary_file"
+  printf '\n'
+}
+
+perf_mem_collect_all() {
+  out_dir="$1"
+  delay_secs="$2"
+  top_process_count="$3"
+  mount_debugfs="$4"
+  verbose="$5"
+
+  mkdir -p "$out_dir" 2>/dev/null || {
+    log_fail "Failed to create output directory: $out_dir"
+    return 1
+  }
+
+  case "$delay_secs" in ''|*[!0-9]*) delay_secs=0 ;; esac
+  case "$top_process_count" in ''|*[!0-9]*) top_process_count=20 ;; esac
+  case "$mount_debugfs" in ''|*[!0-9]*) mount_debugfs=0 ;; esac
+  case "$verbose" in ''|*[!0-9]*) verbose=0 ;; esac
+
+  log_info "Output directory: $out_dir"
+  log_info "Collect delay: ${delay_secs}s"
+  log_info "Top process count: $top_process_count"
+
+  if [ "$delay_secs" -gt 0 ]; then
+    log_info "Waiting ${delay_secs}s before memory capture"
+    sleep "$delay_secs"
+  fi
+
+  : >"$out_dir/manifest.tsv"
+
+  log_info "Preparing optional debugfs access"
+  perf_mem_try_mount_debugfs "$mount_debugfs"
+
+  log_info "Collecting platform and boot context"
+
+  perf_mem_collect_cmd "$out_dir/uname.txt" uname -a
+  perf_mem_append_manifest "$out_dir" "uname" "$out_dir/uname.txt"
+
+  perf_mem_collect_cmd "$out_dir/date.txt" date -u
+  perf_mem_append_manifest "$out_dir" "date" "$out_dir/date.txt"
+
+  perf_mem_collect_file /proc/version "$out_dir/proc_version.txt"
+  perf_mem_append_manifest "$out_dir" "proc_version" "$out_dir/proc_version.txt"
+
+  perf_mem_collect_file /proc/cmdline "$out_dir/cmdline.txt"
+  perf_mem_append_manifest "$out_dir" "cmdline" "$out_dir/cmdline.txt"
+
+  perf_mem_collect_file /proc/cpuinfo "$out_dir/cpuinfo.txt"
+  perf_mem_append_manifest "$out_dir" "cpuinfo" "$out_dir/cpuinfo.txt"
+
+  if [ -r /proc/config.gz ]; then
+    zcat /proc/config.gz >"$out_dir/config.txt" 2>/dev/null || true
+  else
+    printf 'missing: /proc/config.gz\n' >"$out_dir/config.txt"
+  fi
+  perf_mem_append_manifest "$out_dir" "config" "$out_dir/config.txt"
+
+  log_info "Collecting core /proc memory snapshots"
+
+  perf_mem_collect_file /proc/meminfo "$out_dir/meminfo.txt"
+  perf_mem_append_manifest "$out_dir" "meminfo" "$out_dir/meminfo.txt"
+
+  perf_mem_collect_cmd "$out_dir/free.txt" free
+  perf_mem_append_manifest "$out_dir" "free" "$out_dir/free.txt"
+
+  perf_mem_collect_file /proc/vmstat "$out_dir/vmstat.txt"
+  perf_mem_append_manifest "$out_dir" "vmstat" "$out_dir/vmstat.txt"
+
+  perf_mem_collect_cmd "$out_dir/vmstat_cmd.txt" vmstat
+  perf_mem_append_manifest "$out_dir" "vmstat_cmd" "$out_dir/vmstat_cmd.txt"
+
+  perf_mem_collect_file /proc/zoneinfo "$out_dir/zoneinfo.txt"
+  perf_mem_append_manifest "$out_dir" "zoneinfo" "$out_dir/zoneinfo.txt"
+
+  perf_mem_collect_file /proc/pagetypeinfo "$out_dir/pagetypeinfo.txt"
+  perf_mem_append_manifest "$out_dir" "pagetypeinfo" "$out_dir/pagetypeinfo.txt"
+
+  perf_mem_collect_file /proc/buddyinfo "$out_dir/buddyinfo.txt"
+  perf_mem_append_manifest "$out_dir" "buddyinfo" "$out_dir/buddyinfo.txt"
+
+  perf_mem_collect_file /proc/slabinfo "$out_dir/slabinfo.txt"
+  perf_mem_append_manifest "$out_dir" "slabinfo" "$out_dir/slabinfo.txt"
+
+  perf_mem_collect_file /proc/vmallocinfo "$out_dir/vmallocinfo.txt"
+  perf_mem_append_manifest "$out_dir" "vmallocinfo" "$out_dir/vmallocinfo.txt"
+
+  perf_mem_collect_file /proc/modules "$out_dir/modules.txt"
+  perf_mem_append_manifest "$out_dir" "modules" "$out_dir/modules.txt"
+
+  perf_mem_collect_cmd "$out_dir/lsmod.txt" lsmod
+  perf_mem_append_manifest "$out_dir" "lsmod" "$out_dir/lsmod.txt"
+
+  perf_mem_collect_file /proc/iomem "$out_dir/iomem.txt"
+  perf_mem_append_manifest "$out_dir" "iomem" "$out_dir/iomem.txt"
+
+  perf_mem_collect_file /proc/uptime "$out_dir/uptime.txt"
+  perf_mem_append_manifest "$out_dir" "uptime" "$out_dir/uptime.txt"
+
+  perf_mem_collect_file /proc/sys/vm/swappiness "$out_dir/swappiness.txt"
+  perf_mem_append_manifest "$out_dir" "swappiness" "$out_dir/swappiness.txt"
+
+  perf_mem_collect_cmd "$out_dir/df.txt" df
+  perf_mem_append_manifest "$out_dir" "df" "$out_dir/df.txt"
+
+  perf_mem_collect_cmd "$out_dir/mount.txt" mount
+  perf_mem_append_manifest "$out_dir" "mount" "$out_dir/mount.txt"
+
+  perf_mem_collect_cmd "$out_dir/ps_A.txt" ps -A
+  perf_mem_append_manifest "$out_dir" "ps_A" "$out_dir/ps_A.txt"
+
+  perf_mem_collect_cmd "$out_dir/ps_eT.txt" ps -eT
+  perf_mem_append_manifest "$out_dir" "ps_eT" "$out_dir/ps_eT.txt"
+
+  log_info "Collecting optional debugfs and sysfs memory artifacts"
+
+  perf_mem_collect_file /sys/kernel/debug/memblock/reserved "$out_dir/memblock_reserved.txt"
+  perf_mem_append_manifest "$out_dir" "memblock_reserved" "$out_dir/memblock_reserved.txt"
+
+  perf_mem_collect_file /sys/kernel/debug/tracing/buffer_total_size_kb "$out_dir/tracing_buffer_total_size_kb.txt"
+  perf_mem_append_manifest "$out_dir" "tracing_buffer_total_size_kb" "$out_dir/tracing_buffer_total_size_kb.txt"
+
+  perf_mem_collect_file /sys/kernel/debug/dma_buf/bufinfo "$out_dir/dma_buf_bufinfo.txt"
+  perf_mem_append_manifest "$out_dir" "dma_buf_bufinfo" "$out_dir/dma_buf_bufinfo.txt"
+
+  perf_mem_collect_file /sys/kernel/debug/ion/heaps/system "$out_dir/ion_heap_system.txt"
+  perf_mem_append_manifest "$out_dir" "ion_heap_system" "$out_dir/ion_heap_system.txt"
+
+  log_info "Generating memory summary"
+
+  perf_mem_dump_memory_summary "$out_dir/memory_summary.txt"
+  perf_mem_append_manifest "$out_dir" "memory_summary" "$out_dir/memory_summary.txt"
+
+  perf_mem_dump_process_smaps_availability "$out_dir/process_smaps_availability.txt"
+  perf_mem_append_manifest "$out_dir" "process_smaps_availability" "$out_dir/process_smaps_availability.txt"
+
+  log_info "Scanning process memory from /proc/*/smaps_rollup"
+
+  perf_mem_dump_process_mem_tsv "$out_dir/process_mem.tsv"
+  perf_mem_append_manifest "$out_dir" "process_mem" "$out_dir/process_mem.tsv"
+
+  perf_mem_dump_process_top_pss "$out_dir/process_mem.tsv" "$out_dir/process_top_pss.txt" "$top_process_count"
+  perf_mem_append_manifest "$out_dir" "process_top_pss" "$out_dir/process_top_pss.txt"
+
+  log_info "Generating reserved-memory, DMA-BUF, zram and KGSL summaries"
+
+  perf_mem_dump_reserved_memory_dt "$out_dir/reserved_memory_dt.tsv"
+  perf_mem_append_manifest "$out_dir" "reserved_memory_dt" "$out_dir/reserved_memory_dt.tsv"
+
+  perf_mem_dump_dmabuf_fd_owners "$out_dir/dmabuf_fd_owners.tsv"
+  perf_mem_append_manifest "$out_dir" "dmabuf_fd_owners" "$out_dir/dmabuf_fd_owners.tsv"
+
+  perf_mem_dump_dmabuf_summary "$out_dir/dmabuf_summary.txt" "$out_dir/dma_buf_bufinfo.txt" "$out_dir/dmabuf_fd_owners.tsv"
+  perf_mem_append_manifest "$out_dir" "dmabuf_summary" "$out_dir/dmabuf_summary.txt"
+
+  perf_mem_dump_zram_summary "$out_dir/zram_summary.tsv"
+  perf_mem_append_manifest "$out_dir" "zram_summary" "$out_dir/zram_summary.tsv"
+
+  perf_mem_dump_kgsl_summary "$out_dir/kgsl_summary.txt"
+  perf_mem_append_manifest "$out_dir" "kgsl_summary" "$out_dir/kgsl_summary.txt"
+
+  {
+    for state in /sys/devices/system/memory/memory*/state; do
+      [ -r "$state" ] || continue
+      printf '%s\t%s\n' "$state" "$(cat "$state" 2>/dev/null)"
+    done
+  } >"$out_dir/mem_bank_state.txt" 2>/dev/null || true
+  perf_mem_append_manifest "$out_dir" "mem_bank_state" "$out_dir/mem_bank_state.txt"
+
+  perf_mem_collect_cmd "$out_dir/dmesg.txt" dmesg
+  perf_mem_append_manifest "$out_dir" "dmesg" "$out_dir/dmesg.txt"
+
+  log_info "Generating final memory component summary"
+
+  component_summary_file="$(perf_mem_write_component_summary "$out_dir")"
+  perf_mem_append_manifest "$out_dir" "memory_component_summary" "$component_summary_file"
+
+  if [ -f "$out_dir/nhlos_source.txt" ]; then
+    perf_mem_append_manifest "$out_dir" "nhlos_source" "$out_dir/nhlos_source.txt"
+  fi
+
+  if [ -f "$out_dir/nhlos_iomem_reserved_regions_all.tsv" ]; then
+    perf_mem_append_manifest "$out_dir" "nhlos_iomem_reserved_regions_all" "$out_dir/nhlos_iomem_reserved_regions_all.tsv"
+  fi
+
+  if [ -f "$out_dir/nhlos_reserved_memory_dt_all.tsv" ]; then
+    perf_mem_append_manifest "$out_dir" "nhlos_reserved_memory_dt_all" "$out_dir/nhlos_reserved_memory_dt_all.tsv"
+  fi
+
+  if [ -f "$out_dir/nhlos_reserved_memory_dt_non_reusable.tsv" ]; then
+    perf_mem_append_manifest "$out_dir" "nhlos_reserved_memory_dt_non_reusable" "$out_dir/nhlos_reserved_memory_dt_non_reusable.tsv"
+  fi
+
+  log_info "Collected memory artifacts:"
+  perf_mem_dump_console_file "manifest" "$out_dir/manifest.tsv" 80
+
+  log_info "Memory summary:"
+  perf_mem_dump_console_file "memory summary" "$out_dir/memory_summary.txt" 80
+
+  log_info "Top process memory summary:"
+  perf_mem_dump_console_file "top processes by PSS" "$out_dir/process_top_pss.txt" 80
+
+  log_info "DMA-BUF summary:"
+  perf_mem_dump_console_file "dma-buf summary" "$out_dir/dmabuf_summary.txt" 80
+
+  if [ "$verbose" -eq 1 ]; then
+    perf_mem_dump_console_file "reserved memory from DT" "$out_dir/reserved_memory_dt.tsv" 120
+
+    if [ -f "$out_dir/nhlos_iomem_reserved_regions_all.tsv" ]; then
+      perf_mem_dump_console_file "NHLOS iomem non-System-RAM DDR ranges" "$out_dir/nhlos_iomem_reserved_regions_all.tsv" 160
+    fi
+
+    if [ -f "$out_dir/nhlos_reserved_memory_dt_all.tsv" ]; then
+      perf_mem_dump_console_file "NHLOS DT reserved memory all" "$out_dir/nhlos_reserved_memory_dt_all.tsv" 160
+    fi
+
+    if [ -f "$out_dir/nhlos_reserved_memory_dt_non_reusable.tsv" ]; then
+      perf_mem_dump_console_file "NHLOS DT non-reusable reserved memory" "$out_dir/nhlos_reserved_memory_dt_non_reusable.tsv" 160
+    fi
+
+    if [ -f "$out_dir/nhlos_source.txt" ]; then
+      perf_mem_dump_console_file "NHLOS source" "$out_dir/nhlos_source.txt" 40
+    fi
+
+    perf_mem_dump_console_file "zram summary" "$out_dir/zram_summary.tsv" 80
+    perf_mem_dump_console_file "KGSL summary" "$out_dir/kgsl_summary.txt" 120
+  fi
+
+  if [ ! -s "$out_dir/meminfo.txt" ]; then
+    log_fail "Failed to collect /proc/meminfo"
+    return 1
+  fi
+
+  log_info "Final memory component summary"
+  perf_mem_print_component_summary "$out_dir"
+
+  return 0
+}
+

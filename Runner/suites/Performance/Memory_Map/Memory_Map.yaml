@@ -1,0 +1,23 @@
+metadata:
+  name: memory-map
+  format: "Lava-Test Test Definition 1.0"
+  description: "Collect memory-map, per-process memory, reserved memory, DMA-BUF, KGSL, zram, slab, vmalloc and VM debug data, and print a final memory component summary without Android procrank/dmabuf_dump."
+  os:
+    - linux
+  scope:
+    - performance
+    - memory
+
+params:
+  OUT_DIR: "./logs_Memory_Map"
+  COLLECT_DELAY_SECS: "0"
+  TOP_PROCESS_COUNT: "20"
+  MOUNT_DEBUGFS: "1"
+  VERBOSE: "0"
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Performance/Memory_Map/
+    - OUT_DIR="${OUT_DIR}" COLLECT_DELAY_SECS="${COLLECT_DELAY_SECS}" TOP_PROCESS_COUNT="${TOP_PROCESS_COUNT}" MOUNT_DEBUGFS="${MOUNT_DEBUGFS}" VERBOSE="${VERBOSE}" ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh Memory_Map.res
