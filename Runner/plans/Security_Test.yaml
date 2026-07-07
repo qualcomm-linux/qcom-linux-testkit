@@ -1,0 +1,27 @@
+metadata:
+    format: Lava-Test Test Definition 1.0
+    name: AUSanity
+    description: "Baseline AU Sanity test plan"
+    maintainer:
+        - vnarapar@qti.qualcomm.com
+    os:
+        - openembedded
+    scope:
+        - functional
+    devices:
+        - rb3gen2/rideSX
+
+run:
+    steps:
+        - cd Runner
+        - $PWD/suites/Kernel/Security/AVCDenials/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Security/AVCDenials/AVCDenials.res || true
+        - $PWD/suites/Kernel/Security/CheckGetenforce/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Security/CheckGetenforce/CheckGetenforce.res || true
+        - $PWD/suites/Kernel/Security/CheckSestatus/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Security/CheckSestatus/CheckSestatus.res || true
+        - $PWD/suites/Kernel/Security/SystemctlFailedPerVsEnf/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Security/SystemctlFailedPerVsEnf/SystemctlFailedPerVsEnf.res || true
+        - $PWD/suites/Kernel/Security/ToggleSetenforce/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Security/ToggleSetenforce/ToggleSetenforce.res || true
+        - $PWD/utils/result_parse.sh
