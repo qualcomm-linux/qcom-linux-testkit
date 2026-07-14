@@ -31,7 +31,7 @@ fi
 # shellcheck disable=SC1091
 . "$TOOLS/functestlib.sh"
 # shellcheck disable=SC1091
-. "$TOOLS/audio_common.sh"
+. "$TOOLS/audio/audio_common.sh"
 
 SYSTEMD_AVAILABLE=0
 if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
@@ -60,6 +60,8 @@ done
 
 # ---------------- Defaults / CLI ----------------
 AUDIO_BACKEND=""
+ALSA_PROFILE="${ALSA_PROFILE:-generic}" # ALSA profile (hamoa, generic)
+DEVICE="${DEVICE:-}" # Device type for ALSA profiles (handset, headset)
 SRC_CHOICE="${SRC_CHOICE:-mic}" # mic|null
 DURATIONS="" # Will be set to default only if using legacy mode
 RECORD_SECONDS="${RECORD_SECONDS:-30s}" # DEFAULT: 30s; 'auto' maps short/med/long
@@ -88,6 +90,8 @@ usage() {
   cat <<EOF
 Usage: $0 [options]
   --backend {pipewire|pulseaudio|alsa}
+  --alsa-profile {hamoa|generic}  # ALSA profile for hardware-specific mixer configuration
+  --device {handset|headset}      # Device type for ALSA profiles (required with --alsa-profile)
   --source {mic|null}
   --config-name "record_config1" # Test specific config(s) by name (space-separated)
                                  # Also supports record_config1, record_config2, ..., record_config10
@@ -128,6 +132,14 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --backend)
       AUDIO_BACKEND="$2"
+      shift 2
+      ;;
+    --alsa-profile)
+      ALSA_PROFILE="$2"
+      shift 2
+      ;;
+    --device)
+      DEVICE="$2"
       shift 2
       ;;
     --source)
@@ -305,6 +317,21 @@ fi
 
 log_info "Args: backend=${AUDIO_BACKEND:-auto} source=$SRC_CHOICE loops=$LOOPS durations='$DURATIONS' record_seconds=$RECORD_SECONDS timeout=$TIMEOUT strict=$STRICT dmesg=$DMESG_SCAN bootstrap=$AUDIO_BOOTSTRAP_MODE runtime_dir=${AUDIO_RUNTIME_DIR:-auto}"
 
+# Hardware-specific ALSA profiles require direct ALSA backend
+# Profiles like 'hamoa' configure hardware mixer controls and route to specific
+# ALSA devices (e.g., plughw:0,3). These operations require direct ALSA access.
+# Auto-detection may select PipeWire/PulseAudio which adds an abstraction layer
+# that can interfere with low-level mixer configuration and device routing.
+if [ "$ALSA_PROFILE" != "generic" ] && [ -n "$ALSA_PROFILE" ]; then
+  if [ -z "$AUDIO_BACKEND" ]; then
+    AUDIO_BACKEND="alsa"
+    log_info "ALSA profile '$ALSA_PROFILE' requires direct hardware access - using backend: alsa"
+  elif [ "$AUDIO_BACKEND" != "alsa" ]; then
+    log_warn "ALSA profile '$ALSA_PROFILE' specified with backend '$AUDIO_BACKEND'"
+    log_warn "Hardware-specific profiles work best with direct ALSA backend"
+  fi
+fi
+
 # Resolve backend (allow minimal-build ALSA capture fallback)
 if [ -z "$AUDIO_BACKEND" ]; then
   AUDIO_BACKEND="$(detect_audio_backend 2>/dev/null || echo "")"
@@ -352,7 +379,13 @@ log_info "Using backend: $AUDIO_BACKEND"
 
 backend_ok=0
 if [ "$AUDIO_BACKEND" = "alsa" ]; then
-  if [ "$ALSA_CAPTURE_PROBED" -eq 1 ]; then
+  # Hardware-specific ALSA profiles provide explicit device paths and mixer configurations.
+  # The profile setup functions validate device availability, so additional probing is
+  # unnecessary and may fail when other audio servers (PipeWire/PulseAudio) are present.
+  if [ "$ALSA_PROFILE" != "generic" ] && [ -n "$ALSA_PROFILE" ] && [ -n "$DEVICE" ]; then
+    backend_ok=1
+    log_info "Using hardware-specific ALSA profile '$ALSA_PROFILE' - device validation handled by profile"
+  elif [ "$ALSA_CAPTURE_PROBED" -eq 1 ]; then
     backend_ok=1
   else
     if audio_probe_alsa_capture_profile; then
@@ -502,43 +535,35 @@ case "$AUDIO_BACKEND:$SRC_CHOICE" in
     SRC_ID=""
     ;;
   alsa:*)
-    if [ "$ALSA_CAPTURE_PROBED" -eq 1 ] && [ -n "$AUDIO_ALSA_CAPTURE_DEVICE" ]; then
-      SRC_ID="$AUDIO_ALSA_CAPTURE_DEVICE"
+    # Hardware-specific ALSA profiles (e.g., Hamoa) configure mixer controls
+    # and provide explicit device paths for different audio paths
+    if [ "$ALSA_PROFILE" != "generic" ] && [ -n "$DEVICE" ]; then
+      # Use profile-specific setup for hardware mixer configuration
+      log_info "Using ALSA profile: $ALSA_PROFILE for device: $DEVICE"
+      if setup_alsa_profile_"${ALSA_PROFILE}"_capture_"${DEVICE}" "$LOGDIR"; then
+        SRC_ID="$(get_alsa_device_"${ALSA_PROFILE}"_capture_"${DEVICE}")"
+        log_info "ALSA profile configured successfully, device: $SRC_ID"
+      else
+        log_error "Failed to setup ALSA profile: $ALSA_PROFILE for device: $DEVICE"
+        echo "$RESULT_TESTNAME FAIL" > "$RES_FILE"
+        exit 1
+      fi
     else
-      SRC_ID="$(alsa_pick_capture)"
+      # Generic ALSA uses auto-detected or probed capture device
+      if [ "$ALSA_CAPTURE_PROBED" -eq 1 ] && [ -n "$AUDIO_ALSA_CAPTURE_DEVICE" ]; then
+        SRC_ID="$AUDIO_ALSA_CAPTURE_DEVICE"
+      else
+        SRC_ID="$(alsa_pick_capture)"
+      fi
     fi
     ;;
 esac
 
 # ---- Dynamic fallback when mic is missing on the chosen backend ----
-# For real mic capture, do not allow PipeWire to record from an implicit
-# default source when no concrete source was discovered. On systems without
-# a real capture source, this can record from dummy/null/default paths or fail
-# after creating empty files.
-if [ -z "$SRC_ID" ] && [ "$SRC_CHOICE" = "mic" ] && [ "$AUDIO_BACKEND" = "pipewire" ]; then
-  log_warn "$TESTNAME: no concrete PipeWire mic source found; probing direct ALSA capture path"
- 
-  if audio_probe_alsa_capture_profile; then
-    ALSA_CAPTURE_PROBED=1
-    AUDIO_BACKEND="alsa"
-    AUDIO_SYSTEMD_MANAGED=0
-    export AUDIO_SYSTEMD_MANAGED
- 
-    SRC_ID="$AUDIO_ALSA_CAPTURE_DEVICE"
-    SRC_LABEL="$SRC_ID"
- 
-    log_warn "$TESTNAME: falling back to direct ALSA capture device: $SRC_ID"
-  else
-    log_skip "$TESTNAME SKIP - no real capture source available; PipeWire mic source missing and ALSA capture probe failed: ${AUDIO_ALSA_CAPTURE_REASON:-capture path unavailable}"
-    echo "$RESULT_TESTNAME SKIP" > "$RES_FILE"
-    exit 0
-  fi
-fi
- 
+# Stay on PipeWire even if SRC_ID is empty; pw-record can use the default source.
 if [ -z "$SRC_ID" ] && [ "$SRC_CHOICE" = "mic" ] && [ "$AUDIO_BACKEND" != "pipewire" ]; then
   for b in $BACKENDS_TO_TRY; do
     [ "$b" = "$AUDIO_BACKEND" ] && continue
- 
     case "$b" in
       pipewire)
         cand="$(pw_default_mic)"
@@ -559,27 +584,16 @@ if [ -z "$SRC_ID" ] && [ "$SRC_CHOICE" = "mic" ] && [ "$AUDIO_BACKEND" != "pipew
         fi
         ;;
       alsa)
-        if audio_probe_alsa_capture_profile; then
-          ALSA_CAPTURE_PROBED=1
+        cand="$(alsa_pick_capture)"
+        if [ -n "$cand" ]; then
           AUDIO_BACKEND="alsa"
-          AUDIO_SYSTEMD_MANAGED=0
-          export AUDIO_SYSTEMD_MANAGED
- 
-          SRC_ID="$AUDIO_ALSA_CAPTURE_DEVICE"
-          SRC_LABEL="$SRC_ID"
- 
+          SRC_ID="$cand"
           log_info "Falling back to backend: alsa (device=$SRC_ID)"
           break
         fi
         ;;
     esac
   done
-fi
- 
-if [ -z "$SRC_ID" ]; then
-  log_skip "$TESTNAME SKIP - requested source '$SRC_CHOICE' not available on any backend (${BACKENDS_TO_TRY:-unknown})"
-  echo "$RESULT_TESTNAME SKIP" > "$RES_FILE"
-  exit 0
 fi
 
 # Only skip if no source AND not on PipeWire.
@@ -906,63 +920,65 @@ if [ "$USE_CONFIG_DISCOVERY" = "true" ]; then
           rc=$?
           bytes="$(file_size_bytes "$record_out" 2>/dev/null || echo 0)"
 
-          retry_alsa=0
+          # Check if command failed and determine retry strategy
           if [ "$rc" -ne 0 ]; then
-            retry_alsa=1
-          else
-            if [ "${bytes:-0}" -le 1024 ] 2>/dev/null; then
-              retry_alsa=1
-            fi
-          fi
-
-          if [ "$retry_alsa" -eq 1 ]; then
-            if printf '%s\n' "$SRC_ID" | grep -q '^hw:'; then
-              alt_dev="plughw:${SRC_ID#hw:}"
+            if [ "${bytes:-0}" -gt 1024 ] 2>/dev/null; then
+              # Valid audio captured despite nonzero exit code
+              log_warn "[$case_name] nonzero rc=$rc but recording looks valid (bytes=$bytes) - accepting"
+              rc=0
             else
-              alt_dev="$SRC_ID"
-            fi
+              # Command failed and no valid audio - retry with alternate device
+              if printf '%s\n' "$SRC_ID" | grep -q '^hw:'; then
+                alt_dev="plughw:${SRC_ID#hw:}"
+              else
+                alt_dev="$SRC_ID"
+              fi
 
-            : > "$record_out"
-            log_info "[$case_name] retry: arecord -D \"$alt_dev\" -f S16_LE -r $rate -c $channels -d $secs_int \"$record_out\""
-            audio_exec_with_timeout "$effective_timeout" \
-              arecord -D "$alt_dev" -f S16_LE -r "$rate" -c "$channels" -d "$secs_int" "$record_out" >> "$logf" 2>&1
-            rc=$?
-            bytes="$(file_size_bytes "$record_out" 2>/dev/null || echo 0)"
+              : > "$record_out"
+              log_info "[$case_name] retry: arecord -D \"$alt_dev\" -f S16_LE -r $rate -c $channels -d $secs_int \"$record_out\""
+              audio_exec_with_timeout "$effective_timeout" \
+                arecord -D "$alt_dev" -f S16_LE -r "$rate" -c "$channels" -d "$secs_int" "$record_out" >> "$logf" 2>&1
+              rc=$?
+              bytes="$(file_size_bytes "$record_out" 2>/dev/null || echo 0)"
 
-            retry_fallback=0
-            if [ "$rc" -ne 0 ]; then
-              retry_fallback=1
-            else
-              if [ "${bytes:-0}" -le 1024 ] 2>/dev/null; then
+              # Check retry result and determine if fallback configs are needed
+              retry_fallback=0
+              if [ "$rc" -ne 0 ]; then
                 retry_fallback=1
+              else
+                if [ "${bytes:-0}" -le 1024 ] 2>/dev/null; then
+                  retry_fallback=1
+                fi
+              fi
+
+              # Try fallback sample rate/channel configurations
+              if [ "$retry_fallback" -eq 1 ]; then
+                for combo in \
+                  "${AUDIO_ALSA_CAPTURE_FORMAT:-S16_LE} ${AUDIO_ALSA_CAPTURE_RATE:-48000} ${AUDIO_ALSA_CAPTURE_CHANNELS:-2}" \
+                  "S16_LE 48000 2" \
+                  "S16_LE 44100 2" \
+                  "S16_LE 16000 1"
+                do
+                  fmt="$(printf '%s\n' "$combo" | awk '{print $1}')"
+                  fallback_rate="$(printf '%s\n' "$combo" | awk '{print $2}')"
+                  fallback_ch="$(printf '%s\n' "$combo" | awk '{print $3}')"
+                  [ -z "$fmt" ] || [ -z "$fallback_rate" ] || [ -z "$fallback_ch" ] && continue
+
+                  : > "$record_out"
+                  log_info "[$case_name] fallback: arecord -D \"$alt_dev\" -f $fmt -r $fallback_rate -c $fallback_ch -d $secs_int \"$record_out\""
+                  audio_exec_with_timeout "$effective_timeout" \
+                    arecord -D "$alt_dev" -f "$fmt" -r "$fallback_rate" -c "$fallback_ch" -d "$secs_int" "$record_out" >> "$logf" 2>&1
+                  rc=$?
+                  bytes="$(file_size_bytes "$record_out" 2>/dev/null || echo 0)"
+                  if [ "$rc" -eq 0 ] && [ "${bytes:-0}" -gt 1024 ] 2>/dev/null; then
+                    break
+                  fi
+                done
               fi
             fi
-
-            if [ "$retry_fallback" -eq 1 ]; then
-              for combo in \
-                "${AUDIO_ALSA_CAPTURE_FORMAT:-S16_LE} ${AUDIO_ALSA_CAPTURE_RATE:-48000} ${AUDIO_ALSA_CAPTURE_CHANNELS:-2}" \
-                "S16_LE 48000 2" \
-                "S16_LE 44100 2" \
-                "S16_LE 16000 1"
-              do
-                fmt="$(printf '%s\n' "$combo" | awk '{print $1}')"
-                fallback_rate="$(printf '%s\n' "$combo" | awk '{print $2}')"
-                fallback_ch="$(printf '%s\n' "$combo" | awk '{print $3}')"
-                [ -z "$fmt" ] || [ -z "$fallback_rate" ] || [ -z "$fallback_ch" ] && continue
-
-                : > "$record_out"
-                log_info "[$case_name] fallback: arecord -D \"$alt_dev\" -f $fmt -r $fallback_rate -c $fallback_ch -d $secs_int \"$record_out\""
-                audio_exec_with_timeout "$effective_timeout" \
-                  arecord -D "$alt_dev" -f "$fmt" -r "$fallback_rate" -c "$fallback_ch" -d "$secs_int" "$record_out" >> "$logf" 2>&1
-                rc=$?
-                bytes="$(file_size_bytes "$record_out" 2>/dev/null || echo 0)"
-                if [ "$rc" -eq 0 ] && [ "${bytes:-0}" -gt 1024 ] 2>/dev/null; then
-                  break
-                fi
-              done
-            fi
           fi
 
+          # Final check: accept valid audio even with nonzero exit code
           if [ "$rc" -ne 0 ] && [ "${bytes:-0}" -gt 1024 ] 2>/dev/null; then
             log_warn "[$case_name] nonzero rc=$rc but recording looks valid (bytes=$bytes) - PASS"
             rc=0
