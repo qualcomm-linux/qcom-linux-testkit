@@ -282,8 +282,10 @@ echo "$TESTNAME $final" >"$RES_FILE"
 
 if [ "$final" = "PASS" ]; then
   log_pass "${TESTNAME} : PASS"
+  echo "${TESTNAME} PASS" >"$RES_FILE"
   exit 0
 fi
 
 log_fail "${TESTNAME} : FAIL"
+echo "${TESTNAME} FAIL" >"$RES_FILE"
 exit 0
