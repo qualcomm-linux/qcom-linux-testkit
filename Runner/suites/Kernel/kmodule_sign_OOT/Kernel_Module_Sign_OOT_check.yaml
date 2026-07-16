@@ -1,0 +1,16 @@
+metadata:
+  name: Kernel_Module_Sign_OOT_check
+  format: "Lava-Test Test Definition 1.0"
+  description: "This test validates the kernel module signing and out-of-tree modules on Qualcomm platforms with Yocto builds."
+  os:
+    - linux
+  scope:
+    - functional
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/kmodule_sign_OOT
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh Kernel_Module_Sign_OOT_check.res || true
+
