@@ -4,6 +4,10 @@
 # Common audio helpers for PipeWire / PulseAudio runners.
 # Requires: functestlib.sh (log_* helpers, extract_tar_from_url, scan_dmesg_errors)
 
+# Source ALSA-specific helpers (includes Hamoa profile functions)
+# shellcheck disable=SC1091
+. "$TOOLS/audio/alsa_common.sh"
+
 # Check whether a command exists in PATH.
 # Used by bootstrap helpers before attempting backend startup.
 have_cmd() {

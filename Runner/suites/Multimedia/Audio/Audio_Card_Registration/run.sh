@@ -39,7 +39,7 @@ fi
 # shellcheck disable=SC1091
 . "$TOOLS/functestlib.sh"
 # shellcheck disable=SC1091
-. "$TOOLS/audio_common.sh"
+. "$TOOLS/audio/audio_common.sh"
 
 TESTNAME="Audio_Card_Registration"
 
