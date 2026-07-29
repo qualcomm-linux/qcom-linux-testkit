@@ -36,7 +36,7 @@ fi
 # shellcheck disable=SC1091
 . "$TOOLS/functestlib.sh"
 # shellcheck disable=SC1091
-. "$TOOLS/audio_common.sh"
+. "$TOOLS/audio/audio_common.sh"
 # shellcheck disable=SC1091
 . "$TOOLS/lib_video.sh"
 
@@ -71,6 +71,8 @@ export AUDIO_TAR_URL
 
 # ------------- Defaults / CLI -------------
 AUDIO_BACKEND=""
+ALSA_PROFILE="${ALSA_PROFILE:-generic}" # ALSA profile (hamoa, generic)
+DEVICE="${DEVICE:-}" # Device type for ALSA profiles (handset, headset)
 SINK_CHOICE="${SINK_CHOICE:-speakers}" # speakers|null
 FORMATS="" # Will be set to default only if using legacy mode
 DURATIONS="" # Will be set to default only if using legacy mode
@@ -111,7 +113,9 @@ PASSWORD=""
 usage() {
   cat <<EOF
 Usage: $0 [options]
-  --backend {pipewire|pulseaudio}
+  --backend {pipewire|pulseaudio|alsa}
+  --alsa-profile {hamoa|generic}  # ALSA profile (when backend=alsa, default: generic)
+  --device {handset|headset}      # Device type for ALSA profiles (required with --alsa-profile)
   --sink {speakers|null}
   --formats "wav" # Legacy matrix mode only
   --durations "short|short medium" # Legacy matrix mode only (not recommended for new tests)
@@ -156,6 +160,14 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --backend)
       AUDIO_BACKEND="$2"
+      shift 2
+      ;;
+    --alsa-profile)
+      ALSA_PROFILE="$2"
+      shift 2
+      ;;
+    --device)
+      DEVICE="$2"
       shift 2
       ;;
     --sink)
@@ -466,6 +478,25 @@ else
   log_info "Sub-run: skipping initial network bring-up."
 fi
 
+# Hardware-specific ALSA profiles require direct ALSA backend
+# Profiles like 'hamoa' configure hardware mixer controls and route to specific
+# ALSA devices (e.g., plughw:0,1). These operations require direct ALSA access.
+# Auto-detection may select PipeWire/PulseAudio which adds an abstraction layer
+# that can interfere with low-level mixer configuration and device routing.
+if [ "$ALSA_PROFILE" != "generic" ] && [ -n "$ALSA_PROFILE" ]; then
+  if [ -z "$AUDIO_BACKEND" ]; then
+    AUDIO_BACKEND="alsa"
+    log_info "ALSA profile '$ALSA_PROFILE' requires direct hardware access - using backend: alsa"
+  elif [ "$AUDIO_BACKEND" != "alsa" ]; then
+    # A hardware-specific profile cannot be honored on a non-ALSA backend, since
+    # PipeWire/PulseAudio do not expose the direct mixer controls the profile
+    # configures. Skip rather than silently falling back to the requested backend.
+    log_skip "$TESTNAME SKIP - ALSA profile '$ALSA_PROFILE' requires backend=alsa"
+    echo "$RESULT_TESTNAME SKIP" > "$RES_FILE"
+    exit 0
+  fi
+fi
+
 # Resolve backend
 if [ -z "$AUDIO_BACKEND" ]; then
   AUDIO_BACKEND="$(detect_audio_backend 2>/dev/null || echo "")"
@@ -510,7 +541,30 @@ log_info "Using backend: $AUDIO_BACKEND"
 
 backend_ok=0
 if [ "$AUDIO_BACKEND" = "alsa" ]; then
-  if audio_playback_alsa_probe; then
+  # Hardware-specific ALSA profiles provide explicit device paths and mixer configurations.
+  # Unlike the generic ALSA path, these profiles are validated here - profile name, device
+  # value, and card presence - before backend_ok is set, so an unsupported profile/device
+  # combination or missing hardware is reported as a SKIP now rather than surfacing later
+  # as a less clear failure from deep inside the profile setup call.
+  if [ "$ALSA_PROFILE" != "generic" ] && [ -n "$ALSA_PROFILE" ]; then
+    case "$ALSA_PROFILE:$DEVICE" in
+      hamoa:handset|hamoa:headset)
+        if resolve_hamoa_card_index >/dev/null 2>&1; then
+          backend_ok=1
+          log_info "Using hardware-specific ALSA profile '$ALSA_PROFILE' for device '$DEVICE' - card resolved"
+        else
+          log_skip "$TESTNAME SKIP - ALSA profile '$ALSA_PROFILE' hardware not present (card not found)"
+          echo "$RESULT_TESTNAME SKIP" > "$RES_FILE"
+          exit 0
+        fi
+        ;;
+      *)
+        log_skip "$TESTNAME SKIP - unsupported ALSA profile/device combination: '$ALSA_PROFILE'/'$DEVICE'"
+        echo "$RESULT_TESTNAME SKIP" > "$RES_FILE"
+        exit 0
+        ;;
+    esac
+  elif audio_playback_alsa_probe; then
     backend_ok=1
   fi
 else
@@ -680,11 +734,57 @@ case "$AUDIO_BACKEND:$SINK_CHOICE" in
     SINK_ID="null"
     ;;
   alsa:*)
-    audio_playback_alsa_prepare >/dev/null 2>&1 || true
-    if [ -n "${AUDIO_ALSA_PLAYBACK_DEVICE:-}" ]; then
-      SINK_ID="$AUDIO_ALSA_PLAYBACK_DEVICE"
+    # Check if using ALSA profile (e.g., Hamoa)
+    if [ "$ALSA_PROFILE" != "generic" ] && [ -n "$DEVICE" ]; then
+      # Profile setup functions call into amixer (via alsa_common.sh) to
+      # configure and then read back mixer state, so the platform needs the
+      # ALSA control utilities available before profile setup is attempted.
+      if ! CHECK_DEPS_NO_EXIT=1 check_dependencies amixer grep sed flock; then
+        log_skip "$TESTNAME SKIP - missing ALSA mixer utilities required by profile '$ALSA_PROFILE'"
+        echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
+        exit 0
+      fi
+
+      # Dispatch through an explicit allowlist rather than constructing the
+      # setup/get function names dynamically from $ALSA_PROFILE/$DEVICE, so
+      # an unexpected value cannot resolve to an arbitrary function name.
+      # The backend_ok check above already restricts $ALSA_PROFILE:$DEVICE
+      # to one of the two cases below, so the default branch here is a
+      # defensive safeguard rather than a path expected to be reached.
+      log_info "Using ALSA profile: $ALSA_PROFILE for device: $DEVICE"
+      case "$ALSA_PROFILE:$DEVICE" in
+        hamoa:handset)
+          setup_alsa_profile_hamoa_playback_handset "$LOGDIR"
+          profile_setup_rc=$?
+          [ "$profile_setup_rc" -eq 0 ] && SINK_ID="$(get_alsa_device_hamoa_playback_handset)"
+          ;;
+        hamoa:headset)
+          setup_alsa_profile_hamoa_playback_headset "$LOGDIR"
+          profile_setup_rc=$?
+          [ "$profile_setup_rc" -eq 0 ] && SINK_ID="$(get_alsa_device_hamoa_playback_headset)"
+          ;;
+        *)
+          log_skip "$TESTNAME SKIP - unsupported ALSA profile/device: $ALSA_PROFILE/$DEVICE"
+          echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
+          exit 0
+          ;;
+      esac
+
+      if [ "$profile_setup_rc" -eq 0 ]; then
+        log_info "ALSA profile configured successfully, device: $SINK_ID"
+      else
+        log_error "Failed to setup ALSA profile: $ALSA_PROFILE for device: $DEVICE"
+        echo "$RESULT_TESTNAME FAIL" >"$RES_FILE"
+        exit 1
+      fi
     else
-      SINK_ID="$(audio_playback_pick_alsa_sink)"
+      # Generic ALSA (existing behavior)
+      audio_playback_alsa_prepare >/dev/null 2>&1 || true
+      if [ -n "${AUDIO_ALSA_PLAYBACK_DEVICE:-}" ]; then
+        SINK_ID="$AUDIO_ALSA_PLAYBACK_DEVICE"
+      else
+        SINK_ID="$(audio_playback_pick_alsa_sink)"
+      fi
     fi
     ;;
 esac
@@ -715,14 +815,14 @@ else
 fi
 
 # Decide minimum ok seconds if timeout>0
-dur_s="$(duration_to_secs "$TIMEOUT" 2>/dev/null || echo 0)"
+dur_s="$(audio_parse_secs "$TIMEOUT" 2>/dev/null || echo 0)"
 if [ -z "$dur_s" ]; then
   dur_s=0
 fi
 
 min_ok=0
 if [ "$dur_s" -gt 0 ] 2>/dev/null; then
-  min_ok=$($dur_s - 1)
+  min_ok=$((dur_s - 1))
   if [ "$min_ok" -lt 1 ]; then
     min_ok=1
   fi
@@ -835,6 +935,21 @@ if [ "$USE_CLIP_DISCOVERY" = "true" ]; then
         fi
       fi
 
+      # A configured timeout shorter than the clip is an intentionally
+      # bounded run, so a clean kill is expected at ~timeout rather than
+      # ~clip duration. Track whichever bound actually applies to this
+      # loop so the elapsed-time check below reflects the real expected
+      # run length instead of always assuming the full clip should play.
+      effective_timeout_s="$(audio_parse_secs "$effective_timeout" 2>/dev/null || echo 0)"
+      case_bound_s="$clip_dur_s"
+      if [ "$effective_timeout_s" -gt 0 ] 2>/dev/null && [ "$effective_timeout_s" -lt "$clip_dur_s" ] 2>/dev/null; then
+        case_bound_s="$effective_timeout_s"
+      fi
+      case_min_ok=$((case_bound_s - 1))
+      if [ "$case_min_ok" -lt 1 ]; then
+        case_min_ok=1
+      fi
+
       start_s="$(date +%s 2>/dev/null || echo 0)"
 
       if [ "$AUDIO_BACKEND" = "pipewire" ]; then
@@ -895,8 +1010,8 @@ if [ "$USE_CLIP_DISCOVERY" = "true" ]; then
       if [ "$rc" -eq 0 ]; then
         log_pass "[$case_name] loop $i OK (rc=0, ${last_elapsed}s)"
 	ok_runs=$((ok_runs + 1))
-      elif [ "$rc" -eq 124 ] && [ "$clip_dur_s" -gt 0 ] 2>/dev/null && [ "$last_elapsed" -ge "$clip_min_ok" ]; then
-        log_warn "[$case_name] TIMEOUT ($TIMEOUT) - PASS (ran ~${last_elapsed}s, expected ${clip_duration}s)"
+      elif [ "$rc" -eq 124 ] && [ "$case_bound_s" -gt 0 ] 2>/dev/null && [ "$last_elapsed" -ge "$case_min_ok" ]; then
+        log_warn "[$case_name] TIMEOUT ($TIMEOUT) - PASS (ran ~${last_elapsed}s, expected ${case_bound_s}s)"
 	ok_runs=$((ok_runs + 1))
       elif [ "$rc" -ne 0 ] && { [ "$pw_ev" -eq 1 ] || [ "$pa_ev" -eq 1 ] || [ "$alsa_ev" -eq 1 ] || [ "$asoc_ev" -eq 1 ]; }; then
         log_warn "[$case_name] nonzero rc=$rc but evidence indicates playback - PASS"
