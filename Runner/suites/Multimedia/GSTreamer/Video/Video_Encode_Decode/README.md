@@ -49,7 +49,7 @@ At a high level, the test:
    - Uses `videotestsrc` to generate test video patterns (SMPTE color bars)
    - Encodes to H.264 or H.265 using V4L2 hardware encoders
    - Saves encoded files to `logs/Video_Encode_Decode/encoded/`
-   - Tests 4K resolution (3840x2160) by default
+   - Tests 480p resolution (640x480) by default
 6. **Decoding phase**:
    - Reads the previously encoded files (H.264/H.265) or downloaded clips (VP9)
    - Decodes using V4L2 hardware decoders
@@ -72,6 +72,195 @@ By default, the test runs the following test cases at 4K resolution for H.264/H.
 1. **decode_h264_4k** - Decode H.264 4K encoded file
 2. **decode_h265_4k** - Decode H.265 4K encoded file
 3. **decode_vp9_320p** - Decode VP9 pre-downloaded clip (converted to WebM: vp9_test_320p.webm) - **runs by default**
+
+---
+
+## Advanced Test Cases
+
+The test suite includes 9 advanced test cases that can be run using the `--test-type` parameter. These tests validate specific video features and scenarios.
+
+### Test Type: UVC Camera Preview
+
+**Test: UVC_Live_Preview_1080p (PR76474)**
+- **Description**: UVC camera live preview at 1080p@5fps with Wayland display output
+- **Requirements**: UVC camera device, Wayland compositor
+- **Pipeline**: `v4l2src → videoconvert → qtivtransform (optional) → waylandsink`
+- **Usage**: `./run.sh --test-type uvc --duration 30`
+- **Features**:
+  - Automatic UVC camera detection
+  - Wayland display setup (auto-starts Weston if needed)
+  - Optional rotation support via qtivtransform
+
+### Test Type: Dynamic Resolution Change (DRC)
+
+**Test: DRC_H264_Decode_1080p_720p (FR82787)**
+- **Description**: Validates dynamic resolution change during H.264 decode (1080p → 720p)
+- **Requirements**: Special DRC test clip, Wayland display, fpsdisplaysink
+- **Pipeline**: `filesrc → qtdemux → h264parse → v4l2h264dec → fpsdisplaysink → waylandsink`
+- **Usage**: `./run.sh --test-type drc --clip-path /path/to/clips`
+- **Test Clip**: `1080_720_h264.mp4` (automatically downloaded or copied from --clip-path)
+- **Features**:
+  - Monitors FPS and resolution changes during playback
+  - Validates seamless resolution transitions
+
+### Test Type: Concurrent Decode
+
+**Concurrency Tests (PR43865, PR43866, FR98277)**
+
+These tests validate concurrent decode sessions using qtivcomposer for multi-stream composition.
+
+**1. H264_Decode_Concurrency_8x480p (PR43865)**
+- **Description**: 8 concurrent H.264 480p@30fps decode sessions
+- **Requirements**: qtivcomposer, Wayland display
+- **Test Clip**: `H264_480p_30fps.mp4`
+- **Pipeline (per session)**: `filesrc → qtdemux → h264parse → v4l2h264dec → qtivcomposer → waylandsink`
+
+**2. H265_Decode_Concurrency_8x480p (PR43866)**
+- **Description**: 8 concurrent H.265 480p decode sessions
+- **Requirements**: qtivcomposer, Wayland display
+- **Test Clip**: `H265_480p_30fps.mp4`
+- **Pipeline (per session)**: `filesrc → qtdemux → h265parse → v4l2h265dec → qtivcomposer → waylandsink`
+
+**3. MJPEG_Decode_Concurrency_2x1080p (FR98277)**
+- **Description**: 2 concurrent MJPEG 1080p decode sessions
+- **Requirements**: jpegdec (software decoder), qtivcomposer, Wayland display
+- **Test Clip**: `mjpeg1.avi`
+- **Pipeline (per session)**: `filesrc → avidemux → jpegdec → qtivcomposer → waylandsink`
+
+**Usage**:
+```bash
+# Run all 3 concurrency tests
+./run.sh --test-type concurrency --clip-path /path/to/clips
+```
+
+**Features**:
+- Fixed session counts: 8 for H.264/H.265, 2 for MJPEG
+- Single pipeline with qtivcomposer for multi-stream composition
+- Comprehensive error checking and validation
+
+### Test Type: Advanced Encoding (Downstream Only)
+
+**Advanced Encoding Tests (FR74943, FR82773, FR82771, FR72846)**
+
+These tests require downstream video driver (Config2) and Qualcomm camera source (qtiqmmfsrc).
+
+**1. HEVC_Encode_Smart_Bitrate_FPS_720p (FR74943)**
+- **Description**: HEVC 720p encode with smart FPS and bitrate adaptation using dual camera streams
+- **Requirements**: Downstream driver, qtiqmmfsrc, qtismartvencbin
+- **Pipeline**: `qtiqmmfsrc (dual streams: video + control) → qtismartvencbin (smart-fps=true, smart-bitrate=true, smart-gop=false) → h265parse → mp4mux → filesink`
+- **Features**:
+  - Adaptive FPS and bitrate control
+  - Dual camera streams (720p video + 480p control)
+  - Noise reduction (noise-reduction=2)
+  - Extra buffers (extra-buffers=20)
+  - Control sink for smart encoding decisions
+
+**2. HEVC_Encode_1080p_Cyclic_IR (FR82773)**
+- **Description**: HEVC 1080p (1920x1080) encode with Cyclic Intra Refresh and CBR mode
+- **Requirements**: Downstream driver, qtiqmmfsrc, v4l2h265enc
+- **Pipeline**: `qtiqmmfsrc → v4l2h265enc (intra_refresh_period_type=1, intra_refresh_period=20, CBR mode, comprehensive QP controls) → h265parse → mp4mux → filesink`
+- **Features**: 
+  - Cyclic intra refresh mode for error resilience (period=20)
+  - Constant Bitrate (CBR) mode with 5 Mbps target
+  - Comprehensive QP (Quantization Parameter) controls for I/P/B frames
+  - GOP size control (29 frames)
+
+**3. H264_Encode_Slice_MB_VGA (FR82771)**
+- **Description**: H.264 VGA (640x480) encode with Slice MB mode
+- **Requirements**: Downstream driver, qtiqmmfsrc, v4l2h264enc
+- **Pipeline**: `qtiqmmfsrc → v4l2h264enc (slice_partitioning_method=1, number_of_mbs_in_a_slice=368) → h264parse → mp4mux → filesink`
+- **Features**: Macroblock-based slice partitioning
+
+**4. HEVC_Encode_1080p_Rotate90 (FR72846)**
+- **Description**: HEVC 1080p (1920x1080) encode with 90° VPU rotation and VBR mode
+- **Requirements**: qtiqmmfsrc, v4l2h265enc (rotate control requires downstream driver)
+- **Pipeline**: `qtiqmmfsrc → v4l2h265enc (rotate=90, VBR mode, comprehensive QP controls) → h265parse → mp4mux → filesink`
+- **Features**: 
+  - Hardware-accelerated rotation during encoding
+  - Variable Bitrate (VBR) mode with 2.2 Mbps target
+  - Comprehensive QP (Quantization Parameter) controls for I/P/B frames
+  - GOP size control (29 frames)
+
+**Usage**:
+```bash
+# Run all 4 advanced encoding tests (requires downstream driver + camera)
+./run.sh --test-type advanced-encode --stack downstream --duration 30
+```
+
+**Note**: These tests will automatically skip if:
+- Downstream video driver is not detected
+- Camera source (qtiqmmfsrc) is not available
+- Required encoder elements are missing
+
+---
+
+## Test Clip Requirements
+
+### Automatic Download
+
+Test clips are automatically downloaded from the configured URL (default: GitHub releases) or copied from a local path if provided via `--clip-path`.
+
+### Required Clips by Test Type
+
+| Test Type | Clips Required | Auto-Download |
+|-----------|----------------|---------------|
+| basic | VP9_640x480_10s.webm | ✅ Yes |
+| uvc | None (uses camera) | N/A |
+| drc | 1080_720_h264.mp4 | ✅ Yes |
+| concurrency | H264_480p_30fps.mp4<br>H265_480p_30fps.mp4<br>mjpeg1.avi | ✅ Yes |
+| advanced-encode | None (uses camera) | N/A |
+| all (default) | All clips above | ✅ Yes |
+
+### Clip Download Behavior
+
+1. **Check if clip exists** in output directory
+2. **Try local path** if `--clip-path` is provided
+3. **Download from URL** if not found locally
+4. **Skip test** if download fails (offline mode)
+
+### Manual Clip Provision
+
+If you have clips locally, provide the path:
+
+```bash
+./run.sh --test-type concurrency --clip-path /path/to/clips
+```
+
+The script will look for clips in the specified directory and copy them to the output directory.
+
+---
+
+## Advanced Test Examples
+
+### 1) Run UVC camera preview for 60 seconds
+
+```bash
+./run.sh --test-type uvc --duration 60
+```
+
+### 2) Run DRC test with local clips
+
+```bash
+./run.sh --test-type drc --clip-path /mnt/test_clips
+```
+
+### 3) Run concurrency tests
+
+```bash
+./run.sh --test-type concurrency --clip-path /opt
+```
+
+### 4) Run all advanced encoding tests (downstream only)
+
+```bash
+./run.sh --test-type advanced-encode --stack downstream
+```
+
+### 5) Run basic tests with custom settings
+
+```bash
+./run.sh --test-type basic --codecs h264,h265 --resolutions 480p,1080p --duration 10
+```
 
 ---
 
@@ -167,6 +356,15 @@ Help:
 
 ### Options
 
+- `--test-type <basic|uvc|drc|concurrency|advanced-encode|all>`
+  - Default: `basic` (standard encode/decode tests only - backward compatible)
+  - `basic`: Standard encode/decode tests only (H.264, H.265, VP9)
+  - `all`: Run ALL tests (basic + uvc + drc + concurrency + advanced-encode)
+  - `uvc`: UVC camera live preview test
+  - `drc`: Dynamic Resolution Change H.264 decode test
+  - `concurrency`: Concurrent decode tests (H.264, H.265, MJPEG)
+  - `advanced-encode`: Advanced encoding tests (downstream only)
+
 - `--mode <all|encode|decode>`
   - Default: `all` (run both encode and decode tests)
   - `encode`: Run only encoding tests
@@ -178,11 +376,21 @@ Help:
   - Examples: `h264`, `h265`, `h264,h265`, `vp9`, `h264,vp9`
   - Note: VP9 only supports decode (no encode)
 
-- `--resolutions <480p,4k>`
+- `--resolutions <480p,720p,1080p,4k>`
   - Comma-separated list of resolutions to test
-  - Default: `480p,4k`
+  - Default: `480p`
   - Supported: `480p` (640x480), `720p` (1280x720), `1080p` (1920x1080), `4k` (3840x2160)
   - Examples: `480p`, `4k`, `480p,1080p,4k`
+
+- `--clip-path <path>`
+  - Local path to test video files
+  - Overrides --clip-url if files exist
+  - Example: `--clip-path /opt` or `--clip-path /mnt/test_clips`
+
+- `--clip-url <url>`
+  - URL to download test video files
+  - Default: GitHub release URL
+  - Example: `--clip-url https://example.com/clips.tar.gz`
 
 - `--duration <seconds>`
   - Duration for encoding (in seconds)
@@ -222,84 +430,122 @@ Help:
 
 ## Examples
 
-### 1) Run all tests (default - encode + decode for H.264/H.265/VP9 at 4K for 30 seconds)
+### 1) Run basic tests (default - backward compatible)
 
 ```bash
 ./run.sh
 ```
 
-**Note:** Default behavior runs H.264, H.265, and VP9 tests at 4K resolution with 30 second duration.
+**Note:** Default behavior (`--test-type basic`) runs only basic encode/decode tests:
+- H.264 encode/decode at 480p for 30 seconds
+- H.265 encode/decode at 480p for 30 seconds
+- VP9 decode at 480p (if clip available)
 
-### 2) Run only encoding tests
+This is backward compatible with existing LAVA jobs and nightly runs.
+
+### 2) Run ALL tests (basic + advanced)
+
+```bash
+./run.sh --test-type all
+```
+
+**Note:** `--test-type all` runs ALL 9+ tests:
+- Basic encode/decode tests (H.264, H.265, VP9)
+- UVC camera preview (if camera available)
+- DRC H.264 decode (if clip available)
+- Concurrency tests: 8x H.264, 8x H.265, 2x MJPEG (if clips available)
+- Advanced encode tests (if downstream stack + camera available)
+
+Tests that require missing hardware or clips will be gracefully skipped.
+
+### 3) Run only basic encode/decode tests (explicit)
+
+```bash
+./run.sh --test-type basic
+```
+
+### 4) Run only UVC camera test
+
+```bash
+./run.sh --test-type uvc --duration 60
+```
+
+### 5) Run only concurrency tests
+
+```bash
+./run.sh --test-type concurrency --clip-path /opt
+```
+
+### 6) Run only advanced encoding tests (downstream only)
+
+```bash
+./run.sh --test-type advanced-encode --stack downstream
+```
+
+### 7) Run basic tests with specific codecs and resolutions
+
+```bash
+./run.sh --test-type basic --codecs h264,h265 --resolutions 480p,1080p
+```
+
+### 8) Run only encoding tests
 
 ```bash
 ./run.sh --mode encode
 ```
 
-### 3) Run only decoding tests (requires encoded files from previous run)
+### 9) Run only decoding tests (requires encoded files from previous run)
 
 ```bash
 ./run.sh --mode decode
 ```
 
-### 4) Test only H.264 codec
+### 10) Test only H.264 codec
 
 ```bash
-./run.sh --codecs h264
+./run.sh --test-type basic --codecs h264
 ```
 
-### 5) Test only H.265 codec at 4K resolution
-
-```bash
-./run.sh --codecs h265 --resolutions 4k
-```
-
-### 6) Test all codecs at 480p only
-
-```bash
-./run.sh --resolutions 480p
-```
-
-### 7) Test with longer duration (10 seconds)
+### 11) Test with shorter duration (10 seconds)
 
 ```bash
 ./run.sh --duration 10
 ```
 
-### 8) Test with higher framerate (60fps)
+### 12) Test with higher framerate (60fps)
 
 ```bash
-./run.sh --framerate 60
+./run.sh --test-type basic --framerate 60
 ```
 
-### 9) Test multiple resolutions
+### 13) Test multiple resolutions
 
 ```bash
-./run.sh --resolutions 480p,720p,1080p,4k
+./run.sh --test-type basic --resolutions 480p,720p,1080p,4k
 ```
 
-### 10) Increase GStreamer debug verbosity
+### 14) Increase GStreamer debug verbosity
 
 ```bash
 ./run.sh --gst-debug 5
 ```
 
-### 11) Quick test - H.264 only at 480p with 3 second duration
+### 15) Quick test - H.264 only at 480p with 3 second duration
 
 ```bash
-./run.sh --codecs h264 --resolutions 480p --duration 3
+./run.sh --test-type basic --codecs h264 --resolutions 480p --duration 3
 ```
 
-### 12) Test VP9 decode only (requires network connectivity)
+### 16) Test VP9 decode only (requires network connectivity)
 
 ```bash
-./run.sh --codecs vp9 --mode decode
+./run.sh --test-type basic --codecs vp9 --mode decode
 ```
 
-### 13) Test all codecs including VP9
+### 17) Provide local test clips
 
 ```bash
-./run.sh --codecs h264,h265,vp9
+./run.sh --clip-path /opt
 ```
 
 ---
@@ -309,8 +555,8 @@ Help:
 ### Encoding Pipeline
 
 ```
-videotestsrc num-buffers=<N> pattern=smpte 
-  ! video/x-raw,width=<W>,height=<H>,format=NV12,framerate=<FPS>/1 
+videotestsrc num-buffers=<N> pattern=smpte
+  ! video/x-raw,width=<W>,height=<H>,format=NV12,framerate=<FPS>/1
   ! v4l2h264enc extra-controls="controls,video_bitrate=<BITRATE>" (or v4l2h265enc)
   ! h264parse (or h265parse)
   ! filesink location=<output_file>
@@ -330,10 +576,10 @@ Where:
 ### Decoding Pipeline (H.264/H.265)
 
 ```
-filesrc location=<input_file> 
+filesrc location=<input_file>
   ! h264parse (or h265parse)
   ! v4l2h264dec (or v4l2h265dec)
-  ! videoconvert 
+  ! videoconvert
   ! fakesink
 ```
 
@@ -344,10 +590,10 @@ Where:
 ### Decoding Pipeline (VP9)
 
 ```
-filesrc location=VP9_640x480_10s.webm 
-  ! matroskademux 
-  ! v4l2vp9dec 
-  ! videoconvert 
+filesrc location=VP9_640x480_10s.webm
+  ! matroskademux
+  ! v4l2vp9dec
+  ! videoconvert
   ! fakesink
 ```
 
@@ -528,6 +774,105 @@ This test uses reusable helper functions from `lib_gstreamer.sh` that other GStr
   gstreamer_run_gstlaunch_timeout 40 "$pipeline"
   ```
 
+#### 5. `gstreamer_build_uvc_preview_pipeline`
+
+Build pipeline for UVC camera live preview (used by UVC test).
+
+- **Parameters**:
+  - `device`: UVC device path (e.g., `/dev/video2`)
+  - `width`: Video width (default: 1920)
+  - `height`: Video height (default: 1080)
+  - `framerate`: Framerate (default: 5)
+- Returns: Complete pipeline string for UVC preview
+- Automatically includes `qtivtransform` if available
+- Example:
+  ```sh
+  uvc_dev=$(gstreamer_detect_uvc_camera)
+  pipeline=$(gstreamer_build_uvc_preview_pipeline "$uvc_dev" "1920" "1080" "5")
+  gstreamer_run_gstlaunch_timeout 30 "$pipeline"
+  ```
+
+#### 6. `gstreamer_build_drc_decode_pipeline`
+
+Build pipeline for Dynamic Resolution Change H.264 decode test.
+
+- **Parameters**:
+  - `clip_path`: Path to DRC test clip
+  - `video_stack`: `upstream` or `downstream`
+- Returns: Complete pipeline string with fpsdisplaysink wrapper
+- Example:
+  ```sh
+  pipeline=$(gstreamer_build_drc_decode_pipeline "/tmp/drc_clip.mp4" "downstream")
+  gstreamer_run_gstlaunch_timeout 60 "$pipeline"
+  ```
+
+#### 7. `gstreamer_build_concurrency_decode_pipeline`
+
+Build pipeline for concurrent decode tests with qtivcomposer and dynamic grid layouts.
+
+- **Parameters**:
+  - `codec`: `h264`, `h265`, or `mjpeg`
+  - `clip_path`: Path to test clip
+  - `video_stack`: `upstream` or `downstream`
+  - `session_count`: Number of concurrent sessions (must be `2` or `8`)
+- **Supported Session Layouts**:
+  - **8 sessions** (required for H.264/H.265): 4x2 grid (480x540 per tile on 1920x1080 display)
+  - **2 sessions** (required for MJPEG): 2x1 grid (960x1080 per tile on 1920x1080 display)
+- **Codec-Specific Requirements**:
+  - H.264/H.265: Must use exactly 8 sessions (enforced by validation)
+  - MJPEG: Must use exactly 2 sessions (enforced by validation)
+- Returns: Complete pipeline string with qtivcomposer grid layout, or empty on error
+- Automatically handles:
+  - Codec-specific decode chains (v4l2h264dec, v4l2h265dec, jpegdec)
+  - Stack-dependent decoder arguments (IO modes for downstream)
+  - Dynamic grid positioning based on session count
+- Example (H.264 with 8 sessions):
+  ```sh
+  pipeline=$(gstreamer_build_concurrency_decode_pipeline \
+    "h264" "/tmp/test.mp4" "downstream" "8")
+  gstreamer_run_gstlaunch_timeout 40 "$pipeline"
+  ```
+- Example (MJPEG with 2 sessions):
+  ```sh
+  pipeline=$(gstreamer_build_concurrency_decode_pipeline \
+    "mjpeg" "/tmp/test.avi" "upstream" "2")
+  gstreamer_run_gstlaunch_timeout 40 "$pipeline"
+  ```
+
+#### 8. `gstreamer_build_smart_encode_pipeline`
+
+Build pipeline for HEVC Smart Encode with dual camera streams.
+
+- **Parameters**:
+  - `output_file`: Output file path
+- Returns: Complete pipeline string with qtismartvencbin
+- Requires: qtiqmmfsrc, qtismartvencbin (downstream only)
+- Example:
+  ```sh
+  pipeline=$(gstreamer_build_smart_encode_pipeline "/tmp/output.mp4")
+  gstreamer_run_gstlaunch_timeout 40 "$pipeline"
+  ```
+
+#### 9. `gstreamer_build_camera_encode_pipeline`
+
+Build pipeline for camera-based encoding with custom controls.
+
+- **Parameters**:
+  - `codec`: `h264` or `h265`
+  - `width`: Video width
+  - `height`: Video height
+  - `output_file`: Output file path
+  - `extra_controls`: Custom encoder controls string (optional)
+  - `video_stack`: `upstream` or `downstream`
+- Returns: Complete pipeline string with qtiqmmfsrc
+- Example:
+  ```sh
+  controls="controls,video_bitrate=8000000,intra_refresh_period_type=1"
+  pipeline=$(gstreamer_build_camera_encode_pipeline \
+    "h265" "1920" "1080" "/tmp/output.mp4" "$controls" "downstream")
+  gstreamer_run_gstlaunch_timeout 40 "$pipeline"
+  ```
+
 ### Usage in Other Tests
 
 To use these functions in your GStreamer test:
@@ -582,16 +927,18 @@ This will output example pipelines for various codecs, resolutions, and video st
 
 The test supports these environment variables (can be set in LAVA job definition):
 
+- `VIDEO_TEST_TYPE` - Test type (all/basic/uvc/drc/concurrency/advanced-encode) (default: all)
 - `VIDEO_TEST_MODE` - Test mode (all/encode/decode) (default: all)
 - `VIDEO_CODECS` - Comma-separated codec list (default: `h264,h265,vp9`)
-- `VIDEO_RESOLUTIONS` - Comma-separated resolution list (default: `4k`)
+- `VIDEO_RESOLUTIONS` - Comma-separated resolution list (default: `480p`)
 - `VIDEO_DURATION` - Encoding duration in seconds (default: 30)
 - `RUNTIMESEC` - Alternative to VIDEO_DURATION
 - `VIDEO_FRAMERATE` - Video framerate (default: 30)
 - `VIDEO_STACK` - Video stack selection (auto/upstream/downstream) (default: auto)
 - `VIDEO_GST_DEBUG` - GStreamer debug level (default: 2)
 - `GST_DEBUG_LEVEL` - Alternative to VIDEO_GST_DEBUG
-- `VIDEO_CLIP_URL` - URL for VP9 clip download (default: GitHub releases)
+- `VIDEO_CLIP_URL` - URL for test clip download (default: GitHub releases)
+- `VIDEO_CLIP_PATH` - Local path to test clips (overrides VIDEO_CLIP_URL)
 - `LAVA_TESTCASE_ID` - Override test case name for LAVA reporting (default: Video_Encode_Decode)
 
 **Priority order for duration**: `VIDEO_DURATION` > `RUNTIMESEC` > default (30)
