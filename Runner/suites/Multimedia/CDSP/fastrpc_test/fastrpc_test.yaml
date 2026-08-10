@@ -8,7 +8,8 @@ metadata:
     - Now tests ALL supported DSP domains detected at runtime (ADSP, MDSP, SDSP, CDSP, CDSP1, GPDSP0, GPDSP1)
     - Tests BOTH signed (system) and unsigned (user) Protection Domains where hardware supports them
     - ADSP/MDSP/SDSP: signed PD only; CDSP/CDSP1/GPDSP: both signed and unsigned PDs
-    - QCS9075, QCS8275, QCS8300, QCS9100: GPDSP0/GPDSP1 domains are skipped (fastrpc_tests binaries not supported temporarily)
+    - Entire test SKIPs early if FastRPC system libraries (libadsprpc/libcdsprpc/libsdsprpc — all required), DSP skeleton directories (v75/v68 — verified non-empty), or test libraries (libcalculator/libhap_example/libmultithreading — all required) are absent
+    - Domains without a `/dev/fastrpc-<label>` or `/dev/fastrpc-<label>-secure` endpoint are skipped at runtime; explicitly selected domains (--domain / --domain-name / single mode) with a missing endpoint produce FAIL with remoteproc diagnostics
     - For single-domain testing: set DOMAIN_MODE="single" and specify DOMAIN or DOMAIN_NAME
   os:
     - linux
@@ -24,7 +25,8 @@ params:
   PD_MODE: "both"  # both|signed-only|unsigned-only (default: both - tests both PDs where supported)
   UNSIGNED_PD: ""  # If set to non-zero, runs only unsigned PD mode (-U 1)
   REPEAT: 1  # Number of repetitions (default: 1)
-  TIMEOUT: ""  # Timeout for each run (no timeout if omitted)
+  TIMEOUT: "120"  # Per-invocation timeout in seconds (default 120); prevents a wedged DSP
+                  # from consuming the entire CI budget across multi-domain runs
 
 run:
   steps:

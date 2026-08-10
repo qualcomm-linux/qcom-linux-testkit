@@ -52,7 +52,8 @@ fi
 
 # Defaults
 REPEAT=1
-TIMEOUT=""
+TIMEOUT=120  # default per-invocation timeout in seconds; prevents a wedged DSP
+             # from consuming the entire CI budget across multi-domain runs
 ARCH=""
 BIN_DIR="" # directory that CONTAINS fastrpc_test
 ASSETS_DIR="" # kept for compatibility/logging (not used by new layout)
@@ -83,7 +84,7 @@ Options:
   --pd-mode <both|signed-only|unsigned-only> Select PD mode(s) to run (default: both)
   --unsigned-pd Use '-U 1' (user/unsigned PD). Overrides --pd-mode for compatibility
   --repeat <N> Number of repetitions (default: 1)
-  --timeout <sec> Timeout for each run (no timeout if omitted)
+  --timeout <sec> Timeout for each run (default: 120)
   --verbose Extra logging for CI debugging
   --help Show this help
 
@@ -185,7 +186,6 @@ log_info "-------------------Starting $TESTNAME Testcase------------------------
 log_info "Kernel: $(uname -a 2>/dev/null || echo N/A)"
 log_info "Date(UTC): $(date -u 2>/dev/null || echo N/A)"
 log_soc_info
-SOC_MACHINE="$(tr -s ' ' < /sys/devices/soc0/machine 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
 
 # -------------------- Binary directory resolution -----------------
 if [ -n "$BIN_DIR" ]; then
@@ -216,6 +216,28 @@ fi
 # -------------------- Runtime layout discovery --------------------
 fastrpc_setup_runtime_layout
 
+# Gate on artifacts being present: a domain appearing in remoteproc/DT does not
+# guarantee the FastRPC libraries, DSP skeletons, and test libraries are installed
+# and usable.  Without them every invocation would fail rather than skip, which is
+# the wrong signal.
+if [ -z "${FASTRPC_RESOLVED_LIB_SYS_DIR:-}" ]; then
+    log_skip "$TESTNAME SKIP - FastRPC system library not found (no libadsprpc/libcdsprpc/libsdsprpc)"
+    echo "$TESTNAME : SKIP" >"$RESULT_FILE"
+    exit 0
+fi
+
+if [ -z "${FASTRPC_RESOLVED_SKEL_PATH:-}" ]; then
+    log_skip "$TESTNAME SKIP - FastRPC DSP skeleton directory not found (no v75 or v68 under base)"
+    echo "$TESTNAME : SKIP" >"$RESULT_FILE"
+    exit 0
+fi
+
+if [ -z "${FASTRPC_RESOLVED_LIB_TEST_DIR:-}" ]; then
+    log_skip "$TESTNAME SKIP - FastRPC test libraries not found (no libcalculator/libhap_example/libmultithreading)"
+    echo "$TESTNAME : SKIP" >"$RESULT_FILE"
+    exit 0
+fi
+
 log_info "Using binary: $RUN_BIN"
 log_info "Run dir: $RUN_DIR (launching ./fastrpc_test)"
 log_info "Binary details:"
@@ -237,48 +259,43 @@ if [ -z "$DOMAINS_TO_TEST" ]; then
     exit 0
 fi
 
-# -------------------- SoC-specific domain blacklist --------------------
-# QRB2210: FastRPC not supported - skip entire test
-# QCS9075, QCS8275, QCS8300, QCS9100: GPDSP0 (domain 5) and GPDSP1 (domain 6) not supported currently
-# SM8850: libhap_example HAP_mem DMA not supported - treat as known skip per invocation
-#
-# Do not skip Glymur CRD by SoC name. Newer Glymur/Debian images expose
-# ADSP/CDSP remoteproc instances and FastRPC skeletons, so runtime discovery
-# should decide whether the test can run.
-soc_skip_all=0
-soc_skip_gpdsp=0
- 
-case "$SOC_MACHINE" in
-    *QRB2210*|*"Glymur CRD"*)
-        soc_skip_all=1
-        ;;
-    *QCS9075*|*QCS8275*|*QCS8300*|*QCS9100*)
-        soc_skip_gpdsp=1
-        ;;
-esac
+# -------------------- Validate FastRPC endpoint availability --------------------
+# Explicitly selected domains must have their endpoint present (FAIL if absent).
+# Auto-discovered domains without a usable endpoint are filtered out; if the
+# filtered set is empty the test SKIPs.  No interface bypass: a system without
+# any /dev/fastrpc-* nodes is treated the same as any other — absent endpoints
+# produce the correct FAIL/SKIP signal rather than masking a broken image.
+domain_selection_explicit=0
+{ [ -n "$CLI_DOMAIN_NAME" ] || [ -n "$CLI_DOMAIN" ] || [ "$DOMAIN_MODE" = "single" ]; } \
+    && domain_selection_explicit=1
 
-if [ "$soc_skip_all" -eq 1 ]; then
-    log_skip "$TESTNAME SKIP - SoC $SOC_MACHINE does not support FastRPC"
+available_domains=""
+for d in $DOMAINS_TO_TEST; do
+    dom_name="$(domain_to_name "$d")"
+    _ep="$(domain_to_endpoint_label "$d")"
+    if fastrpc_domain_endpoint_available "$d"; then
+        available_domains="${available_domains:+$available_domains }$d"
+        log_debug "Endpoint available: /dev/fastrpc-${_ep} (or /dev/fastrpc-${_ep}-secure)"
+    else
+        if [ "$domain_selection_explicit" -eq 1 ]; then
+            log_fail "$dom_name: explicitly selected endpoint not present (checked /dev/fastrpc-${_ep} and /dev/fastrpc-${_ep}-secure)"
+            log_dsp_remoteproc_status
+            echo "$TESTNAME : FAIL" >"$RESULT_FILE"
+            exit 0
+        fi
+        log_debug "$dom_name: endpoint not present (checked /dev/fastrpc-${_ep} and /dev/fastrpc-${_ep}-secure); skipping auto-discovered domain"
+    fi
+    unset _ep
+done
+
+if [ -z "$available_domains" ]; then
+    log_dsp_remoteproc_status
+    log_skip "$TESTNAME SKIP - no FastRPC endpoint devices found"
     echo "$TESTNAME : SKIP" >"$RESULT_FILE"
     exit 0
 fi
 
-if [ "$soc_skip_gpdsp" -eq 1 ]; then
-    filtered=""
-    for d in $DOMAINS_TO_TEST; do
-        case "$d" in
-            5|6) log_info "SoC $SOC_MACHINE: skipping $(domain_to_name "$d") (not supported)" ;;
-            *) filtered="${filtered:+$filtered }$d" ;;
-        esac
-    done
-    DOMAINS_TO_TEST="$filtered"
-fi
-
-if [ -z "$DOMAINS_TO_TEST" ]; then
-    log_skip "$TESTNAME SKIP - no supported domains remain after SoC filter ($SOC_MACHINE)"
-    echo "$TESTNAME : SKIP" >"$RESULT_FILE"
-    exit 0
-fi
+DOMAINS_TO_TEST="$available_domains"
 
 log_info "Domain mode: $DOMAIN_MODE"
 log_info "Domains to test: $DOMAINS_TO_TEST"
@@ -296,6 +313,16 @@ done
 [ -n "$domain_names" ] && log_info "Resolved domain names: $domain_names"
 
 log_info "PD mode: $PD_MODE"
+
+# Log the invocation matrix so CI operators can set a realistic action timeout.
+_matrix_invs=0
+for _md in $DOMAINS_TO_TEST; do
+    _md_pd_count=0
+    for _mp in $(effective_pds_for_domain "$_md"); do _md_pd_count=$((_md_pd_count+1)); done
+    _matrix_invs=$((_matrix_invs + _md_pd_count * REPEAT))
+done
+log_info "Invocation matrix: ${_matrix_invs} run(s) × ${TIMEOUT}s timeout → worst-case ~$((_matrix_invs * TIMEOUT))s"
+unset _md _md_pd_count _mp _matrix_invs
 
 # -------------------- Buffering tool availability ---------------
 HAVE_STDBUF=0; command -v stdbuf >/dev/null 2>&1 && HAVE_STDBUF=1
@@ -328,6 +355,15 @@ RESULTS_TRACKER=""
 
 for DOMAIN in $DOMAINS_TO_TEST; do
     dom_name="$(domain_to_name "$DOMAIN")"
+
+    # Defensive re-check; the pre-filter above should have caught this.
+    if ! fastrpc_domain_endpoint_available "$DOMAIN"; then
+        _ep_rc="$(domain_to_endpoint_label "$DOMAIN")"
+        log_info "Skipping $dom_name: endpoint not present (checked /dev/fastrpc-${_ep_rc} and /dev/fastrpc-${_ep_rc}-secure)"
+        unset _ep_rc
+        continue
+    fi
+
     PD_VALUES="$(effective_pds_for_domain "$DOMAIN")"
 
     if [ -z "$PD_VALUES" ]; then
@@ -433,15 +469,10 @@ for DOMAIN in $DOMAINS_TO_TEST; do
             fi
 
             # Track invocation result immediately
-            # SM8850: libhap_example HAP_mem DMA handle not supported - treat as known skip
             if [ "$rc" -eq 0 ] && [ -r "$iter_log" ] && grep -F -q -e "All tests completed successfully" -e "All applicable tests PASSED" "$iter_log"; then
                 PASS_COUNT=$((PASS_COUNT+1))
                 combo_pass=$((combo_pass+1))
                 log_pass "$iter_tag: success"
-            elif case "$SOC_MACHINE" in *SM8850*) true ;; *) false ;; esac && only_hap_example_failed "$iter_log"; then
-                PASS_COUNT=$((PASS_COUNT+1))
-                combo_pass=$((combo_pass+1))
-                log_pass "$iter_tag: success (libhap_example.so HAP_mem skipped on $SOC_MACHINE - DMA handle not supported)"
             else
                 combo_fail=$((combo_fail+1))
                 log_warn "$iter_tag: success pattern not found"
