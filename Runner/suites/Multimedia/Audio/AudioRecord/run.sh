@@ -91,7 +91,7 @@ done
 export AUDIO_OVERLAY_REQUESTED
 
 # ---------------- Defaults / CLI ----------------
-AUDIO_BACKEND=""
+AUDIO_BACKEND="${AUDIO_BACKEND:-}"
 SRC_CHOICE="${SRC_CHOICE:-mic}" # mic|null
 DURATIONS="" # Will be set to default only if using legacy mode
 RECORD_SECONDS="${RECORD_SECONDS:-30s}" # DEFAULT: 30s; 'auto' maps short/med/long
@@ -205,7 +205,7 @@ case "$audio_prepare_rc" in
   0)
     ;;
   2)
-    log_skip "$TESTNAME SKIP - AudioReach kernel package changed; reboot required"
+    log_skip "$TESTNAME SKIP - AudioReach kernel package changed, reboot required"
     echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
     exit 0
     ;;
@@ -332,6 +332,11 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# Preserve an explicit backend request. Automatic fallback is only appropriate
+# when backend selection was left in auto mode.
+AUDIO_BACKEND_REQUESTED="$AUDIO_BACKEND"
+export AUDIO_BACKEND_REQUESTED
+
 case "$AUDIO_RECORD_STRICT_SIGNAL" in
   auto)
     AUDIO_RECORD_STRICT_SIGNAL="$STRICT"
@@ -339,7 +344,7 @@ case "$AUDIO_RECORD_STRICT_SIGNAL" in
   0|1)
     ;;
   *)
-    log_warn "Invalid AUDIO_RECORD_STRICT_SIGNAL='$AUDIO_RECORD_STRICT_SIGNAL'; using 0"
+    log_warn "Invalid AUDIO_RECORD_STRICT_SIGNAL='$AUDIO_RECORD_STRICT_SIGNAL', using 0"
     AUDIO_RECORD_STRICT_SIGNAL=0
     ;;
 esac
@@ -438,7 +443,7 @@ if [ "$AUDIO_OVERLAY_REQUESTED" -eq 1 ]; then
     0)
       ;;
     2)
-      log_skip "$TESTNAME SKIP - AudioReach kernel package changed; reboot required"
+      log_skip "$TESTNAME SKIP - AudioReach kernel package changed, reboot required"
       echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
       exit 0
       ;;
@@ -453,11 +458,29 @@ elif [ "$SYSTEMD_AVAILABLE" -eq 1 ] &&
   # Preserve the existing native/Yocto validation path. Debian base mode uses
   # command-level user probes during backend discovery instead.
   if ! setup_overlay_audio_environment; then
-    log_warn "Existing overlay audio environment validation failed; continuing with backend recovery flow"
+    log_warn "Existing overlay audio environment validation failed, continuing with backend recovery flow"
   fi
 else
-  log_info "systemd not available; skipping legacy overlay environment check"
+  log_info "systemd not available, skipping legacy overlay environment check"
 fi
+
+# Start an image-provisioned audio remoteproc before backend and device
+# discovery. Platforms without an applicable remoteproc continue unchanged.
+audio_prepare_audio_remoteproc
+audio_remoteproc_rc=$?
+
+case "$audio_remoteproc_rc" in
+  0)
+    ;;
+  2)
+    log_info "Audio remoteproc preflight not applicable: ${AUDIO_REMOTE_PROC_REASON:-no matching remoteproc}"
+    ;;
+  *)
+    log_skip "$TESTNAME SKIP - audio remoteproc preflight failed: ${AUDIO_REMOTE_PROC_REASON:-unknown remoteproc error}"
+    echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
+    exit 0
+    ;;
+esac
 
 # Minimal ramdisk detection and cleanup trap (kills any manually bootstrapped daemons)
 if [ "$SYSTEMD_AVAILABLE" -eq 0 ]; then
@@ -582,7 +605,8 @@ else
   fi
 fi
 
-if [ "$backend_ok" -ne 1 ] && [ "$AUDIO_BACKEND" != "alsa" ]; then
+if [ "$backend_ok" -ne 1 ] && [ -z "$AUDIO_BACKEND_REQUESTED" ] &&
+   [ "$AUDIO_BACKEND" != "alsa" ]; then
   if [ "$SYSTEMD_AVAILABLE" -eq 1 ] && [ "${AUDIO_SYSTEMD_MANAGED:-0}" -eq 1 ]; then
     log_warn "$TESTNAME: backend not available ($AUDIO_BACKEND) - attempting restart+retry once"
     audio_record_restart_backend_best_effort "$AUDIO_BACKEND" >/dev/null 2>&1 || true
@@ -724,8 +748,9 @@ esac
 # default source when no concrete source was discovered. On systems without
 # a real capture source, this can record from dummy/null/default paths or fail
 # after creating empty files.
-if [ -z "$SRC_ID" ] && [ "$SRC_CHOICE" = "mic" ] && [ "$AUDIO_BACKEND" = "pipewire" ]; then
-  log_warn "$TESTNAME: no concrete PipeWire mic source found; probing direct ALSA capture path"
+if [ -z "$SRC_ID" ] && [ -z "$AUDIO_BACKEND_REQUESTED" ] &&
+   [ "$SRC_CHOICE" = "mic" ] && [ "$AUDIO_BACKEND" = "pipewire" ]; then
+  log_warn "$TESTNAME: no concrete PipeWire mic source found, probing direct ALSA capture path"
 
   if audio_record_probe_alsa_capture_profile; then
     ALSA_CAPTURE_PROBED=1
@@ -738,13 +763,14 @@ if [ -z "$SRC_ID" ] && [ "$SRC_CHOICE" = "mic" ] && [ "$AUDIO_BACKEND" = "pipewi
 
     log_warn "$TESTNAME: falling back to direct ALSA capture device: $SRC_ID"
   else
-    log_skip "$TESTNAME SKIP - no real capture source available; PipeWire mic source missing and ALSA capture probe failed: ${AUDIO_ALSA_CAPTURE_REASON:-capture path unavailable}"
+    log_skip "$TESTNAME SKIP - no real capture source available, PipeWire mic source missing and ALSA capture probe failed: ${AUDIO_ALSA_CAPTURE_REASON:-capture path unavailable}"
     echo "$RESULT_TESTNAME SKIP" > "$RES_FILE"
     exit 0
   fi
 fi
 
-if [ -z "$SRC_ID" ] && [ "$SRC_CHOICE" = "mic" ] && [ "$AUDIO_BACKEND" != "pipewire" ]; then
+if [ -z "$SRC_ID" ] && [ -z "$AUDIO_BACKEND_REQUESTED" ] &&
+   [ "$SRC_CHOICE" = "mic" ] && [ "$AUDIO_BACKEND" != "pipewire" ]; then
   for b in $BACKENDS_TO_TRY; do
     [ "$b" = "$AUDIO_BACKEND" ] && continue
 
@@ -1667,4 +1693,3 @@ fi
 log_fail "$TESTNAME FAIL"
 echo "$RESULT_TESTNAME FAIL" > "$RES_FILE"
 exit 1
-

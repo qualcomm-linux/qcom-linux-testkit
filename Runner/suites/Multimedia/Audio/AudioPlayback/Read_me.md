@@ -2,12 +2,12 @@
 
 ## Overview
 
-This suite automates the validation of audio playback capabilities on Qualcomm Linux-based platforms running a Yocto-based Linux system. It supports both PipeWire and PulseAudio backends, with robust evidence-based PASS/FAIL logic, asset management, and diagnostic logging.
+This suite automates the validation of audio playback capabilities on Qualcomm Linux-based platforms. It supports PipeWire, PulseAudio, and direct ALSA backends with robust evidence-based PASS/FAIL logic, asset management, and diagnostic logging.
 
 
 ## Features
 
-- Supports **PipeWire** and **PulseAudio** backends
+- Supports **PipeWire**, **PulseAudio**, and direct **ALSA** backends
 - **10-clip test coverage**: Comprehensive validation across diverse audio formats (sample rates: 8KHz-48KHz, bit depths: 8b-32b, channels: 1ch-8ch)
 - **Flexible clip selection**: 
   - Use generic config names (playback_config1-playback_config10) for easy selection
@@ -61,8 +61,27 @@ Ensure the following components are present in the target Yocto build:
 
 - PipeWire: `pw-play`, `wpctl`
 - PulseAudio: `paplay`, `pactl`
+- ALSA: `aplay`, `amixer`, `alsaucm` when UCM is available
 - Common tools: `pgrep`, `timeout`, `grep`, `wget`, `tar`
 - Daemon: `pipewire` or `pulseaudio` must be running
+
+## Backend and Route Selection
+
+When no backend is requested, the suite uses automatic selection. A physical PipeWire audio sink uses `pw-play`, and a physical PulseAudio sink uses `paplay`. Dummy, null, monitor, and loopback PipeWire sinks are not accepted as speaker routes.
+
+If automatic selection finds no physical managed speaker sink, the suite probes direct ALSA playback. It selects an ALSA card and PCM from the available device inventory, applies only mixer controls exposed by that card, and runs `aplay -D <device>`. This supports the Shikra primary-MI2S, secondary-TDM, and codec-direct route capabilities without selecting a form factor or assuming card `0`.
+
+An explicit backend request is never replaced:
+
+- `--backend pipewire` or `AUDIO_BACKEND=pipewire` runs `pw-play` only and skips if PipeWire has no physical speaker sink.
+- `--backend pulseaudio` or `AUDIO_BACKEND=pulseaudio` runs `paplay` only and skips if no matching sink is available.
+- `--backend alsa` or `AUDIO_BACKEND=alsa` runs `aplay` with the discovered ALSA route.
+
+## Audio Remoteproc Preflight
+
+Before backend discovery, the suite enumerates runtime remoteprocs and checks the configured firmware and topology under `/lib/firmware` or `/usr/lib/firmware`. It recognizes audio DSP identities and the Shikra modem-hosted audio path. A remoteproc named `modem` is ignored on non-Shikra targets because it is not their audio preflight dependency.
+
+If the matching remoteproc is `running`, the suite records its name and firmware evidence. If it is `offline`, the suite starts it only after confirming the corresponding firmware is provisioned. Generic audio DSP paths also require adjacent topology evidence. Shikra's modem-hosted path does not require an adjacent topology file because its public image packages `qdsp6sw` modem firmware and `lpaicp` audio firmware separately. The suite never stops a remoteproc. Platforms with no applicable audio remoteproc continue normally. Provisioning or start issues produce a clean skip with the reason.
 
 ## Overlay Build Support
 
@@ -210,7 +229,7 @@ cd Runner/suites/Multimedia/Audio/AudioPlayback
 
 Environment Variables:
 Variable	             Description	                                   Default
-AUDIO_BACKEND	         Selects backend: pipewire or pulseaudio	       auto-detect
+AUDIO_BACKEND	         Selects backend: pipewire, pulseaudio, or alsa	       auto-detect
 SINK_CHOICE	             Playback sink: speakers or null	               speakers
 CLIP_NAMES               Test specific clips (e.g., "playback_config1 playback_config2")    playback_config1
 CLIP_FILTER              Filter clips by pattern (e.g., "48KHz" or "16b" or "2ch")          unset
@@ -235,7 +254,7 @@ LAVA_TESTCASE_ID         Unique testcase ID written into the .res file for LAVA 
 
 CLI Options
 Option	                    Description
---backend	                Select backend: pipewire or pulseaudio
+--backend	                Select backend: pipewire, pulseaudio, or alsa
 --sink	                    Playback sink: speakers or null
 --clip-name <names>         Test specific clips using playback_config1-playback_config10 or descriptive names (space-separated)
 --clip-filter <patterns>    Filter clips by sample rate, bit rate, or channels (space-separated patterns)

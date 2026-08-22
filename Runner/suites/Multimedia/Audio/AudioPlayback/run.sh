@@ -100,7 +100,7 @@ AUDIO_TAR_URL="${AUDIO_TAR_URL:-https://github.com/qualcomm-linux/qcom-linux-tes
 export AUDIO_TAR_URL
 
 # ------------- Defaults / CLI -------------
-AUDIO_BACKEND=""
+AUDIO_BACKEND="${AUDIO_BACKEND:-}"
 SINK_CHOICE="${SINK_CHOICE:-speakers}" # speakers|null
 FORMATS="" # Will be set to default only if using legacy mode
 DURATIONS="" # Will be set to default only if using legacy mode
@@ -146,7 +146,7 @@ PASSWORD=""
 usage() {
   cat <<EOF_USAGE
 Usage: $0 [options]
-  --backend {pipewire|pulseaudio}
+  --backend {pipewire|pulseaudio|alsa}
   --sink {speakers|null}
   --overlay
       On Debian, ensure the Qualcomm AudioReach package set and prepare the
@@ -278,7 +278,7 @@ case "$audio_prepare_rc" in
   0)
     ;;
   2)
-    log_skip "$TESTNAME SKIP - AudioReach kernel package changed; reboot required"
+    log_skip "$TESTNAME SKIP - AudioReach kernel package changed, reboot required"
     echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
     exit 0
     ;;
@@ -416,6 +416,11 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# Preserve an explicit backend request. Automatic fallback is only appropriate
+# when backend selection was left in auto mode.
+AUDIO_BACKEND_REQUESTED="$AUDIO_BACKEND"
+export AUDIO_BACKEND_REQUESTED
+
 # Prepare only the Debian user capabilities required by the selected mode.
 # Explicit base ALSA playback needs group membership but no systemd user
 # manager. Overlay and managed backends require the user session.
@@ -478,7 +483,7 @@ if [ "$AUDIO_OVERLAY_REQUESTED" -eq 1 ]; then
     0)
       ;;
     2)
-      log_skip "$TESTNAME SKIP - AudioReach kernel package changed; reboot required"
+      log_skip "$TESTNAME SKIP - AudioReach kernel package changed, reboot required"
       echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
       exit 0
       ;;
@@ -493,11 +498,29 @@ elif [ "$SYSTEMD_AVAILABLE" -eq 1 ] &&
   # Preserve the existing native/Yocto validation path. Debian base mode uses
   # command-level user probes during backend discovery instead.
   if ! setup_overlay_audio_environment; then
-    log_warn "Existing overlay audio environment validation failed; continuing with backend recovery flow"
+    log_warn "Existing overlay audio environment validation failed, continuing with backend recovery flow"
   fi
 else
-  log_info "systemd not available; skipping legacy overlay environment check"
+  log_info "systemd not available, skipping legacy overlay environment check"
 fi
+
+# Start an image-provisioned audio remoteproc before backend and device
+# discovery. Platforms without an applicable remoteproc continue unchanged.
+audio_prepare_audio_remoteproc
+audio_remoteproc_rc=$?
+
+case "$audio_remoteproc_rc" in
+  0)
+    ;;
+  2)
+    log_info "Audio remoteproc preflight not applicable: ${AUDIO_REMOTE_PROC_REASON:-no matching remoteproc}"
+    ;;
+  *)
+    log_skip "$TESTNAME SKIP - audio remoteproc preflight failed: ${AUDIO_REMOTE_PROC_REASON:-unknown remoteproc error}"
+    echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
+    exit 0
+    ;;
+esac
 
 if [ "$SYSTEMD_AVAILABLE" -eq 0 ]; then
   MINIMAL_RAMDISK_MODE=1
@@ -680,7 +703,7 @@ fi
 export AUDIO_SYSTEMD_MANAGED
 
 if [ -z "$AUDIO_BACKEND" ]; then
-  if audio_run_helper_as_test_user audio_playback_alsa_probe; then
+  if audio_playback_probe_alsa_with_recovery; then
     AUDIO_BACKEND="alsa"
     AUDIO_SYSTEMD_MANAGED=0
     export AUDIO_SYSTEMD_MANAGED
@@ -688,7 +711,7 @@ if [ -z "$AUDIO_BACKEND" ]; then
   elif audio_playback_bootstrap_backend_if_needed; then
     AUDIO_BACKEND="$(audio_run_helper_as_test_user --require-session detect_audio_backend 2>/dev/null || echo "")"
     if [ -z "$AUDIO_BACKEND" ]; then
-      if audio_run_helper_as_test_user audio_playback_alsa_probe; then
+      if audio_playback_probe_alsa_with_recovery; then
         AUDIO_BACKEND="alsa"
         AUDIO_SYSTEMD_MANAGED=0
         export AUDIO_SYSTEMD_MANAGED
@@ -710,7 +733,7 @@ log_info "Using backend: $AUDIO_BACKEND"
 
 backend_ok=0
 if [ "$AUDIO_BACKEND" = "alsa" ]; then
-  if audio_run_helper_as_test_user audio_playback_alsa_probe; then
+  if audio_playback_probe_alsa_with_recovery; then
     backend_ok=1
   fi
 else
@@ -738,7 +761,8 @@ if [ "$backend_ok" -ne 1 ]; then
   fi
 fi
 
-if [ "$backend_ok" -ne 1 ] && [ "$AUDIO_BACKEND" != "alsa" ]; then
+if [ "$backend_ok" -ne 1 ] && [ -z "$AUDIO_BACKEND_REQUESTED" ] &&
+   [ "$AUDIO_BACKEND" != "alsa" ]; then
   if [ "$AUDIO_PLAYBACK_DEBIAN_ROOT_MODE" -eq 1 ]; then
     log_warn "$TESTNAME: backend not available ($AUDIO_BACKEND) - attempting user-service recovery"
   else
@@ -762,7 +786,7 @@ if [ "$backend_ok" -ne 1 ] && [ "$AUDIO_BACKEND" != "alsa" ]; then
 fi
 
 if [ "$backend_ok" -ne 1 ] && [ "$AUDIO_BACKEND" != "alsa" ]; then
-  if audio_run_helper_as_test_user audio_playback_alsa_probe; then
+  if audio_playback_probe_alsa_with_recovery; then
     log_warn "$TESTNAME: falling back to ALSA direct playback path"
     AUDIO_BACKEND="alsa"
     AUDIO_SYSTEMD_MANAGED=0
@@ -781,7 +805,8 @@ fi
 case "$AUDIO_BACKEND" in
   pipewire)
     if ! check_dependencies pw-play; then
-      if audio_run_helper_as_test_user audio_playback_alsa_probe && check_dependencies aplay; then
+      if [ -z "$AUDIO_BACKEND_REQUESTED" ] &&
+         audio_playback_probe_alsa_with_recovery && check_dependencies aplay; then
         log_warn "$TESTNAME: PipeWire playback utility missing - falling back to ALSA"
         AUDIO_BACKEND="alsa"
         AUDIO_SYSTEMD_MANAGED=0
@@ -795,7 +820,8 @@ case "$AUDIO_BACKEND" in
     ;;
   pulseaudio)
     if ! check_dependencies paplay; then
-      if audio_run_helper_as_test_user audio_playback_alsa_probe && check_dependencies aplay; then
+      if [ -z "$AUDIO_BACKEND_REQUESTED" ] &&
+         audio_playback_probe_alsa_with_recovery && check_dependencies aplay; then
         log_warn "$TESTNAME: PulseAudio playback utility missing - falling back to ALSA"
         AUDIO_BACKEND="alsa"
         AUDIO_SYSTEMD_MANAGED=0
@@ -832,7 +858,8 @@ if [ "$AUDIO_BACKEND" = "pipewire" ]; then
     fi
 
     if ! audio_run_helper_as_test_user --require-session audio_pw_ctl_ok 2>/dev/null; then
-      if audio_run_helper_as_test_user audio_playback_alsa_probe && check_dependencies aplay; then
+      if [ -z "$AUDIO_BACKEND_REQUESTED" ] &&
+         audio_playback_probe_alsa_with_recovery && check_dependencies aplay; then
         log_warn "$TESTNAME: falling back to ALSA direct playback path"
         AUDIO_BACKEND="alsa"
         AUDIO_SYSTEMD_MANAGED=0
@@ -855,7 +882,8 @@ elif [ "$AUDIO_BACKEND" = "pulseaudio" ]; then
     fi
 
     if ! audio_run_helper_as_test_user --require-session audio_pa_ctl_ok 2>/dev/null; then
-      if audio_run_helper_as_test_user audio_playback_alsa_probe && check_dependencies aplay; then
+      if [ -z "$AUDIO_BACKEND_REQUESTED" ] &&
+         audio_playback_probe_alsa_with_recovery && check_dependencies aplay; then
         log_warn "$TESTNAME: falling back to ALSA direct playback path"
         AUDIO_BACKEND="alsa"
         AUDIO_SYSTEMD_MANAGED=0
@@ -888,14 +916,36 @@ case "$AUDIO_BACKEND:$SINK_CHOICE" in
     SINK_ID="null"
     ;;
   alsa:*)
-    audio_playback_alsa_prepare >/dev/null 2>&1 || true
     if [ -n "${AUDIO_ALSA_PLAYBACK_DEVICE:-}" ]; then
       SINK_ID="$AUDIO_ALSA_PLAYBACK_DEVICE"
     else
       SINK_ID="$(audio_playback_pick_alsa_sink)"
     fi
+
+    audio_playback_alsa_prepare \
+      "$(audio_alsa_device_card "$SINK_ID")" >/dev/null 2>&1 || true
     ;;
 esac
+
+if [ -z "$SINK_ID" ] && [ -z "$AUDIO_BACKEND_REQUESTED" ] &&
+   [ "$SINK_CHOICE" = "speakers" ] &&
+   { [ "$AUDIO_BACKEND" = "pipewire" ] || [ "$AUDIO_BACKEND" = "pulseaudio" ]; }
+then
+  log_warn "$TESTNAME: no physical $AUDIO_BACKEND speaker sink found, probing direct ALSA playback"
+
+  if audio_playback_probe_alsa_with_recovery; then
+    AUDIO_BACKEND="alsa"
+    AUDIO_SYSTEMD_MANAGED=0
+    export AUDIO_SYSTEMD_MANAGED
+
+    SINK_ID="$AUDIO_ALSA_PLAYBACK_DEVICE"
+    log_warn "$TESTNAME: falling back to direct ALSA playback device: $SINK_ID"
+  else
+    log_skip "$TESTNAME SKIP - no physical $AUDIO_BACKEND speaker sink and ALSA playback probe failed"
+    echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
+    exit 0
+  fi
+fi
 
 if [ -z "$SINK_ID" ]; then
   log_skip "$TESTNAME SKIP - requested sink '$SINK_CHOICE' not found for $AUDIO_BACKEND"
@@ -995,7 +1045,7 @@ if [ "$USE_CLIP_DISCOVERY" = "true" ]; then
     case_name="$(generate_clip_testcase_name "$clip_file" 2>/dev/null || true)"
     if [ -z "$case_name" ]; then
       case_name="$(printf '%s' "$clip_file" | sed 's/\.[Ww][Aa][Vv]$//' | tr ' /' '__')"
-      log_warn "Clip name not in expected format; using generic testcase name: $case_name"
+      log_warn "Clip name not in expected format, using generic testcase name: $case_name"
     fi
 
     # Resolve full path

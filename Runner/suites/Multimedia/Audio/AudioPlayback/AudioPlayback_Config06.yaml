@@ -8,7 +8,7 @@ metadata:
     - functional
 
 params:
-  AUDIO_BACKEND: ""  # Selects backend: pipewire or pulseaudio, default: auto-detect
+  AUDIO_BACKEND: ""  # Selects backend: pipewire, pulseaudio, or alsa, default: auto-detect
   SINK_CHOICE: "speakers"  # Playback sink: speakers or null, default: speakers
   CLIP_NAMES: "playback_config6"  # Test specific clips (Config06: 24KHz, 32-bit, 1ch)
   CLIP_FILTER: ""  # Filter clips by pattern (e.g., "48KHz" or "16b" or "2ch"), default: unset

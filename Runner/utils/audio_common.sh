@@ -166,7 +166,7 @@ audio_fetch_assets_from_url() {
       log_info "Already extracted. Skipping download."
       return 0
     fi
-    log_warn "Extraction marker present but runnable clips not found; continuing with download/re-extract path"
+    log_warn "Extraction marker present but runnable clips not found, continuing with download/re-extract path"
   fi
 
   while [ "$fetch_attempt" -le "$fetch_attempts" ]; do
@@ -180,7 +180,7 @@ audio_fetch_assets_from_url() {
       if curl -fL --retry 3 --retry-delay 2 --connect-timeout 20 -o "$archive_path" "$url" >"$fetch_log" 2>&1; then
         download_ok=1
       else
-        log_warn "curl download failed on attempt ${fetch_attempt}/${fetch_attempts}; showing last lines from $fetch_log"
+        log_warn "curl download failed on attempt ${fetch_attempt}/${fetch_attempts}, showing last lines from $fetch_log"
         tail -n 20 "$fetch_log" 2>/dev/null || true
       fi
     fi
@@ -191,7 +191,7 @@ audio_fetch_assets_from_url() {
         if wget --tries=3 --timeout=20 -O "$archive_path" "$url" >"$fetch_log" 2>&1; then
           download_ok=1
         else
-          log_warn "wget download failed on attempt ${fetch_attempt}/${fetch_attempts}; showing last lines from $fetch_log"
+          log_warn "wget download failed on attempt ${fetch_attempt}/${fetch_attempts}, showing last lines from $fetch_log"
           tail -n 20 "$fetch_log" 2>/dev/null || true
         fi
       fi
@@ -202,7 +202,7 @@ audio_fetch_assets_from_url() {
     fi
 
     if [ "$fetch_attempt" -lt "$fetch_attempts" ]; then
-      log_warn "Download attempt ${fetch_attempt}/${fetch_attempts} failed; retrying after ${fetch_retry_delay}s"
+      log_warn "Download attempt ${fetch_attempt}/${fetch_attempts} failed, retrying after ${fetch_retry_delay}s"
       sleep "$fetch_retry_delay"
     fi
 
@@ -278,7 +278,7 @@ audio_ensure_clip_ready() {
     fi
     # Bring network up and retry once
     if ! ensure_network_online; then
-        log_warn "Network unavailable; cannot fetch audio assets for $clip"
+        log_warn "Network unavailable, cannot fetch audio assets for $clip"
         return 2
     fi
     if [ -n "$url" ]; then
@@ -552,6 +552,27 @@ audio_pipewire_systemctl() {
   return $?
 }
 
+# Prefer the invoking suite directory for test-owned scratch files. PWD covers
+# helpers re-sourced in a child shell where SCRIPT_DIR is not exported, while
+# AUDIO_RECORD_USER_CAPTURE_DIR provides the prepared Debian-user workspace.
+audio_scratch_dir() {
+  for asd_candidate in \
+    "${SCRIPT_DIR:-}" \
+    "${PWD:-}" \
+    "${AUDIO_RECORD_USER_CAPTURE_DIR:-}" \
+    "${LOGDIR:-}"
+  do
+    if [ -n "$asd_candidate" ] &&
+       [ -d "$asd_candidate" ] &&
+       [ -w "$asd_candidate" ]; then
+      printf '%s\n' "$asd_candidate"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
 # Restart PipeWire through systemd and wait for the service state to settle.
 #
 # Service scope:
@@ -580,7 +601,12 @@ audio_restart_pipewire_service() {
   aprs_next_log=10
   aprs_scope="system"
   aprs_exec_text="systemctl restart pipewire"
-  aprs_output_file="${TMPDIR:-/tmp}/audio-pipewire-systemctl.$$.log"
+  aprs_output_dir="$(audio_scratch_dir 2>/dev/null || true)"
+  if [ -z "$aprs_output_dir" ]; then
+    log_fail "No writable Audio scratch directory is available"
+    return 1
+  fi
+  aprs_output_file="$aprs_output_dir/audio-pipewire-systemctl.$$.log"
  
   case "${AUDIO_SYSTEMCTL_USER_SCOPE:-0}" in
     0)
@@ -601,7 +627,7 @@ audio_restart_pipewire_service() {
   fi
  
   if ! command -v systemctl >/dev/null 2>&1; then
-    log_fail "systemctl is unavailable; cannot restart PipeWire"
+    log_fail "systemctl is unavailable, cannot restart PipeWire"
     return 1
   fi
  
@@ -842,21 +868,71 @@ pwctl_inspect_safe() {
 }
 
 # ---------- PipeWire: sinks (playback) ----------
+# Return success only for a physical PipeWire audio sink. Dummy, null, monitor,
+# and loopback sinks can accept streams without producing hardware audio.
+pw_sink_is_real_audio() {
+  psira_id="$1"
+
+  [ -n "$psira_id" ] || return 1
+
+  psira_inspect="$(pwctl_inspect_safe "$psira_id" 2>/dev/null || true)"
+  [ -n "$psira_inspect" ] || return 1
+
+  if ! printf '%s\n' "$psira_inspect" |
+      grep -Eiq 'media[.]class[[:space:]]*=[[:space:]]*"Audio/Sink'; then
+    return 1
+  fi
+
+  psira_label="$({
+    printf '%s\n' "$psira_inspect" |
+      grep -m1 -E 'node[.](description|name)[[:space:]]*=' |
+      cut -d'"' -f2
+  } 2>/dev/null)"
+
+  if printf '%s\n' "$psira_label" |
+      grep -Eiq '(^|[._ -])(null|dummy|monitor|loopback|freewheel)($|[._ -])'; then
+    return 1
+  fi
+
+  return 0
+}
+
+# Prefer speaker or headphone sinks, then any physical audio sink. Do not use a
+# PipeWire dummy sink as a successful speakers route.
 pw_default_speakers() {
-  st="$(pwctl_status_safe 2>/dev/null)" || { printf '%s\n' ""; return 0; }
- 
-  _block="$(printf '%s\n' "$st" | sed -n '/Sinks:/,/Sources:/p')"
-  _id="$(printf '%s\n' "$_block" \
-        | grep -i -E 'speaker|headphone' \
-        | sed -n 's/^[^0-9]*\([0-9][0-9]*\)\..*/\1/p' \
-        | head -n1)"
-  [ -n "$_id" ] || _id="$(printf '%s\n' "$_block" \
-        | sed -n 's/^[^*]*\*[[:space:]]*\([0-9][0-9]*\)\..*/\1/p' \
-        | head -n1)"
-  [ -n "$_id" ] || _id="$(printf '%s\n' "$_block" \
-        | sed -n 's/^[^0-9]*\([0-9][0-9]*\)\..*/\1/p' \
-        | head -n1)"
-  printf '%s\n' "$_id"
+  st="$(pwctl_status_safe 2>/dev/null)" || {
+    printf '%s\n' ""
+    return 0
+  }
+
+  block="$(printf '%s\n' "$st" | sed -n '/Sinks:/,/Sources:/p')"
+  preferred_ids="$(
+    printf '%s\n' "$block" |
+      grep -Ei 'speaker|headphone|line[._ -]*out|analog|hdmi' |
+      sed -n 's/^[^0-9]*\([0-9][0-9]*\)\..*/\1/p'
+  )"
+  all_ids="$(
+    printf '%s\n' "$block" |
+      sed -n 's/^[^0-9]*\([0-9][0-9]*\)\..*/\1/p'
+  )"
+  checked_ids=""
+
+  for id in $preferred_ids $all_ids; do
+    case " $checked_ids " in
+      *" $id "*)
+        continue
+        ;;
+    esac
+
+    checked_ids="$checked_ids $id"
+
+    if pw_sink_is_real_audio "$id"; then
+      printf '%s\n' "$id"
+      return 0
+    fi
+  done
+
+  printf '%s\n' ""
 }
 
 pw_default_null() {
@@ -901,13 +977,76 @@ pw_set_default_sink() {
 }
 
 # ---------- PipeWire: sources (record) ----------
+# Return success only for a real PipeWire audio capture source. This prevents
+# camera nodes listed under a generic Sources section from being selected.
+pw_source_is_real_audio() {
+  psira_id="$1"
+
+  [ -n "$psira_id" ] || return 1
+
+  psira_inspect="$(pwctl_inspect_safe "$psira_id" 2>/dev/null || true)"
+  [ -n "$psira_inspect" ] || return 1
+
+  if printf '%s\n' "$psira_inspect" |
+      grep -Eiq 'media[.]class[[:space:]]*=[[:space:]]*"Video/Source'; then
+    return 1
+  fi
+
+  if ! printf '%s\n' "$psira_inspect" |
+      grep -Eiq 'media[.]class[[:space:]]*=[[:space:]]*"Audio/Source'; then
+    return 1
+  fi
+
+  psira_label="$({
+    printf '%s\n' "$psira_inspect" |
+      grep -m1 -E 'node[.](description|name)[[:space:]]*=' |
+      cut -d'"' -f2
+  } 2>/dev/null)"
+
+  if printf '%s\n' "$psira_label" |
+      grep -Eiq '(^|[._ -])(null|dummy|monitor|loopback)($|[._ -])'; then
+    return 1
+  fi
+
+  return 0
+}
+
+# Prefer microphone-labelled audio sources, then any real audio source. Never
+# fall back to the first unclassified source because it may be a camera node.
 pw_default_mic() {
-  st="$(pwctl_status_safe 2>/dev/null)" || { printf '%s\n' ""; return 0; }
- 
+  st="$(pwctl_status_safe 2>/dev/null)" || {
+    printf '%s\n' ""
+    return 0
+  }
+
   blk="$(printf '%s\n' "$st" | sed -n '/Sources:/,/^$/p')"
-  id="$(printf '%s\n' "$blk" | grep -i 'mic' | sed -n 's/^[^0-9]*\([0-9][0-9]*\)\..*/\1/p' | head -n1)"
-  [ -n "$id" ] || id="$(printf '%s\n' "$blk" | sed -n 's/^[^0-9]*\([0-9][0-9]*\)\..*/\1/p' | head -n1)"
-  printf '%s\n' "$id"
+  preferred_ids="$(
+    printf '%s\n' "$blk" |
+      grep -Ei 'mic|microphone|capture|audio.*input' |
+      sed -n 's/^[^0-9]*\([0-9][0-9]*\)\..*/\1/p'
+  )"
+  all_ids="$(
+    printf '%s\n' "$blk" |
+      sed -n 's/^[^0-9]*\([0-9][0-9]*\)\..*/\1/p'
+  )"
+  checked_ids=""
+
+  for id in $preferred_ids $all_ids; do
+    case " $checked_ids " in
+      *" $id "*)
+        continue
+        ;;
+    esac
+
+    checked_ids="$checked_ids $id"
+
+    if pw_source_is_real_audio "$id"; then
+      printf '%s\n' "$id"
+      return 0
+    fi
+  done
+
+  printf '%s\n' ""
 }
 
 pw_default_null_source() {
@@ -2550,7 +2689,377 @@ audio_should_use_service_recovery() {
   return 1
 }
 
+# Require an image-provided ALSA topology in the configured DSP firmware
+# directory or its platform parent. Some images keep a shared platform topology
+# above variant-specific firmware directories such as cqs, iqs, or cqm.
+audio_remoteproc_topology_path() {
+  artp_firmware_path="$1"
+  artp_firmware_dir="$(dirname "$artp_firmware_path")"
+  artp_platform_dir="$(dirname "$artp_firmware_dir")"
+
+  for artp_search_dir in "$artp_firmware_dir" "$artp_platform_dir"; do
+    for artp_path in \
+      "$artp_search_dir"/*tplg* \
+      "$artp_search_dir"/*topology*
+    do
+      if [ -f "$artp_path" ]; then
+        printf '%s\n' "$artp_path"
+        return 0
+      fi
+    done
+  done
+
+  return 1
+}
+
+# Return success for a remoteproc identity commonly used to host the audio
+# firmware. The caller applies the Shikra platform gate to modem instances.
+audio_remoteproc_is_audio_candidate() {
+  ariac_name="$1"
+  ariac_firmware="$2"
+  ariac_identity="$(
+    printf '%s %s\n' "$ariac_name" "$ariac_firmware" |
+      tr '[:upper:]' '[:lower:]'
+  )"
+
+  case "$ariac_identity" in
+    *qdsp6sw*|*mdsp*|*audio*dsp*|*adsp*|*modem*)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+# Return success when the runtime remoteproc name identifies a modem-hosted
+# audio path. This is intentionally based on the name, never its index.
+audio_remoteproc_is_modem() {
+  arim_name="$1"
+  arim_name_lower="$(printf '%s\n' "$arim_name" | tr '[:upper:]' '[:lower:]')"
+
+  case "$arim_name_lower" in
+    *modem*)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+# Return success when runtime platform evidence identifies a Shikra target.
+# The preflight runs before the suites call detect_platform, so inspect both
+# any already-populated platform variables and the standard runtime DT paths.
+audio_platform_is_shikra() {
+  apis_identity="${PLATFORM_MACHINE:-} ${PLATFORM_TARGET:-}"
+  apis_identity="$apis_identity ${PLATFORM_SOC_MACHINE:-}"
+  apis_identity="$apis_identity ${PLATFORM_DT_MODEL:-}"
+  apis_identity="$apis_identity ${PLATFORM_DT_COMPAT:-}"
+
+  for apis_file in \
+    /proc/device-tree/model \
+    /proc/device-tree/compatible \
+    /sys/firmware/devicetree/base/model \
+    /sys/firmware/devicetree/base/compatible
+  do
+    if [ -r "$apis_file" ]; then
+      apis_value="$(tr '\000' ' ' <"$apis_file" 2>/dev/null || true)"
+      apis_identity="$apis_identity $apis_value"
+    fi
+  done
+
+  apis_identity="$(
+    printf '%s\n' "$apis_identity" |
+      tr '[:upper:]' '[:lower:]'
+  )"
+
+  case "$apis_identity" in
+    *shikra*)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+# Reorder an inventory so a modem-hosted audio path is considered before DSP
+# fallbacks. The caller still validates its firmware and topology, and no
+# remoteproc index is inferred or hardcoded.
+audio_remoteproc_prioritize_modem() {
+  arpm_instances="$1"
+
+  for arpm_pass in modem other; do
+    while IFS='|' read -r arpm_path arpm_name arpm_firmware arpm_state ||
+          [ -n "$arpm_path" ]
+    do
+      if audio_remoteproc_is_modem "$arpm_name"; then
+        if [ "$arpm_pass" != "modem" ]; then
+          continue
+        fi
+      elif [ "$arpm_pass" != "other" ]; then
+        continue
+      fi
+
+      printf '%s|%s|%s|%s\n' \
+        "$arpm_path" \
+        "$arpm_name" \
+        "$arpm_firmware" \
+        "$arpm_state"
+    done <<EOF
+$arpm_instances
+EOF
+  done
+}
+
+# Check the audio-bearing remoteproc before audio tests begin. A matching
+# remoteproc needs image-provided firmware and topology evidence before an
+# offline instance is started. Return 2 when no applicable remoteproc exists.
+audio_prepare_audio_remoteproc() {
+  AUDIO_REMOTE_PROC_REASON=""
+  AUDIO_REMOTE_PROC_STARTED=0
+  export AUDIO_REMOTE_PROC_STARTED
+  arpr_matched=0
+
+  if ! command -v list_remoteproc_instances >/dev/null 2>&1 ||
+     ! command -v find_image_firmware >/dev/null 2>&1 ||
+     ! command -v start_remoteproc >/dev/null 2>&1; then
+    AUDIO_REMOTE_PROC_REASON="remoteproc helpers are unavailable"
+    export AUDIO_REMOTE_PROC_REASON
+    return 2
+  fi
+
+  arpr_instances="$(list_remoteproc_instances 2>/dev/null || true)"
+  if [ -z "$arpr_instances" ]; then
+    AUDIO_REMOTE_PROC_REASON="no runtime remoteproc instances are exposed"
+    export AUDIO_REMOTE_PROC_REASON
+    return 2
+  fi
+
+  arpr_instances="$(audio_remoteproc_prioritize_modem "$arpr_instances")"
+
+  while IFS='|' read -r arpr_path arpr_name arpr_firmware arpr_state ||
+        [ -n "$arpr_path" ]
+  do
+    arpr_is_shikra_modem=0
+
+    if ! audio_remoteproc_is_audio_candidate "$arpr_name" "$arpr_firmware"; then
+      continue
+    fi
+
+    # The modem-hosted audio remoteproc is a Shikra-specific path. Other
+    # platforms can expose a modem remoteproc without provisioning Shikra
+    # audio firmware, which must not block their normal audio validation.
+    if audio_remoteproc_is_modem "$arpr_name" &&
+       ! audio_platform_is_shikra; then
+      continue
+    fi
+    if audio_remoteproc_is_modem "$arpr_name"; then
+      arpr_is_shikra_modem=1
+    fi
+
+    arpr_matched=1
+    arpr_firmware_path="$(
+      find_image_firmware "$arpr_firmware" 2>/dev/null || true
+    )"
+    if [ -z "$arpr_firmware_path" ]; then
+      AUDIO_REMOTE_PROC_REASON="audio remoteproc firmware is not provisioned: name='$arpr_name' firmware='$arpr_firmware'"
+      continue
+    fi
+
+    if [ "$arpr_is_shikra_modem" -eq 1 ]; then
+      # Public Shikra images package qdsp6sw as modem firmware and lpaicp as
+      # separate audio firmware. They do not provide an ALSA topology beside
+      # qdsp6sw, so firmware presence is the correct startup prerequisite.
+      arpr_topology_path="not-required"
+    else
+      arpr_topology_path="$(
+        audio_remoteproc_topology_path "$arpr_firmware_path" 2>/dev/null || true
+      )"
+      if [ -z "$arpr_topology_path" ]; then
+        AUDIO_REMOTE_PROC_REASON="audio topology is not provisioned for firmware '$arpr_firmware_path'"
+        continue
+      fi
+    fi
+
+    case "$arpr_state" in
+      running)
+        log_info "Audio remoteproc ready: name='$arpr_name' state=running firmware='$arpr_firmware_path' topology='$arpr_topology_path'"
+        AUDIO_REMOTE_PROC_REASON=""
+        export AUDIO_REMOTE_PROC_REASON
+        return 0
+        ;;
+      offline)
+        log_info "Starting offline audio remoteproc: name='$arpr_name' path='$arpr_path' firmware='$arpr_firmware_path' topology='$arpr_topology_path'"
+        if start_remoteproc "$arpr_path"; then
+          log_info "Audio remoteproc started: name='$arpr_name' path='$arpr_path'"
+          AUDIO_REMOTE_PROC_REASON=""
+          AUDIO_REMOTE_PROC_STARTED=1
+          export AUDIO_REMOTE_PROC_STARTED
+          export AUDIO_REMOTE_PROC_REASON
+          return 0
+        fi
+        AUDIO_REMOTE_PROC_REASON="failed to start audio remoteproc: name='$arpr_name' path='$arpr_path'"
+        ;;
+      *)
+        AUDIO_REMOTE_PROC_REASON="audio remoteproc is in unexpected state '$arpr_state': name='$arpr_name' path='$arpr_path'"
+        ;;
+    esac
+  done <<EOF
+$arpr_instances
+EOF
+
+  if [ "$arpr_matched" -eq 0 ]; then
+    AUDIO_REMOTE_PROC_REASON="no applicable audio remoteproc was identified"
+    export AUDIO_REMOTE_PROC_REASON
+    return 2
+  fi
+
+  export AUDIO_REMOTE_PROC_REASON
+  export AUDIO_REMOTE_PROC_STARTED
+  return 1
+}
+
+# Reuse the shared remoteproc preflight when a later ALSA probe needs a retry.
+# Success is reported only when this call started the offline remoteproc.
+audio_recover_offline_dsp() {
+  audio_prepare_audio_remoteproc
+  ard_rc=$?
+
+  if [ "$ard_rc" -eq 0 ] && [ "${AUDIO_REMOTE_PROC_STARTED:-0}" -eq 1 ]; then
+    AUDIO_DSP_RECOVERY_REASON=""
+    export AUDIO_DSP_RECOVERY_REASON
+    return 0
+  fi
+
+  if [ "$ard_rc" -eq 0 ]; then
+    AUDIO_DSP_RECOVERY_REASON="audio remoteproc is already running"
+  else
+    AUDIO_DSP_RECOVERY_REASON="${AUDIO_REMOTE_PROC_REASON:-no offline audio remoteproc was identified}"
+  fi
+
+  export AUDIO_DSP_RECOVERY_REASON
+  return 1
+}
+
+# Return success when an exact mixer control is exposed by the selected card.
+audio_alsa_control_exists() {
+  aace_card="$1"
+  aace_name="$2"
+
+  command -v amixer >/dev/null 2>&1 || return 1
+
+  amixer -c "$aace_card" controls 2>/dev/null |
+    grep -F "name='$aace_name'" >/dev/null 2>&1
+}
+
+# Set an optional mixer control without assuming that every platform has it.
+audio_alsa_set_control_if_present() {
+  aascip_card="$1"
+  aascip_name="$2"
+  aascip_value="$3"
+
+  if ! audio_alsa_control_exists "$aascip_card" "$aascip_name"; then
+    return 1
+  fi
+
+  amixer -c "$aascip_card" \
+    cset "iface=MIXER,name=$aascip_name" "$aascip_value" >/dev/null 2>&1
+}
+
+# List unique ALSA card indexes from procfs and the playback/capture inventories.
+audio_alsa_card_indexes() {
+  {
+    sed -n 's/^[[:space:]]*\([0-9][0-9]*\)[[:space:]].*/\1/p' \
+      /proc/asound/cards 2>/dev/null
+    aplay -l 2>/dev/null |
+      sed -n 's/^card[[:space:]]*\([0-9][0-9]*\):.*/\1/p'
+    arecord -l 2>/dev/null |
+      sed -n 's/^card[[:space:]]*\([0-9][0-9]*\):.*/\1/p'
+  } | awk '!seen[$0]++'
+}
+
+# Extract the card index from an hw:CARD,DEV or plughw:CARD,DEV identifier.
+audio_alsa_device_card() {
+  printf '%s\n' "$1" |
+    sed -n 's/^\(plug\)\{0,1\}hw:\([0-9][0-9]*\),.*/\2/p'
+}
+
+# Return success after ALSA exposes at least one hardware capture PCM.
+audio_alsa_capture_inventory_available() {
+  if command -v arecord >/dev/null 2>&1 &&
+     arecord -l 2>/dev/null |
+       grep -E '^card[[:space:]]+[0-9]+:.*device[[:space:]]+[0-9]+:' \
+         >/dev/null 2>&1; then
+    return 0
+  fi
+
+  if grep -E '^[0-9]+-[0-9]+:.*capture' /proc/asound/pcm \
+      >/dev/null 2>&1; then
+    return 0
+  fi
+
+  return 1
+}
+
+# Classify the playback route by mixer capabilities instead of platform names.
+# The profile controls both mixer preparation and preferred PCM selection.
+audio_alsa_playback_profile() {
+  aapp_card="$1"
+
+  if audio_alsa_control_exists \
+      "$aapp_card" "PRIMARY_MI2S_RX Audio Mixer MultiMedia1"; then
+    if audio_alsa_control_exists \
+        "$aapp_card" "Left Speaker Mixer Left DAC Switch" ||
+       audio_alsa_control_exists \
+        "$aapp_card" "Playback Path DC Blocking"; then
+      printf '%s\n' "primary-mi2s"
+      return 0
+    fi
+
+    printf '%s\n' "legacy-primary"
+    return 0
+  fi
+
+  if audio_alsa_control_exists \
+      "$aapp_card" "SECONDARY_TDM_RX_0 Audio Mixer MultiMedia1"; then
+    printf '%s\n' "secondary-tdm"
+    return 0
+  fi
+
+  if audio_alsa_control_exists "$aapp_card" "Rx Slot Mask"; then
+    printf '%s\n' "codec-direct"
+    return 0
+  fi
+
+  if audio_alsa_control_exists \
+      "$aapp_card" "stream0.vol_ctrl0 MultiMedia1 Playback Volu"; then
+    printf '%s\n' "legacy-primary"
+    return 0
+  fi
+
+  printf '%s\n' "generic"
+}
+
+# Find the first card exposing a recognized hardware playback route.
+audio_alsa_find_playback_card() {
+  for aafpc_card in $(audio_alsa_card_indexes); do
+    aafpc_profile="$(audio_alsa_playback_profile "$aafpc_card")"
+    if [ "$aafpc_profile" != "generic" ]; then
+      printf '%s\n' "$aafpc_card"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+# Enable UCM first, then apply only mixer controls present for the detected
+# primary-MI2S, secondary-TDM, codec-direct, or legacy playback path.
 audio_playback_alsa_prepare() {
+  ap_card="${1:-}"
+  ap_profile=""
   ap_ucm_card=""
 
   if [ "${SINK_CHOICE:-speakers}" = "null" ]; then
@@ -2569,20 +3078,88 @@ EOF
     fi
   fi
 
-  if command -v amixer >/dev/null 2>&1; then
-    if amixer -c 0 scontrols 2>/dev/null | grep -F "PRIMARY_MI2S_RX Audio Mixer MultiMedia1" >/dev/null 2>&1; then
-      amixer -c 0 cset name='PRIMARY_MI2S_RX Audio Mixer MultiMedia1' 1 >/dev/null 2>&1 || true
+  if ! command -v amixer >/dev/null 2>&1; then
+    return 0
+  fi
+
+  if [ -z "$ap_card" ]; then
+    ap_card="$(audio_alsa_find_playback_card 2>/dev/null || true)"
+  fi
+  if [ -z "$ap_card" ]; then
+    return 0
+  fi
+
+  ap_profile="$(audio_alsa_playback_profile "$ap_card")"
+
+  case "$ap_profile" in
+    primary-mi2s)
+      audio_alsa_set_control_if_present \
+        "$ap_card" "Left Speaker Mixer Left DAC Switch" on || true
+      audio_alsa_set_control_if_present \
+        "$ap_card" "Right Speaker Mixer Right DAC Switch" on || true
+      audio_alsa_set_control_if_present \
+        "$ap_card" "Speaker Left Switch" on || true
+      audio_alsa_set_control_if_present \
+        "$ap_card" "Speaker Right Switch" on || true
+      audio_alsa_set_control_if_present \
+        "$ap_card" "Speaker Switch" on || true
+      audio_alsa_set_control_if_present \
+        "$ap_card" "Speaker Volume" 10 || true
+      audio_alsa_set_control_if_present \
+        "$ap_card" "Speaker Left Mixer Volume" 3 || true
+      audio_alsa_set_control_if_present \
+        "$ap_card" "Speaker Right Mixer Volume" 3 || true
+      audio_alsa_set_control_if_present \
+        "$ap_card" "Playback Path DC Blocking" 1 || true
+      audio_alsa_set_control_if_present \
+        "$ap_card" "PRIMARY_MI2S_RX Audio Mixer MultiMedia1" 1 || true
+      ;;
+    secondary-tdm)
+      audio_alsa_set_control_if_present \
+        "$ap_card" "SECONDARY_TDM_RX_0 Audio Mixer MultiMedia1" 1 || true
+      audio_alsa_set_control_if_present \
+        "$ap_card" "stream0.vol_ctrl0 MM1 Playback Volume" 65535 || true
+      ;;
+    legacy-primary)
+      audio_alsa_set_control_if_present \
+        "$ap_card" "PRIMARY_MI2S_RX Audio Mixer MultiMedia1" 1 || true
+      ;;
+  esac
+
+  audio_alsa_set_control_if_present \
+    "$ap_card" "stream0.vol_ctrl0 MultiMedia1 Playback Volu" 65535 || true
+
+  if [ "$ap_profile" != "primary-mi2s" ]; then
+    audio_alsa_set_control_if_present \
+      "$ap_card" "Rx Slot Mask" 3 || true
+
+    if audio_alsa_control_exists \
+        "$ap_card" "SA1 FU21 Stereo Gain Offset dB"; then
+      audio_alsa_set_control_if_present \
+        "$ap_card" "SA1 FU21 Stereo Gain Offset dB" 72 || true
+    else
+      audio_alsa_set_control_if_present \
+        "$ap_card" "Speaker Volume" 72 || true
     fi
-    if amixer -c 0 scontrols 2>/dev/null | grep -F "stream0.vol_ctrl0 MultiMedia1 Playback Volu" >/dev/null 2>&1; then
-      amixer -c 0 cset name='stream0.vol_ctrl0 MultiMedia1 Playback Volu' 65535 >/dev/null 2>&1 || true
+
+    if audio_alsa_control_exists "$ap_card" "OT23 Usage Mode"; then
+      audio_alsa_set_control_if_present \
+        "$ap_card" "OT23 Usage Mode" 3 || true
+    else
+      audio_alsa_set_control_if_present \
+        "$ap_card" "Usage Mode" 3 || true
     fi
   fi
 
   return 0
 }
 
+# Prefer the PCM associated with a detected hardware route, then retain the
+# existing default, sysdefault, and first-device fallback order.
 audio_playback_pick_alsa_sink() {
   ap_dev=""
+  ap_card=""
+  ap_profile="generic"
 
   if [ "${SINK_CHOICE:-speakers}" = "null" ]; then
     echo "null"
@@ -2590,6 +3167,28 @@ audio_playback_pick_alsa_sink() {
   fi
 
   if command -v aplay >/dev/null 2>&1; then
+    ap_card="$(audio_alsa_find_playback_card 2>/dev/null || true)"
+    if [ -n "$ap_card" ]; then
+      ap_profile="$(audio_alsa_playback_profile "$ap_card")"
+
+      case "$ap_profile" in
+        primary-mi2s|secondary-tdm)
+          if aplay -l 2>/dev/null |
+              grep -E "^card[[:space:]]+$ap_card:.*device[[:space:]]+0:" >/dev/null 2>&1; then
+            printf '%s\n' "plughw:$ap_card,0"
+            return 0
+          fi
+          ;;
+        codec-direct)
+          if aplay -l 2>/dev/null |
+              grep -E "^card[[:space:]]+$ap_card:.*device[[:space:]]+2:" >/dev/null 2>&1; then
+            printf '%s\n' "plughw:$ap_card,2"
+            return 0
+          fi
+          ;;
+      esac
+    fi
+
     ap_dev="$(aplay -L 2>/dev/null | awk '/^default:CARD=/{print $1; exit}')"
     if [ -n "$ap_dev" ]; then
       echo "$ap_dev"
@@ -2613,13 +3212,15 @@ audio_playback_pick_alsa_sink() {
   return 1
 }
 
+# Prepare the selected card before verifying that its playback PCM can open.
 audio_playback_alsa_probe() {
   ap_probe_dev="$(audio_playback_pick_alsa_sink)"
   if [ -z "$ap_probe_dev" ]; then
     return 1
   fi
 
-  audio_playback_alsa_prepare >/dev/null 2>&1 || true
+  ap_probe_card="$(audio_alsa_device_card "$ap_probe_dev")"
+  audio_playback_alsa_prepare "$ap_probe_card" >/dev/null 2>&1 || true
 
   if audio_exec_with_timeout 5s aplay -D "$ap_probe_dev" -t raw -f S16_LE -r 48000 -c 2 -d 1 /dev/zero >/dev/null 2>&1; then
     AUDIO_ALSA_PLAYBACK_DEVICE="$ap_probe_dev"
@@ -2630,7 +3231,93 @@ audio_playback_alsa_probe() {
   return 1
 }
 
+# Print the successfully probed ALSA playback device for propagation from a
+# Debian Audio-user subprocess back into the root orchestrator.
+audio_playback_alsa_probe_device() {
+  if ! audio_playback_alsa_probe; then
+    return 1
+  fi
+
+  printf '%s\n' "$AUDIO_ALSA_PLAYBACK_DEVICE"
+}
+
+# Return success after ALSA exposes at least one hardware playback PCM.
+audio_alsa_playback_inventory_available() {
+  if command -v aplay >/dev/null 2>&1 &&
+     aplay -l 2>/dev/null |
+       grep -E '^card[[:space:]]+[0-9]+:.*device[[:space:]]+[0-9]+:' \
+         >/dev/null 2>&1; then
+    return 0
+  fi
+
+  if grep -E '^[0-9]+-[0-9]+:.*playback' /proc/asound/pcm \
+      >/dev/null 2>&1; then
+    return 0
+  fi
+
+  return 1
+}
+
+# Probe direct ALSA playback in the prepared user context. When no playback PCM
+# exists, root may start one fully provisioned offline audio DSP and retry.
+audio_playback_probe_alsa_with_recovery() {
+  appawr_output="$(
+    audio_run_helper_as_test_user audio_playback_alsa_probe_device 2>/dev/null
+  )"
+  appawr_rc=$?
+
+  if [ "$appawr_rc" -eq 0 ] && [ -n "$appawr_output" ]; then
+    AUDIO_ALSA_PLAYBACK_DEVICE="$(printf '%s\n' "$appawr_output" | tail -n 1)"
+    export AUDIO_ALSA_PLAYBACK_DEVICE
+    return 0
+  fi
+
+  appawr_candidate="$(
+    audio_run_helper_as_test_user audio_playback_pick_alsa_sink 2>/dev/null || true
+  )"
+  if [ -n "$appawr_candidate" ]; then
+    return 1
+  fi
+
+  if [ "$(id -u 2>/dev/null || echo 1)" -ne 0 ] ||
+     [ "${AUDIO_DSP_RECOVERY_ATTEMPTED:-0}" -eq 1 ]; then
+    return 1
+  fi
+
+  AUDIO_DSP_RECOVERY_ATTEMPTED=1
+  export AUDIO_DSP_RECOVERY_ATTEMPTED
+
+  if ! audio_recover_offline_dsp; then
+    return 1
+  fi
+
+  appawr_wait=0
+  while [ "$appawr_wait" -lt 10 ]; do
+    if audio_alsa_playback_inventory_available; then
+      break
+    fi
+
+    sleep 1
+    appawr_wait=$((appawr_wait + 1))
+  done
+
+  appawr_output="$(
+    audio_run_helper_as_test_user audio_playback_alsa_probe_device 2>/dev/null
+  )"
+  appawr_rc=$?
+
+  if [ "$appawr_rc" -ne 0 ] || [ -z "$appawr_output" ]; then
+    return 1
+  fi
+
+  AUDIO_ALSA_PLAYBACK_DEVICE="$(printf '%s\n' "$appawr_output" | tail -n 1)"
+  export AUDIO_ALSA_PLAYBACK_DEVICE
+  return 0
+}
+
+# Enable UCM first, then configure any exposed VA-DMIC or legacy capture route.
 audio_record_alsa_prepare_capture() {
+  ar_card="${1:-}"
   ar_ucm_card=""
 
   if command -v alsaucm >/dev/null 2>&1; then
@@ -2645,19 +3332,64 @@ EOF
     fi
   fi
 
-  if command -v amixer >/dev/null 2>&1; then
-    if amixer -c 0 scontrols 2>/dev/null | grep -F "MultiMedia2 Mixer TERTIARY_MI2S_TX" >/dev/null 2>&1; then
-      amixer -c 0 cset name='MultiMedia2 Mixer TERTIARY_MI2S_TX' 1 >/dev/null 2>&1 || true
-    fi
+  if ! command -v amixer >/dev/null 2>&1; then
+    return 0
   fi
+
+  if [ -z "$ar_card" ]; then
+    for ar_candidate_card in $(audio_alsa_card_indexes); do
+      if audio_alsa_control_exists "$ar_candidate_card" "VA DEC0 MUX" ||
+         audio_alsa_control_exists \
+          "$ar_candidate_card" "MultiMedia2 Mixer TERTIARY_MI2S_TX"; then
+        ar_card="$ar_candidate_card"
+        break
+      fi
+    done
+  fi
+  if [ -z "$ar_card" ]; then
+    return 0
+  fi
+
+  audio_alsa_set_control_if_present \
+    "$ar_card" "VA DEC0 MUX" "VA_DMIC" || true
+  audio_alsa_set_control_if_present \
+    "$ar_card" "VA DMIC MUX0" "DMIC0" || true
+  audio_alsa_set_control_if_present \
+    "$ar_card" "VA_AIF1_CAP Mixer DEC0" 1 || true
+  audio_alsa_set_control_if_present \
+    "$ar_card" "VA_DEC0 Volume" 100 || true
+  audio_alsa_set_control_if_present \
+    "$ar_card" "MultiMedia3 Mixer VA_CODEC_DMA_TX_0" 1 || true
+  audio_alsa_set_control_if_present \
+    "$ar_card" "MultiMedia2 Mixer TERTIARY_MI2S_TX" 1 || true
 
   return 0
 }
 
+# Prefer the capture PCM implied by the available VA DMA controls, falling back
+# to the first ALSA capture device for platforms with other routing schemes.
 audio_record_pick_alsa_capture() {
   ar_dev=""
+  ar_card=""
 
   if command -v arecord >/dev/null 2>&1; then
+    for ar_card in $(audio_alsa_card_indexes); do
+      if audio_alsa_control_exists \
+          "$ar_card" "MultiMedia3 Mixer VA_CODEC_DMA_TX_0"; then
+        if arecord -l 2>/dev/null |
+            grep -E "^card[[:space:]]+$ar_card:.*device[[:space:]]+2:" >/dev/null 2>&1; then
+          printf '%s\n' "plughw:$ar_card,2"
+          return 0
+        fi
+      elif audio_alsa_control_exists "$ar_card" "VA DEC0 MUX"; then
+        if arecord -l 2>/dev/null |
+            grep -E "^card[[:space:]]+$ar_card:.*device[[:space:]]+3:" >/dev/null 2>&1; then
+          printf '%s\n' "plughw:$ar_card,3"
+          return 0
+        fi
+      fi
+    done
+
     ar_dev="$(arecord -l 2>/dev/null | sed -n 's/^card[[:space:]]*\([0-9][0-9]*\):.*device[[:space:]]*\([0-9][0-9]*\):.*/hw:\1,\2/p' | head -n 1)"
     if [ -n "$ar_dev" ]; then
       echo "$ar_dev"
@@ -2681,9 +3413,14 @@ audio_record_alsa_capture_probe() {
     return 1
   fi
 
-  audio_record_alsa_prepare_capture >/dev/null 2>&1 || true
+  ar_probe_card="$(audio_alsa_device_card "$ar_probe_dev")"
+  audio_record_alsa_prepare_capture "$ar_probe_card" >/dev/null 2>&1 || true
 
-  ar_probe_out="$(mktemp /tmp/audio_record_probe.XXXXXX.wav 2>/dev/null || echo /tmp/audio_record_probe.$$)"
+  ar_probe_dir="$(audio_scratch_dir 2>/dev/null || true)"
+  if [ -z "$ar_probe_dir" ]; then
+    return 1
+  fi
+  ar_probe_out="$(mktemp "$ar_probe_dir/audio_record_probe.XXXXXX.wav" 2>/dev/null || printf '%s\n' "$ar_probe_dir/audio_record_probe.$$.wav")"
   rm -f "$ar_probe_out" >/dev/null 2>&1 || true
 
   for ar_probe_combo in "S16_LE 16000 1" "S16_LE 48000 1" "S16_LE 48000 2"; do
@@ -2739,12 +3476,17 @@ audio_probe_alsa_capture_profile() {
     return 1
   fi
 
+  probe_dir="$(audio_scratch_dir 2>/dev/null || true)"
+  if [ -z "$probe_dir" ]; then
+    AUDIO_ALSA_CAPTURE_REASON="no writable Audio scratch directory is available"
+    return 1
+  fi
   probe_tmp=""
   if command -v mktemp >/dev/null 2>&1; then
-    probe_tmp="$(mktemp /tmp/audio_record_probe.XXXXXX.wav 2>/dev/null || true)"
+    probe_tmp="$(mktemp "$probe_dir/audio_record_probe.XXXXXX.wav" 2>/dev/null || true)"
   fi
   if [ -z "$probe_tmp" ]; then
-    probe_tmp="/tmp/audio_record_probe.$$.$(date +%s 2>/dev/null || echo 0).wav"
+    probe_tmp="$probe_dir/audio_record_probe.$$.$(date +%s 2>/dev/null || echo 0).wav"
   fi
 
   probe_cleanup() {
@@ -2796,6 +3538,10 @@ audio_probe_alsa_capture_profile() {
   fi
 
   for dev in $probe_devices; do
+    # Mixer controls and PCM devices must come from the same ALSA card.
+    probe_card="$(audio_alsa_device_card "$dev")"
+    audio_record_alsa_prepare_capture "$probe_card" >/dev/null 2>&1 || true
+
     for combo in \
       "S16_LE 48000 1" \
       "S16_LE 16000 1" \
@@ -3045,7 +3791,9 @@ audio_card_dt_audio_expected() {
     return 0
   fi
 
-  compat_match_file="$(mktemp "${TMPDIR:-/tmp}/audio_compat_match.XXXXXX" 2>/dev/null || printf '%s\n' "${TMPDIR:-/tmp}/audio_compat_match.$$")"
+  compat_match_dir="$(audio_scratch_dir 2>/dev/null || true)"
+  [ -n "$compat_match_dir" ] || return 1
+  compat_match_file="$(mktemp "$compat_match_dir/audio_compat_match.XXXXXX" 2>/dev/null || printf '%s\n' "$compat_match_dir/audio_compat_match.$$")"
   : > "$compat_match_file" 2>/dev/null || return 1
 
   find /proc/device-tree -name compatible -type f 2>/dev/null |
@@ -3175,7 +3923,12 @@ audio_card_validate_pcm_nodes() {
     return 1
   fi
 
-  pcm_tmp_file="$(mktemp "${TMPDIR:-/tmp}/audio_pcm_lines.XXXXXX" 2>/dev/null || printf '%s\n' "${TMPDIR:-/tmp}/audio_pcm_lines.$$")"
+  pcm_tmp_dir="$(audio_scratch_dir 2>/dev/null || true)"
+  if [ -z "$pcm_tmp_dir" ]; then
+    log_fail "No writable Audio scratch directory is available"
+    return 1
+  fi
+  pcm_tmp_file="$(mktemp "$pcm_tmp_dir/audio_pcm_lines.XXXXXX" 2>/dev/null || printf '%s\n' "$pcm_tmp_dir/audio_pcm_lines.$$")"
   : > "$pcm_tmp_file" 2>/dev/null || return 1
 
   while IFS='|' read -r card_idx card_id card_desc || [ -n "$card_idx" ]; do
@@ -3394,7 +4147,7 @@ audio_refresh_overlay_devices() {
     debian)
       ;;
     qcom-distro|poky|openembedded|oe)
-      log_info "Native image detected; AudioReach device refresh is not required"
+      log_info "Native image detected, AudioReach device refresh is not required"
       return 0
       ;;
     *)
@@ -3425,10 +4178,10 @@ audio_refresh_overlay_devices() {
  
       log_pass "Kernel module dependency metadata refreshed"
     else
-      log_warn "depmod is unavailable; kernel module metadata was not refreshed"
+      log_warn "depmod is unavailable, kernel module metadata was not refreshed"
     fi
   else
-    log_info "AudioReach packages are unchanged; depmod refresh is not required"
+    log_info "AudioReach packages are unchanged, depmod refresh is not required"
   fi
  
   ###########################################################################
@@ -3479,7 +4232,7 @@ audio_validate_dma_heap_access() {
   fi
 
   log_fail "$avdha_node is present but is not accessible to uid=$(id -u 2>/dev/null || echo unknown)"
-  log_fail "Fix audioreach-config udev/group policy; the test will not chmod the node"
+  log_fail "Fix audioreach-config udev/group policy, the test will not chmod the node"
   return 1
 }
 
@@ -4024,7 +4777,7 @@ audio_prepare_audioreach_udev_rule() {
     debian)
       ;;
     qcom-distro|poky|openembedded|oe)
-      log_info "Native image detected; AudioReach udev preparation is not required"
+      log_info "Native image detected, AudioReach udev preparation is not required"
       return 0
       ;;
     *)
@@ -4039,12 +4792,12 @@ audio_prepare_audioreach_udev_rule() {
   fi
 
   if ! command -v udevadm >/dev/null 2>&1; then
-    log_fail "udevadm is unavailable; cannot activate AudioReach device rules"
+    log_fail "udevadm is unavailable, cannot activate AudioReach device rules"
     return 1
   fi
 
   if ! command -v stat >/dev/null 2>&1; then
-    log_fail "stat is unavailable; cannot validate AudioReach device permissions"
+    log_fail "stat is unavailable, cannot validate AudioReach device permissions"
     return 1
   fi
 
@@ -4117,7 +4870,7 @@ audio_prepare_audioreach_udev_rule() {
       return 1
     fi
   else
-    log_info "dma_heap subsystem is not currently enumerated; rule remains installed"
+    log_info "dma_heap subsystem is not currently enumerated, rule remains installed"
   fi
 
   log_info "Waiting for udev event processing to settle"
@@ -4132,7 +4885,7 @@ audio_prepare_audioreach_udev_rule() {
   # The node may not exist yet when the driver has not been loaded. Runtime
   # preparation performs the mandatory existence check later.
   if [ ! -e /dev/dma_heap/system ]; then
-    log_info "/dev/dma_heap/system is not currently present; permission validation is deferred"
+    log_info "/dev/dma_heap/system is not currently present, permission validation is deferred"
     return 0
   fi
 
@@ -4224,7 +4977,7 @@ audio_prepare_test_packages() {
  
   case "$atp_os_id" in
     qcom-distro|poky|openembedded|oe)
-      log_info "Native image detected; Audio package preparation is not required"
+      log_info "Native image detected, Audio package preparation is not required"
       return 0
       ;;
     debian)
@@ -4350,7 +5103,7 @@ audio_prepare_test_packages() {
       log_info "AudioReach DKMS version changed: ${atp_before_dkms:-not-installed} -> ${atp_after_dkms:-not-installed}"
     fi
   else
-    log_info "AudioReach packages were already installed; runtime package state is unchanged"
+    log_info "AudioReach packages were already installed, runtime package state is unchanged"
   fi
  
   # Do not continue into Audio testing after installing or upgrading the DKMS
@@ -4500,7 +5253,7 @@ audio_prepare_debian_audio_environment() {
     log_pass "User is already a member of audio: $apdae_user"
   else
     if ! command -v usermod >/dev/null 2>&1; then
-      log_fail "usermod is unavailable; cannot configure Audio test user"
+      log_fail "usermod is unavailable, cannot configure Audio test user"
       return 1
     fi
 
@@ -4563,12 +5316,12 @@ audio_prepare_debian_audio_environment() {
 
   if [ "$apdae_need_user_manager" -eq 1 ]; then
     if ! command -v systemctl >/dev/null 2>&1; then
-      log_fail "systemctl is unavailable; cannot prepare PipeWire user services"
+      log_fail "systemctl is unavailable, cannot prepare PipeWire user services"
       return 1
     fi
 
     if [ ! -d /run/systemd/system ]; then
-      log_fail "systemd is not running; cannot prepare PipeWire user services"
+      log_fail "systemd is not running, cannot prepare PipeWire user services"
       return 1
     fi
 
@@ -4773,7 +5526,7 @@ audio_run_as_test_user() {
   fi
 
   if ! command -v runuser >/dev/null 2>&1; then
-    log_fail "runuser is unavailable; cannot execute an Audio command as the Debian user"
+    log_fail "runuser is unavailable, cannot execute an Audio command as the Debian user"
     return 1
   fi
 
@@ -5217,9 +5970,9 @@ audio_record_dump_mixers() {
   } >"$ardm_out" 2>/dev/null
 }
 
-# Probe the ALSA capture path as the Debian Audio user while copying the
-# discovered profile back into the root orchestrator.
-audio_record_probe_alsa_capture_profile() {
+# Run one capture probe in the correct user context and copy its profile into
+# the root orchestrator.
+audio_record_probe_alsa_capture_profile_once() {
   if [ "${AUDIO_RECORD_DEBIAN_ROOT_MODE:-0}" -ne 1 ]; then
     audio_probe_alsa_capture_profile
     return $?
@@ -5276,6 +6029,54 @@ audio_record_probe_alsa_capture_profile() {
   export AUDIO_ALSA_CAPTURE_REASON
 
   return "$arpacp_rc"
+}
+
+# Retry capture discovery after a narrowly guarded audio-DSP startup. Recovery
+# is attempted once and only when ALSA exposes no capture PCM at all.
+audio_record_probe_alsa_capture_profile() {
+  if audio_record_probe_alsa_capture_profile_once; then
+    return 0
+  fi
+
+  if [ "${AUDIO_ALSA_CAPTURE_REASON:-}" != \
+       "no ALSA capture device candidates found" ]; then
+    return 1
+  fi
+
+  if [ "${AUDIO_DSP_RECOVERY_ATTEMPTED:-0}" -eq 1 ]; then
+    return 1
+  fi
+
+  AUDIO_DSP_RECOVERY_ATTEMPTED=1
+  export AUDIO_DSP_RECOVERY_ATTEMPTED
+
+  if ! audio_recover_offline_dsp; then
+    AUDIO_ALSA_CAPTURE_REASON="$AUDIO_ALSA_CAPTURE_REASON, ${AUDIO_DSP_RECOVERY_REASON:-audio DSP recovery was not applicable}"
+    export AUDIO_ALSA_CAPTURE_REASON
+    return 1
+  fi
+
+  arpacp_wait=0
+  while [ "$arpacp_wait" -lt 10 ]; do
+    if audio_alsa_capture_inventory_available; then
+      break
+    fi
+
+    sleep 1
+    arpacp_wait=$((arpacp_wait + 1))
+  done
+
+  if audio_record_probe_alsa_capture_profile_once; then
+    return 0
+  fi
+
+  if [ "${AUDIO_ALSA_CAPTURE_REASON:-}" = \
+       "no ALSA capture device candidates found" ]; then
+    AUDIO_ALSA_CAPTURE_REASON="$AUDIO_ALSA_CAPTURE_REASON after audio DSP startup"
+    export AUDIO_ALSA_CAPTURE_REASON
+  fi
+
+  return 1
 }
 
 # Prepare the Debian Audio test user and re-execute the current test as that
@@ -5477,7 +6278,7 @@ audio_prepare_debian_audio_test_user() {
     log_pass "User is already a member of audio: $apdatu_user"
   else
     if ! command -v usermod >/dev/null 2>&1; then
-      log_fail "usermod is unavailable; cannot configure Audio test user"
+      log_fail "usermod is unavailable, cannot configure Audio test user"
       return 1
     fi
 
@@ -5612,12 +6413,12 @@ audio_prepare_debian_audio_test_user() {
 
   if [ "$apdatu_need_user_manager" -eq 1 ]; then
     if ! command -v systemctl >/dev/null 2>&1; then
-      log_fail "systemctl is unavailable; cannot prepare PipeWire user services"
+      log_fail "systemctl is unavailable, cannot prepare PipeWire user services"
       return 1
     fi
 
     if [ ! -d /run/systemd/system ]; then
-      log_fail "systemd is not running; cannot prepare PipeWire user services"
+      log_fail "systemd is not running, cannot prepare PipeWire user services"
       return 1
     fi
 
@@ -5722,7 +6523,7 @@ audio_prepare_debian_audio_test_user() {
   ###########################################################################
 
   if ! command -v runuser >/dev/null 2>&1; then
-    log_fail "runuser is unavailable; cannot execute Audio test as $apdatu_user"
+    log_fail "runuser is unavailable, cannot execute Audio test as $apdatu_user"
     return 1
   fi
 
@@ -5863,7 +6664,7 @@ $avrwo_meta
 EOF
 
   [ "$avrwo_format" -eq 1 ] 2>/dev/null || {
-    log_warn "od WAV fallback supports PCM only; format=$avrwo_format requires Python"
+    log_warn "od WAV fallback supports PCM only, format=$avrwo_format requires Python"
     return 1
   }
 
@@ -6050,7 +6851,7 @@ audio_validate_recorded_wav() {
     return $?
   fi
 
-  log_warn "Python WAV validator unavailable; using bounded od/dd fallback"
+  log_warn "Python WAV validator unavailable, using bounded od/dd fallback"
   if audio_validate_recorded_wav_od \
       "$avrw_file" \
       "$avrw_source_kind" \
@@ -6126,7 +6927,7 @@ audio_validate_recording_result() {
         export AUDIO_WAV_VALIDATION_SUMMARY
         return 1
       fi
-      log_warn "Recorder ended through expected watchdog timeout rc=$avrr_rc; validated WAV payload is accepted"
+      log_warn "Recorder ended through expected watchdog timeout rc=$avrr_rc, validated WAV payload is accepted"
       ;;
     *)
       AUDIO_WAV_VALIDATION_SUMMARY="${AUDIO_WAV_VALIDATION_SUMMARY} recorder_rc=$avrr_rc recorder_status=failed"

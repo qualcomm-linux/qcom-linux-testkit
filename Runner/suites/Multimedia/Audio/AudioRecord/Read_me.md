@@ -2,11 +2,11 @@
 
 ## Overview
 
-This suite automates the validation of audio recording capabilities on Qualcomm Linux-based platforms running a Yocto-based Linux system. It supports both PipeWire and PulseAudio backends, with robust evidence-based PASS/FAIL logic, asset management, and diagnostic logging.
+This suite automates the validation of audio recording capabilities on Qualcomm Linux-based platforms. It supports PipeWire, PulseAudio, and direct ALSA backends with robust evidence-based PASS/FAIL logic, asset management, and diagnostic logging.
 
 ## Features
 
-- Supports **PipeWire** and **PulseAudio** backends
+- Supports **PipeWire**, **PulseAudio**, and direct **ALSA** backends
 - **10-config test coverage**: Comprehensive validation across diverse audio formats (sample rates: 8KHz-96KHz, channels: 1ch-6ch)
 - **Flexible config selection**: 
   - Use generic config names (record_config1-record_config10) for easy selection
@@ -60,6 +60,24 @@ Ensure the following components are present in the target Yocto build:
 - ALSA: `arecord`
 - Common tools: `pgrep`, `timeout`, `grep`, `sed`
 - Daemon: `pipewire` or `pulseaudio` must be running
+
+## Backend and Route Selection
+
+When no backend is requested, the suite uses automatic selection. A real PipeWire audio source uses `pw-record`, and a real PulseAudio source uses `parecord`. Camera, dummy, null, monitor, and loopback PipeWire nodes are not accepted as microphone sources.
+
+If automatic selection finds no physical managed microphone source, the suite probes direct ALSA capture. It selects a card and PCM from the available device inventory, applies only mixer controls exposed by that card, and runs `arecord -D <device>`. This discovers the VA-DMIC capture route from its controls without selecting a form factor or assuming card `0`.
+
+An explicit backend request is never replaced:
+
+- `--backend pipewire` or `AUDIO_BACKEND=pipewire` runs `pw-record` only and skips if PipeWire has no physical microphone source.
+- `--backend pulseaudio` or `AUDIO_BACKEND=pulseaudio` runs `parecord` only and skips if no matching source is available.
+- `--backend alsa` or `AUDIO_BACKEND=alsa` runs `arecord` with the discovered ALSA route.
+
+## Audio Remoteproc Preflight
+
+Before backend discovery, the suite enumerates runtime remoteprocs and checks the configured firmware and topology under `/lib/firmware` or `/usr/lib/firmware`. It recognizes audio DSP identities and the Shikra modem-hosted audio path. A remoteproc named `modem` is ignored on non-Shikra targets because it is not their audio preflight dependency.
+
+If the matching remoteproc is `running`, the suite records its name and firmware evidence. If it is `offline`, the suite starts it only after confirming the corresponding firmware is provisioned. Generic audio DSP paths also require adjacent topology evidence. Shikra's modem-hosted path does not require an adjacent topology file because its public image packages `qdsp6sw` modem firmware and `lpaicp` audio firmware separately. The suite never stops a remoteproc. Platforms with no applicable audio remoteproc continue normally. Provisioning or start issues produce a clean skip with the reason.
 
 ## Overlay Build Support
 
@@ -176,7 +194,7 @@ cd Runner/suites/Multimedia/Audio/AudioRecord
 
 Environment Variables:
 Variable	      Description	                                                  Default
-AUDIO_BACKEND	  Selects backend: pipewire or pulseaudio	                      auto-detect
+AUDIO_BACKEND	  Selects backend: pipewire, pulseaudio, or alsa	                      auto-detect
 SOURCE_CHOICE	  Recording source: mic or null                                   mic
 CONFIG_NAMES      Test specific configs (e.g., "record_config1 record_config2")   record_config1
 CONFIG_FILTER     Filter configs by pattern (e.g., "48KHz" or "2ch")              unset
@@ -194,7 +212,7 @@ LAVA_TESTCASE_ID  Unique testcase ID written into the .res file for LAVA        
 
 CLI Options:
 Option	                      Description
---backend	                  Select backend: pipewire or pulseaudio
+--backend	                  Select backend: pipewire, pulseaudio, or alsa
 --source	                  Recording source: mic or null
 --config-name <names>         Test specific configs using record_config1-record_config10 or descriptive names (space-separated)
 --config-filter <patterns>    Filter configs by sample rate or channels (space-separated patterns)

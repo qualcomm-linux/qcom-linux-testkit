@@ -8,7 +8,7 @@ metadata:
     - functional
 
 params:
-  AUDIO_BACKEND: ""  # Selects backend: pipewire or pulseaudio, default: auto-detect
+  AUDIO_BACKEND: ""  # Selects backend: pipewire, pulseaudio, or alsa, default: auto-detect
   SOURCE_CHOICE: "mic"  # Recording source: mic or null, default: mic
   CONFIG_NAMES: "record_config8"  # Test specific configs (Config08: 48KHz, 6ch)
   CONFIG_FILTER: ""  # Filter configs by pattern (e.g., "48KHz" or "2ch"), default: unset
