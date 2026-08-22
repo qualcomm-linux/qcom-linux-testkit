@@ -4204,8 +4204,10 @@ audio_prepare_test_packages() {
       ;;
   esac
  
-  # Resolve the operating-system ID without making the package-provider
-  # library mandatory on native embedded images.
+  ###########################################################################
+  # Platform detection
+  ###########################################################################
+ 
   if command -v pkg_detect_os_id >/dev/null 2>&1; then
     atp_os_id="$(
       pkg_detect_os_id 2>/dev/null ||
@@ -4227,7 +4229,7 @@ audio_prepare_test_packages() {
       log_info "Native image detected; Audio package preparation is not required"
       return 0
       ;;
-    debian)
+    debian|ubuntu)
       ;;
     *)
       log_info "Audio package preparation is not enabled for os=$atp_os_id"
@@ -4235,15 +4237,47 @@ audio_prepare_test_packages() {
       ;;
   esac
  
-  # Debian package preparation must run before the test is re-executed as the
-  # unprivileged Audio user.
+  ###########################################################################
+  # Root requirement
+  ###########################################################################
+ 
   if [ "$(id -u 2>/dev/null || echo 1)" -ne 0 ]; then
-    log_fail "Debian Audio package preparation must run as root"
+    log_fail "Audio package preparation must run as root for os=$atp_os_id"
     return 1
   fi
  
   ###########################################################################
-  # Debian base mode
+  # Ubuntu package preparation
+  ###########################################################################
+ 
+  if [ "$atp_os_id" = "ubuntu" ]; then
+    if [ "$atp_overlay_requested" -eq 1 ]; then
+      log_fail "Ubuntu AudioReach overlay support is still in progress"
+      log_info "Use the Ubuntu native ALSA/UCM path without --overlay"
+      log_info "No AudioReach packages were installed"
+      log_info "No Ubuntu apt source files were added or modified"
+      return 1
+    fi
+ 
+    if ! command -v pkg_ensure_required_package_set_present \
+        >/dev/null 2>&1; then
+      log_fail "Required package-set helper is unavailable"
+      return 1
+    fi
+ 
+    log_info "Preparing native Ubuntu ALSA/UCM Audio packages"
+ 
+    if ! pkg_ensure_required_package_set_present audio-base; then
+      log_fail "Failed to ensure Ubuntu native Audio package set"
+      return 1
+    fi
+ 
+    log_pass "Ubuntu native ALSA/UCM Audio package set is ready"
+    return 0
+  fi
+ 
+  ###########################################################################
+  # Debian base package preparation
   ###########################################################################
  
   if [ "$atp_overlay_requested" -eq 0 ]; then
@@ -4252,6 +4286,8 @@ audio_prepare_test_packages() {
       log_fail "Required package-set helper is unavailable"
       return 1
     fi
+ 
+    log_info "Preparing Debian base Audio packages"
  
     if ! pkg_ensure_required_package_set_present audio-base; then
       log_fail "Failed to ensure Debian base Audio package set"
@@ -4263,7 +4299,7 @@ audio_prepare_test_packages() {
   fi
  
   ###########################################################################
-  # Debian AudioReach overlay mode
+  # Debian Qualcomm AudioReach overlay package preparation
   ###########################################################################
  
   if ! command -v pkg_ensure_optional_package_set_present \
@@ -4278,9 +4314,12 @@ audio_prepare_test_packages() {
     return 1
   fi
  
-  # Capture AudioReach package versions before package preparation. These
-  # values let us distinguish an already-ready target from an install or
-  # upgrade performed during this invocation.
+  log_info "Preparing Debian Qualcomm AudioReach overlay packages"
+ 
+  ###########################################################################
+  # Capture AudioReach package state before preparation
+  ###########################################################################
+ 
   atp_before_plugin="$(
     pkg_installed_package_version \
       audioreach-pipewire-plugin 2>/dev/null ||
@@ -4299,18 +4338,25 @@ audio_prepare_test_packages() {
       true
   )"
  
-  # The optional package provider intentionally requires the literal
-  # --overlay argument. Passing only the internal value "1" makes the provider
-  # treat the request as base mode.
+  ###########################################################################
+  # Ensure the Debian AudioReach package set
+  ###########################################################################
+ 
+  # The optional package provider determines overlay mode from the arguments.
+  # Keep --overlay last so it cannot be overridden by an earlier base option.
   if ! pkg_ensure_optional_package_set_present \
       audio \
       qli-staging \
       auto \
-      --overlay \
-      "$@"; then
+      "$@" \
+      --overlay; then
     log_fail "Failed to ensure Debian AudioReach package set"
     return 1
   fi
+ 
+  ###########################################################################
+  # Capture AudioReach package state after preparation
+  ###########################################################################
  
   atp_after_plugin="$(
     pkg_installed_package_version \
@@ -4329,6 +4375,10 @@ audio_prepare_test_packages() {
       audioreach-config 2>/dev/null ||
       true
   )"
+ 
+  ###########################################################################
+  # Detect AudioReach package changes
+  ###########################################################################
  
   if [ "$atp_before_plugin" != "$atp_after_plugin" ] ||
      [ "$atp_before_dkms" != "$atp_after_dkms" ] ||
@@ -4353,8 +4403,10 @@ audio_prepare_test_packages() {
     log_info "AudioReach packages were already installed; runtime package state is unchanged"
   fi
  
-  # Do not continue into Audio testing after installing or upgrading the DKMS
-  # package. The active kernel must boot with the newly prepared module.
+  ###########################################################################
+  # Debian AudioReach DKMS reboot requirement
+  ###########################################################################
+ 
   if [ "$atp_before_dkms" != "$atp_after_dkms" ]; then
     AUDIO_OVERLAY_REBOOT_REQUIRED=1
     export AUDIO_OVERLAY_REBOOT_REQUIRED
@@ -4363,9 +4415,11 @@ audio_prepare_test_packages() {
     log_warn "A reboot is required before running AudioReach validation"
     return 2
   fi
-  
-  # Refresh module metadata when package state changed, then install and
-  # activate the repository-owned AudioReach udev rule.
+ 
+  ###########################################################################
+  # Refresh Debian AudioReach device policy
+  ###########################################################################
+ 
   if ! command -v audio_refresh_overlay_devices \
       >/dev/null 2>&1; then
     log_fail "AudioReach device-refresh helper is unavailable"
@@ -4375,7 +4429,7 @@ audio_prepare_test_packages() {
   if ! audio_refresh_overlay_devices \
       "$atp_overlay_requested" \
       "$AUDIO_OVERLAY_PACKAGES_CHANGED"; then
-    log_fail "Failed to refresh AudioReach devices"
+    log_fail "Failed to refresh Debian AudioReach devices"
     return 1
   fi
  
