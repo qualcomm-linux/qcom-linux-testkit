@@ -238,20 +238,11 @@ if [ -z "$DOMAINS_TO_TEST" ]; then
 fi
 
 # -------------------- SoC-specific domain blacklist --------------------
-# QRB2210: FastRPC not supported - skip entire test
 # QCS9075, QCS8275, QCS8300, QCS9100: GPDSP0 (domain 5) and GPDSP1 (domain 6) not supported currently
-# SM8850: libhap_example HAP_mem DMA not supported - treat as known skip per invocation
-#
-# Do not skip Glymur CRD by SoC name. Newer Glymur/Debian images expose
-# ADSP/CDSP remoteproc instances and FastRPC skeletons, so runtime discovery
-# should decide whether the test can run.
 soc_skip_all=0
 soc_skip_gpdsp=0
- 
+
 case "$SOC_MACHINE" in
-    *QRB2210*|*"Glymur CRD"*)
-        soc_skip_all=1
-        ;;
     *QCS9075*|*QCS8275*|*QCS8300*|*QCS9100*)
         soc_skip_gpdsp=1
         ;;
@@ -433,15 +424,10 @@ for DOMAIN in $DOMAINS_TO_TEST; do
             fi
 
             # Track invocation result immediately
-            # SM8850: libhap_example HAP_mem DMA handle not supported - treat as known skip
             if [ "$rc" -eq 0 ] && [ -r "$iter_log" ] && grep -F -q -e "All tests completed successfully" -e "All applicable tests PASSED" "$iter_log"; then
                 PASS_COUNT=$((PASS_COUNT+1))
                 combo_pass=$((combo_pass+1))
                 log_pass "$iter_tag: success"
-            elif case "$SOC_MACHINE" in *SM8850*) true ;; *) false ;; esac && only_hap_example_failed "$iter_log"; then
-                PASS_COUNT=$((PASS_COUNT+1))
-                combo_pass=$((combo_pass+1))
-                log_pass "$iter_tag: success (libhap_example.so HAP_mem skipped on $SOC_MACHINE - DMA handle not supported)"
             else
                 combo_fail=$((combo_fail+1))
                 log_warn "$iter_tag: success pattern not found"
