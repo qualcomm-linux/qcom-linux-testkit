@@ -1,0 +1,16 @@
+metadata:
+  name: STM-HWEvent-Port-Enable-Disable
+  format: "Lava-Test Test Definition 1.0"
+  description: "This script validates multiple coresight sinks reset by simultaneously enabling pairs of sinks and verifying reset robustness."
+  os:
+    - linux
+  scope:
+    - coresight
+    - kernel
+
+run:
+  steps:
+    - REPO_PATH=$PWD || true
+    - cd Runner/suites/Kernel/DEBUG/Reset-Random-Sinks-Base || true
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh Reset-Random-Sinks-Base.res || true
