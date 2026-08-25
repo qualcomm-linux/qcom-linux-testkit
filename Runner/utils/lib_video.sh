@@ -1986,3 +1986,146 @@ video_auto_preference_from_blacklist() {
     printf '%s\n' "unknown"
     return 0
 }
+
+# -----------------------------------------------------------------------------
+# Per-target overrides (merged in from lib_video_target_overrides.sh)
+# -----------------------------------------------------------------------------
+# Problem statement:
+#   On the "shikra" target, the IRIS video encoder JSON configs (H.264/H.265)
+#   must use "Level": "4.0" in their StaticControls block, whereas every
+#   other supported target uses the default "Level": "5.0" that already
+#   ships in the checked-in JSON files.
+#
+# Approach:
+#   Rather than maintaining separate copies of every JSON config per target,
+#   these helpers detect the current target via `uname -a` (falls back to
+#   `uname -n`) and, if it matches "shikra" (case-insensitive substring),
+#   rewrite the "Level" StaticControls "Value" field in-place to "4.0"
+#   before the JSON is consumed by the test binary. The rewrite is:
+#     - jq-free (pure sed/awk, POSIX sh compatible)
+#     - scoped only to the StaticControls object whose "Id" is "Level"
+#       (so "Value" fields belonging to Profile/BitRate/etc. are untouched)
+#     - idempotent (re-running when already at the desired value is a no-op)
+#     - a no-op on any file that has no "Level" StaticControl
+#     - a no-op on any target that does not match the configured pattern
+#     - handles BOTH JSON layouts used in this repo:
+#         (a) pretty-printed / multi-line ("Id" and "Value" on separate lines)
+#         (b) compact / single-line (e.g. {"Id": "Level", ..., "Value": "5.0"})
+#
+# Public env knobs:
+#   VIDEO_LEVEL_OVERRIDE         Value to force (default: "4.0")
+#   VIDEO_LEVEL_OVERRIDE_TARGET  Target substring to match (default: "shikra")
+#
+# Public functions:
+#   video_target_matches <substr>            -> 0/1
+#   video_target_is_shikra                   -> 0/1
+#   video_apply_level_override_for_target <cfg_json_path>
+
+: "${VIDEO_LEVEL_OVERRIDE:=4.0}"
+: "${VIDEO_LEVEL_OVERRIDE_TARGET:=shikra}"
+
+# -----------------------------------------------------------------------------
+# video_target_matches <substr>
+# Case-insensitive substring match against `uname -a` (falls back to `uname -n`).
+# -----------------------------------------------------------------------------
+video_target_matches() {
+    tok="$1"
+    [ -z "$tok" ] && return 1
+
+    ua="$(uname -a 2>/dev/null)"
+    if [ -z "$ua" ]; then
+        ua="$(uname -n 2>/dev/null)"
+    fi
+
+    ua_l="$(printf '%s' "$ua" | tr '[:upper:]' '[:lower:]')"
+    tok_l="$(printf '%s' "$tok" | tr '[:upper:]' '[:lower:]')"
+
+    case "$ua_l" in
+        *"$tok_l"*)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+# Convenience wrapper for the "shikra" target specifically.
+video_target_is_shikra() {
+    video_target_matches "shikra"
+}
+
+# -----------------------------------------------------------------------------
+# video_apply_level_override_for_target <cfg_json_path>
+#
+# Rewrites the "Level" StaticControls "Value" to $VIDEO_LEVEL_OVERRIDE
+# in-place, ONLY when:
+#   - the current target matches $VIDEO_LEVEL_OVERRIDE_TARGET, AND
+#   - the JSON file contains a StaticControls entry with "Id": "Level".
+# -----------------------------------------------------------------------------
+video_apply_level_override_for_target() {
+    cfg="$1"
+    [ -z "$cfg" ] && return 0
+    [ -f "$cfg" ] || return 0
+
+    if ! video_target_matches "$VIDEO_LEVEL_OVERRIDE_TARGET"; then
+        return 0
+    fi
+
+    # Only touch files that actually declare a "Level" StaticControl.
+    if ! grep -q '"Id"[[:space:]]*:[[:space:]]*"Level"' "$cfg" 2>/dev/null; then
+        return 0
+    fi
+
+    tmp="$cfg.tmp.$$"
+
+    # Scope the "Value" replacement strictly to the block belonging to
+    # "Id": "Level" so other controls (Profile, BitRate, etc.) are untouched.
+    #
+    # Handles BOTH JSON layouts seen in this repo:
+    #   1) Pretty-printed / multi-line:
+    #        "Id": "Level",
+    #        "Vtype": "String",
+    #        "Value": "5.0"
+    #      ("Id" and "Value" on different lines)
+    #   2) Compact / single-line (as used by the h264 encoder configs):
+    #        {"Id": "Level", "Vtype": "String", "Value": "5.0"},
+    #      ("Id" and "Value" on the SAME line)
+    awk -v newval="$VIDEO_LEVEL_OVERRIDE" '
+        BEGIN { in_level = 0 }
+        {
+            line = $0
+            if (line ~ /"Id"[ \t]*:[ \t]*"Level"/) {
+                in_level = 1
+                if (line ~ /"Value"[ \t]*:/) {
+                    sub(/"Value"[ \t]*:[ \t]*"[^"]*"/, "\"Value\": \"" newval "\"", line)
+                    in_level = 0
+                }
+                print line
+                next
+            }
+            if (in_level == 1 && line ~ /"Value"[ \t]*:/) {
+                sub(/"Value"[ \t]*:[ \t]*"[^"]*"/, "\"Value\": \"" newval "\"", line)
+                print line
+                in_level = 0
+                next
+            }
+            print line
+        }
+    ' "$cfg" > "$tmp" 2>/dev/null
+
+    if [ -s "$tmp" ]; then
+        if ! cmp -s "$cfg" "$tmp" 2>/dev/null; then
+            mv "$tmp" "$cfg"
+            if command -v log_info >/dev/null 2>&1; then
+                log_info "Applied Level override ($VIDEO_LEVEL_OVERRIDE) for target '$VIDEO_LEVEL_OVERRIDE_TARGET' in: $cfg"
+            fi
+        else
+            rm -f "$tmp" 2>/dev/null || true
+        fi
+    else
+        rm -f "$tmp" 2>/dev/null || true
+    fi
+
+    return 0
+}

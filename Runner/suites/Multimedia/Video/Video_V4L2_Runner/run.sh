@@ -1184,6 +1184,10 @@ while IFS= read -r cfg; do
                 ;;
         esac
 
+        if command -v video_apply_level_override_for_target >/dev/null 2>&1; then
+            video_apply_level_override_for_target "$cfg" || true
+        fi
+
         if video_run_once "$cfg" "$logf" "$TIMEOUT" "$SUCCESS_RE" "$LOGLEVEL"; then
             pass_runs=$((pass_runs + 1))
         else
@@ -1247,6 +1251,9 @@ while IFS= read -r cfg; do
             fi
 
             log_info "[$id] retry attempt $r/$RETRY_ON_FAIL"
+            if command -v video_apply_level_override_for_target >/dev/null 2>&1; then
+                video_apply_level_override_for_target "$cfg" || true
+            fi
             if video_run_once "$cfg" "$logf" "$TIMEOUT" "$SUCCESS_RE" "$LOGLEVEL"; then
                 pass_runs=$((pass_runs + 1))
                 final="PASS"
