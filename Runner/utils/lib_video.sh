@@ -663,22 +663,50 @@ video_normalize_stack() {
 }
 
 # -----------------------------------------------------------------------------
-# Platform detect → lemans|monaco|kodiak|unknown
+# video_get_dt_identity
+#
+# Delegates to platform_runtime_identity() from functestlib.sh when available
+# (the shared single source of truth for board identity across audio and video).
+# Falls back to an inline implementation with identical logic for environments
+# where functestlib.sh is not sourced before lib_video.sh.
+#
+# Output: lowercased, space-joined identity string on stdout. May be empty
+# if no device-tree/platform data is available (callers should treat that
+# as "no match" rather than falling back to a caller-name heuristic).
+# -----------------------------------------------------------------------------
+video_get_dt_identity() {
+    if command -v platform_runtime_identity >/dev/null 2>&1; then
+        platform_runtime_identity
+        return
+    fi
+
+    # Inline fallback — identical logic to platform_runtime_identity().
+    identity="${PLATFORM_MACHINE:-} ${PLATFORM_TARGET:-}"
+    identity="$identity ${PLATFORM_SOC_MACHINE:-}"
+    identity="$identity ${PLATFORM_DT_MODEL:-}"
+    identity="$identity ${PLATFORM_DT_COMPAT:-}"
+
+    for dtf in \
+        /proc/device-tree/model \
+        /proc/device-tree/compatible \
+        /sys/firmware/devicetree/base/model \
+        /sys/firmware/devicetree/base/compatible
+    do
+        if [ -r "$dtf" ]; then
+            dtv="$(tr '\000' ' ' <"$dtf" 2>/dev/null || true)"
+            identity="$identity $dtv"
+        fi
+    done
+
+    printf '%s\n' "$identity" | tr '[:upper:]' '[:lower:]'
+}
+
+# -----------------------------------------------------------------------------
+# Platform detect → lemans|monaco|kodiak|shikra|unknown
 # -----------------------------------------------------------------------------
 video_detect_platform() {
-    model=""
-    compat=""
- 
-    if [ -r /proc/device-tree/model ]; then
-        model=$(tr -d '\000' </proc/device-tree/model 2>/dev/null)
-    fi
- 
-    if [ -r /proc/device-tree/compatible ]; then
-        compat=$(tr -d '\000' </proc/device-tree/compatible 2>/dev/null)
-    fi
- 
-    s=$(printf '%s\n%s\n' "$model" "$compat" | tr '[:upper:]' '[:lower:]')
- 
+    s="$(video_get_dt_identity)"
+
     # Monaco: qcs8300-ride, iq-8275-evk, qcs8275, generic qcs8300, or ride-sx+8300
     monaco_pat='qcs8300-ride|iq-8275-evk|qcs8275|qcs8300|ride-sx.*8300|8300.*ride-sx'
  
@@ -687,6 +715,9 @@ video_detect_platform() {
  
     # Kodiak: qcs6490, qcm6490, or rb3+6490
     kodiak_pat='qcs6490|qcm6490|rb3.*6490|6490.*rb3'
+
+    # Shikra: matched by substring, same identity string as the other boards.
+    shikra_pat='shikra'
  
     if printf '%s' "$s" | grep -Eq "$lemans_pat"; then
         printf '%s\n' "lemans"
@@ -700,6 +731,11 @@ video_detect_platform() {
  
     if printf '%s' "$s" | grep -Eq "$kodiak_pat"; then
         printf '%s\n' "kodiak"
+        return 0
+    fi
+
+    if printf '%s' "$s" | grep -Eq "$shikra_pat"; then
+        printf '%s\n' "shikra"
         return 0
     fi
  
@@ -737,6 +773,14 @@ video_validate_upstream_loaded() {
  
             return 1
             ;;
+
+        shikra)
+            # Shikra is upstream-only; qcom_iris is the sole driver.
+            if video_has_module_loaded qcom_iris; then
+                return 0
+            fi
+            return 1
+            ;;
     esac
  
     return 1
@@ -755,6 +799,10 @@ video_validate_downstream_loaded() {
             if video_has_module_loaded "$IRIS_VPU_MOD" && ! video_has_module_loaded "$VENUS_CORE_MOD"; then
                 return 0
             fi
+            return 1
+            ;;
+        shikra)
+            # Shikra is upstream-only; downstream is not supported.
             return 1
             ;;
         *)
@@ -779,6 +827,9 @@ video_assert_stack() {
                 kodiak)
                     log_fail "[STACK] Upstream requested but venus_core/dec/enc are not all present."
                     ;;
+                shikra)
+                    log_fail "[STACK] Upstream requested but qcom_iris is not present (Shikra)."
+                    ;;
                 *)
                     log_fail "[STACK] Upstream requested but platform '$plat' is unknown."
                     ;;
@@ -786,6 +837,10 @@ video_assert_stack() {
             return 1
             ;;
         downstream|overlay|down)
+            if [ "$plat" = "shikra" ]; then
+                log_fail "[STACK] Downstream is not supported on Shikra (upstream-only platform)."
+                return 1
+            fi
             if video_validate_downstream_loaded "$plat"; then
                 return 0
             fi
@@ -858,6 +913,14 @@ video_stack_status() {
                 return 0
             fi
             ;;
+
+        shikra)
+            # Shikra is upstream-only; qcom_iris is the sole driver.
+            if video_has_module_loaded qcom_iris; then
+                printf '%s\n' "upstream"
+                return 0
+            fi
+            ;;
     esac
  
     printf '%s\n' "unknown"
@@ -898,6 +961,10 @@ video_unload_all_video_modules() {
             tryrmmod "$VENUS_DEC_MOD"
             tryrmmod "$VENUS_CORE_MOD"
             tryrmmod "$IRIS_VPU_MOD"
+            tryrmmod "$IRIS_UP_MOD"
+            ;;
+        shikra)
+            # Shikra is upstream-only; only qcom_iris needs to be unloaded.
             tryrmmod "$IRIS_UP_MOD"
             ;;
         *)
@@ -990,6 +1057,22 @@ video_hot_switch_modules() {
                 video_modprobe_or_insmod "$VENUS_ENC_MOD" || true
                 video_usleep "${MOD_SETTLE_SLEEP}"
                 video_log_fw_hint
+            fi
+            ;;
+        shikra)
+            # Shikra is upstream-only; downstream is not supported.
+            if [ "$stack" = "downstream" ]; then
+                log_warn "Shikra is upstream-only; downstream stack is not supported."
+                rc=1
+            else
+                video_unblock_mod_now "$IRIS_UP_MOD"
+                video_usleep "${MOD_SETTLE_SLEEP}"
+                video_unload_all_video_modules "$plat"
+                if ! video_modprobe_or_insmod "$IRIS_UP_MOD"; then
+                    log_warn "modprobe $IRIS_UP_MOD failed on Shikra"
+                    rc=1
+                fi
+                video_usleep "${MOD_SETTLE_SLEEP}"
             fi
             ;;
         *)
@@ -1945,6 +2028,9 @@ video_apply_blacklist_for_stack() {
                 video_remove_blacklist "iris_vpu"
             fi
             ;;
+        shikra)
+            # Shikra is upstream-only; no blacklisting is needed for any stack request.
+            ;;
         *)
             return 1
             ;;
@@ -1981,8 +2067,229 @@ video_auto_preference_from_blacklist() {
                 return 0
             fi
             ;;
+        shikra)
+            # Shikra is upstream-only; always prefer upstream regardless of blacklist state.
+            printf '%s\n' "upstream"
+            return 0
+            ;;
     esac
 
     printf '%s\n' "unknown"
+    return 0
+}
+
+# -----------------------------------------------------------------------------
+# Per-target policy overrides
+# -----------------------------------------------------------------------------
+# Policy table: platform|mode|codec|control|value
+#
+# Adding a new SoC requires one new row in video_policy_lookup(); no run.sh
+# changes are needed. The generic staging helper (video_stage_control_override)
+# applies each row's control/value rewrite to a staged copy of the config,
+# structurally validating that exactly one control object was changed.
+#
+# Public functions:
+#   video_target_matches <substr>                              -> 0/1
+#   video_policy_lookup <platform> <mode> <codec>             -> control|value lines
+#   video_stage_control_override <cfg> <ctrl> <val> <outdir>  -> staged path or empty
+# -----------------------------------------------------------------------------
+
+# -----------------------------------------------------------------------------
+# video_target_matches <substr>
+#
+# Case-insensitive substring match against the runtime board identity.
+# Delegates to platform_identity_matches() from functestlib.sh when available
+# (the shared contract consumed by both audio and video). Falls back to an
+# inline implementation using video_get_dt_identity() for environments where
+# functestlib.sh is not sourced before lib_video.sh.
+# -----------------------------------------------------------------------------
+video_target_matches() {
+    tok="$1"
+    [ -z "$tok" ] && return 1
+
+    if command -v platform_identity_matches >/dev/null 2>&1; then
+        platform_identity_matches "$tok"
+        return
+    fi
+
+    identity_l="$(video_get_dt_identity)"
+    tok_l="$(printf '%s' "$tok" | tr '[:upper:]' '[:lower:]')"
+
+    case "$identity_l" in
+        *"$tok_l"*)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+# -----------------------------------------------------------------------------
+# video_policy_lookup <platform> <mode> <codec>
+#
+# Prints zero or more "control|value" lines for the given platform/mode/codec
+# combination. Adding a new SoC requires only a new row in the built-in table;
+# no changes to run.sh are needed.
+#
+# Built-in policy table (platform|mode|codec|control|value):
+#   shikra|encode|h264|Level|4.0
+#   shikra|encode|hevc|Level|4.0
+#
+# Extend at runtime via VIDEO_POLICY_EXTRA (same pipe-separated format,
+# one row per line).
+# -----------------------------------------------------------------------------
+video_policy_lookup() {
+    vpl_plat="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+    vpl_mode="$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')"
+    vpl_codec="$(printf '%s' "$3" | tr '[:upper:]' '[:lower:]')"
+
+    {
+        printf '%s\n' \
+            "shikra|encode|h264|Level|4.0" \
+            "shikra|encode|hevc|Level|4.0"
+        if [ -n "${VIDEO_POLICY_EXTRA:-}" ]; then
+            printf '%s\n' "$VIDEO_POLICY_EXTRA"
+        fi
+    } | while IFS='|' read -r p_plat p_mode p_codec p_ctrl p_val; do
+        [ -z "$p_plat" ] && continue
+        if [ "$p_plat" = "$vpl_plat" ] && \
+           [ "$p_mode" = "$vpl_mode" ] && \
+           [ "$p_codec" = "$vpl_codec" ]; then
+            printf '%s|%s\n' "$p_ctrl" "$p_val"
+        fi
+    done
+}
+
+# -----------------------------------------------------------------------------
+# video_stage_control_override <cfg_json_path> <control> <value> <output_dir>
+#
+# Rewrites the StaticControls entry with "Id": "<control>" to
+# "Value": "<value>" in a staged copy of the config. The awk rewrite:
+#   - Tracks the enclosing control object so only the Value belonging to the
+#     matched Id is changed (not Value fields in Profile/BitRate/etc. objects).
+#   - Handles both compact single-line and pretty-printed multi-line layouts.
+#   - Verifies that exactly one control was changed; exits non-zero if the
+#     config is malformed (ambiguous Id/Value pairing) or if more than one
+#     match is found.
+#
+# Prints the staged file path on stdout when a change was made.
+# Prints nothing and returns 0 when the file has no matching control (no-op).
+# Returns 1 on structural error (malformed/ambiguous config).
+# -----------------------------------------------------------------------------
+video_stage_control_override() {
+    vsc_cfg="$1"
+    vsc_ctrl="$2"
+    vsc_val="$3"
+    vsc_out_dir="$4"
+
+    [ -z "$vsc_cfg" ] && return 0
+    [ -f "$vsc_cfg" ] || return 0
+    [ -z "$vsc_ctrl" ] && return 1
+    [ -z "$vsc_val" ] && return 1
+
+    # Quick check: does this file have the target control at all?
+    if ! grep -q "\"Id\"[[:space:]]*:[[:space:]]*\"${vsc_ctrl}\"" "$vsc_cfg" 2>/dev/null; then
+        return 0
+    fi
+
+    mkdir -p "$vsc_out_dir" 2>/dev/null || true
+    vsc_base="$(basename "$vsc_cfg" .json)"
+    vsc_tmp="${vsc_out_dir}/${vsc_base}.staged-${vsc_ctrl}.$$.json"
+
+    # The awk program tracks whether we are inside the control object that
+    # contains the target "Id" so that only the "Value" belonging to that
+    # specific object is rewritten.  It handles:
+    #   1) Compact / single-line: {"Id": "Level", ..., "Value": "5.0"}
+    #   2) Pretty-printed / multi-line: "Id" and "Value" on separate lines
+    #
+    # Exit codes:
+    #   0 = exactly one change made
+    #   1 = Id found and Value found, but value was already correct (no change)
+    #   2 = Id found but no Value found within the object (malformed config)
+    #   3 = multiple changes (ambiguous)
+    awk -v ctrl="$vsc_ctrl" -v newval="$vsc_val" '
+    BEGIN { in_ctrl_obj = 0; changes = 0; found_id = 0; found_val = 0 }
+    {
+        line = $0
+
+        # Detect the line that declares the target control Id.
+        if (line ~ ("\"Id\"[[:space:]]*:[[:space:]]*\"" ctrl "\"")) {
+            found_id++
+            # Compact layout: Id and Value on the same line.
+            if (line ~ /"Value"[[:space:]]*:/) {
+                orig = line
+                sub(/"Value"[[:space:]]*:[[:space:]]*"[^"]*"/, \
+                    "\"Value\": \"" newval "\"", line)
+                if (line != orig) changes++
+                found_val++
+                in_ctrl_obj = 0
+                print line
+                next
+            }
+            # Multi-line layout: set flag to rewrite the next Value line.
+            in_ctrl_obj = 1
+            print line
+            next
+        }
+
+        if (in_ctrl_obj) {
+            # Found the Value line within the target control object.
+            if (line ~ /"Value"[[:space:]]*:/) {
+                orig = line
+                sub(/"Value"[[:space:]]*:[[:space:]]*"[^"]*"/, \
+                    "\"Value\": \"" newval "\"", line)
+                if (line != orig) changes++
+                found_val++
+                in_ctrl_obj = 0
+                print line
+                next
+            }
+            # Another Id before Value, or closing brace: object boundary
+            # crossed without finding Value — malformed object.
+            if (line ~ /"Id"[[:space:]]*:/ || line ~ /^[[:space:]]*\}/) {
+                in_ctrl_obj = 0
+            }
+        }
+
+        print line
+    }
+    END {
+        # Id found but no Value found in the object — malformed config.
+        if (found_id > 0 && found_val == 0) exit 2
+        # Value found but already at the desired setting — valid no-op.
+        if (changes == 0) exit 1
+        # Multiple changes — ambiguous.
+        if (changes > 1) exit 3
+        exit 0
+    }
+    ' "$vsc_cfg" > "$vsc_tmp"
+    vsc_awk_rc=$?
+
+    if [ "$vsc_awk_rc" -eq 1 ]; then
+        # Value found but already at the desired setting — valid no-op.
+        rm -f "$vsc_tmp" 2>/dev/null || true
+        return 0
+    fi
+
+    if [ "$vsc_awk_rc" -ne 0 ]; then
+        log_warn "video_stage_control_override: malformed or ambiguous config for control '${vsc_ctrl}' in ${vsc_cfg} (awk rc=${vsc_awk_rc})" >&2
+        rm -f "$vsc_tmp" 2>/dev/null || true
+        return 1
+    fi
+
+    if [ ! -s "$vsc_tmp" ]; then
+        rm -f "$vsc_tmp" 2>/dev/null || true
+        return 0
+    fi
+
+    if cmp -s "$vsc_cfg" "$vsc_tmp" 2>/dev/null; then
+        # Value was already at the desired setting; no change needed.
+        rm -f "$vsc_tmp" 2>/dev/null || true
+        return 0
+    fi
+
+    log_info "video_stage_control_override: ${vsc_ctrl}=${vsc_val} staged -> ${vsc_tmp} (source unchanged: ${vsc_cfg})" >&2
+    printf '%s\n' "$vsc_tmp"
     return 0
 }

@@ -9329,6 +9329,69 @@ partition_log_block_devices() {
     return 0
 }
 
+# -----------------------------------------------------------------------------
+# platform_runtime_identity
+#
+# Returns a lowercased, space-joined identity string built from device-tree
+# model/compatible data (both /proc/device-tree and /sys/firmware/devicetree/base,
+# since some images only expose one or the other) and any already-resolved
+# platform vars (PLATFORM_MACHINE, PLATFORM_TARGET, PLATFORM_SOC_MACHINE,
+# PLATFORM_DT_MODEL, PLATFORM_DT_COMPAT).
+#
+# This is the SINGLE shared source of truth for "what board am I running on",
+# consumed by both audio and video subsystems. Kernel version strings and
+# hostnames are intentionally NOT used — they vary run-to-run and do not
+# reliably encode the board name.
+#
+# Output: lowercased identity string on stdout. May be empty if no
+# device-tree/platform data is available. Callers should treat an empty
+# result as "no match" rather than falling back to a hostname heuristic.
+# -----------------------------------------------------------------------------
+platform_runtime_identity() {
+    pri_identity="${PLATFORM_MACHINE:-} ${PLATFORM_TARGET:-}"
+    pri_identity="$pri_identity ${PLATFORM_SOC_MACHINE:-}"
+    pri_identity="$pri_identity ${PLATFORM_DT_MODEL:-}"
+    pri_identity="$pri_identity ${PLATFORM_DT_COMPAT:-}"
+
+    for pri_dtf in \
+        /proc/device-tree/model \
+        /proc/device-tree/compatible \
+        /sys/firmware/devicetree/base/model \
+        /sys/firmware/devicetree/base/compatible
+    do
+        if [ -r "$pri_dtf" ]; then
+            pri_dtv="$(tr '\000' ' ' <"$pri_dtf" 2>/dev/null || true)"
+            pri_identity="$pri_identity $pri_dtv"
+        fi
+    done
+
+    printf '%s\n' "$pri_identity" | tr '[:upper:]' '[:lower:]'
+}
+
+# -----------------------------------------------------------------------------
+# platform_identity_matches <substr>
+#
+# Case-insensitive substring match against the runtime board identity resolved
+# via platform_runtime_identity(). Returns 0 if matched, 1 if not matched.
+# An empty <substr> always returns 1 (no match).
+# -----------------------------------------------------------------------------
+platform_identity_matches() {
+    pim_tok="$1"
+    [ -z "$pim_tok" ] && return 1
+
+    pim_identity="$(platform_runtime_identity)"
+    pim_tok_l="$(printf '%s' "$pim_tok" | tr '[:upper:]' '[:lower:]')"
+
+    case "$pim_identity" in
+        *"$pim_tok_l"*)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
 ###############################################################################
 # CPU hotplug validation helpers
 ###############################################################################

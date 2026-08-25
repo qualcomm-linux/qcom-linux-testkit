@@ -933,6 +933,15 @@ case "$plat" in
             fi
         fi
         ;;
+    shikra)
+        if [ "$post_stack" = "upstream" ]; then
+            if video_has_module_loaded qcom_iris; then
+                log_pass "Upstream validated: qcom_iris present (Shikra)"
+            else
+                log_warn "Upstream expected but qcom_iris not present (Shikra)"
+            fi
+        fi
+        ;;
     *)
         log_warn "Unknown platform; skipping strict module validation"
         ;;
@@ -1157,6 +1166,54 @@ while IFS= read -r cfg; do
         continue
     fi
 
+    # -----------------------------------------------------------------------
+    # Stage the effective config once per test case, before the repeat loop.
+    # Both normal runs and retries use the same staged path so they cannot
+    # diverge. Platforms with no matching policy row use the original config
+    # unchanged (no-op path through video_policy_lookup).
+    # -----------------------------------------------------------------------
+    effective_cfg="$cfg"
+    vpl_policy_file="$LOG_DIR/.policy_${id}.$$.txt"
+    video_policy_lookup "$plat" "$mode" "$codec" > "$vpl_policy_file" 2>/dev/null || true
+
+    if [ -s "$vpl_policy_file" ]; then
+        vpl_staged="$cfg"
+        vpl_stage_ok=1
+        while IFS='|' read -r vpl_ctrl vpl_val; do
+            [ -z "$vpl_ctrl" ] && continue
+            vpl_result="$(video_stage_control_override \
+                "$vpl_staged" "$vpl_ctrl" "$vpl_val" "$LOG_DIR")"
+            vpl_rc=$?
+            if [ "$vpl_rc" -ne 0 ]; then
+                log_warn "[$id] Config staging failed for control '$vpl_ctrl'; aborting preparation"
+                vpl_stage_ok=0
+                break
+            fi
+            if [ -n "$vpl_result" ] && [ -f "$vpl_result" ]; then
+                vpl_staged="$vpl_result"
+            fi
+        done < "$vpl_policy_file"
+
+        if [ "$vpl_stage_ok" -eq 0 ]; then
+            rm -f "$vpl_policy_file" 2>/dev/null || true
+            log_fail "[$id] FAIL - config preparation failed"
+            printf '%s\n' "$id FAIL $pretty" >> "$LOG_DIR/summary.txt"
+            printf '%s\n' "$mode,$id,FAIL,$pretty,0,0,0" >> "$LOG_DIR/results.csv"
+            fail=$((fail + 1))
+            suite_rc=1
+            if [ "$STOP_ON_FAIL" -eq 1 ]; then
+                break
+            fi
+            continue
+        fi
+
+        if [ "$vpl_staged" != "$cfg" ]; then
+            effective_cfg="$vpl_staged"
+            log_info "[$id] Using staged config: $effective_cfg"
+        fi
+    fi
+    rm -f "$vpl_policy_file" 2>/dev/null || true
+
     pass_runs="0"
     fail_runs="0"
     rep="1"
@@ -1169,7 +1226,7 @@ while IFS= read -r cfg; do
         fi
 
         video_step "$id" "Execute app"
-        log_info "[$id] CMD: $VIDEO_APP --config \"$cfg\" --loglevel $LOGLEVEL"
+        log_info "[$id] CMD: $VIDEO_APP --config \"$effective_cfg\" --loglevel $LOGLEVEL"
 
         case "$APP_LAUNCH_SLEEP" in
             ''|*[!0-9]* )
@@ -1184,7 +1241,7 @@ while IFS= read -r cfg; do
                 ;;
         esac
 
-        if video_run_once "$cfg" "$logf" "$TIMEOUT" "$SUCCESS_RE" "$LOGLEVEL"; then
+        if video_run_once "$effective_cfg" "$logf" "$TIMEOUT" "$SUCCESS_RE" "$LOGLEVEL"; then
             pass_runs=$((pass_runs + 1))
         else
             rc_val="$(awk -F'=' '/^END-RUN rc=/{print $2}' "$logf" 2>/dev/null | tail -n1 | tr -d ' ')"
@@ -1238,7 +1295,7 @@ while IFS= read -r cfg; do
     fi
 
     # (2) Retry on final failure (extra attempts outside REPEAT loop, before recording results)
-    if [ "$final" = "FAIL" ] && [ "$RETRY_ON_FAIL" -gt 0 ] 2>/dev/null; then
+        if [ "$final" = "FAIL" ] && [ "$RETRY_ON_FAIL" -gt 0 ] 2>/dev/null; then
         r=1
         log_info "[$id] RETRY_ON_FAIL: up to $RETRY_ON_FAIL additional attempt(s)"
         while [ "$r" -le "$RETRY_ON_FAIL" ]; do
@@ -1247,7 +1304,7 @@ while IFS= read -r cfg; do
             fi
 
             log_info "[$id] retry attempt $r/$RETRY_ON_FAIL"
-            if video_run_once "$cfg" "$logf" "$TIMEOUT" "$SUCCESS_RE" "$LOGLEVEL"; then
+            if video_run_once "$effective_cfg" "$logf" "$TIMEOUT" "$SUCCESS_RE" "$LOGLEVEL"; then
                 pass_runs=$((pass_runs + 1))
                 final="PASS"
                 log_pass "[$id] RETRY succeeded — marking PASS"
