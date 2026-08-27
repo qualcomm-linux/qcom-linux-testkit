@@ -539,7 +539,7 @@ if [ -n "$CONFIG_NAMES" ] && [ -n "$CONFIG_FILTER" ]; then
   CONFIG_FILTER=""
 fi
 
-log_info "Args: backend=${AUDIO_BACKEND:-auto} source=$SRC_CHOICE overlay=$AUDIO_OVERLAY_REQUESTED loops=$LOOPS durations='$DURATIONS' record_seconds=$RECORD_SECONDS timeout=$TIMEOUT strict=$STRICT signal_strict=$AUDIO_RECORD_STRICT_SIGNAL dmesg=$DMESG_SCAN bootstrap=$AUDIO_BOOTSTRAP_MODE runtime_dir=${AUDIO_RUNTIME_DIR:-auto}"
+log_info "Args: backend=${AUDIO_BACKEND:-auto} source=$SRC_CHOICE overlay=$AUDIO_OVERLAY_REQUESTED loops=$LOOPS durations='$DURATIONS' record_seconds=$RECORD_SECONDS timeout=$TIMEOUT start_grace=${AUDIO_RECORD_START_GRACE:-5} strict=$STRICT signal_strict=$AUDIO_RECORD_STRICT_SIGNAL dmesg=$DMESG_SCAN bootstrap=$AUDIO_BOOTSTRAP_MODE runtime_dir=${AUDIO_RUNTIME_DIR:-auto}"
 
 # Resolve backend (allow minimal-build ALSA capture fallback)
 if [ -z "$AUDIO_BACKEND" ]; then
@@ -960,6 +960,29 @@ auto_secs_for() {
   esac
 }
 
+# Add startup headroom to the capture watchdog.
+#
+# pw-record has no duration flag on this path, so the watchdog is what ends
+# the recording, and its clock starts before PipeWire has opened the device:
+# a slow start is taken out of the recording and fails the duration check.
+# Grant AUDIO_RECORD_START_GRACE extra watchdog seconds so the requested
+# duration is still captured. The duration validated against is unchanged,
+# and an explicit --timeout still overrides the watchdog.
+audio_record_timeout_with_grace() {
+  artg_requested="$(audio_parse_secs "$1" 2>/dev/null || echo 0)"
+  artg_grace="${AUDIO_RECORD_START_GRACE:-5}"
+
+  is_unsigned_number "$artg_grace" || artg_grace=5
+
+  if [ "${artg_requested:-0}" -gt 0 ] 2>/dev/null &&
+     [ "$artg_grace" -gt 0 ] 2>/dev/null; then
+    printf '%ss\n' "$((artg_requested + artg_grace))"
+    return 0
+  fi
+
+  printf '%s\n' "$1"
+}
+
 # Validate the final capture selected by the existing backend/retry flow.
 # Size remains useful only for deciding whether compatibility fallbacks should
 # run; PASS requires a structurally valid WAV with acceptable sample content.
@@ -1079,7 +1102,7 @@ if [ "$USE_CONFIG_DISCOVERY" = "true" ]; then
 
     while [ "$i" -le "$LOOPS" ]; do
       iso="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-      effective_timeout="$secs"
+      effective_timeout="$(audio_record_timeout_with_grace "$secs")"
       if [ -n "$TIMEOUT" ] && [ "$TIMEOUT" != "0" ]; then
         effective_timeout="$TIMEOUT"
       fi
@@ -1384,7 +1407,7 @@ else
 
     while [ "$i" -le "$LOOPS" ]; do
       iso="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-      effective_timeout="$secs"
+      effective_timeout="$(audio_record_timeout_with_grace "$secs")"
       if [ -n "$TIMEOUT" ] && [ "$TIMEOUT" != "0" ]; then
         effective_timeout="$TIMEOUT"
       fi
