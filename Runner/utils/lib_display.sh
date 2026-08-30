@@ -207,7 +207,8 @@ display_connected_summary() {
     ds_base="/sys/class/drm"
 
     if [ ! -d "$ds_base" ]; then
-        log_warn "display_connected_summary: $ds_base not found"
+        # stderr: callers capture stdout as the summary.
+        log_warn "display_connected_summary: $ds_base not found" >&2
         printf '%s\n' "none"
         return 0
     fi
