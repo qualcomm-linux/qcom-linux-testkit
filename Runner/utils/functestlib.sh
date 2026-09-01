@@ -4787,18 +4787,42 @@ wait_remoteproc_state() {
         *)      rpath="/sys/class/remoteproc/$rp" ;;
     esac
  
-    start_ts=$(date +%s)
+    # Monotonic, so an NTP step cannot skew the wait.
+    start_ts=$(get_monotonic_seconds)
     while :; do
         cur=$(get_remoteproc_state "$rpath")
         [ "$cur" = "$want" ] && return 0
  
-        now_ts=$(date +%s)
+        now_ts=$(get_monotonic_seconds)
         [ $((now_ts - start_ts)) -ge "$to" ] && {
             log_info "Waiting for state='$want' timed out (got='$cur')..."
             return 1
         }
         sleep "$poll"
     done
+}
+
+# wait_remoteproc_boot_state <rproc> <label> [timeout_s] [poll_s]
+# Boot check for suites whose instance list snapshots state right after login:
+# give a processor still coming up timeout_s (default 30, 0 keeps the single
+# shot) to reach running, then print the refreshed state.
+wait_remoteproc_boot_state() {
+    wrbs_rp="$1"
+    wrbs_label="${2:-$1}"
+    wrbs_to="${3:-30}"
+    wrbs_poll="${4:-1}"
+
+    is_unsigned_number "$wrbs_to" || wrbs_to=30
+
+    wrbs_state="$(get_remoteproc_state "$wrbs_rp")"
+    if [ "$wrbs_state" != "running" ] && [ "$wrbs_to" -gt 0 ]; then
+        # stderr: stdout carries the state for command substitution.
+        log_info "$wrbs_label: state=$wrbs_state, waiting up to ${wrbs_to}s for state=running" >&2
+        wait_remoteproc_state "$wrbs_rp" running "$wrbs_to" "$wrbs_poll" >&2 || true
+        wrbs_state="$(get_remoteproc_state "$wrbs_rp")"
+    fi
+
+    printf '%s\n' "$wrbs_state"
 }
 
 # Stop remoteproc
