@@ -928,12 +928,55 @@ find_test_case_script_by_name() {
 # CONFIG_BAZ=m
 # passes only when the exact expected value matches
 # Logs PASS or FAIL for each config and returns 0 on success, 1 on first mismatch.
+
+kernel_config_source() {
+    kcs_kver="$(uname -r 2>/dev/null)"
+
+    if [ -r /proc/config.gz ]; then
+        if command -v zgrep >/dev/null 2>&1 || command -v gzip >/dev/null 2>&1; then
+            printf '%s|%s\n' "/proc/config.gz" "gz"
+            return 0
+        fi
+    fi
+
+    for kcs_cand in \
+        "/boot/config-${kcs_kver}" \
+        "/lib/modules/${kcs_kver}/build/.config" \
+        "/usr/src/linux-headers-${kcs_kver}/.config"
+    do
+        if [ -n "$kcs_kver" ] && [ -r "$kcs_cand" ]; then
+            printf '%s|%s\n' "$kcs_cand" "plain"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
 check_kernel_config() {
     cfgs=$1
+    kver="$(uname -r 2>/dev/null)"
 
-    if [ ! -r /proc/config.gz ]; then
-        log_fail "Kernel config source /proc/config.gz is not available"
+    cfg_info="$(kernel_config_source 2>/dev/null)"
+    if [ -z "$cfg_info" ]; then
+        log_fail "No readable/usable kernel config source found (checked /proc/config.gz [requires zgrep or gzip], /boot/config-${kver:-<unknown>}, /lib/modules/${kver:-<unknown>}/build/.config, /usr/src/linux-headers-${kver:-<unknown>}/.config)"
         return 1
+    fi
+
+    cfg_source="${cfg_info%%|*}"
+    cfg_format="${cfg_info#*|}"
+    cfg_is_gz=0
+    [ "$cfg_format" = "gz" ] && cfg_is_gz=1
+
+    if command -v detect_platform >/dev/null 2>&1; then
+        detect_platform >/dev/null 2>&1 || true
+    fi
+    cfg_os_family="${PLATFORM_OS_FAMILY:-unknown}"
+
+    if [ -n "${PLATFORM_OS_NAME:-}" ]; then
+        log_info "Using kernel config source: $cfg_source (OS: $PLATFORM_OS_NAME, family: $cfg_os_family)"
+    else
+        log_info "Using kernel config source: $cfg_source (family: $cfg_os_family)"
     fi
 
     for cfg in $cfgs; do
@@ -952,20 +995,23 @@ check_kernel_config() {
                 ;;
         esac
 
-        if command -v zgrep >/dev/null 2>&1; then
-            if zgrep -qE "$pattern" /proc/config.gz 2>/dev/null; then
-                log_pass "$pass_msg"
+        cfg_matched=0
+
+        if [ "$cfg_is_gz" -eq 1 ]; then
+            if command -v zgrep >/dev/null 2>&1; then
+                zgrep -qE "$pattern" "$cfg_source" 2>/dev/null && cfg_matched=1
             else
-                log_fail "$fail_msg"
-                return 1
+                gzip -dc "$cfg_source" 2>/dev/null | grep -qE "$pattern" && cfg_matched=1
             fi
         else
-            if gzip -dc /proc/config.gz 2>/dev/null | grep -qE "$pattern"; then
-                log_pass "$pass_msg"
-            else
-                log_fail "$fail_msg"
-                return 1
-            fi
+            grep -qE "$pattern" "$cfg_source" 2>/dev/null && cfg_matched=1
+        fi
+
+        if [ "$cfg_matched" -eq 1 ]; then
+            log_pass "$pass_msg"
+        else
+            log_fail "$fail_msg"
+            return 1
         fi
     done
 
@@ -977,41 +1023,44 @@ check_kernel_config() {
 # Prints CONFIG_NAME=value from the running kernel configuration, including
 # CONFIG_NAME=n for an explicitly disabled option. Returns 0 when found, 1
 # when unavailable or absent, and 3 when the name is omitted.
+#
+# Uses kernel_config_source() for source discovery, the same shared helper
+# used by check_kernel_config(), so precedence and decompressor handling
+# cannot drift between the two.
 ###############################################################################
 kernel_config_value() {
     config_name="$1"
     [ -n "$config_name" ] || return 3
 
-    if [ -r /proc/config.gz ]; then
-        if command -v zgrep >/dev/null 2>&1; then
-            config_line=$(zgrep -m 1 -E "^${config_name}=" /proc/config.gz 2>/dev/null || true)
-            config_disabled=$(zgrep -m 1 -E "^# ${config_name} is not set$" /proc/config.gz 2>/dev/null || true)
-        else
-            config_line=$(gzip -dc /proc/config.gz 2>/dev/null | grep -m 1 -E "^${config_name}=" || true)
-            config_disabled=$(gzip -dc /proc/config.gz 2>/dev/null | grep -m 1 -E "^# ${config_name} is not set$" || true)
-        fi
+    kcv_info="$(kernel_config_source 2>/dev/null)"
+    [ -n "$kcv_info" ] || return 1
 
-        if [ -n "$config_line" ]; then
-            printf '%s\n' "$config_line"
-            return 0
+    kcv_source="${kcv_info%%|*}"
+    kcv_format="${kcv_info#*|}"
+    kcv_is_gz=0
+    [ "$kcv_format" = "gz" ] && kcv_is_gz=1
+
+    if [ "$kcv_is_gz" -eq 1 ]; then
+        if command -v zgrep >/dev/null 2>&1; then
+            kcv_line=$(zgrep -m 1 -E "^${config_name}=" "$kcv_source" 2>/dev/null || true)
+            kcv_disabled=$(zgrep -m 1 -E "^# ${config_name} is not set$" "$kcv_source" 2>/dev/null || true)
+        else
+            kcv_line=$(gzip -dc "$kcv_source" 2>/dev/null | grep -m 1 -E "^${config_name}=" || true)
+            kcv_disabled=$(gzip -dc "$kcv_source" 2>/dev/null | grep -m 1 -E "^# ${config_name} is not set$" || true)
         fi
-        if [ -n "$config_disabled" ]; then
-            printf '%s=n\n' "$config_name"
-            return 0
-        fi
+    else
+        kcv_line=$(grep -m 1 -E "^${config_name}=" "$kcv_source" 2>/dev/null || true)
+        kcv_disabled=$(grep -m 1 -E "^# ${config_name} is not set$" "$kcv_source" 2>/dev/null || true)
     fi
 
-    boot_config="/boot/config-$(uname -r 2>/dev/null)"
-    if [ -r "$boot_config" ]; then
-        config_line=$(grep -m 1 -E "^${config_name}=" "$boot_config" 2>/dev/null || true)
-        if [ -n "$config_line" ]; then
-            printf '%s\n' "$config_line"
-            return 0
-        fi
-        if grep -q -E "^# ${config_name} is not set$" "$boot_config" 2>/dev/null; then
-            printf '%s=n\n' "$config_name"
-            return 0
-        fi
+    if [ -n "$kcv_line" ]; then
+        printf '%s\n' "$kcv_line"
+        return 0
+    fi
+
+    if [ -n "$kcv_disabled" ]; then
+        printf '%s=n\n' "$config_name"
+        return 0
     fi
 
     return 1
@@ -6795,6 +6844,8 @@ log_soc_info() {
 #   PLATFORM_SOC_MACHINE, PLATFORM_SOC_ID, PLATFORM_SOC_FAMILY
 #   PLATFORM_DT_MODEL, PLATFORM_DT_COMPAT
 #   PLATFORM_OS_LIKE, PLATFORM_OS_NAME
+#   PLATFORM_OS_ID (lowercased /etc/os-release ID, e.g. ubuntu/debian/poky)
+#   PLATFORM_OS_FAMILY (normalized: ubuntu | debian | yocto | unknown)
 #   PLATFORM_TARGET, PLATFORM_MACHINE
 ###############################################################################
 detect_platform() {
@@ -6841,9 +6892,16 @@ detect_platform() {
     fi
  
     # --- OS (parse, do not source /etc/os-release) ---
+    PLATFORM_OS_ID=""
     PLATFORM_OS_LIKE=""
     PLATFORM_OS_NAME=""
+    PLATFORM_OS_FAMILY="unknown"
+    _os_cpe_name=""
     if [ -r /etc/os-release ]; then
+        PLATFORM_OS_ID="$(
+            awk -F= '$1=="ID"{gsub(/"/,"",$2); print $2}' /etc/os-release 2>/dev/null |
+                tr '[:upper:]' '[:lower:]'
+        )"
         PLATFORM_OS_LIKE="$(
             awk -F= '$1=="ID_LIKE"{gsub(/"/,"",$2); print $2}' /etc/os-release 2>/dev/null
         )"
@@ -6855,7 +6913,44 @@ detect_platform() {
         PLATFORM_OS_NAME="$(
             awk -F= '$1=="PRETTY_NAME"{gsub(/"/,"",$2); print $2}' /etc/os-release 2>/dev/null
         )"
+        _os_cpe_name="$(
+            awk -F= '$1=="CPE_NAME"{gsub(/"/,"",$2); print $2}' /etc/os-release 2>/dev/null |
+                tr '[:upper:]' '[:lower:]'
+        )"
     fi
+
+    _os_like_lc="$(printf '%s' "$PLATFORM_OS_LIKE" | tr '[:upper:]' '[:lower:]')"
+    case "$PLATFORM_OS_ID" in
+        ubuntu)
+            PLATFORM_OS_FAMILY="ubuntu"
+            ;;
+        debian)
+            PLATFORM_OS_FAMILY="debian"
+            ;;
+        poky)
+            PLATFORM_OS_FAMILY="yocto"
+            ;;
+        *)
+            case "$_os_like_lc" in
+                *debian*)
+                    # Debian derivatives other than Ubuntu (e.g. Raspbian, Devuan).
+                    PLATFORM_OS_FAMILY="debian"
+                    ;;
+                *poky*)
+                    PLATFORM_OS_FAMILY="yocto"
+                    ;;
+                *)
+                    case "$_os_cpe_name" in
+                        *openembedded*)
+                            # Covers qcom-distro and other Yocto/OpenEmbedded
+                            # builds that set neither ID=poky nor ID_LIKE.
+                            PLATFORM_OS_FAMILY="yocto"
+                            ;;
+                    esac
+                    ;;
+            esac
+            ;;
+    esac
  
     # --- Target guess (mutually-exclusive; generic names only) ---
     lc_compat="$(printf '%s %s' "$PLATFORM_DT_MODEL" "$PLATFORM_DT_COMPAT" \
@@ -6903,6 +6998,7 @@ detect_platform() {
       PLATFORM_KERNEL PLATFORM_ARCH PLATFORM_UNAME_S PLATFORM_HOSTNAME \
       PLATFORM_SOC_MACHINE PLATFORM_SOC_ID PLATFORM_SOC_FAMILY \
       PLATFORM_DT_MODEL PLATFORM_DT_COMPAT PLATFORM_OS_LIKE PLATFORM_OS_NAME \
+      PLATFORM_OS_ID PLATFORM_OS_FAMILY \
       PLATFORM_TARGET PLATFORM_MACHINE
  
     return 0
