@@ -920,98 +920,6 @@ find_test_case_script_by_name() {
     find "$base_dir" -type d -iname "$test_name" -print -quit 2>/dev/null
 }
 
-# Classify the current OS into a broad family, based on /etc/os-release.
-# This is intentionally decoupled from any file-probing/behavior logic
-# elsewhere (e.g. check_kernel_config()): it exists purely for logging/
-# diagnostics and optional future use, so callers that only probe for file
-# existence remain OS-agnostic and unaffected if this classification is
-# incomplete or /etc/os-release is unavailable.
-#
-# Prints one of: ubuntu | debian | yocto | unknown
-#
-# Also exports raw fields for callers that want them without re-parsing:
-#   DETECTED_OS_ID           (e.g. ubuntu, debian, qcom-distro)
-#   DETECTED_OS_ID_LIKE      (e.g. debian)
-#   DETECTED_OS_PRETTY_NAME  (e.g. "Ubuntu 26.04 LTS")
-#
-# Examples observed:
-#   Ubuntu:  ID=ubuntu            ID_LIKE=debian
-#   Debian:  ID=debian            (no ID_LIKE)
-#   Yocto:   ID=qcom-distro       CPE_NAME=cpe:/o:openembedded:...
-detect_os_family() {
-    DETECTED_OS_ID=""
-    DETECTED_OS_ID_LIKE=""
-    DETECTED_OS_PRETTY_NAME=""
-    dof_cpe_name=""
-
-    if [ -r /etc/os-release ]; then
-        DETECTED_OS_ID="$(
-            sed -n 's/^ID=//p' /etc/os-release 2>/dev/null |
-                sed -n '1p' |
-                sed 's/^"//; s/"$//' |
-                tr '[:upper:]' '[:lower:]'
-        )"
-        DETECTED_OS_ID_LIKE="$(
-            sed -n 's/^ID_LIKE=//p' /etc/os-release 2>/dev/null |
-                sed -n '1p' |
-                sed 's/^"//; s/"$//' |
-                tr '[:upper:]' '[:lower:]'
-        )"
-        DETECTED_OS_PRETTY_NAME="$(
-            sed -n 's/^PRETTY_NAME=//p' /etc/os-release 2>/dev/null |
-                sed -n '1p' |
-                sed 's/^"//; s/"$//'
-        )"
-        dof_cpe_name="$(
-            sed -n 's/^CPE_NAME=//p' /etc/os-release 2>/dev/null |
-                sed -n '1p' |
-                sed 's/^"//; s/"$//' |
-                tr '[:upper:]' '[:lower:]'
-        )"
-    fi
-
-    export DETECTED_OS_ID DETECTED_OS_ID_LIKE DETECTED_OS_PRETTY_NAME
-
-    case "$DETECTED_OS_ID" in
-        ubuntu)
-            printf '%s\n' "ubuntu"
-            return 0
-            ;;
-        debian)
-            printf '%s\n' "debian"
-            return 0
-            ;;
-        poky)
-            printf '%s\n' "yocto"
-            return 0
-            ;;
-    esac
-
-    case "$DETECTED_OS_ID_LIKE" in
-        *debian*)
-            # Debian derivatives other than Ubuntu (e.g. Raspbian, Devuan).
-            printf '%s\n' "debian"
-            return 0
-            ;;
-        *poky*)
-            printf '%s\n' "yocto"
-            return 0
-            ;;
-    esac
-
-    case "$dof_cpe_name" in
-        *openembedded*)
-            # Covers qcom-distro and other Yocto/OpenEmbedded-based builds
-            # that do not set ID_LIKE.
-            printf '%s\n' "yocto"
-            return 0
-            ;;
-    esac
-
-    printf '%s\n' "unknown"
-    return 0
-}
-
 # Check each given kernel config in /proc/config.gz.
 # Supported inputs:
 # CONFIG_FOO
@@ -1023,50 +931,9 @@ detect_os_family() {
 check_kernel_config() {
     cfgs=$1
 
-    # Locate a usable kernel config source across distros/build types:
-    # - /proc/config.gz: common on embedded/Yocto/Android kernels built with
-    #   CONFIG_IKCONFIG_PROC=y. Most stock Ubuntu/Debian kernels do NOT enable
-    #   this, so config.gz is frequently absent there.
-    # - /boot/config-<uname -r>: the standard plain-text location Ubuntu/Debian
-    #   (and most distro kernel packages) install the build config to.
-    # - /lib/modules/<uname -r>/build/.config and
-    #   /usr/src/linux-headers-<uname -r>/.config: fallbacks used when kernel
-    #   headers/build trees are installed but /boot/config-* was removed.
-    kver="$(uname -r 2>/dev/null)"
-    cfg_source=""
-    cfg_is_gz=0
-
-    if [ -r /proc/config.gz ]; then
-        cfg_source="/proc/config.gz"
-        cfg_is_gz=1
-    else
-        for cand in \
-            "/boot/config-${kver}" \
-            "/lib/modules/${kver}/build/.config" \
-            "/usr/src/linux-headers-${kver}/.config"
-        do
-            if [ -n "$kver" ] && [ -r "$cand" ]; then
-                cfg_source="$cand"
-                cfg_is_gz=0
-                break
-            fi
-        done
-    fi
-
-    if [ -z "$cfg_source" ]; then
-        log_fail "No readable kernel config source found (checked /proc/config.gz, /boot/config-${kver:-<unknown>}, /lib/modules/${kver:-<unknown>}/build/.config, /usr/src/linux-headers-${kver:-<unknown>}/.config)"
+    if [ ! -r /proc/config.gz ]; then
+        log_fail "Kernel config source /proc/config.gz is not available"
         return 1
-    fi
-
-    # OS family/name is logged purely for debug traceability (which distro/
-    # build this config source came from); it never drives which source or
-    # matching logic is used above.
-    cfg_os_family="$(detect_os_family 2>/dev/null || echo unknown)"
-
-    if [ -n "${DETECTED_OS_PRETTY_NAME:-}" ]; then
-        log_info "Using kernel config source: $cfg_source (OS: $DETECTED_OS_PRETTY_NAME, family: $cfg_os_family)"
-    else
-        log_info "Using kernel config source: $cfg_source (family: $cfg_os_family)"
     fi
 
     for cfg in $cfgs; do
@@ -1085,23 +952,20 @@ check_kernel_config() {
                 ;;
         esac
 
-        cfg_matched=0
-
-        if [ "$cfg_is_gz" -eq 1 ]; then
-            if command -v zgrep >/dev/null 2>&1; then
-                zgrep -qE "$pattern" "$cfg_source" 2>/dev/null && cfg_matched=1
+        if command -v zgrep >/dev/null 2>&1; then
+            if zgrep -qE "$pattern" /proc/config.gz 2>/dev/null; then
+                log_pass "$pass_msg"
             else
-                gzip -dc "$cfg_source" 2>/dev/null | grep -qE "$pattern" && cfg_matched=1
+                log_fail "$fail_msg"
+                return 1
             fi
         else
-            grep -qE "$pattern" "$cfg_source" 2>/dev/null && cfg_matched=1
-        fi
-
-        if [ "$cfg_matched" -eq 1 ]; then
-            log_pass "$pass_msg"
-        else
-            log_fail "$fail_msg"
-            return 1
+            if gzip -dc /proc/config.gz 2>/dev/null | grep -qE "$pattern"; then
+                log_pass "$pass_msg"
+            else
+                log_fail "$fail_msg"
+                return 1
+            fi
         fi
     done
 
@@ -1118,50 +982,36 @@ kernel_config_value() {
     config_name="$1"
     [ -n "$config_name" ] || return 3
 
-    kcv_kver="$(uname -r 2>/dev/null)"
-    kcv_source=""
-    kcv_is_gz=0
-
     if [ -r /proc/config.gz ]; then
-        kcv_source="/proc/config.gz"
-        kcv_is_gz=1
-    else
-        for kcv_cand in \
-            "/boot/config-${kcv_kver}" \
-            "/lib/modules/${kcv_kver}/build/.config" \
-            "/usr/src/linux-headers-${kcv_kver}/.config"
-        do
-            if [ -n "$kcv_kver" ] && [ -r "$kcv_cand" ]; then
-                kcv_source="$kcv_cand"
-                kcv_is_gz=0
-                break
-            fi
-        done
-    fi
-
-    [ -n "$kcv_source" ] || return 1
-
-    if [ "$kcv_is_gz" -eq 1 ]; then
         if command -v zgrep >/dev/null 2>&1; then
-            kcv_line=$(zgrep -m 1 -E "^${config_name}=" "$kcv_source" 2>/dev/null || true)
-            kcv_disabled=$(zgrep -m 1 -E "^# ${config_name} is not set$" "$kcv_source" 2>/dev/null || true)
+            config_line=$(zgrep -m 1 -E "^${config_name}=" /proc/config.gz 2>/dev/null || true)
+            config_disabled=$(zgrep -m 1 -E "^# ${config_name} is not set$" /proc/config.gz 2>/dev/null || true)
         else
-            kcv_line=$(gzip -dc "$kcv_source" 2>/dev/null | grep -m 1 -E "^${config_name}=" || true)
-            kcv_disabled=$(gzip -dc "$kcv_source" 2>/dev/null | grep -m 1 -E "^# ${config_name} is not set$" || true)
+            config_line=$(gzip -dc /proc/config.gz 2>/dev/null | grep -m 1 -E "^${config_name}=" || true)
+            config_disabled=$(gzip -dc /proc/config.gz 2>/dev/null | grep -m 1 -E "^# ${config_name} is not set$" || true)
         fi
-    else
-        kcv_line=$(grep -m 1 -E "^${config_name}=" "$kcv_source" 2>/dev/null || true)
-        kcv_disabled=$(grep -m 1 -E "^# ${config_name} is not set$" "$kcv_source" 2>/dev/null || true)
+
+        if [ -n "$config_line" ]; then
+            printf '%s\n' "$config_line"
+            return 0
+        fi
+        if [ -n "$config_disabled" ]; then
+            printf '%s=n\n' "$config_name"
+            return 0
+        fi
     fi
 
-    if [ -n "$kcv_line" ]; then
-        printf '%s\n' "$kcv_line"
-        return 0
-    fi
-
-    if [ -n "$kcv_disabled" ]; then
-        printf '%s=n\n' "$config_name"
-        return 0
+    boot_config="/boot/config-$(uname -r 2>/dev/null)"
+    if [ -r "$boot_config" ]; then
+        config_line=$(grep -m 1 -E "^${config_name}=" "$boot_config" 2>/dev/null || true)
+        if [ -n "$config_line" ]; then
+            printf '%s\n' "$config_line"
+            return 0
+        fi
+        if grep -q -E "^# ${config_name} is not set$" "$boot_config" 2>/dev/null; then
+            printf '%s=n\n' "$config_name"
+            return 0
+        fi
     fi
 
     return 1
