@@ -56,8 +56,17 @@ export URM_REQUIRE_COMMON_FILES="InitConfig.yaml PropertiesConfig.yaml Resources
 export URM_REQUIRE_TEST_FILES="InitConfig.yaml PropertiesConfig.yaml ResourcesConfig.yaml SignalsConfig.yaml TargetConfig.yaml ExtFeaturesConfig.yaml Baseline.yaml"
 ```
 
-### 3) Test test nodes
-`/etc/urm/tests/nodes` must exist and be non‑empty for **`/usr/bin/UrmIntegrationTests`** and **`/usr/bin/UrmComponentTests`**. If missing/empty → **SKIP only that suite**.
+### 3) Test nodes
+The runner resolves the test-nodes source directory in the following priority order:
+
+1. **`URM_TEST_NODES_DIR`** – explicit operator override (takes precedence over everything).
+2. **`URM_CONFIG_DIR`** – legacy compatibility fallback (same variable honoured by the config roots).
+3. **`/var/lib/urm/tests/nodes`** – runtime/writable location, used only when the directory exists **and is non-empty**.
+4. **`/usr/share/urm/tests/nodes`** – package-installed default (Yocto and Debian).
+
+Before tests run, the resolved nodes are **copied** into `/run/urm/tests/nodes` — the path hardcoded in the test binaries — so that URM can write to them during testing without modifying the read-only package-installed source. The copied directory is removed automatically on exit, interrupt, or termination.
+
+The resolved source directory must exist and be non-empty for **`/usr/bin/UrmIntegrationTests`** and **`/usr/bin/UrmComponentTests`**. If missing, empty, or the copy fails → **SKIP only that suite**.
 
 ### 4) Base tools
 Requires: `awk`, `grep`, `date`, `printf`. If missing → **overall SKIP**.
@@ -100,8 +109,11 @@ Per‑suite default timeouts (if helper is present):
 ## Environment overrides
 
 - `SERVICE_NAME`: systemd unit to check (default: `urm.service`)
-- `URM_CONFIG_DIR`: root of config tree (default: `/etc/urm`)
-- `URM_REQUIRE_COMMON_FILES`, `URM_REQUIRE_TEST_FILES`: *space‑separated* filenames that must exist in `common/` / `tests/` respectively to treat that tree as present.
+- `URM_CONFIG_DIR`: **legacy** compatibility override – sets the root for `common/`, `tests/configs/`, and `tests/nodes/` when the per-root variables below are not set (default: unset; built-in defaults are `/etc/urm`, `/usr/share/urm`, and `/usr/share/urm` respectively).
+- `URM_COMMON_CONFIG_DIR`: root for `common/` configs (default: `/etc/urm`). Takes precedence over `URM_CONFIG_DIR`.
+- `URM_TESTS_CONFIG_DIR`: root for `tests/configs/` (default: `/usr/share/urm`). Takes precedence over `URM_CONFIG_DIR`.
+- `URM_TEST_NODES_DIR`: explicit root for `tests/nodes/` (default: auto-resolved; see [Test nodes](#3-test-nodes) above). Takes precedence over the automatic candidate search.
+- `URM_REQUIRE_COMMON_FILES`, `URM_REQUIRE_TEST_FILES`: *space‑separated* filenames that must exist in `common/` / `tests/configs/` respectively to treat that tree as present.
 
 ---
 
@@ -122,9 +134,19 @@ List suites and presence coverage:
 ./run.sh --list
 ```
 
-Use a different config root:
+Use a different config root (legacy, applies to both common and tests-config roots):
 ```bash
 URM_CONFIG_DIR=/opt/rt/etc ./run.sh
+```
+
+Override individual roots:
+```bash
+URM_COMMON_CONFIG_DIR=/opt/rt/etc/urm URM_TESTS_CONFIG_DIR=/opt/rt/usr/share/urm ./run.sh
+```
+
+Point to a custom test-nodes directory:
+```bash
+URM_TEST_NODES_DIR=/opt/rt/usr/share/urm ./run.sh
 ```
 
 ---
