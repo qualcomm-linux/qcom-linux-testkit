@@ -87,6 +87,44 @@ fastrpc_first_existing_word_dir() {
     return 1
 }
 
+# Returns the first directory in the space-separated candidate_dirs list that
+# contains at least one FastRPC system library (libadsprpc, libcdsprpc, or
+# libsdsprpc).  Generic directories like /usr/lib that exist without FastRPC
+# installed are skipped.
+fastrpc_first_dir_with_fastrpc_syslib() {
+    candidate_dirs="$1"
+    for candidate_dir in $candidate_dirs; do
+        [ -d "$candidate_dir" ] || continue
+        for lib in libadsprpc libcdsprpc libsdsprpc; do
+            if find "$candidate_dir" -maxdepth 1 -name "${lib}.so*" 2>/dev/null \
+               | grep -qm1 .; then
+                printf '%s\n' "$candidate_dir"
+                return 0
+            fi
+        done
+    done
+    return 1
+}
+
+# Returns the first directory in the space-separated candidate_dirs list that
+# contains at least one known FastRPC test library (libcalculator, libhap_example,
+# or libmultithreading).  Matches both unversioned (.so) and versioned (.so.N)
+# forms so Debian runtime-only installs are detected correctly.
+fastrpc_first_dir_with_testlib() {
+    candidate_dirs="$1"
+    for candidate_dir in $candidate_dirs; do
+        [ -d "$candidate_dir" ] || continue
+        for lib in libcalculator libhap_example libmultithreading; do
+            if find "$candidate_dir" -maxdepth 1 -name "${lib}.so*" 2>/dev/null \
+               | grep -qm1 .; then
+                printf '%s\n' "$candidate_dir"
+                return 0
+            fi
+        done
+    done
+    return 1
+}
+
 fastrpc_detect_multiarch_triplet() {
     triplet=""
 
@@ -148,8 +186,8 @@ fastrpc_discover_runtime_layout() {
     FASTRPC_LIB_TEST_DIRS_CHECKED="$(fastrpc_append_word_unique "$FASTRPC_LIB_TEST_DIRS_CHECKED" "/usr/lib/fastrpc_test")"
     FASTRPC_SKEL_BASES_CHECKED="$(fastrpc_append_word_unique "$FASTRPC_SKEL_BASES_CHECKED" "/usr/share/fastrpc_test")"
 
-    FASTRPC_RESOLVED_LIB_SYS_DIR="$(fastrpc_first_existing_word_dir "$FASTRPC_LIB_SYS_DIRS_CHECKED" || true)"
-    FASTRPC_RESOLVED_LIB_TEST_DIR="$(fastrpc_first_existing_word_dir "$FASTRPC_LIB_TEST_DIRS_CHECKED" || true)"
+    FASTRPC_RESOLVED_LIB_SYS_DIR="$(fastrpc_first_dir_with_fastrpc_syslib "$FASTRPC_LIB_SYS_DIRS_CHECKED" || true)"
+    FASTRPC_RESOLVED_LIB_TEST_DIR="$(fastrpc_first_dir_with_testlib "$FASTRPC_LIB_TEST_DIRS_CHECKED" || true)"
     FASTRPC_RESOLVED_SKEL_BASE="$(fastrpc_first_existing_word_dir "$FASTRPC_SKEL_BASES_CHECKED" || true)"
 
     FASTRPC_RESOLVED_SKEL_PATH=""
@@ -262,16 +300,6 @@ extract_test_summary_counts() {
     printf '%s:%s:%s:%s\n' "$total" "$passed" "$failed" "$skipped"
 }
 
-# Returns true if the only failing subtest is libhap_example.so.
-# Used to treat HAP_mem DMA failures as known-skip on affected SoCs.
-only_hap_example_failed() {
-    log_file="$1"
-
-    [ -r "$log_file" ] || return 1
-    grep -F -q "[FAIL]" "$log_file" || return 1
-    ! grep -F "[FAIL]" "$log_file" | grep -q -v "libhap_example.so"
-}
-
 log_dsp_remoteproc_status() {
     fw_list="adsp mdsp sdsp cdsp cdsp0 cdsp1 gdsp0 gdsp1 gpdsp0 gpdsp1"
     any=0
@@ -321,6 +349,30 @@ domain_to_name() {
         6) echo "GPDSP1" ;;
         *) echo "UNKNOWN" ;;
     esac
+}
+
+# Maps a domain number to the DT binding label used by the FastRPC driver
+# when naming /dev/fastrpc-<label>.  GPDSP domains use the DT label gdsp0/gdsp1,
+# not the presentation names gpdsp0/gpdsp1.
+domain_to_endpoint_label() {
+    case "$1" in
+        0) echo "adsp" ;;
+        1) echo "mdsp" ;;
+        2) echo "sdsp" ;;
+        3) echo "cdsp" ;;
+        4) echo "cdsp1" ;;
+        5) echo "gdsp0" ;;
+        6) echo "gdsp1" ;;
+        *) echo "" ;;
+    esac
+}
+
+# Returns 0 if a usable FastRPC character device exists for the given domain.
+# Checks both /dev/fastrpc-<label> and /dev/fastrpc-<label>-secure.
+fastrpc_domain_endpoint_available() {
+    _label="$(domain_to_endpoint_label "$1")"
+    [ -n "$_label" ] || return 1
+    [ -c "/dev/fastrpc-${_label}" ] || [ -c "/dev/fastrpc-${_label}-secure" ]
 }
 
 append_unique() {
