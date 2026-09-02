@@ -71,6 +71,7 @@ if command -v flock >/dev/null 2>&1; then
     echo "$TESTNAME SKIP" >"$RES_FILE"
     exit 0
   fi
+  lock_flock=1
   trap 'exec 9>&-' EXIT INT TERM
 else
   if ! mkdir "$LOCKDIR" 2>/dev/null; then
@@ -78,6 +79,7 @@ else
     echo "$TESTNAME SKIP" >"$RES_FILE"
     exit 0
   fi
+  lock_flock=0
   trap 'rmdir "$LOCKDIR" 2>/dev/null || true' EXIT INT TERM
 fi
 
@@ -275,10 +277,50 @@ else
 fi
 
 # ---------- Config preflight (check both common/ and tests/) ----------
-URM_CONFIG_DIR="${URM_CONFIG_DIR:-/etc/urm}"
-COMMON_CONFIGS_DIR="$URM_CONFIG_DIR/common"
-TEST_CONFIGS_DIR="$URM_CONFIG_DIR/tests/configs"
-TEST_NODES_DIR="$URM_CONFIG_DIR/tests/nodes"
+# Resolution order for each root (first match wins):
+#   1. Explicit per-root override (URM_COMMON_CONFIG_DIR / URM_TESTS_CONFIG_DIR)
+#   2. Legacy URM_CONFIG_DIR (compatibility fallback for existing callers)
+#   3. Built-in default
+#
+# For test-nodes the candidate order is:
+#   1. Explicit URM_TEST_NODES_DIR override
+#   2. Legacy URM_CONFIG_DIR (compatibility fallback for existing callers)
+#   3. /var/lib/urm  — runtime/writable location, only when non-empty
+#   4. /usr/share/urm — package-installed location (default)
+
+# Resolve common-config root
+if [ -n "${URM_COMMON_CONFIG_DIR:-}" ]; then
+    common_root="$URM_COMMON_CONFIG_DIR"
+elif [ -n "${URM_CONFIG_DIR:-}" ]; then
+    common_root="$URM_CONFIG_DIR"
+else
+    common_root="/etc/urm"
+fi
+
+# Resolve tests-config root
+if [ -n "${URM_TESTS_CONFIG_DIR:-}" ]; then
+    tests_root="$URM_TESTS_CONFIG_DIR"
+elif [ -n "${URM_CONFIG_DIR:-}" ]; then
+    tests_root="$URM_CONFIG_DIR"
+else
+    tests_root="/usr/share/urm"
+fi
+
+# Resolve test-nodes root: explicit override > legacy URM_CONFIG_DIR > populated runtime dir > package dir
+if [ -n "${URM_TEST_NODES_DIR:-}" ]; then
+    nodes_root="$URM_TEST_NODES_DIR"
+elif [ -n "${URM_CONFIG_DIR:-}" ]; then
+    nodes_root="$URM_CONFIG_DIR"
+elif [ -d "/var/lib/urm/tests/nodes" ] && \
+     [ "$(find "/var/lib/urm/tests/nodes" -mindepth 1 -maxdepth 1 -type f 2>/dev/null | wc -l | awk '{print $1}')" -gt 0 ]; then
+    nodes_root="/var/lib/urm"
+else
+    nodes_root="/usr/share/urm"
+fi
+
+COMMON_CONFIGS_DIR="$common_root/common"
+TEST_CONFIGS_DIR="$tests_root/tests/configs"
+TEST_NODES_DIR="$nodes_root/tests/nodes"
 
 COMMON_CONFIGS_OK=1
 TEST_CONFIGS_OK=1
@@ -397,6 +439,39 @@ if [ -z "$TESTS" ]; then
     exit 0
 fi
 
+# ---------- Stage test nodes into a private temporary directory ----------
+# UrmComponentTests and UrmIntegrationTests accept a --npath argument that
+# tells them where to find the writable test nodes. The package installs
+# read-only node files under /usr/share/urm/tests/nodes (or /var/lib/urm),
+# so we copy them into a mktemp-owned directory before running the tests.
+# mktemp -d guarantees a fresh unique base exclusively owned by this run;
+# the trap registered immediately after removes only that base directory
+# on exit, interrupt, or termination.
+RUNTIME_NODES_DIR=""
+if [ "$TEST_NODES_OK" -eq 1 ]; then
+    nodes_tmp_base="$(mktemp -d)"
+    if [ -z "$nodes_tmp_base" ] || [ ! -d "$nodes_tmp_base" ]; then
+        log_warn "[NODES] mktemp -d failed — suites requiring nodes will SKIP"
+        TEST_NODES_OK=0
+    else
+        if [ "$lock_flock" -eq 1 ]; then
+            trap 'rm -rf "$nodes_tmp_base"; exec 9>&-' EXIT INT TERM
+        else
+            trap 'rm -rf "$nodes_tmp_base"; rmdir "$LOCKDIR" 2>/dev/null || true' EXIT INT TERM
+        fi
+        RUNTIME_NODES_DIR="$nodes_tmp_base/urm/tests/nodes"
+        if ! mkdir -p "$RUNTIME_NODES_DIR"; then
+            log_warn "[NODES] Failed to create staging directory $RUNTIME_NODES_DIR — suites requiring nodes will SKIP"
+            TEST_NODES_OK=0
+        elif cp -r "$TEST_NODES_DIR/"* "$RUNTIME_NODES_DIR/"; then
+            log_info "[NODES] Staged test nodes from $TEST_NODES_DIR to $RUNTIME_NODES_DIR"
+        else
+            log_warn "[NODES] Failed to stage test nodes into $RUNTIME_NODES_DIR — suites requiring nodes will SKIP"
+            TEST_NODES_OK=0
+        fi
+    fi
+fi
+
 # ---------- Execute ----------
 PASS=0
 FAIL=0
@@ -440,7 +515,7 @@ run_one() {
 
     log_info "--- Running $bin ---"
     log_info "[CI] Logging to $tlog"
-    run_cmd_maybe_timeout "$bin" >"$tlog" 2>&1
+    run_cmd_maybe_timeout "$bin" --npath "$RUNTIME_NODES_DIR" >"$tlog" 2>&1
     rc=$?
 
     case $rc in
@@ -508,7 +583,7 @@ log_info "Overall counts: PASS=$PASS FAIL=$FAIL SKIP=$SKIP"
 # - Else -> overall SKIP (everything skipped)
 if [ "$FAIL" -gt 0 ]; then
   echo "$TESTNAME FAIL" >"$RES_FILE"
-  exit 1 
+  exit 1
 fi
 if [ "$PASS" -gt 0 ]; then
   echo "$TESTNAME PASS" >"$RES_FILE"
