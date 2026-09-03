@@ -1184,7 +1184,17 @@ while IFS= read -r cfg; do
                 ;;
         esac
 
-        if video_run_once "$cfg" "$logf" "$TIMEOUT" "$SUCCESS_RE" "$LOGLEVEL"; then
+        run_cfg="$cfg"
+        if [ "$mode" = "encode" ] && { [ "$codec" = "h264" ] || [ "$codec" = "hevc" ]; }; then
+            if command -v video_apply_level_override_for_target >/dev/null 2>&1; then
+                override_cfg="$(video_apply_level_override_for_target "$cfg" 2>/dev/null | tail -n 1)"
+                if [ -n "$override_cfg" ] && [ -f "$override_cfg" ]; then
+                    run_cfg="$override_cfg"
+                fi
+            fi
+        fi
+
+        if video_run_once "$run_cfg" "$logf" "$TIMEOUT" "$SUCCESS_RE" "$LOGLEVEL"; then
             pass_runs=$((pass_runs + 1))
         else
             rc_val="$(awk -F'=' '/^END-RUN rc=/{print $2}' "$logf" 2>/dev/null | tail -n1 | tr -d ' ')"
@@ -1247,7 +1257,16 @@ while IFS= read -r cfg; do
             fi
 
             log_info "[$id] retry attempt $r/$RETRY_ON_FAIL"
-            if video_run_once "$cfg" "$logf" "$TIMEOUT" "$SUCCESS_RE" "$LOGLEVEL"; then
+            retry_cfg="$cfg"
+            if [ "$mode" = "encode" ] && { [ "$codec" = "h264" ] || [ "$codec" = "hevc" ]; }; then
+                if command -v video_apply_level_override_for_target >/dev/null 2>&1; then
+                    override_cfg="$(video_apply_level_override_for_target "$cfg" 2>/dev/null || true)"
+                    if [ -n "$override_cfg" ] && [ -f "$override_cfg" ]; then
+                        retry_cfg="$override_cfg"
+                    fi
+                fi
+            fi
+            if video_run_once "$retry_cfg" "$logf" "$TIMEOUT" "$SUCCESS_RE" "$LOGLEVEL"; then
                 pass_runs=$((pass_runs + 1))
                 final="PASS"
                 log_pass "[$id] RETRY succeeded — marking PASS"

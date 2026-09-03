@@ -663,22 +663,55 @@ video_normalize_stack() {
 }
 
 # -----------------------------------------------------------------------------
-# Platform detect → lemans|monaco|kodiak|unknown
+# video_get_dt_identity
+#
+# Shared helper: resolves the runtime board identity string purely from
+# device-tree model/compatible data (both /proc and /sys mount points, since
+# some images only expose one or the other), plus any already-resolved
+# platform.sh vars if present. This mirrors audio_platform_is_shikra() (see
+# PR #544 / audio_common.sh), which is also purely device-tree/platform-var
+# based with NO uname fallback -- kernel version strings and hostnames vary
+# run-to-run and do not reliably encode the board name, so they are
+# intentionally not used here.
+#
+# This is the SINGLE source of truth for "what board am I running on" used
+# by BOTH video_detect_platform() (lemans/monaco/kodiak/shikra classification)
+# AND video_target_matches() (generic substring matching, e.g. shikra gating
+# for the Level override). Keeping one shared reader avoids duplicating
+# device-tree parsing logic across the two call sites (see PR review comment
+# requesting alignment with the Shikra audio approach in PR #544).
+#
+# Output: lowercased, space-joined identity string on stdout. May be empty
+# if no device-tree/platform data is available (callers should treat that
+# as "no match" rather than falling back to a caller-name heuristic).
+# -----------------------------------------------------------------------------
+video_get_dt_identity() {
+    identity="${PLATFORM_MACHINE:-} ${PLATFORM_TARGET:-}"
+    identity="$identity ${PLATFORM_SOC_MACHINE:-}"
+    identity="$identity ${PLATFORM_DT_MODEL:-}"
+    identity="$identity ${PLATFORM_DT_COMPAT:-}"
+
+    for dtf in \
+        /proc/device-tree/model \
+        /proc/device-tree/compatible \
+        /sys/firmware/devicetree/base/model \
+        /sys/firmware/devicetree/base/compatible
+    do
+        if [ -r "$dtf" ]; then
+            dtv="$(tr '\000' ' ' <"$dtf" 2>/dev/null || true)"
+            identity="$identity $dtv"
+        fi
+    done
+
+    printf '%s\n' "$identity" | tr '[:upper:]' '[:lower:]'
+}
+
+# -----------------------------------------------------------------------------
+# Platform detect → lemans|monaco|kodiak|shikra|unknown
 # -----------------------------------------------------------------------------
 video_detect_platform() {
-    model=""
-    compat=""
- 
-    if [ -r /proc/device-tree/model ]; then
-        model=$(tr -d '\000' </proc/device-tree/model 2>/dev/null)
-    fi
- 
-    if [ -r /proc/device-tree/compatible ]; then
-        compat=$(tr -d '\000' </proc/device-tree/compatible 2>/dev/null)
-    fi
- 
-    s=$(printf '%s\n%s\n' "$model" "$compat" | tr '[:upper:]' '[:lower:]')
- 
+    s="$(video_get_dt_identity)"
+
     # Monaco: qcs8300-ride, iq-8275-evk, qcs8275, generic qcs8300, or ride-sx+8300
     monaco_pat='qcs8300-ride|iq-8275-evk|qcs8275|qcs8300|ride-sx.*8300|8300.*ride-sx'
  
@@ -687,6 +720,9 @@ video_detect_platform() {
  
     # Kodiak: qcs6490, qcm6490, or rb3+6490
     kodiak_pat='qcs6490|qcm6490|rb3.*6490|6490.*rb3'
+
+    # Shikra: matched by substring, same identity string as the other boards.
+    shikra_pat='shikra'
  
     if printf '%s' "$s" | grep -Eq "$lemans_pat"; then
         printf '%s\n' "lemans"
@@ -700,6 +736,11 @@ video_detect_platform() {
  
     if printf '%s' "$s" | grep -Eq "$kodiak_pat"; then
         printf '%s\n' "kodiak"
+        return 0
+    fi
+
+    if printf '%s' "$s" | grep -Eq "$shikra_pat"; then
+        printf '%s\n' "shikra"
         return 0
     fi
  
@@ -1984,5 +2025,157 @@ video_auto_preference_from_blacklist() {
     esac
 
     printf '%s\n' "unknown"
+    return 0
+}
+
+# -----------------------------------------------------------------------------
+# Per-target overrides (merged in from lib_video_target_overrides.sh)
+# -----------------------------------------------------------------------------
+# Problem statement:
+#   On the "shikra" target, the IRIS video encoder JSON configs (H.264/H.265)
+#   must use "Level": "4.0" in their StaticControls block, whereas every
+#   other supported target uses the default "Level": "5.0" that already
+#   ships in the checked-in JSON files.
+#
+# Approach:
+#   Rather than maintaining separate copies of every JSON config per target,
+#   these helpers detect the current target via video_get_dt_identity()
+#   (runtime device-tree model/compatible data — the SAME shared helper used
+#   by video_detect_platform(), see PR #544 audio_platform_is_shikra
+#   alignment) and, if it matches "shikra" (case-insensitive substring),
+#   compute an overridden copy of the "Level" StaticControls "Value" as "4.0"
+#   before the JSON is consumed by the test binary. The rewrite is:
+#     - jq-free (pure sed/awk, POSIX sh compatible)
+#     - scoped only to the StaticControls object whose "Id" is "Level"
+#       (so "Value" fields belonging to Profile/BitRate/etc. are untouched)
+#     - idempotent (re-running when already at the desired value is a no-op)
+#     - a no-op on any file that has no "Level" StaticControl
+#     - a no-op on any target that does not match the configured pattern
+#     - handles BOTH JSON layouts used in this repo:
+#         (a) pretty-printed / multi-line ("Id" and "Value" on separate lines)
+#         (b) compact / single-line (e.g. {"Id": "Level", ..., "Value": "5.0"})
+#
+# Public env knobs:
+#   VIDEO_LEVEL_OVERRIDE         Value to force (default: "4.0")
+#   VIDEO_LEVEL_OVERRIDE_TARGET  Target substring to match (default: "shikra")
+#
+# Public functions:
+#   video_target_matches <substr>            -> 0/1
+#   video_target_is_shikra                   -> 0/1
+#   video_apply_level_override_for_target <cfg_json_path>
+
+: "${VIDEO_LEVEL_OVERRIDE:=4.0}"
+: "${VIDEO_LEVEL_OVERRIDE_TARGET:=shikra}"
+
+# -----------------------------------------------------------------------------
+# video_target_matches <substr>
+#
+# Case-insensitive substring match against the runtime board identity,
+# resolved via the SAME shared helper (video_get_dt_identity) used by
+# video_detect_platform(). This is the "integrate it carefully with
+# video_detect_platform()" alignment requested for the Shikra approach in
+# PR #544 (audio_platform_is_shikra): both functions now read the runtime
+# device-tree model/compatible data through one shared code path instead of
+# each parsing /proc/device-tree independently, and instead of the previous
+# uname -a substring match (fragile: kernel/hostname strings vary and do not
+# reliably encode the board name).
+# -----------------------------------------------------------------------------
+video_target_matches() {
+    tok="$1"
+    [ -z "$tok" ] && return 1
+
+    identity_l="$(video_get_dt_identity)"
+    tok_l="$(printf '%s' "$tok" | tr '[:upper:]' '[:lower:]')"
+
+    case "$identity_l" in
+        *"$tok_l"*)
+            return 0
+            ;;
+        *)  
+            return 1
+            ;;
+    esac
+}
+
+# Convenience wrapper for the "shikra" target specifically.
+video_target_is_shikra() {
+    video_target_matches "shikra"
+}
+
+# -----------------------------------------------------------------------------
+# video_apply_level_override_for_target <cfg_json_path>
+#
+# Rewrites the "Level" StaticControls "Value" to $VIDEO_LEVEL_OVERRIDE
+# in-place, ONLY when:
+#   - the current target matches $VIDEO_LEVEL_OVERRIDE_TARGET, AND
+#   - the JSON file contains a StaticControls entry with "Id": "Level".
+# -----------------------------------------------------------------------------
+video_apply_level_override_for_target() {
+    cfg="$1"
+    [ -z "$cfg" ] && return 0
+    [ -f "$cfg" ] || return 0
+
+    if ! video_target_matches "$VIDEO_LEVEL_OVERRIDE_TARGET"; then
+        return 0
+    fi
+
+    # Only touch files that actually declare a "Level" StaticControl.
+    if ! grep -q '"Id"[[:space:]]*:[[:space:]]*"Level"' "$cfg" 2>/dev/null; then
+        return 0
+    fi
+
+    override_dir="${VIDEO_LEVEL_OVERRIDE_DIR:-${LOG_DIR:-${TMPDIR:-/tmp}}}"
+    mkdir -p "$override_dir" 2>/dev/null || true
+    base_noext="$(basename "$cfg" .json)"
+    tmp="$override_dir/${base_noext}.level-override.$$.json"
+
+    # Scope the "Value" replacement strictly to the block belonging to
+    # "Id": "Level" so other controls (Profile, BitRate, etc.) are untouched.
+    #
+    # Handles BOTH JSON layouts seen in this repo:
+    #   1) Pretty-printed / multi-line:
+    #        "Id": "Level",
+    #        "Vtype": "String",
+    #        "Value": "5.0"
+    #      ("Id" and "Value" on different lines)
+    #   2) Compact / single-line (as used by the h264 encoder configs):
+    #        {"Id": "Level", "Vtype": "String", "Value": "5.0"},
+    #      ("Id" and "Value" on the SAME line)
+    awk -v newval="$VIDEO_LEVEL_OVERRIDE" '
+        BEGIN { in_level = 0 }
+        {
+            line = $0
+            if (line ~ /"Id"[ \t]*:[ \t]*"Level"/) {
+                in_level = 1
+                if (line ~ /"Value"[ \t]*:/) {
+                    sub(/"Value"[ \t]*:[ \t]*"[^"]*"/, "\"Value\": \"" newval "\"", line)
+                    in_level = 0
+                }
+                print line
+                next
+            }
+            if (in_level == 1 && line ~ /"Value"[ \t]*:/) {
+                sub(/"Value"[ \t]*:[ \t]*"[^"]*"/, "\"Value\": \"" newval "\"", line)
+                print line
+                in_level = 0
+                next
+            }
+            print line
+        }
+    ' "$cfg" > "$tmp" 2>/dev/null
+
+    if [ -s "$tmp" ]; then
+        if ! cmp -s "$cfg" "$tmp" 2>/dev/null; then
+            if command -v log_info >/dev/null 2>&1; then
+                log_info "Applied Level override ($VIDEO_LEVEL_OVERRIDE) for target '$VIDEO_LEVEL_OVERRIDE_TARGET' -> $tmp (source left untouched: $cfg)" >&2
+            fi
+            printf '%s\n' "$tmp"
+        else
+            rm -f "$tmp" 2>/dev/null || true
+        fi
+    else
+        rm -f "$tmp" 2>/dev/null || true
+    fi
+
     return 0
 }
