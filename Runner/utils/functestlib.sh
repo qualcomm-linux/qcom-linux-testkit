@@ -4433,6 +4433,440 @@ i2c_collect_runtime_inventory() {
 }
 
 ###############################################################################
+# I2C userspace-tool validation helpers.
+###############################################################################
+# i2c_tools_select_adapter
+# Prints the unique exposed I2C character adapter number.
+i2c_tools_select_adapter() {
+    itsa_dev_root="${I2C_DEV_ROOT:-/dev}"
+    itsa_selected=""
+    itsa_count=0
+
+    for itsa_devnode in "$itsa_dev_root"/i2c-*; do
+        [ -c "$itsa_devnode" ] || continue
+        itsa_bus=${itsa_devnode##*-}
+        case "$itsa_bus" in
+            ''|*[!0-9]*)
+                continue
+                ;;
+        esac
+        itsa_selected=$itsa_bus
+        itsa_count=$((itsa_count + 1))
+    done
+
+    [ "$itsa_count" -gt 0 ] || return 2
+    [ "$itsa_count" -eq 1 ] || return 1
+    printf '%s\n' "$itsa_selected"
+}
+
+# i2c_tools_adapter_number <adapter>
+# Normalizes BUS or /dev/i2c-BUS and verifies that its character device exists.
+i2c_tools_adapter_number() {
+    itan_adapter="$1"
+    itan_dev_root="${I2C_DEV_ROOT:-/dev}"
+
+    case "$itan_adapter" in
+        "$itan_dev_root"/i2c-*)
+            itan_bus=${itan_adapter##*-}
+            ;;
+        /dev/i2c-*)
+            itan_bus=${itan_adapter##*-}
+            ;;
+        *)
+            itan_bus=$itan_adapter
+            ;;
+    esac
+
+    case "$itan_bus" in
+        ''|*[!0-9]*)
+            return 3
+            ;;
+    esac
+
+    [ -c "$itan_dev_root/i2c-$itan_bus" ] || return 2
+    printf '%s\n' "$itan_bus"
+}
+
+# i2c_tools_value_decimal <value>
+# Converts a validated decimal or hexadecimal i2c-tools argument to decimal.
+i2c_tools_value_decimal() {
+    itvd_value="$1"
+
+    case "$itvd_value" in
+        0x[0-9a-fA-F]*)
+            itvd_digits=${itvd_value#0x}
+            case "$itvd_digits" in
+                ''|*[!0-9a-fA-F]*)
+                    return 3
+                    ;;
+            esac
+            ;;
+        ''|*[!0-9]*)
+            return 3
+            ;;
+    esac
+
+    printf '%d\n' "$itvd_value" 2>/dev/null
+}
+
+# i2c_tools_value_in_range <value> <minimum> <maximum>
+# Validates a decimal or hexadecimal value against inclusive decimal bounds.
+i2c_tools_value_in_range() {
+    itvir_value="$1"
+    itvir_minimum="$2"
+    itvir_maximum="$3"
+    itvir_decimal=$(i2c_tools_value_decimal "$itvir_value") || return 3
+
+    [ "$itvir_decimal" -ge "$itvir_minimum" ] 2>/dev/null &&
+        [ "$itvir_decimal" -le "$itvir_maximum" ] 2>/dev/null
+}
+
+# i2c_tools_validate_adapters <result-dir> <timeout-seconds>
+# Lists adapters and queries each exposed character adapter's functionality.
+i2c_tools_validate_adapters() {
+    itva_result_dir="$1"
+    itva_timeout="$2"
+    itva_dev_root="${I2C_DEV_ROOT:-/dev}"
+    I2C_TOOLS_CAPABILITY_COUNT=0
+    I2C_TOOLS_CAPABILITY_FAILURES=0
+
+    [ -n "$itva_result_dir" ] || return 3
+    case "$itva_timeout" in
+        ''|*[!0-9]*|0)
+            return 3
+            ;;
+    esac
+    command -v i2cdetect >/dev/null 2>&1 || return 2
+    mkdir -p "$itva_result_dir" || return 1
+
+    if ! run_with_timeout_log \
+        "$itva_timeout" \
+        "$itva_result_dir/i2cdetect_list.log" \
+        i2cdetect -l; then
+        log_file_with_label "I2C-TOOLS-LIST" "$itva_result_dir/i2cdetect_list.log"
+        log_fail "[I2C-TOOLS] expected=adapter-list observed=command-failed-or-timeout artifact=$itva_result_dir/i2cdetect_list.log"
+        return 1
+    fi
+    if [ ! -s "$itva_result_dir/i2cdetect_list.log" ]; then
+        log_fail "[I2C-TOOLS] expected=nonempty-adapter-list observed=empty artifact=$itva_result_dir/i2cdetect_list.log"
+        return 1
+    fi
+    log_file_with_label "I2C-TOOLS-LIST" "$itva_result_dir/i2cdetect_list.log"
+
+    for itva_devnode in "$itva_dev_root"/i2c-*; do
+        [ -c "$itva_devnode" ] || continue
+        itva_bus=${itva_devnode##*-}
+        case "$itva_bus" in
+            ''|*[!0-9]*)
+                continue
+                ;;
+        esac
+        I2C_TOOLS_CAPABILITY_COUNT=$((I2C_TOOLS_CAPABILITY_COUNT + 1))
+        itva_log="$itva_result_dir/i2cdetect_functionality_${itva_bus}.log"
+        if run_with_timeout_log "$itva_timeout" "$itva_log" i2cdetect -F "$itva_bus" &&
+           grep -Eq 'I2C|SMBus' "$itva_log"; then
+            log_info "[I2C-TOOLS] adapter=i2c-$itva_bus functionality=readable artifact=$itva_log"
+        else
+            I2C_TOOLS_CAPABILITY_FAILURES=$((I2C_TOOLS_CAPABILITY_FAILURES + 1))
+            log_file_with_label "I2C-TOOLS-F$itva_bus" "$itva_log"
+            log_fail "[I2C-TOOLS] adapter=i2c-$itva_bus expected=readable-functionality observed=command-failed-or-timeout artifact=$itva_log"
+        fi
+    done
+
+    [ "$I2C_TOOLS_CAPABILITY_COUNT" -gt 0 ] || return 2
+    [ "$I2C_TOOLS_CAPABILITY_FAILURES" -eq 0 ]
+}
+
+# i2c_tools_scan_adapter <adapter> <quick|read> <timeout-seconds> <result-dir>
+# Runs an explicitly requested address scan and retains the complete matrix.
+i2c_tools_scan_adapter() {
+    itsa_adapter="$1"
+    itsa_mode="$2"
+    itsa_timeout="$3"
+    itsa_result_dir="$4"
+
+    [ -n "$itsa_result_dir" ] || return 3
+    case "$itsa_timeout" in
+        ''|*[!0-9]*|0)
+            return 3
+            ;;
+    esac
+    case "$itsa_mode" in
+        quick|read)
+            ;;
+        *)
+            return 3
+            ;;
+    esac
+    command -v i2cdetect >/dev/null 2>&1 || return 2
+    itsa_bus=$(i2c_tools_adapter_number "$itsa_adapter") || return $?
+    mkdir -p "$itsa_result_dir" || return 1
+    itsa_log="$itsa_result_dir/i2cdetect_scan_${itsa_bus}_${itsa_mode}.log"
+
+    set -- i2cdetect -y "$itsa_bus"
+    if [ "$itsa_mode" = "read" ]; then
+        set -- i2cdetect -r -y "$itsa_bus"
+    fi
+    if ! run_with_timeout_log "$itsa_timeout" "$itsa_log" "$@"; then
+        log_file_with_label "I2C-SCAN" "$itsa_log"
+        log_fail "[I2C-SCAN] adapter=i2c-$itsa_bus mode=$itsa_mode expected=completed-scan observed=command-failed-or-timeout artifact=$itsa_log"
+        return 1
+    fi
+    if ! grep -Eq '(^|[[:space:]])0[[:space:]]+1[[:space:]]+2' "$itsa_log"; then
+        log_file_with_label "I2C-SCAN" "$itsa_log"
+        log_fail "[I2C-SCAN] adapter=i2c-$itsa_bus mode=$itsa_mode expected=address-matrix observed=malformed-output artifact=$itsa_log"
+        return 1
+    fi
+
+    log_file_with_label "I2C-SCAN" "$itsa_log"
+    log_info "[I2C-SCAN] adapter=i2c-$itsa_bus mode=$itsa_mode state=completed artifact=$itsa_log"
+    return 0
+}
+
+# i2c_tools_read_register <adapter> <address> <register> <b|w> <timeout> <result-dir> [expected] [mask]
+# Reads one explicitly selected register and optionally validates masked data.
+i2c_tools_read_register() {
+    itrr_adapter="$1"
+    itrr_address="$2"
+    itrr_register="$3"
+    itrr_mode="$4"
+    itrr_timeout="$5"
+    itrr_result_dir="$6"
+    itrr_expected="${7:-}"
+    itrr_mask="${8:-}"
+    I2C_TOOLS_LAST_READ=""
+
+    [ -n "$itrr_result_dir" ] || return 3
+    case "$itrr_mode" in
+        b|w)
+            ;;
+        *)
+            return 3
+            ;;
+    esac
+    case "$itrr_timeout" in
+        ''|*[!0-9]*|0)
+            return 3
+            ;;
+    esac
+    i2c_tools_value_in_range "$itrr_address" 3 119 || return 3
+    i2c_tools_value_in_range "$itrr_register" 0 255 || return 3
+    if [ -n "$itrr_expected" ]; then
+        if [ "$itrr_mode" = "w" ]; then
+            i2c_tools_value_in_range "$itrr_expected" 0 65535 || return 3
+        else
+            i2c_tools_value_in_range "$itrr_expected" 0 255 || return 3
+        fi
+    fi
+    if [ -n "$itrr_mask" ]; then
+        if [ "$itrr_mode" = "w" ]; then
+            i2c_tools_value_in_range "$itrr_mask" 0 65535 || return 3
+        else
+            i2c_tools_value_in_range "$itrr_mask" 0 255 || return 3
+        fi
+    fi
+    command -v i2cget >/dev/null 2>&1 || return 2
+    itrr_bus=$(i2c_tools_adapter_number "$itrr_adapter") || return $?
+    mkdir -p "$itrr_result_dir" || return 1
+    itrr_log="$itrr_result_dir/i2cget_${itrr_bus}_${itrr_address}_${itrr_register}_${itrr_mode}.log"
+
+    if ! run_with_timeout_log \
+        "$itrr_timeout" \
+        "$itrr_log" \
+        i2cget -y "$itrr_bus" "$itrr_address" "$itrr_register" "$itrr_mode"; then
+        log_file_with_label "I2C-READ" "$itrr_log"
+        log_fail "[I2C-READ] adapter=i2c-$itrr_bus address=$itrr_address register=$itrr_register mode=$itrr_mode expected=successful-read observed=command-failed-or-timeout artifact=$itrr_log"
+        return 1
+    fi
+
+    I2C_TOOLS_LAST_READ=$(awk '/^0x[0-9a-fA-F]+$/ { value=$0 } END { print value }' "$itrr_log")
+    i2c_tools_value_decimal "$I2C_TOOLS_LAST_READ" >/dev/null || {
+        log_file_with_label "I2C-READ" "$itrr_log"
+        log_fail "[I2C-READ] adapter=i2c-$itrr_bus address=$itrr_address register=$itrr_register expected=numeric-value observed=${I2C_TOOLS_LAST_READ:-missing} artifact=$itrr_log"
+        return 1
+    }
+
+    if [ -n "$itrr_expected" ]; then
+        itrr_actual_decimal=$(i2c_tools_value_decimal "$I2C_TOOLS_LAST_READ") || return 1
+        itrr_expected_decimal=$(i2c_tools_value_decimal "$itrr_expected") || return 3
+        if [ -n "$itrr_mask" ]; then
+            itrr_mask_decimal=$(i2c_tools_value_decimal "$itrr_mask") || return 3
+        elif [ "$itrr_mode" = "w" ]; then
+            itrr_mask_decimal=65535
+        else
+            itrr_mask_decimal=255
+        fi
+        if [ $((itrr_actual_decimal & itrr_mask_decimal)) -ne $((itrr_expected_decimal & itrr_mask_decimal)) ]; then
+            log_fail "[I2C-READ] adapter=i2c-$itrr_bus address=$itrr_address register=$itrr_register mask=$itrr_mask_decimal expected=$itrr_expected observed=$I2C_TOOLS_LAST_READ artifact=$itrr_log"
+            return 1
+        fi
+    fi
+
+    log_info "[I2C-READ] adapter=i2c-$itrr_bus address=$itrr_address register=$itrr_register mode=$itrr_mode value=$I2C_TOOLS_LAST_READ artifact=$itrr_log"
+    return 0
+}
+
+I2C_TOOLS_RESTORE_PENDING=0
+I2C_TOOLS_RESTORE_ADAPTER=""
+I2C_TOOLS_RESTORE_ADDRESS=""
+I2C_TOOLS_RESTORE_REGISTER=""
+I2C_TOOLS_RESTORE_VALUE=""
+I2C_TOOLS_RESTORE_MODE=""
+I2C_TOOLS_RESTORE_TIMEOUT=""
+I2C_TOOLS_RESTORE_RESULT_DIR=""
+
+# i2c_tools_restore_pending_write
+# Restores the original register value after an interrupted transactional write.
+i2c_tools_restore_pending_write() {
+    [ "$I2C_TOOLS_RESTORE_PENDING" -eq 1 ] || return 0
+    if ! i2c_tools_write_register_value \
+        "$I2C_TOOLS_RESTORE_ADAPTER" \
+        "$I2C_TOOLS_RESTORE_ADDRESS" \
+        "$I2C_TOOLS_RESTORE_REGISTER" \
+        "$I2C_TOOLS_RESTORE_VALUE" \
+        "$I2C_TOOLS_RESTORE_MODE" \
+        "$I2C_TOOLS_RESTORE_TIMEOUT" \
+        "$I2C_TOOLS_RESTORE_RESULT_DIR/i2cset_emergency_restore.log"; then
+        return 1
+    fi
+    if ! i2c_tools_read_register \
+        "$I2C_TOOLS_RESTORE_ADAPTER" \
+        "$I2C_TOOLS_RESTORE_ADDRESS" \
+        "$I2C_TOOLS_RESTORE_REGISTER" \
+        "$I2C_TOOLS_RESTORE_MODE" \
+        "$I2C_TOOLS_RESTORE_TIMEOUT" \
+        "$I2C_TOOLS_RESTORE_RESULT_DIR" \
+        "$I2C_TOOLS_RESTORE_VALUE"; then
+        return 1
+    fi
+    I2C_TOOLS_RESTORE_PENDING=0
+    return 0
+}
+
+# i2c_tools_write_register_value <adapter> <address> <register> <value> <b|w> <timeout> <log>
+# Writes one validated register value for transactional helper use.
+i2c_tools_write_register_value() {
+    itwrv_adapter="$1"
+    itwrv_address="$2"
+    itwrv_register="$3"
+    itwrv_value="$4"
+    itwrv_mode="$5"
+    itwrv_timeout="$6"
+    itwrv_log="$7"
+
+    case "$itwrv_mode" in
+        b|w)
+            ;;
+        *)
+            return 3
+            ;;
+    esac
+    case "$itwrv_timeout" in
+        ''|*[!0-9]*|0)
+            return 3
+            ;;
+    esac
+    i2c_tools_value_in_range "$itwrv_address" 3 119 || return 3
+    i2c_tools_value_in_range "$itwrv_register" 0 255 || return 3
+    if [ "$itwrv_mode" = "w" ]; then
+        i2c_tools_value_in_range "$itwrv_value" 0 65535 || return 3
+    else
+        i2c_tools_value_in_range "$itwrv_value" 0 255 || return 3
+    fi
+    command -v i2cset >/dev/null 2>&1 || return 2
+    itwrv_bus=$(i2c_tools_adapter_number "$itwrv_adapter") || return $?
+
+    run_with_timeout_log \
+        "$itwrv_timeout" \
+        "$itwrv_log" \
+        i2cset -y "$itwrv_bus" "$itwrv_address" "$itwrv_register" "$itwrv_value" "$itwrv_mode"
+}
+
+# i2c_tools_write_restore_register <adapter> <address> <register> <value> <b|w> <timeout> <result-dir>
+# Writes, reads back, restores, and verifies one explicitly selected register.
+i2c_tools_write_restore_register() {
+    itwrr_adapter="$1"
+    itwrr_address="$2"
+    itwrr_register="$3"
+    itwrr_value="$4"
+    itwrr_mode="$5"
+    itwrr_timeout="$6"
+    itwrr_result_dir="$7"
+
+    [ -n "$itwrr_result_dir" ] || return 3
+    command -v i2cget >/dev/null 2>&1 || return 2
+    command -v i2cset >/dev/null 2>&1 || return 2
+    mkdir -p "$itwrr_result_dir" || return 1
+
+    i2c_tools_read_register \
+        "$itwrr_adapter" "$itwrr_address" "$itwrr_register" \
+        "$itwrr_mode" "$itwrr_timeout" "$itwrr_result_dir"
+    itwrr_read_status=$?
+    [ "$itwrr_read_status" -eq 0 ] || return "$itwrr_read_status"
+    itwrr_original=$I2C_TOOLS_LAST_READ
+    itwrr_original_decimal=$(i2c_tools_value_decimal "$itwrr_original") || return 1
+    itwrr_requested_decimal=$(i2c_tools_value_decimal "$itwrr_value") || return 3
+    if [ "$itwrr_original_decimal" -eq "$itwrr_requested_decimal" ]; then
+        log_fail "[I2C-WRITE] address=$itwrr_address register=$itwrr_register expected=different-test-value observed=request-equals-original-$itwrr_original"
+        return 3
+    fi
+
+    I2C_TOOLS_RESTORE_PENDING=1
+    I2C_TOOLS_RESTORE_ADAPTER=$itwrr_adapter
+    I2C_TOOLS_RESTORE_ADDRESS=$itwrr_address
+    I2C_TOOLS_RESTORE_REGISTER=$itwrr_register
+    I2C_TOOLS_RESTORE_VALUE=$itwrr_original
+    I2C_TOOLS_RESTORE_MODE=$itwrr_mode
+    I2C_TOOLS_RESTORE_TIMEOUT=$itwrr_timeout
+    I2C_TOOLS_RESTORE_RESULT_DIR=$itwrr_result_dir
+
+    itwrr_write_log="$itwrr_result_dir/i2cset_test_write.log"
+    if ! i2c_tools_write_register_value \
+        "$itwrr_adapter" "$itwrr_address" "$itwrr_register" \
+        "$itwrr_value" "$itwrr_mode" "$itwrr_timeout" "$itwrr_write_log"; then
+        log_file_with_label "I2C-WRITE" "$itwrr_write_log"
+        if i2c_tools_restore_pending_write; then
+            log_info "[I2C-RESTORE] original value restored after test-write failure"
+        else
+            log_fail "[I2C-RESTORE] expected=$itwrr_original observed=emergency-restore-failed"
+        fi
+        return 1
+    fi
+
+    if ! i2c_tools_read_register \
+        "$itwrr_adapter" "$itwrr_address" "$itwrr_register" \
+        "$itwrr_mode" "$itwrr_timeout" "$itwrr_result_dir" \
+        "$itwrr_value"; then
+        if i2c_tools_restore_pending_write; then
+            log_info "[I2C-RESTORE] original value restored after read-back failure"
+        else
+            log_fail "[I2C-RESTORE] expected=$itwrr_original observed=emergency-restore-failed"
+        fi
+        return 1
+    fi
+
+    itwrr_restore_log="$itwrr_result_dir/i2cset_restore.log"
+    if ! i2c_tools_write_register_value \
+        "$itwrr_adapter" "$itwrr_address" "$itwrr_register" \
+        "$itwrr_original" "$itwrr_mode" "$itwrr_timeout" "$itwrr_restore_log"; then
+        log_file_with_label "I2C-RESTORE" "$itwrr_restore_log"
+        log_fail "[I2C-RESTORE] address=$itwrr_address register=$itwrr_register expected=$itwrr_original observed=restore-write-failed artifact=$itwrr_restore_log"
+        return 1
+    fi
+    if ! i2c_tools_read_register \
+        "$itwrr_adapter" "$itwrr_address" "$itwrr_register" \
+        "$itwrr_mode" "$itwrr_timeout" "$itwrr_result_dir" \
+        "$itwrr_original"; then
+        log_fail "[I2C-RESTORE] address=$itwrr_address register=$itwrr_register expected=$itwrr_original observed=restore-verification-failed"
+        return 1
+    fi
+
+    I2C_TOOLS_RESTORE_PENDING=0
+    log_info "[I2C-WRITE] adapter=$itwrr_adapter address=$itwrr_address register=$itwrr_register test_value=$itwrr_value original=$itwrr_original state=write-readback-restored"
+    return 0
+}
+
+###############################################################################
 # i2c_run_legacy_test <result-dir> <adapter> <timeout-seconds>
 # Runs the image-provided i2c-msm-test compatibility path and verifies both its
 # status and transfer markers. Returns 0 for success, 1 for a failed transfer,
