@@ -2,23 +2,15 @@
 
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause
-# Validate USB HID device detection
-# Requires at least one USB HID peripheral (keyboard/mouse, etc.) connected to a USB Host port.
 
-TESTNAME="usb_hid"
-
-# Robustly find and source init_env
+# ---------- Repo env + helpers ----------
 SCRIPT_DIR="$(
   cd "$(dirname "$0")" || exit 1
   pwd
 )"
-
-# Default result file (works even before functestlib is available)
-# shellcheck disable=SC2034
-RES_FILE="$SCRIPT_DIR/${TESTNAME}.res"
-
 INIT_ENV=""
 SEARCH="$SCRIPT_DIR"
+
 while [ "$SEARCH" != "/" ]; do
     if [ -f "$SEARCH/init_env" ]; then
         INIT_ENV="$SEARCH/init_env"
@@ -29,70 +21,56 @@ done
 
 if [ -z "$INIT_ENV" ]; then
     echo "[ERROR] Could not find init_env (starting at $SCRIPT_DIR)" >&2
-	echo "$TESTNAME SKIP" >"$RES_FILE" 2>/dev/null || true
-    exit 0
+    exit 1
 fi
 
-# Only source if not already loaded (idempotent)
+# Only source once (idempotent)
+# NOTE: We intentionally **do not export** any new vars. They stay local to this shell.
 if [ -z "${__INIT_ENV_LOADED:-}" ]; then
     # shellcheck disable=SC1090
     . "$INIT_ENV"
     __INIT_ENV_LOADED=1
 fi
-# Always source functestlib.sh, using $TOOLS exported by init_env
-# shellcheck disable=SC1090,SC1091
+
+# shellcheck disable=SC1090
+. "$INIT_ENV"
+# shellcheck disable=SC1091
 . "$TOOLS/functestlib.sh"
 
-# Resolve test path and cd (single SKIP/exit path)
-SKIP_REASON=""
-test_path=$(find_test_case_by_name "$TESTNAME")
-if [ -z "$test_path" ] || [ ! -d "$test_path" ]; then
-  SKIP_REASON="$TESTNAME SKIP - test path not found"
-elif ! cd "$test_path"; then
-  SKIP_REASON="$TESTNAME SKIP - cannot cd into $test_path"
-else
-  RES_FILE="$test_path/${TESTNAME}.res"
+TESTNAME="usb_hid"
+RES_FILE="$SCRIPT_DIR/$TESTNAME.res"
+RESULT_DIR="$SCRIPT_DIR/results/$TESTNAME"
+
+test_result_init "$TESTNAME" "$RES_FILE" || exit 1
+
+if ! mkdir -p "$RESULT_DIR"; then
+    test_result_finish "FAIL" "$TESTNAME FAIL: cannot create result directory $RESULT_DIR"
 fi
 
-if [ -n "$SKIP_REASON" ]; then
-  log_skip "$SKIP_REASON"
-  echo "$TESTNAME SKIP" >"$RES_FILE" 2>/dev/null || true
-  exit 0
+log_info "--------------------------------------------------------------------------"
+log_info "Starting $TESTNAME Testcase"
+
+if ! CHECK_DEPS_RECOVER=0 CHECK_DEPS_NO_EXIT=1 check_dependencies \
+    basename cat dirname mkdir readlink tr; then
+    test_result_finish "SKIP" "$TESTNAME SKIP: required base utilities are unavailable"
 fi
 
-log_info "-----------------------------------------------------------------------------------------"
-log_info "-------------------Starting $TESTNAME Testcase----------------------------"
-log_info "=== Test Initialization ==="
+usb_validate_hid_runtime "$RESULT_DIR"
+usb_hid_status=$?
 
-# Check if grep is installed, else skip test
-deps_list="grep sed sort wc"
-if ! check_dependencies "$deps_list"; then
-  log_skip "$TESTNAME SKIP - missing dependencies: $deps_list"
-  echo "$TESTNAME SKIP" >"$RES_FILE"
-  exit 0
-fi
+case "$usb_hid_status" in
+    0)
+        test_result_record "PASS" "All $USB_HID_INTERFACE_COUNT USB HID interface(s) are driver-bound"
+        ;;
+    1)
+        test_result_record "FAIL" "$USB_HID_UNBOUND_COUNT of $USB_HID_INTERFACE_COUNT USB HID interface(s) have no bound kernel driver"
+        ;;
+    2)
+        test_result_finish "SKIP" "$TESTNAME SKIP: no USB HID peripheral is connected"
+        ;;
+    *)
+        test_result_finish "FAIL" "$TESTNAME FAIL: USB HID runtime validation could not complete"
+        ;;
+esac
 
-# Count uniques devices with bInterfaceClass = 03 (HID) under /sys/bus/usb/devices
-hid_device_count=0
-log_info "=== USB HID device Detection ==="
-hid_device_count=$(
-  for f in /sys/bus/usb/devices/*/bInterfaceClass; do
-    [ -r "$f" ] || continue
-    if grep -qx '03' "$f"; then
-      d=${f%/bInterfaceClass}
-      echo "${d##*/}"
-    fi
-  done 2>/dev/null | sed 's/:.*$//' | sort -u | wc -l | tr -d '[:space:]'
-  )
-
-log_info "Number of HID devices found: $hid_device_count"
-
-if [ "$hid_device_count" -gt 0 ]; then
-    log_pass "$TESTNAME : Test Passed - USB HID device(s) detected"
-    echo "$TESTNAME PASS" > "$RES_FILE"
-    exit 0
-else
-    log_fail "$TESTNAME : Test Failed - No USB 'Human Interface Device' found"
-    echo "$TESTNAME FAIL" > "$RES_FILE"
-    exit 0
-fi
+test_result_finish

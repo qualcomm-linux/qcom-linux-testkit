@@ -295,6 +295,8 @@ check_dependencies() {
     # Support both:
     # check_dependencies date awk sed
     # check_dependencies "$deps" where deps="date awk sed"
+    # Set CHECK_DEPS_RECOVER=0 for image-validation suites that must never
+    # install packages while running on the target.
     if [ "$#" -eq 1 ]; then
         # Split the single string into args
         # shellcheck disable=SC2086
@@ -316,7 +318,8 @@ check_dependencies() {
             continue
         fi
  
-        if command -v pkg_check_dependencies_recover_enabled >/dev/null 2>&1; then
+        if [ "${CHECK_DEPS_RECOVER:-1}" = "1" ] &&
+           command -v pkg_check_dependencies_recover_enabled >/dev/null 2>&1; then
             if pkg_check_dependencies_recover_enabled; then
                 if pkg_ensure_command "$cmd"; then
                     if command -v "$cmd" >/dev/null 2>&1; then
@@ -3613,6 +3616,8 @@ dt_build_runtime_indexes() {
         -name '#clock-cells' -o \
         -name '#reset-cells' -o \
         -name regulator-name -o \
+        -name '#power-domain-cells' -o \
+        -name '#cooling-cells' -o \
         -name '#mbox-cells' -o \
         -name '#interconnect-cells' \
     \) 2>/dev/null |
@@ -3670,6 +3675,7 @@ dt_hw_capability_parse_args() {
                 return 3
                 ;;
         esac
+        shift
     done
     DTRHC_AREAS=$(printf '%s' "$DTRHC_AREAS" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
     [ -n "$DTRHC_AREAS" ] || return 3
@@ -3838,6 +3844,51 @@ platform_device_driver_name() {
     pddn_driver_path=$(readlink -f "$pddn_device_dir/driver" 2>/dev/null || true)
     [ -n "$pddn_driver_path" ] || return 1
     basename "$pddn_driver_path"
+}
+
+# kernel_modules_for_modalias <modalias>
+# Prints kernel module candidates resolved from the running image's alias
+# database. Returns 0 when candidates are found, 1 when no alias matches, 2
+# when alias resolution is unavailable, and 3 for an empty modalias.
+kernel_modules_for_modalias() {
+    kmfm_modalias="$1"
+    [ -n "$kmfm_modalias" ] || return 3
+    command -v modprobe >/dev/null 2>&1 || return 2
+
+    kmfm_modules=$(modprobe -R "$kmfm_modalias" 2>/dev/null | awk 'NF && !seen[$0]++')
+    [ -n "$kmfm_modules" ] || return 1
+    printf '%s\n' "$kmfm_modules"
+}
+
+# kernel_module_runtime_origin <module-name>
+# Prints builtin, loaded, or the module file reported by the running image.
+# Returns 1 when the optional runtime metadata is unavailable.
+kernel_module_runtime_origin() {
+    kmro_module="$1"
+    [ -n "$kmro_module" ] || return 3
+
+    if command -v modinfo >/dev/null 2>&1; then
+        kmro_filename=$(modinfo -F filename "$kmro_module" 2>/dev/null || true)
+        case "$kmro_filename" in
+            '(builtin)')
+                printf '%s\n' "builtin"
+                return 0
+                ;;
+            '')
+                ;;
+            *)
+                printf '%s\n' "module:$kmro_filename"
+                return 0
+                ;;
+        esac
+    fi
+
+    if is_module_loaded "$kmro_module"; then
+        printf '%s\n' "loaded"
+        return 0
+    fi
+
+    return 1
 }
 
 # interconnect_debugfs_dir
@@ -4186,6 +4237,927 @@ dt_validate_usb_host_runtime() {
 }
 
 ###############################################################################
+# i2c_collect_runtime_inventory <result-dir>
+# Correlates enabled Qualcomm I2C controllers with runtime adapters and clients.
+# Returns 0 for healthy applicable hardware, 1 for inconsistent runtime state,
+# 2 when I2C is not exposed, and 3 for invalid arguments.
+###############################################################################
+i2c_collect_runtime_inventory() {
+    icri_result_dir="$1"
+    I2C_RUNTIME_CONTROLLER_COUNT=0
+    I2C_RUNTIME_ADAPTER_COUNT=0
+    I2C_RUNTIME_CLIENT_COUNT=0
+    I2C_RUNTIME_BOUND_CLIENT_COUNT=0
+    I2C_RUNTIME_WAITING_CLIENT_COUNT=0
+    I2C_RUNTIME_REGISTERED_DRIVER_COUNT=0
+    I2C_RUNTIME_FAILURE_REASON=""
+    icri_controller_unbound=0
+    icri_declared_client_unbound=0
+    icri_seen_adapters=""
+    icri_unbound_clients=""
+    icri_waiting_clients=""
+
+    [ -n "$icri_result_dir" ] || return 3
+    mkdir -p "$icri_result_dir" || return 1
+    : >"$icri_result_dir/i2c_controllers.tsv"
+    : >"$icri_result_dir/i2c_adapters.tsv"
+    : >"$icri_result_dir/i2c_clients.tsv"
+    : >"$icri_result_dir/i2c_registered_drivers.log"
+
+    for icri_driver_path in /sys/bus/i2c/drivers/*; do
+        [ -d "$icri_driver_path" ] || continue
+        I2C_RUNTIME_REGISTERED_DRIVER_COUNT=$((I2C_RUNTIME_REGISTERED_DRIVER_COUNT + 1))
+        basename "$icri_driver_path" >>"$icri_result_dir/i2c_registered_drivers.log"
+    done
+    log_info "I2C driver registry: registered=$I2C_RUNTIME_REGISTERED_DRIVER_COUNT artifact=$icri_result_dir/i2c_registered_drivers.log"
+
+    log_info "I2C validation: correlating enabled Qualcomm controllers, adapters, clients, and bound drivers"
+
+    if dt_runtime_root >/dev/null 2>&1; then
+        if dt_list_compatible_nodes \
+            'qcom,(geni-i2c|i2c-geni)' \
+            regex >"$icri_result_dir/i2c_controller_nodes.log"; then
+            while IFS= read -r icri_node; do
+                [ -n "$icri_node" ] || continue
+                I2C_RUNTIME_CONTROLLER_COUNT=$((I2C_RUNTIME_CONTROLLER_COUNT + 1))
+                icri_compatible=$(dt_property_text "$icri_node" compatible 2>/dev/null || true)
+                icri_device=""
+                icri_driver=""
+
+                if icri_device=$(find_platform_device_for_dt_node "$icri_node" 2>/dev/null); then
+                    icri_driver=$(platform_device_driver_name "$icri_device" 2>/dev/null || true)
+                fi
+
+                printf '%s\tcompatible=%s\tdevice=%s\tdriver=%s\n' \
+                    "$icri_node" \
+                    "${icri_compatible:-unknown}" \
+                    "${icri_device##*/}" \
+                    "${icri_driver:-unbound}" >>"$icri_result_dir/i2c_controllers.tsv"
+                log_info "[I2C-CONTROLLER] node=$icri_node device=${icri_device##*/} driver=${icri_driver:-unbound}"
+
+                if [ -z "$icri_device" ] || [ -z "$icri_driver" ]; then
+                    icri_controller_unbound=$((icri_controller_unbound + 1))
+                fi
+            done <"$icri_result_dir/i2c_controller_nodes.log"
+        fi
+    fi
+
+    for icri_adapter in \
+        /sys/class/i2c-adapter/i2c-* \
+        /sys/bus/i2c/devices/i2c-*; do
+        [ -d "$icri_adapter" ] || continue
+        icri_adapter_id=${icri_adapter##*/}
+        case " $icri_seen_adapters " in
+            *" $icri_adapter_id "*)
+                continue
+                ;;
+        esac
+        icri_seen_adapters="$icri_seen_adapters $icri_adapter_id"
+        I2C_RUNTIME_ADAPTER_COUNT=$((I2C_RUNTIME_ADAPTER_COUNT + 1))
+        icri_adapter_name=$(cat "$icri_adapter/name" 2>/dev/null || true)
+        icri_adapter_path=$(readlink -f "$icri_adapter/device" 2>/dev/null || true)
+        icri_adapter_driver=$(platform_device_driver_name "$icri_adapter/device" 2>/dev/null || true)
+        icri_devnode="absent"
+        [ -c "/dev/$icri_adapter_id" ] && icri_devnode="present"
+
+        printf '%s\tname=%s\tdriver=%s\tdevnode=%s\tpath=%s\n' \
+            "$icri_adapter_id" \
+            "${icri_adapter_name:-unknown}" \
+            "${icri_adapter_driver:-framework-or-unexposed}" \
+            "$icri_devnode" \
+            "${icri_adapter_path:-unknown}" >>"$icri_result_dir/i2c_adapters.tsv"
+        log_info "[I2C-ADAPTER] adapter=$icri_adapter_id name=${icri_adapter_name:-unknown} driver=${icri_adapter_driver:-framework-or-unexposed} devnode=$icri_devnode"
+    done
+
+    for icri_client in /sys/bus/i2c/devices/[0-9]*-[0-9a-fA-F]*; do
+        [ -d "$icri_client" ] || continue
+        I2C_RUNTIME_CLIENT_COUNT=$((I2C_RUNTIME_CLIENT_COUNT + 1))
+        icri_client_name=$(cat "$icri_client/name" 2>/dev/null || true)
+        icri_client_driver=$(platform_device_driver_name "$icri_client" 2>/dev/null || true)
+        icri_client_of_node=$(readlink -f "$icri_client/of_node" 2>/dev/null || true)
+        icri_client_modalias=$(cat "$icri_client/modalias" 2>/dev/null || true)
+        icri_client_waiting=$(cat "$icri_client/waiting_for_supplier" 2>/dev/null || true)
+        icri_client_modules=""
+        icri_client_module_state=""
+        icri_client_dt_status=""
+        icri_client_dt_children=0
+        icri_client_resources=""
+        icri_client_channels=0
+        if [ -n "$icri_client_modalias" ] &&
+           icri_client_module_lines=$(kernel_modules_for_modalias "$icri_client_modalias" 2>/dev/null); then
+            icri_client_modules=$(printf '%s\n' "$icri_client_module_lines" | tr '\n' ',' | sed 's/,$//')
+            for icri_client_module in $icri_client_module_lines; do
+                icri_client_origin=$(kernel_module_runtime_origin "$icri_client_module" 2>/dev/null || true)
+                [ -n "$icri_client_origin" ] || icri_client_origin="alias-resolved"
+                if [ -n "$icri_client_module_state" ]; then
+                    icri_client_module_state="$icri_client_module_state,$icri_client_module=$icri_client_origin"
+                else
+                    icri_client_module_state="$icri_client_module=$icri_client_origin"
+                fi
+            done
+        fi
+        if [ -n "$icri_client_of_node" ]; then
+            icri_client_dt_status=$(dt_property_text "$icri_client_of_node" status 2>/dev/null || true)
+            [ -n "$icri_client_dt_status" ] || icri_client_dt_status="okay-default"
+            icri_client_dt_children=$(
+                find "$icri_client_of_node" -mindepth 1 -maxdepth 1 -type d 2>/dev/null |
+                    wc -l |
+                    tr -d '[:space:]'
+            )
+            for icri_client_property in \
+                vdd-supply reset-gpios resets clocks power-domains; do
+                [ -e "$icri_client_of_node/$icri_client_property" ] || continue
+                if [ -n "$icri_client_resources" ]; then
+                    icri_client_resources="$icri_client_resources,$icri_client_property"
+                else
+                    icri_client_resources="$icri_client_property"
+                fi
+            done
+        fi
+        [ -n "$icri_client_resources" ] || icri_client_resources="none-exposed"
+        for icri_client_channel in "$icri_client"/channel-*; do
+            [ -L "$icri_client_channel" ] || continue
+            icri_client_channels=$((icri_client_channels + 1))
+        done
+
+        if [ -n "$icri_client_driver" ]; then
+            I2C_RUNTIME_BOUND_CLIENT_COUNT=$((I2C_RUNTIME_BOUND_CLIENT_COUNT + 1))
+        elif [ -n "$icri_client_of_node" ]; then
+            icri_declared_client_unbound=$((icri_declared_client_unbound + 1))
+            icri_unbound_clients="$icri_unbound_clients ${icri_client##*/}(${icri_client_name:-unknown})"
+            case "$icri_client_waiting" in
+                1|Y|y|yes|true)
+                    I2C_RUNTIME_WAITING_CLIENT_COUNT=$((I2C_RUNTIME_WAITING_CLIENT_COUNT + 1))
+                    icri_waiting_clients="$icri_waiting_clients ${icri_client##*/}(${icri_client_name:-unknown})"
+                    ;;
+            esac
+            log_warn "[I2C-UNBOUND] client=${icri_client##*/} name=${icri_client_name:-unknown} dt_status=$icri_client_dt_status waiting_for_supplier=${icri_client_waiting:-unexposed} module_state=${icri_client_module_state:-unresolved} dt_children=$icri_client_dt_children runtime_channels=$icri_client_channels resources=$icri_client_resources"
+        fi
+
+        printf '%s\tname=%s\tdriver=%s\tmodalias=%s\tmodule_candidates=%s\tmodule_state=%s\twaiting_for_supplier=%s\tdt_status=%s\tdt_children=%s\truntime_channels=%s\tresources=%s\tof_node=%s\n' \
+            "${icri_client##*/}" \
+            "${icri_client_name:-unknown}" \
+            "${icri_client_driver:-unbound}" \
+            "${icri_client_modalias:-unexposed}" \
+            "${icri_client_modules:-unresolved}" \
+            "${icri_client_module_state:-unresolved}" \
+            "${icri_client_waiting:-unexposed}" \
+            "${icri_client_dt_status:-unknown}" \
+            "$icri_client_dt_children" \
+            "$icri_client_channels" \
+            "$icri_client_resources" \
+            "${icri_client_of_node:-none}" >>"$icri_result_dir/i2c_clients.tsv"
+        log_info "[I2C-CLIENT] client=${icri_client##*/} name=${icri_client_name:-unknown} driver=${icri_client_driver:-unbound} modalias=${icri_client_modalias:-unexposed} module_candidates=${icri_client_modules:-unresolved} waiting_for_supplier=${icri_client_waiting:-unexposed} of_node=${icri_client_of_node:-none}"
+    done
+
+    log_info "I2C runtime summary: controllers=$I2C_RUNTIME_CONTROLLER_COUNT adapters=$I2C_RUNTIME_ADAPTER_COUNT clients=$I2C_RUNTIME_CLIENT_COUNT bound_clients=$I2C_RUNTIME_BOUND_CLIENT_COUNT waiting_for_supplier=$I2C_RUNTIME_WAITING_CLIENT_COUNT artifact=$icri_result_dir/i2c_adapters.tsv"
+
+    if [ "$I2C_RUNTIME_CONTROLLER_COUNT" -eq 0 ] &&
+       [ "$I2C_RUNTIME_ADAPTER_COUNT" -eq 0 ]; then
+        return 2
+    fi
+
+    if [ "$I2C_RUNTIME_CONTROLLER_COUNT" -gt 0 ] &&
+       [ "$I2C_RUNTIME_ADAPTER_COUNT" -eq 0 ]; then
+        I2C_RUNTIME_FAILURE_REASON="enabled Qualcomm I2C controllers expose no runtime adapters"
+    elif [ "$icri_controller_unbound" -gt 0 ]; then
+        I2C_RUNTIME_FAILURE_REASON="$icri_controller_unbound enabled Qualcomm I2C controller(s) have no bound platform driver"
+    elif [ "$I2C_RUNTIME_WAITING_CLIENT_COUNT" -gt 0 ]; then
+        I2C_RUNTIME_FAILURE_REASON="$I2C_RUNTIME_WAITING_CLIENT_COUNT DT-declared I2C client(s) are waiting for unresolved suppliers:${icri_waiting_clients}"
+    elif [ "$icri_declared_client_unbound" -gt 0 ]; then
+        I2C_RUNTIME_FAILURE_REASON="$icri_declared_client_unbound DT-declared I2C client(s) are unbound:${icri_unbound_clients}"
+    fi
+
+    [ -z "$I2C_RUNTIME_FAILURE_REASON" ] || return 1
+    return 0
+}
+
+###############################################################################
+# i2c_run_legacy_test <result-dir> <adapter> <timeout-seconds>
+# Runs the image-provided i2c-msm-test compatibility path and verifies both its
+# status and transfer markers. Returns 0 for success, 1 for a failed transfer,
+# 2 when the tool is absent, 3 for invalid arguments, and 4 without an adapter.
+###############################################################################
+i2c_run_legacy_test() {
+    irlt_result_dir="$1"
+    irlt_requested_adapter="$2"
+    irlt_timeout="$3"
+    I2C_LEGACY_SELECTED_ADAPTER=""
+
+    [ -n "$irlt_result_dir" ] && [ -n "$irlt_requested_adapter" ] || return 3
+    case "$irlt_timeout" in
+        ''|*[!0-9]*|0)
+            return 3
+            ;;
+    esac
+
+    command -v i2c-msm-test >/dev/null 2>&1 || return 2
+
+    case "$irlt_requested_adapter" in
+        auto)
+            for irlt_devnode in /dev/i2c-*; do
+                [ -c "$irlt_devnode" ] || continue
+                I2C_LEGACY_SELECTED_ADAPTER="$irlt_devnode"
+                break
+            done
+            ;;
+        /dev/i2c-*)
+            I2C_LEGACY_SELECTED_ADAPTER="$irlt_requested_adapter"
+            ;;
+        *)
+            I2C_LEGACY_SELECTED_ADAPTER="/dev/i2c-$irlt_requested_adapter"
+            ;;
+    esac
+
+    [ -n "$I2C_LEGACY_SELECTED_ADAPTER" ] &&
+        [ -c "$I2C_LEGACY_SELECTED_ADAPTER" ] || return 4
+
+    log_info "I2C functional target: adapter=$I2C_LEGACY_SELECTED_ADAPTER command=i2c-msm-test timeout=${irlt_timeout}s"
+    if ! run_with_timeout_log \
+        "$irlt_timeout" \
+        "$irlt_result_dir/i2c_msm_test.log" \
+        i2c-msm-test -v -D "$I2C_LEGACY_SELECTED_ADAPTER" -l; then
+        log_file_with_label "I2C-LEGACY" "$irlt_result_dir/i2c_msm_test.log"
+        return 1
+    fi
+
+    if ! grep -q 'Reading' "$irlt_result_dir/i2c_msm_test.log" ||
+       ! grep -q 'ret:1' "$irlt_result_dir/i2c_msm_test.log"; then
+        log_file_with_label "I2C-LEGACY" "$irlt_result_dir/i2c_msm_test.log"
+        return 1
+    fi
+
+    return 0
+}
+
+###############################################################################
+# pcie_collect_runtime_health <result-dir>
+# Captures PCI device link, MSI, driver, and runtime-power evidence without
+# changing link or power state. Returns 0 when inventory is readable, 1 when
+# malformed, 2 when PCI is absent, and 3 for invalid arguments.
+###############################################################################
+pcie_collect_runtime_health() {
+    pcrh_result_dir="$1"
+    PCIE_RUNTIME_DEVICE_COUNT=0
+    PCIE_RUNTIME_LINK_COUNT=0
+    PCIE_RUNTIME_MSI_DEVICE_COUNT=0
+    PCIE_RUNTIME_POWER_COUNT=0
+    PCIE_RUNTIME_INACTIVE_PORT_COUNT=0
+    PCIE_RUNTIME_FAILURE_REASON=""
+    pcrh_invalid_link_count=0
+
+    [ -n "$pcrh_result_dir" ] || return 3
+    mkdir -p "$pcrh_result_dir" || return 1
+    : >"$pcrh_result_dir/pcie_runtime.tsv"
+
+    log_info "PCIe runtime validation: collecting driver, link, MSI, and runtime-power evidence"
+
+    for pcrh_device in /sys/bus/pci/devices/*; do
+        [ -d "$pcrh_device" ] || continue
+        PCIE_RUNTIME_DEVICE_COUNT=$((PCIE_RUNTIME_DEVICE_COUNT + 1))
+        pcrh_vendor=$(cat "$pcrh_device/vendor" 2>/dev/null || true)
+        pcrh_device_id=$(cat "$pcrh_device/device" 2>/dev/null || true)
+        pcrh_class=$(cat "$pcrh_device/class" 2>/dev/null || true)
+        pcrh_driver=$(platform_device_driver_name "$pcrh_device" 2>/dev/null || true)
+        pcrh_current_speed=$(cat "$pcrh_device/current_link_speed" 2>/dev/null || true)
+        pcrh_max_speed=$(cat "$pcrh_device/max_link_speed" 2>/dev/null || true)
+        pcrh_current_width=$(cat "$pcrh_device/current_link_width" 2>/dev/null || true)
+        pcrh_max_width=$(cat "$pcrh_device/max_link_width" 2>/dev/null || true)
+        pcrh_runtime_status=$(cat "$pcrh_device/power/runtime_status" 2>/dev/null || true)
+        pcrh_msi_count=0
+        pcrh_link_state="unexposed"
+
+        if [ -d "$pcrh_device/msi_irqs" ]; then
+            pcrh_msi_count=$(find "$pcrh_device/msi_irqs" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l | tr -d '[:space:]')
+        fi
+        case "$pcrh_msi_count" in
+            ''|*[!0-9]*)
+                pcrh_msi_count=0
+                ;;
+        esac
+        if [ "$pcrh_msi_count" -gt 0 ]; then
+            PCIE_RUNTIME_MSI_DEVICE_COUNT=$((PCIE_RUNTIME_MSI_DEVICE_COUNT + 1))
+        fi
+
+        if [ -n "$pcrh_current_speed" ] || [ -n "$pcrh_current_width" ]; then
+            PCIE_RUNTIME_LINK_COUNT=$((PCIE_RUNTIME_LINK_COUNT + 1))
+            pcrh_link_state="up"
+            case "$pcrh_current_width" in
+                0|0x|0X)
+                    case "$pcrh_class" in
+                        0x0604*|0604*)
+                            pcrh_link_state="inactive-bridge-port"
+                            PCIE_RUNTIME_INACTIVE_PORT_COUNT=$((PCIE_RUNTIME_INACTIVE_PORT_COUNT + 1))
+                            ;;
+                        *)
+                            pcrh_link_state="invalid-zero-width"
+                            pcrh_invalid_link_count=$((pcrh_invalid_link_count + 1))
+                            ;;
+                    esac
+                    ;;
+            esac
+        fi
+        [ -n "$pcrh_runtime_status" ] && PCIE_RUNTIME_POWER_COUNT=$((PCIE_RUNTIME_POWER_COUNT + 1))
+
+        printf '%s\tvendor=%s\tdevice=%s\tclass=%s\tdriver=%s\tcurrent_speed=%s\tmax_speed=%s\tcurrent_width=%s\tmax_width=%s\tlink_state=%s\tmsi_irqs=%s\truntime_status=%s\n' \
+            "${pcrh_device##*/}" \
+            "${pcrh_vendor:-unknown}" \
+            "${pcrh_device_id:-unknown}" \
+            "${pcrh_class:-unknown}" \
+            "${pcrh_driver:-unbound}" \
+            "${pcrh_current_speed:-unexposed}" \
+            "${pcrh_max_speed:-unexposed}" \
+            "${pcrh_current_width:-unexposed}" \
+            "${pcrh_max_width:-unexposed}" \
+            "$pcrh_link_state" \
+            "$pcrh_msi_count" \
+            "${pcrh_runtime_status:-unexposed}" >>"$pcrh_result_dir/pcie_runtime.tsv"
+        log_info "[PCIE] bdf=${pcrh_device##*/} id=${pcrh_vendor:-unknown}:${pcrh_device_id:-unknown} class=${pcrh_class:-unknown} driver=${pcrh_driver:-unbound} link=${pcrh_current_speed:-unexposed}/x${pcrh_current_width:-unexposed} link_state=$pcrh_link_state max=${pcrh_max_speed:-unexposed}/x${pcrh_max_width:-unexposed} msi_irqs=$pcrh_msi_count runtime_status=${pcrh_runtime_status:-unexposed}"
+    done
+
+    if [ "$PCIE_RUNTIME_DEVICE_COUNT" -eq 0 ]; then
+        return 2
+    fi
+
+    if [ "$pcrh_invalid_link_count" -gt 0 ]; then
+        # Exported result for suite orchestration after this helper returns.
+        # shellcheck disable=SC2034
+        PCIE_RUNTIME_FAILURE_REASON="$pcrh_invalid_link_count non-bridge PCIe device(s) report zero negotiated link width"
+        return 1
+    fi
+
+    log_info "PCIe runtime summary: devices=$PCIE_RUNTIME_DEVICE_COUNT links=$PCIE_RUNTIME_LINK_COUNT inactive_bridge_ports=$PCIE_RUNTIME_INACTIVE_PORT_COUNT msi_devices=$PCIE_RUNTIME_MSI_DEVICE_COUNT power_nodes=$PCIE_RUNTIME_POWER_COUNT artifact=$pcrh_result_dir/pcie_runtime.tsv"
+    return 0
+}
+
+###############################################################################
+# usb_collect_host_inventory <result-dir>
+# Captures USB root hubs, connected devices, interfaces, speeds, drivers, and
+# runtime-power state. Returns 0 for host runtime, 1 for malformed host state,
+# 2 when host mode is inactive, and 3 for invalid arguments.
+###############################################################################
+usb_collect_host_inventory() {
+    uchi_result_dir="$1"
+    USB_RUNTIME_ROOT_HUB_COUNT=0
+    USB_RUNTIME_DEVICE_COUNT=0
+    USB_RUNTIME_INTERFACE_COUNT=0
+    USB_RUNTIME_BOUND_INTERFACE_COUNT=0
+    USB_RUNTIME_FAILURE_REASON=""
+
+    [ -n "$uchi_result_dir" ] || return 3
+    mkdir -p "$uchi_result_dir" || return 1
+    : >"$uchi_result_dir/usb_host_runtime.tsv"
+
+    log_info "USB host validation: collecting root-hub, device, interface, speed, driver, and runtime-power evidence"
+
+    for uchi_hub in /sys/bus/usb/devices/usb*; do
+        [ -d "$uchi_hub" ] || continue
+        USB_RUNTIME_ROOT_HUB_COUNT=$((USB_RUNTIME_ROOT_HUB_COUNT + 1))
+        uchi_speed=$(cat "$uchi_hub/speed" 2>/dev/null || true)
+        uchi_runtime=$(cat "$uchi_hub/power/runtime_status" 2>/dev/null || true)
+        uchi_path=$(readlink -f "$uchi_hub" 2>/dev/null || true)
+        printf 'root-hub\t%s\tspeed=%s\truntime_status=%s\tpath=%s\n' \
+            "${uchi_hub##*/}" \
+            "${uchi_speed:-unknown}" \
+            "${uchi_runtime:-unexposed}" \
+            "${uchi_path:-unknown}" >>"$uchi_result_dir/usb_host_runtime.tsv"
+        log_info "[USB-ROOT] hub=${uchi_hub##*/} speed=${uchi_speed:-unknown} runtime_status=${uchi_runtime:-unexposed} path=${uchi_path:-unknown}"
+    done
+
+    if [ "$USB_RUNTIME_ROOT_HUB_COUNT" -eq 0 ]; then
+        for uchi_role in /sys/class/usb_role/*/role /sys/class/typec/*/data_role; do
+            [ -r "$uchi_role" ] || continue
+            uchi_role_value=$(tr -d '[:space:]' <"$uchi_role" 2>/dev/null)
+            [ -n "$uchi_role_value" ] || continue
+            log_info "USB host mode is inactive: role_node=$uchi_role role=$uchi_role_value"
+            return 2
+        done
+        # Exported result for suite orchestration after this helper returns.
+        # shellcheck disable=SC2034
+        USB_RUNTIME_FAILURE_REASON="no USB root hubs are exposed and no inactive device role could be confirmed"
+        return 1
+    fi
+
+    for uchi_device in /sys/bus/usb/devices/*-*; do
+        [ -d "$uchi_device" ] || continue
+        case "${uchi_device##*/}" in
+            *:*)
+                continue
+                ;;
+        esac
+        [ -r "$uchi_device/idVendor" ] || continue
+
+        USB_RUNTIME_DEVICE_COUNT=$((USB_RUNTIME_DEVICE_COUNT + 1))
+        uchi_vendor=$(cat "$uchi_device/idVendor" 2>/dev/null || true)
+        uchi_product_id=$(cat "$uchi_device/idProduct" 2>/dev/null || true)
+        uchi_product=$(tr -d '\000' <"$uchi_device/product" 2>/dev/null || true)
+        uchi_speed=$(cat "$uchi_device/speed" 2>/dev/null || true)
+        uchi_runtime=$(cat "$uchi_device/power/runtime_status" 2>/dev/null || true)
+        log_info "[USB-DEVICE] device=${uchi_device##*/} id=${uchi_vendor:-unknown}:${uchi_product_id:-unknown} product=${uchi_product:-unknown} speed_mbps=${uchi_speed:-unknown} runtime_status=${uchi_runtime:-unexposed}"
+
+        for uchi_interface in "$uchi_device":*; do
+            [ -d "$uchi_interface" ] || continue
+            [ -r "$uchi_interface/bInterfaceClass" ] || continue
+            USB_RUNTIME_INTERFACE_COUNT=$((USB_RUNTIME_INTERFACE_COUNT + 1))
+            uchi_class=$(cat "$uchi_interface/bInterfaceClass" 2>/dev/null || true)
+            uchi_driver=$(platform_device_driver_name "$uchi_interface" 2>/dev/null || true)
+            [ -n "$uchi_driver" ] && USB_RUNTIME_BOUND_INTERFACE_COUNT=$((USB_RUNTIME_BOUND_INTERFACE_COUNT + 1))
+            printf 'interface\t%s\tclass=%s\tdriver=%s\tparent=%s\n' \
+                "${uchi_interface##*/}" \
+                "${uchi_class:-unknown}" \
+                "${uchi_driver:-unbound}" \
+                "${uchi_device##*/}" >>"$uchi_result_dir/usb_host_runtime.tsv"
+            log_info "[USB-INTERFACE] interface=${uchi_interface##*/} class=${uchi_class:-unknown} driver=${uchi_driver:-unbound}"
+        done
+    done
+
+    log_info "USB host summary: root_hubs=$USB_RUNTIME_ROOT_HUB_COUNT devices=$USB_RUNTIME_DEVICE_COUNT interfaces=$USB_RUNTIME_INTERFACE_COUNT bound_interfaces=$USB_RUNTIME_BOUND_INTERFACE_COUNT artifact=$uchi_result_dir/usb_host_runtime.tsv"
+    return 0
+}
+
+###############################################################################
+# usb_validate_hid_runtime <result-dir>
+# Validates binding for connected USB HID class interfaces. Returns 0 when all
+# discovered interfaces are bound, 1 when any is unbound, 2 when absent, and 3
+# for invalid arguments.
+###############################################################################
+usb_validate_hid_runtime() {
+    uvhr_result_dir="$1"
+    USB_HID_INTERFACE_COUNT=0
+    USB_HID_BOUND_COUNT=0
+    USB_HID_UNBOUND_COUNT=0
+
+    [ -n "$uvhr_result_dir" ] || return 3
+    mkdir -p "$uvhr_result_dir" || return 1
+    : >"$uvhr_result_dir/usb_hid_runtime.tsv"
+
+    log_info "USB HID validation: checking class interfaces and kernel-driver binding"
+
+    for uvhr_class_file in /sys/bus/usb/devices/*:*/bInterfaceClass; do
+        [ -r "$uvhr_class_file" ] || continue
+        [ "$(cat "$uvhr_class_file" 2>/dev/null)" = "03" ] || continue
+
+        uvhr_interface=$(dirname "$uvhr_class_file")
+        uvhr_interface_name=${uvhr_interface##*/}
+        uvhr_device_name=${uvhr_interface_name%%:*}
+        uvhr_device="/sys/bus/usb/devices/$uvhr_device_name"
+        uvhr_driver=$(platform_device_driver_name "$uvhr_interface" 2>/dev/null || true)
+        uvhr_vendor=$(cat "$uvhr_device/idVendor" 2>/dev/null || true)
+        uvhr_product_id=$(cat "$uvhr_device/idProduct" 2>/dev/null || true)
+        uvhr_product=$(tr -d '\000' <"$uvhr_device/product" 2>/dev/null || true)
+        USB_HID_INTERFACE_COUNT=$((USB_HID_INTERFACE_COUNT + 1))
+
+        if [ -n "$uvhr_driver" ]; then
+            USB_HID_BOUND_COUNT=$((USB_HID_BOUND_COUNT + 1))
+        else
+            USB_HID_UNBOUND_COUNT=$((USB_HID_UNBOUND_COUNT + 1))
+        fi
+
+        printf '%s\tdevice=%s\tid=%s:%s\tproduct=%s\tdriver=%s\n' \
+            "$uvhr_interface_name" \
+            "$uvhr_device_name" \
+            "${uvhr_vendor:-unknown}" \
+            "${uvhr_product_id:-unknown}" \
+            "${uvhr_product:-unknown}" \
+            "${uvhr_driver:-unbound}" >>"$uvhr_result_dir/usb_hid_runtime.tsv"
+        log_info "[USB-HID] interface=$uvhr_interface_name device=$uvhr_device_name id=${uvhr_vendor:-unknown}:${uvhr_product_id:-unknown} product=${uvhr_product:-unknown} driver=${uvhr_driver:-unbound}"
+    done
+
+    [ "$USB_HID_INTERFACE_COUNT" -gt 0 ] || return 2
+    [ "$USB_HID_UNBOUND_COUNT" -eq 0 ] || return 1
+    return 0
+}
+
+###############################################################################
+# usb_validate_mass_storage_runtime <result-dir> <read-verify> <wait-seconds>
+# Validates USB mass-storage binding and block nodes, then optionally performs
+# a non-destructive 512-byte read. Returns 0 for healthy devices, 1 for a
+# runtime failure, 2 when no fixture is present, and 3 for invalid arguments.
+###############################################################################
+usb_validate_mass_storage_runtime() {
+    uvms_result_dir="$1"
+    uvms_read_verify="$2"
+    uvms_wait_seconds="$3"
+    USB_MSD_DEVICE_COUNT=0
+    USB_MSD_FAILURE_COUNT=0
+
+    [ -n "$uvms_result_dir" ] || return 3
+    case "$uvms_read_verify" in
+        0|1)
+            ;;
+        *)
+            return 3
+            ;;
+    esac
+    case "$uvms_wait_seconds" in
+        ''|*[!0-9]*)
+            return 3
+            ;;
+    esac
+
+    mkdir -p "$uvms_result_dir" || return 1
+    : >"$uvms_result_dir/usb_msd_runtime.tsv"
+    uvms_device_file="$uvms_result_dir/usb_msd_devices.list"
+    : >"$uvms_device_file"
+
+    log_info "USB mass-storage validation: checking class binding, block-device creation, and optional read access"
+
+    for uvms_class_file in /sys/bus/usb/devices/*:*/bInterfaceClass; do
+        [ -r "$uvms_class_file" ] || continue
+        [ "$(cat "$uvms_class_file" 2>/dev/null)" = "08" ] || continue
+        uvms_interface_name=$(basename "$(dirname "$uvms_class_file")")
+        uvms_device_name=${uvms_interface_name%%:*}
+        if ! grep -Fqx "$uvms_device_name" "$uvms_device_file"; then
+            printf '%s\n' "$uvms_device_name" >>"$uvms_device_file"
+        fi
+    done
+
+    while IFS= read -r uvms_device_name; do
+        [ -n "$uvms_device_name" ] || continue
+        USB_MSD_DEVICE_COUNT=$((USB_MSD_DEVICE_COUNT + 1))
+        uvms_device="/sys/bus/usb/devices/$uvms_device_name"
+        uvms_vendor=$(cat "$uvms_device/idVendor" 2>/dev/null || true)
+        uvms_product_id=$(cat "$uvms_device/idProduct" 2>/dev/null || true)
+        uvms_product=$(tr -d '\000' <"$uvms_device/product" 2>/dev/null || true)
+        uvms_driver=""
+        uvms_block_list=""
+
+        for uvms_interface in "$uvms_device":*; do
+            [ -d "$uvms_interface" ] || continue
+            [ "$(cat "$uvms_interface/bInterfaceClass" 2>/dev/null)" = "08" ] || continue
+            uvms_driver=$(platform_device_driver_name "$uvms_interface" 2>/dev/null || true)
+
+            if [ -z "$uvms_driver" ]; then
+                break
+            fi
+
+            uvms_waited=0
+            while [ "$uvms_waited" -le "$uvms_wait_seconds" ]; do
+                uvms_block_list="$({
+                    for uvms_block_path in \
+                        "$uvms_interface"/host*/target*/*/block/* \
+                        "$uvms_interface"/host*/target*/*/*/block/* \
+                        "$uvms_interface"/host*/target*/block/*; do
+                        [ -e "$uvms_block_path" ] || continue
+                        basename "$uvms_block_path"
+                    done
+                } | sort -u)"
+                [ -n "$uvms_block_list" ] && break
+                [ "$uvms_waited" -eq "$uvms_wait_seconds" ] && break
+                sleep 1
+                uvms_waited=$((uvms_waited + 1))
+            done
+            break
+        done
+
+        printf '%s\tid=%s:%s\tproduct=%s\tdriver=%s\tblocks=%s\n' \
+            "$uvms_device_name" \
+            "${uvms_vendor:-unknown}" \
+            "${uvms_product_id:-unknown}" \
+            "${uvms_product:-unknown}" \
+            "${uvms_driver:-unbound}" \
+            "${uvms_block_list:-none}" >>"$uvms_result_dir/usb_msd_runtime.tsv"
+        log_info "[USB-MSD] device=$uvms_device_name id=${uvms_vendor:-unknown}:${uvms_product_id:-unknown} product=${uvms_product:-unknown} driver=${uvms_driver:-unbound} blocks=${uvms_block_list:-none}"
+
+        if [ -z "$uvms_driver" ]; then
+            USB_MSD_FAILURE_COUNT=$((USB_MSD_FAILURE_COUNT + 1))
+            log_warn "USB mass-storage interface is unbound: device=$uvms_device_name"
+            continue
+        fi
+
+        if [ -z "$uvms_block_list" ]; then
+            USB_MSD_FAILURE_COUNT=$((USB_MSD_FAILURE_COUNT + 1))
+            log_warn "USB mass-storage device has no block device after ${uvms_wait_seconds}s: device=$uvms_device_name driver=$uvms_driver"
+            continue
+        fi
+
+        if [ "$uvms_read_verify" -eq 1 ]; then
+            for uvms_block in $uvms_block_list; do
+                if [ ! -b "/dev/$uvms_block" ]; then
+                    USB_MSD_FAILURE_COUNT=$((USB_MSD_FAILURE_COUNT + 1))
+                    log_warn "USB mass-storage block node is missing: /dev/$uvms_block"
+                    continue
+                fi
+
+                log_info "USB mass-storage read validation: device=/dev/$uvms_block bytes=512"
+                if ! dd \
+                    if="/dev/$uvms_block" \
+                    of=/dev/null \
+                    bs=512 \
+                    count=1 >"$uvms_result_dir/read_${uvms_block}.log" 2>&1; then
+                    USB_MSD_FAILURE_COUNT=$((USB_MSD_FAILURE_COUNT + 1))
+                    log_file_with_label "USB-MSD-READ" "$uvms_result_dir/read_${uvms_block}.log"
+                fi
+            done
+        fi
+    done <"$uvms_device_file"
+
+    [ "$USB_MSD_DEVICE_COUNT" -gt 0 ] || return 2
+    [ "$USB_MSD_FAILURE_COUNT" -eq 0 ] || return 1
+    return 0
+}
+
+###############################################################################
+# dt_validate_pmic_glink_ucsi <result-dir>
+# Validates the Qualcomm PMIC GLINK parent, UCSI auxiliary driver, and Type-C
+# runtime exposure only when an enabled PMIC GLINK DT node declares support.
+###############################################################################
+dt_validate_pmic_glink_ucsi() {
+    dtvpgu_result_dir="$1"
+    dtvpgu_nodes_file="$dtvpgu_result_dir/pmic_glink_nodes.log"
+    dtvpgu_parent_count=0
+    dtvpgu_aux_count=0
+    dtvpgu_typec_count=0
+    dtvpgu_role_invalid_count=0
+
+    [ -n "$dtvpgu_result_dir" ] || return 3
+    : >"$dtvpgu_nodes_file"
+
+    log_info "PMIC GLINK/UCSI validation: checking enabled DT parents, auxiliary binding, Type-C ports, and role state"
+
+    if ! dt_list_compatible_nodes \
+        '(^|[[:space:]])qcom,([^[:space:]]+-)?pmic-glink([[:space:]]|$)' \
+        regex >"$dtvpgu_nodes_file"; then
+        test_result_record "SKIP" "Qualcomm PMIC GLINK UCSI capability is not enabled in the runtime device tree"
+        return 0
+    fi
+
+    while IFS= read -r dtvpgu_node; do
+        [ -n "$dtvpgu_node" ] || continue
+        dtvpgu_parent_count=$((dtvpgu_parent_count + 1))
+        dtvpgu_compatible="$(dt_property_text "$dtvpgu_node" compatible 2>/dev/null || true)"
+        log_info "[PMIC-GLINK-DT] node=$dtvpgu_node compatible=${dtvpgu_compatible:-unknown}"
+
+        if dtvpgu_device="$(find_platform_device_for_dt_node "$dtvpgu_node" 2>/dev/null)" &&
+           dtvpgu_driver="$(platform_device_driver_name "$dtvpgu_device" 2>/dev/null)"; then
+            test_result_record "PASS" "PMIC GLINK parent is bound: device=$(basename "$dtvpgu_device") driver=$dtvpgu_driver"
+        else
+            test_result_record "FAIL" "Enabled PMIC GLINK node has no bound runtime platform driver: ${dtvpgu_node##*/}"
+        fi
+    done <"$dtvpgu_nodes_file"
+
+    for dtvpgu_aux in /sys/bus/auxiliary/devices/pmic_glink.ucsi.*; do
+        [ -d "$dtvpgu_aux" ] || continue
+        dtvpgu_aux_count=$((dtvpgu_aux_count + 1))
+        if [ -L "$dtvpgu_aux/driver" ]; then
+            dtvpgu_aux_driver="$(basename "$(readlink -f "$dtvpgu_aux/driver" 2>/dev/null)" 2>/dev/null || true)"
+            log_info "[PMIC-GLINK-UCSI] auxiliary=${dtvpgu_aux##*/} driver=${dtvpgu_aux_driver:-unknown}"
+            case "$dtvpgu_aux_driver" in
+                *pmic_glink_ucsi)
+                    test_result_record "PASS" "PMIC GLINK UCSI auxiliary device is bound: device=${dtvpgu_aux##*/} driver=$dtvpgu_aux_driver"
+                    ;;
+                *)
+                    test_result_record "FAIL" "PMIC GLINK UCSI auxiliary device has unexpected driver: device=${dtvpgu_aux##*/} driver=${dtvpgu_aux_driver:-unknown}"
+                    ;;
+            esac
+        else
+            log_info "[PMIC-GLINK-UCSI] auxiliary=${dtvpgu_aux##*/} driver=unbound"
+            test_result_record "FAIL" "PMIC GLINK UCSI auxiliary device is present but unbound: ${dtvpgu_aux##*/}"
+        fi
+    done
+
+    if [ "$dtvpgu_aux_count" -eq 0 ]; then
+        test_result_record "FAIL" "PMIC GLINK is declared but no UCSI auxiliary device is exposed"
+    elif [ "$dtvpgu_aux_count" -lt "$dtvpgu_parent_count" ]; then
+        test_result_record "FAIL" "Only $dtvpgu_aux_count UCSI auxiliary device(s) are exposed for $dtvpgu_parent_count PMIC GLINK parent(s)"
+    fi
+
+    : >"$dtvpgu_result_dir/typec_ports.log"
+    for dtvpgu_port in /sys/class/typec/port*; do
+        [ -d "$dtvpgu_port" ] || continue
+        case "${dtvpgu_port##*/}" in
+            *-partner*)
+                continue
+                ;;
+        esac
+        dtvpgu_port_path="$(readlink -f "$dtvpgu_port" 2>/dev/null || true)"
+        case "$dtvpgu_port_path" in
+            *pmic_glink.ucsi.*)
+                ;;
+            *)
+                continue
+                ;;
+        esac
+
+        dtvpgu_typec_count=$((dtvpgu_typec_count + 1))
+        dtvpgu_power_role="$(cat "$dtvpgu_port/power_role" 2>/dev/null || true)"
+        dtvpgu_data_role="$(cat "$dtvpgu_port/data_role" 2>/dev/null || true)"
+        printf '%s\tpower_role=%s\tdata_role=%s\tpath=%s\n' \
+            "${dtvpgu_port##*/}" \
+            "${dtvpgu_power_role:-unknown}" \
+            "${dtvpgu_data_role:-unknown}" \
+            "${dtvpgu_port_path:-unknown}" >>"$dtvpgu_result_dir/typec_ports.log"
+        log_info "[PMIC-GLINK-UCSI] port=${dtvpgu_port##*/} power_role=${dtvpgu_power_role:-unknown} data_role=${dtvpgu_data_role:-unknown}"
+
+        case "$dtvpgu_power_role" in
+            source|sink|*'[source]'*|*'[sink]'*)
+                ;;
+            *)
+                dtvpgu_role_invalid_count=$((dtvpgu_role_invalid_count + 1))
+                continue
+                ;;
+        esac
+        case "$dtvpgu_data_role" in
+            host|device|*'[host]'*|*'[device]'*)
+                ;;
+            *)
+                dtvpgu_role_invalid_count=$((dtvpgu_role_invalid_count + 1))
+                ;;
+        esac
+    done
+
+    if [ "$dtvpgu_typec_count" -eq 0 ]; then
+        test_result_record "FAIL" "PMIC GLINK UCSI is declared but no UCSI-backed Type-C ports are exposed"
+    elif [ "$dtvpgu_role_invalid_count" -gt 0 ]; then
+        test_result_record "FAIL" "PMIC GLINK UCSI has $dtvpgu_role_invalid_count Type-C port(s) with unreadable or invalid role state"
+    else
+        test_result_record "PASS" "PMIC GLINK UCSI exposes $dtvpgu_typec_count Type-C port(s) with valid power and data roles"
+    fi
+}
+
+###############################################################################
+# dt_validate_thermal_runtime <dt-root> <result-dir>
+# Validates readable and plausible thermal-zone data when thermal zones are
+# declared. Cooling devices are required only when a cooling provider exists.
+###############################################################################
+dt_validate_thermal_runtime() {
+    dtvtr_root="$1"
+    dtvtr_result_dir="$2"
+    dtvtr_zone_file="$dtvtr_result_dir/thermal_zones.log"
+    dtvtr_cooling_file="$dtvtr_result_dir/cooling_devices.log"
+    dtvtr_zone_count=0
+    dtvtr_readable_count=0
+    dtvtr_unreadable_count=0
+    dtvtr_invalid_count=0
+    dtvtr_cooling_count=0
+    dtvtr_cooling_invalid_count=0
+    dtvtr_declared_count=0
+
+    [ -d "$dtvtr_root" ] && [ -n "$dtvtr_result_dir" ] || return 3
+
+    log_info "Thermal validation: checking enabled DT thermal zones, runtime temperatures, and cooling-device state"
+
+    if [ ! -d "$dtvtr_root/thermal-zones" ]; then
+        test_result_record "SKIP" "Runtime device tree does not declare thermal zones"
+        return 0
+    fi
+
+    for dtvtr_declared in "$dtvtr_root/thermal-zones"/*; do
+        [ -d "$dtvtr_declared" ] || continue
+        dt_node_enabled "$dtvtr_declared" || continue
+        dtvtr_declared_count=$((dtvtr_declared_count + 1))
+    done
+
+    if [ "$dtvtr_declared_count" -eq 0 ]; then
+        test_result_record "SKIP" "Runtime device tree has no enabled thermal zones"
+        return 0
+    fi
+
+    : >"$dtvtr_zone_file"
+    for dtvtr_zone in /sys/class/thermal/thermal_zone*; do
+        [ -d "$dtvtr_zone" ] || continue
+        dtvtr_zone_count=$((dtvtr_zone_count + 1))
+        dtvtr_type="$(cat "$dtvtr_zone/type" 2>/dev/null || true)"
+        dtvtr_temp="$(cat "$dtvtr_zone/temp" 2>/dev/null || true)"
+        printf '%s\ttype=%s\ttemp_mC=%s\n' \
+            "${dtvtr_zone##*/}" \
+            "${dtvtr_type:-unknown}" \
+            "${dtvtr_temp:-unreadable}" >>"$dtvtr_zone_file"
+        log_info "[THERMAL] zone=${dtvtr_zone##*/} type=${dtvtr_type:-unknown} temp_mC=${dtvtr_temp:-unreadable}"
+
+        if [ -z "$dtvtr_type" ]; then
+            dtvtr_invalid_count=$((dtvtr_invalid_count + 1))
+            continue
+        fi
+
+        if [ -z "$dtvtr_temp" ]; then
+            dtvtr_unreadable_count=$((dtvtr_unreadable_count + 1))
+            continue
+        fi
+
+        case "$dtvtr_temp" in
+            -*)
+                dtvtr_temp_digits=${dtvtr_temp#-}
+                ;;
+            *)
+                dtvtr_temp_digits=$dtvtr_temp
+                ;;
+        esac
+
+        case "$dtvtr_temp_digits" in
+            ''|*[!0-9]*)
+                dtvtr_invalid_count=$((dtvtr_invalid_count + 1))
+                ;;
+            *)
+                if [ "$dtvtr_temp" -lt -100000 ] || [ "$dtvtr_temp" -gt 250000 ]; then
+                    dtvtr_invalid_count=$((dtvtr_invalid_count + 1))
+                else
+                    dtvtr_readable_count=$((dtvtr_readable_count + 1))
+                fi
+                ;;
+        esac
+    done
+
+    if [ "$dtvtr_zone_count" -eq 0 ]; then
+        test_result_record "FAIL" "Thermal zones are declared but no runtime thermal zones are exposed"
+    elif [ "$dtvtr_invalid_count" -gt 0 ]; then
+        test_result_record "FAIL" "Thermal runtime has $dtvtr_invalid_count malformed or implausible zone(s) out of $dtvtr_zone_count"
+    elif [ "$dtvtr_readable_count" -eq 0 ]; then
+        test_result_record "FAIL" "Thermal zones are exposed but none currently provide a readable temperature"
+    else
+        test_result_record "PASS" "Thermal runtime exposes $dtvtr_readable_count readable zone(s) with plausible temperatures"
+        if [ "$dtvtr_unreadable_count" -gt 0 ]; then
+            test_result_record "SKIP" "$dtvtr_unreadable_count optional or aggregate thermal zone(s) do not currently expose temperature data"
+        fi
+    fi
+
+    : >"$dtvtr_cooling_file"
+    for dtvtr_cooling in /sys/class/thermal/cooling_device*; do
+        [ -d "$dtvtr_cooling" ] || continue
+        dtvtr_cooling_count=$((dtvtr_cooling_count + 1))
+        dtvtr_cooling_type="$(cat "$dtvtr_cooling/type" 2>/dev/null || true)"
+        dtvtr_cooling_state="$(cat "$dtvtr_cooling/cur_state" 2>/dev/null || true)"
+        dtvtr_cooling_max="$(cat "$dtvtr_cooling/max_state" 2>/dev/null || true)"
+        printf '%s\ttype=%s\tstate=%s\tmax_state=%s\n' \
+            "${dtvtr_cooling##*/}" \
+            "${dtvtr_cooling_type:-unknown}" \
+            "${dtvtr_cooling_state:-unknown}" \
+            "${dtvtr_cooling_max:-unknown}" >>"$dtvtr_cooling_file"
+        log_info "[THERMAL] cooling=${dtvtr_cooling##*/} type=${dtvtr_cooling_type:-unknown} state=${dtvtr_cooling_state:-unknown} max_state=${dtvtr_cooling_max:-unknown}"
+
+        dtvtr_cooling_valid=1
+        case "$dtvtr_cooling_state" in
+            ''|*[!0-9]*)
+                dtvtr_cooling_valid=0
+                ;;
+        esac
+        case "$dtvtr_cooling_max" in
+            ''|*[!0-9]*)
+                dtvtr_cooling_valid=0
+                ;;
+        esac
+
+        if [ "$dtvtr_cooling_valid" -eq 0 ] ||
+           [ "$dtvtr_cooling_state" -gt "$dtvtr_cooling_max" ]; then
+            dtvtr_cooling_invalid_count=$((dtvtr_cooling_invalid_count + 1))
+        fi
+    done
+
+    if dt_list_enabled_property_nodes "$dtvtr_root" '#cooling-cells' >/dev/null 2>&1; then
+        if [ "$dtvtr_cooling_count" -gt 0 ]; then
+            if [ "$dtvtr_cooling_invalid_count" -eq 0 ]; then
+                test_result_record "PASS" "Thermal runtime exposes $dtvtr_cooling_count valid cooling device(s)"
+            else
+                test_result_record "FAIL" "Thermal runtime has $dtvtr_cooling_invalid_count malformed cooling device(s) out of $dtvtr_cooling_count"
+            fi
+        else
+            test_result_record "FAIL" "Cooling providers are declared but no runtime cooling devices are exposed"
+        fi
+    else
+        test_result_record "SKIP" "Runtime device tree does not declare a cooling-device provider"
+    fi
+}
+
+###############################################################################
+# dt_capture_power_runtime <result-dir>
+# Retains optional regulator and generic power-domain debugfs summaries. Their
+# absence is not a failure because production images may disable debugfs.
+###############################################################################
+dt_capture_power_runtime() {
+    dtcpr_result_dir="$1"
+    dtcpr_regulator="/sys/kernel/debug/regulator/regulator_summary"
+    dtcpr_genpd="/sys/kernel/debug/pm_genpd/pm_genpd_summary"
+
+    [ -n "$dtcpr_result_dir" ] || return 3
+
+    log_info "Power evidence validation: checking optional regulator and generic power-domain debugfs summaries"
+
+    if [ -r "$dtcpr_regulator" ]; then
+        if cp "$dtcpr_regulator" "$dtcpr_result_dir/regulator_summary.log"; then
+            dtcpr_regulator_lines=$(wc -l <"$dtcpr_result_dir/regulator_summary.log" | tr -d '[:space:]')
+            log_info "[POWER] regulator_summary source=$dtcpr_regulator lines=${dtcpr_regulator_lines:-0} artifact=$dtcpr_result_dir/regulator_summary.log"
+            test_result_record "PASS" "Regulator runtime summary was captured"
+        else
+            test_result_record "FAIL" "Regulator runtime summary is readable but could not be captured"
+        fi
+    else
+        test_result_record "SKIP" "Regulator debugfs summary is not exposed"
+    fi
+
+    if [ -r "$dtcpr_genpd" ]; then
+        if cp "$dtcpr_genpd" "$dtcpr_result_dir/power_domain_summary.log"; then
+            dtcpr_genpd_lines=$(wc -l <"$dtcpr_result_dir/power_domain_summary.log" | tr -d '[:space:]')
+            log_info "[POWER] power_domain_summary source=$dtcpr_genpd lines=${dtcpr_genpd_lines:-0} artifact=$dtcpr_result_dir/power_domain_summary.log"
+            test_result_record "PASS" "Generic power-domain runtime summary was captured"
+        else
+            test_result_record "FAIL" "Generic power-domain summary is readable but could not be captured"
+        fi
+    else
+        test_result_record "SKIP" "Generic power-domain debugfs summary is not exposed"
+    fi
+}
+
+###############################################################################
 # dt_validate_tee_runtime <result-dir>
 # Distinguishes declared OP-TEE from a generic TEE device, which is commonly
 # the Qualcomm TEE flow on platforms without an OP-TEE DT node.
@@ -4385,7 +5357,7 @@ dt_validate_runtime_hardware_capabilities() {
     if dt_hw_capability_area_enabled "health"; then
         scan_dmesg_errors \
             "$dtrhc_result_dir" \
-            'of|device.tree|devicetree|qcom.*(smmu|pcie|ufs|sdhci|dwc3|usb|ethqos|dpu|mdss)' \
+            'of|device.tree|devicetree|qcom.*(smmu|pcie|ufs|sdhci|dwc3|usb|ethqos|dpu|mdss)|pmic.gl|ucsi|thermal|tsens|rpmh|regulator|power.domain' \
             '-517|EPROBE_DEFER|deferred probe|dummy regulator|supply [^ ]+ not found' || true
         log_info "Captured DT and controller kernel-health snapshot"
     fi
@@ -4542,11 +5514,13 @@ dt_validate_runtime_hardware_capabilities() {
     dt_validate_property_provider "$dtrhc_root" "Clock" "#clock-cells" "$dtrhc_result_dir"
     dt_validate_property_provider "$dtrhc_root" "Reset" "#reset-cells" "$dtrhc_result_dir"
     dt_validate_property_provider "$dtrhc_root" "Regulator" "regulator-name" "$dtrhc_result_dir"
+    dt_validate_property_provider "$dtrhc_root" "Power domain" "#power-domain-cells" "$dtrhc_result_dir"
     dt_validate_property_provider "$dtrhc_root" "Mailbox" "#mbox-cells" "$dtrhc_result_dir"
     dt_validate_property_provider "$dtrhc_root" "Interconnect" "#interconnect-cells" "$dtrhc_result_dir"
     dt_validate_node_inventory "RPMh" 'qcom,.*rpmh' "$dtrhc_result_dir"
     dt_validate_platform_capability "LLCC" 'qcom,.*llcc' "$dtrhc_result_dir"
     dt_validate_platform_capability "SMMU" 'qcom,.*smmu-500' "$dtrhc_result_dir"
+    dt_capture_power_runtime "$dtrhc_result_dir"
         dt_summary_end_area
     fi
 
@@ -4554,6 +5528,7 @@ dt_validate_runtime_hardware_capabilities() {
         dt_summary_begin_area "$dtrhc_result_dir" "USB"
     dt_validate_platform_capability "USB" 'qcom,.*(dwc3|usb)' "$dtrhc_result_dir"
     dt_validate_usb_host_runtime
+    dt_validate_pmic_glink_ucsi "$dtrhc_result_dir"
     dt_validate_runtime_path "USB gadget controller" '/sys/class/udc/*'
         dt_summary_end_area
     fi
@@ -4614,6 +5589,7 @@ dt_validate_runtime_hardware_capabilities() {
 
     if dt_hw_capability_area_enabled "health"; then
         dt_summary_begin_area "$dtrhc_result_dir" "Kernel health"
+    dt_validate_thermal_runtime "$dtrhc_root" "$dtrhc_result_dir"
     if [ -s "$dtrhc_result_dir/dmesg_errors.log" ]; then
         test_result_record "FAIL" "Relevant DT or hardware-controller errors were found in the captured kernel log"
     else
@@ -4655,15 +5631,29 @@ list_remoteproc_instances() {
 
 ###############################################################################
 # find_image_firmware <firmware-name>
-# Prints the first matching image-provided firmware path under the standard
-# firmware roots, accepting uncompressed, .xz, and .zst files. Returns 0 on a
-# match, 1 when no asset is exposed, and 3 when no name is supplied.
+# Prints the first matching image-provided firmware path under the standard or
+# running-kernel firmware roots, accepting uncompressed, .xz, and .zst files.
+# Returns 0 on a match, 1 when no asset is exposed, and 3 when no name is
+# supplied.
 ###############################################################################
 find_image_firmware() {
     firmware_name="$1"
+    firmware_release=$(uname -r 2>/dev/null || true)
     [ -n "$firmware_name" ] || return 3
 
-    for firmware_root in /lib/firmware /usr/lib/firmware; do
+    for firmware_root in \
+        "/lib/firmware/$firmware_release" \
+        "/usr/lib/firmware/$firmware_release" \
+        /lib/firmware \
+        /usr/lib/firmware; do
+        [ -n "$firmware_release" ] || {
+            case "$firmware_root" in
+                /lib/firmware/|/usr/lib/firmware/)
+                    continue
+                    ;;
+            esac
+        }
+        [ -d "$firmware_root" ] || continue
         for firmware_path in \
             "$firmware_root/$firmware_name" \
             "$firmware_root/$firmware_name.xz" \
@@ -5905,6 +6895,88 @@ minkipc_prepare_test_packages() {
 
     log_pass "MinkIPC package set is ready on os=$mptp_os_id"
     return 0
+}
+
+# qrtr_runtime_present
+# Reports whether the running kernel exposes QRTR transport evidence. Installed
+# tools or modules that are not loaded are not treated as hardware evidence.
+qrtr_runtime_present() {
+    if [ -d /sys/bus/qrtr ] || [ -r /proc/net/qrtr ] || [ -d /sys/module/qrtr ]; then
+        return 0
+    fi
+
+    if is_module_loaded qrtr; then
+        return 0
+    fi
+
+    return 1
+}
+
+# qrtr_capture_topology <output-file> [timeout-seconds]
+# Runs one bounded, read-only qrtr-lookup inventory and validates its tabular
+# header. Returns 0 for a valid snapshot, 1 for a broken query, 2 when QRTR or
+# qrtr-lookup is unavailable, and 3 for invalid arguments.
+qrtr_capture_topology() {
+    qct_output_file="$1"
+    qct_timeout="${2:-${QRTR_LOOKUP_TIMEOUT:-10}}"
+    qct_lookup_bin="${QRTR_LOOKUP_BIN:-qrtr-lookup}"
+
+    [ -n "$qct_output_file" ] || return 3
+    case "$qct_timeout" in
+        ''|*[!0-9]*|0)
+            return 3
+            ;;
+    esac
+
+    qrtr_runtime_present || return 2
+    command -v "$qct_lookup_bin" >/dev/null 2>&1 || return 2
+
+    qct_output_dir=$(dirname "$qct_output_file")
+    mkdir -p "$qct_output_dir" || return 1
+    rm -f "$qct_output_file"
+
+    if ! run_with_timeout_log \
+        "$qct_timeout" \
+        "$qct_output_file" \
+        "$qct_lookup_bin"; then
+        return 1
+    fi
+
+    if ! awk '
+        NR == 1 && $1 == "Service" && $2 == "Version" &&
+            $3 == "Instance" && $4 == "Node" && $5 == "Port" {
+            valid=1
+        }
+        END { exit !valid }
+    ' "$qct_output_file"; then
+        return 1
+    fi
+
+    return 0
+}
+
+# qrtr_topology_has_service <topology-file> <service> [version] [instance]
+# Matches a qrtr-lookup row. Empty version or instance arguments act as
+# wildcards, allowing each consumer to enforce only its documented contract.
+qrtr_topology_has_service() {
+    qths_file="$1"
+    qths_service="$2"
+    qths_version="${3:-}"
+    qths_instance="${4:-}"
+
+    [ -r "$qths_file" ] && [ -n "$qths_service" ] || return 3
+
+    awk \
+        -v service="$qths_service" \
+        -v version="$qths_version" \
+        -v instance="$qths_instance" '
+        NR > 1 && $1 == service &&
+            (version == "" || $2 == version) &&
+            (instance == "" || $3 == instance) {
+            found=1
+        }
+        END { exit !found }
+    ' "$qths_file"
 }
 
 ###############################################################################
