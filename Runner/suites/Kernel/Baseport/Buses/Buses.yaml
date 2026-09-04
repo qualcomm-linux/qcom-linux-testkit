@@ -1,11 +1,17 @@
 metadata:
   name: buses
   format: "Lava-Test Test Definition 1.0"
-  description: "Test I2C busses"
+  description: "Validate runtime I2C controllers, adapters, clients, and optional legacy transfers"
   os:
     - linux
   scope:
     - functional
+
+params:
+  I2C_LEGACY_TEST_ENABLE: "auto"
+  I2C_TEST_ADAPTER: "auto"
+  I2C_TEST_TIMEOUT: "15"
+  I2C_DMESG_STRICT: "0"
 
 run:
   steps:
@@ -13,4 +19,3 @@ run:
     - cd Runner/suites/Kernel/Baseport/Buses
     - ./run.sh || true
     - $REPO_PATH/Runner/utils/send-to-lava.sh Buses.res
-
