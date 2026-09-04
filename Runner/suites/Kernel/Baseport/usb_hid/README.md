@@ -4,7 +4,10 @@ SPDX-License-Identifier: BSD-3-Clause
 
 ## Overview
 
-This shell script executes on the DUT (Device-Under-Test) and verifies enumeration of connected USB Human Interface Devices (HID).
+This shell script executes on the DUT and validates connected USB Human
+Interface Device interfaces. It reports the device identity and verifies that
+every HID class interface has a bound kernel driver. A missing external HID
+fixture is reported as `SKIP`.
 
 ---
 
@@ -29,3 +32,12 @@ This shell script executes on the DUT (Device-Under-Test) and verifies enumerati
 cd Runner
 ./run-test.sh usb_hid
 ```
+
+Run directly:
+
+```sh
+cd Runner/suites/Kernel/Baseport/usb_hid
+./run.sh
+```
+
+Runtime evidence is retained under `results/usb_hid/`.

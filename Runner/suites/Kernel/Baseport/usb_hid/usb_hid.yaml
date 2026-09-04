@@ -1,7 +1,7 @@
 metadata:
   name: usb_hid
   format: "Lava-Test Test Definition 1.0"
-  description: "This shell script executes on the DUT (Device-Under-Test) and verifies enumeration of connected USB Human Interface Devices (HID)."
+  description: "Validate connected USB HID interfaces and kernel-driver binding."
   os:
     - linux
   scope:
@@ -13,4 +13,3 @@ run:
     - cd Runner/suites/Kernel/Baseport/usb_hid
     - ./run.sh || true
     - $REPO_PATH/Runner/utils/send-to-lava.sh usb_hid.res
-
