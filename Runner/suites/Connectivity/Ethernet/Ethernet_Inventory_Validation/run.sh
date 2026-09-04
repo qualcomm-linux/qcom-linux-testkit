@@ -109,6 +109,7 @@ if ! CHECK_DEPS_NO_EXIT=1 check_dependencies \
     grep \
     cat \
     find \
+    head \
     readlink \
     uname; then
 
@@ -123,6 +124,58 @@ fi
 
 log_info "Platform Details: machine='${PLATFORM_MACHINE:-unknown}' target='${PLATFORM_TARGET:-unknown}' kernel='$(uname -r 2>/dev/null || echo unknown)' arch='$(uname -m 2>/dev/null || echo unknown)'"
 
+QPS615_RESULT_DIR="./qps615_runtime"
+ethv_qps615_collect_runtime "$QPS615_RESULT_DIR"
+qps615_status=$?
+
+case "$qps615_status" in
+    0|1)
+        if [ -n "$QPS615_TOPOLOGY_FAILURE_REASON" ]; then
+            ethv_record_result \
+                "$RESULT_TABLE" \
+                "QPS615 PCIe topology and firmware" \
+                "FAIL" \
+                "$QPS615_TOPOLOGY_FAILURE_REASON"
+        else
+            ethv_record_result \
+                "$RESULT_TABLE" \
+                "QPS615 PCIe topology and firmware" \
+                "PASS" \
+                "bridge_functions=$QPS615_SWITCH_COUNT downstream=$QPS615_DOWNSTREAM_COUNT firmware=$QPS615_FIRMWARE_PATH"
+        fi
+
+        if [ -n "$QPS615_ETHERNET_FAILURE_REASON" ]; then
+            ethv_record_result \
+                "$RESULT_TABLE" \
+                "QPS615 Ethernet endpoint readiness" \
+                "FAIL" \
+                "$QPS615_ETHERNET_FAILURE_REASON"
+        elif [ -n "$QPS615_ETHERNET_SKIP_REASON" ]; then
+            ethv_record_result \
+                "$RESULT_TABLE" \
+                "QPS615 Ethernet endpoint readiness" \
+                "SKIP" \
+                "$QPS615_ETHERNET_SKIP_REASON"
+        else
+            ethv_record_result \
+                "$RESULT_TABLE" \
+                "QPS615 Ethernet endpoint readiness" \
+                "PASS" \
+                "devices=$QPS615_ETHERNET_DEVICE_COUNT declared_ports=$QPS615_ETHERNET_DECLARED_COUNT bound_declared_ports=$QPS615_DECLARED_DRIVER_DEVICE_COUNT declared_port_netdevs=$QPS615_DECLARED_NETDEV_COUNT module_state=$QPS615_MODULE_STATE pci_driver_state=$QPS615_PCI_DRIVER_STATE module_path=${QPS615_MODULE_PATH:-built-in-or-unexposed}"
+        fi
+        ;;
+    2)
+        log_info "QPS615 PCIe switch is not present, preserving generic Ethernet inventory validation"
+        ;;
+    *)
+        ethv_record_result \
+            "$RESULT_TABLE" \
+            "QPS615 runtime collection" \
+            "FAIL" \
+            "runtime topology collection could not complete"
+        ;;
+esac
+
 if [ -n "$ETH_INTERFACE" ]; then
     ETH_IFACES="$ETH_INTERFACE"
 else
@@ -130,18 +183,33 @@ else
 fi
 
 if [ -z "$ETH_IFACES" ]; then
-    ethv_record_result \
-        "$RESULT_TABLE" \
-        "Physical Ethernet inventory" \
-        "SKIP" \
-        "no physical Ethernet interfaces are currently enumerated"
-
-    ethv_print_summary "$RESULT_TABLE" "Ethernet Inventory Summary"
-    echo "$TESTNAME SKIP" >"$RES_FILE"
-    exit 0
+    case "$qps615_status" in
+        0)
+            if [ -n "$QPS615_ETHERNET_SKIP_REASON" ]; then
+                ethv_record_result \
+                    "$RESULT_TABLE" \
+                    "Physical Ethernet inventory" \
+                    "SKIP" \
+                    "no runtime-provisioned Ethernet interface is present"
+            else
+                ethv_record_result \
+                    "$RESULT_TABLE" \
+                    "Physical Ethernet inventory" \
+                    "FAIL" \
+                    "QPS615 reported $QPS615_NETDEV_COUNT netdev(s), but physical Ethernet discovery returned none"
+            fi
+            ;;
+        2)
+            ethv_record_result \
+                "$RESULT_TABLE" \
+                "Physical Ethernet inventory" \
+                "SKIP" \
+                "no physical Ethernet interfaces are currently enumerated"
+            ;;
+    esac
+else
+    log_info "Detected physical Ethernet interfaces: $(printf '%s' "$ETH_IFACES" | tr '\n' ' ')"
 fi
-
-log_info "Detected physical Ethernet interfaces: $(printf '%s' "$ETH_IFACES" | tr '\n' ' ')"
 
 for iface in $ETH_IFACES; do
     driver="$(ethv_get_driver "$iface")"
@@ -242,7 +310,7 @@ log_info "---- Ethernet-related kernel messages ----"
 if command -v get_kernel_log >/dev/null 2>&1; then
     get_kernel_log 2>/dev/null \
         | grep -iE \
-            'ethqos|stmmac|dwmac|gmac|emac|phylink|mdio|sgmii|hsgmii|2500base|rgmii|qca808|marvell|aquantia|aqr|dp83867|ptp' \
+            'ethqos|stmmac|dwmac|gmac|emac|tc956|qps615|phylink|mdio|sgmii|hsgmii|2500base|rgmii|qca808|marvell|aquantia|aqr|dp83867|ptp' \
         | tail -n 200 \
         | while IFS= read -r line; do
             [ -n "$line" ] && log_info "[eth-kernel] $line"
