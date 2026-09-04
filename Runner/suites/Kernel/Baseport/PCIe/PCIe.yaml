@@ -1,11 +1,14 @@
 metadata:
   name: pcio
   format: "Lava-Test Test Definition 1.0"
-  description: "Test basic PCIe features"
+  description: "Test basic PCIe features and capability-gated QPS615 topology and firmware readiness, with downstream Ethernet diagnostics"
   os:
     - linux
   scope:
     - functional
+
+params:
+  PCIE_DMESG_STRICT: "0"
 
 run:
   steps:
@@ -13,4 +16,3 @@ run:
     - cd Runner/suites/Kernel/Baseport/PCIe
     - ./run.sh || true
     - $REPO_PATH/Runner/utils/send-to-lava.sh PCIe.res || true
-

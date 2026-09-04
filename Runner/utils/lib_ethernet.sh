@@ -258,6 +258,329 @@ ethv_get_physical_interfaces() {
     done
 }
 
+# ethv_qps615_collect_runtime <result-dir> [pci-devices-root]
+#   Collect and validate the runtime QPS615/TC956x PCIe Ethernet topology.
+#   QPS615 applicability comes from the enumerated Toshiba 1179:0623 switch,
+#   not from an installed package or module alone. Exported QPS615_* values
+#   summarize the result for PCIe and Ethernet suite orchestration.
+#   return: 0 when applicable and healthy, 1 when declared hardware is broken,
+#   2 when QPS615 is not present, and 3 for invalid arguments.
+ethv_qps615_collect_runtime() {
+    ethv_qcr_result_dir="${1:-}"
+    ethv_qcr_pci_root="${2:-/sys/bus/pci/devices}"
+    ethv_qcr_inventory="$ethv_qcr_result_dir/qps615_runtime.tsv"
+    ethv_qcr_switches="$ethv_qcr_result_dir/qps615_switches.log"
+
+    [ -n "$ethv_qcr_result_dir" ] || return 3
+    mkdir -p "$ethv_qcr_result_dir" || return 1
+    : >"$ethv_qcr_inventory" || return 1
+    : >"$ethv_qcr_switches" || return 1
+
+    QPS615_SWITCH_COUNT=0
+    QPS615_DOWNSTREAM_COUNT=0
+    QPS615_ETHERNET_DEVICE_COUNT=0
+    QPS615_ETHERNET_DECLARED_COUNT=0
+    QPS615_DRIVER_DEVICE_COUNT=0
+    QPS615_DECLARED_DRIVER_DEVICE_COUNT=0
+    QPS615_UNBOUND_ETHERNET_COUNT=0
+    QPS615_NETDEV_COUNT=0
+    QPS615_DECLARED_NETDEV_COUNT=0
+    QPS615_ETHERNET_OF_NODE_COUNT=0
+    QPS615_ETHERNET_OVERRIDE_COUNT=0
+    QPS615_FIRMWARE_PATH=""
+    QPS615_MODULE_PATH=""
+    QPS615_MODULE_STATE="absent"
+    QPS615_MODULE_PORT_BDFS=""
+    QPS615_MODULE_PORT_CONFIG="unavailable"
+    QPS615_PCI_DRIVER_PATH=""
+    QPS615_PCI_DRIVER_STATE="absent"
+    QPS615_PCI_AUTOPROBE="unknown"
+    QPS615_TOPOLOGY_FAILURE_REASON=""
+    QPS615_ETHERNET_FAILURE_REASON=""
+    QPS615_ETHERNET_SKIP_REASON=""
+    QPS615_FAILURE_REASON=""
+
+    log_info "QPS615 validation: scanning PCI devices under $ethv_qcr_pci_root for switch 1179:0623"
+
+    if [ ! -d "$ethv_qcr_pci_root" ]; then
+        log_info "QPS615 validation is not applicable because the PCI sysfs inventory is not exposed"
+        export QPS615_SWITCH_COUNT QPS615_DOWNSTREAM_COUNT QPS615_ETHERNET_DEVICE_COUNT
+        export QPS615_ETHERNET_DECLARED_COUNT QPS615_DRIVER_DEVICE_COUNT
+        export QPS615_DECLARED_DRIVER_DEVICE_COUNT QPS615_UNBOUND_ETHERNET_COUNT QPS615_NETDEV_COUNT
+        export QPS615_DECLARED_NETDEV_COUNT
+        export QPS615_ETHERNET_OF_NODE_COUNT QPS615_ETHERNET_OVERRIDE_COUNT
+        export QPS615_FIRMWARE_PATH QPS615_MODULE_PATH QPS615_MODULE_STATE
+        export QPS615_MODULE_PORT_BDFS QPS615_MODULE_PORT_CONFIG
+        export QPS615_PCI_DRIVER_PATH QPS615_PCI_DRIVER_STATE
+        export QPS615_PCI_AUTOPROBE
+        export QPS615_TOPOLOGY_FAILURE_REASON QPS615_ETHERNET_FAILURE_REASON
+        export QPS615_ETHERNET_SKIP_REASON QPS615_FAILURE_REASON
+        return 2
+    fi
+
+    for ethv_qcr_device in "$ethv_qcr_pci_root"/*; do
+        [ -d "$ethv_qcr_device" ] || continue
+        ethv_qcr_vendor="$(ethv_read_first_line "$ethv_qcr_device/vendor" 2>/dev/null || true)"
+        ethv_qcr_id="$(ethv_read_first_line "$ethv_qcr_device/device" 2>/dev/null || true)"
+
+        if [ "$ethv_qcr_vendor" = "0x1179" ] && \
+           [ "$ethv_qcr_id" = "0x0623" ]; then
+            ethv_qcr_resolved="$(readlink -f "$ethv_qcr_device" 2>/dev/null || true)"
+            QPS615_SWITCH_COUNT=$((QPS615_SWITCH_COUNT + 1))
+            if [ -n "$ethv_qcr_resolved" ]; then
+                printf '%s\n' "$ethv_qcr_resolved" >>"$ethv_qcr_switches"
+            fi
+            printf 'switch\t%s\t%s\t%s\t%s\n' \
+                "${ethv_qcr_device##*/}" \
+                "$ethv_qcr_vendor" \
+                "$ethv_qcr_id" \
+                "${ethv_qcr_resolved:-unresolved}" >>"$ethv_qcr_inventory"
+            log_info "[QPS615] switch=${ethv_qcr_device##*/} vendor=$ethv_qcr_vendor device=$ethv_qcr_id path=${ethv_qcr_resolved:-unresolved}"
+        fi
+    done
+
+    if [ "$QPS615_SWITCH_COUNT" -eq 0 ]; then
+        log_info "QPS615 validation is not applicable because switch 1179:0623 was not enumerated"
+        export QPS615_SWITCH_COUNT QPS615_DOWNSTREAM_COUNT QPS615_ETHERNET_DEVICE_COUNT
+        export QPS615_ETHERNET_DECLARED_COUNT QPS615_DRIVER_DEVICE_COUNT
+        export QPS615_DECLARED_DRIVER_DEVICE_COUNT QPS615_UNBOUND_ETHERNET_COUNT QPS615_NETDEV_COUNT
+        export QPS615_DECLARED_NETDEV_COUNT
+        export QPS615_ETHERNET_OF_NODE_COUNT QPS615_ETHERNET_OVERRIDE_COUNT
+        export QPS615_FIRMWARE_PATH QPS615_MODULE_PATH QPS615_MODULE_STATE
+        export QPS615_MODULE_PORT_BDFS QPS615_MODULE_PORT_CONFIG
+        export QPS615_PCI_DRIVER_PATH QPS615_PCI_DRIVER_STATE
+        export QPS615_PCI_AUTOPROBE
+        export QPS615_TOPOLOGY_FAILURE_REASON QPS615_ETHERNET_FAILURE_REASON
+        export QPS615_ETHERNET_SKIP_REASON QPS615_FAILURE_REASON
+        return 2
+    fi
+
+    for ethv_qcr_device in "$ethv_qcr_pci_root"/*; do
+        [ -d "$ethv_qcr_device" ] || continue
+        ethv_qcr_resolved="$(readlink -f "$ethv_qcr_device" 2>/dev/null || true)"
+        ethv_qcr_is_downstream=0
+
+        while IFS= read -r ethv_qcr_switch_path; do
+            [ -n "$ethv_qcr_switch_path" ] || continue
+            case "$ethv_qcr_resolved" in
+                "$ethv_qcr_switch_path"/*)
+                    ethv_qcr_is_downstream=1
+                    break
+                    ;;
+            esac
+        done <"$ethv_qcr_switches"
+
+        [ "$ethv_qcr_is_downstream" -eq 1 ] || continue
+        QPS615_DOWNSTREAM_COUNT=$((QPS615_DOWNSTREAM_COUNT + 1))
+
+        ethv_qcr_driver=""
+        if [ -L "$ethv_qcr_device/driver" ]; then
+            ethv_qcr_driver="$(basename "$(readlink -f "$ethv_qcr_device/driver" 2>/dev/null)" 2>/dev/null || true)"
+        fi
+        ethv_qcr_vendor="$(ethv_read_first_line "$ethv_qcr_device/vendor" 2>/dev/null || true)"
+        ethv_qcr_id="$(ethv_read_first_line "$ethv_qcr_device/device" 2>/dev/null || true)"
+        printf 'downstream\t%s\t%s\t%s\t%s\t%s\n' \
+            "${ethv_qcr_device##*/}" \
+            "${ethv_qcr_vendor:-unknown}" \
+            "${ethv_qcr_id:-unknown}" \
+            "${ethv_qcr_driver:-unbound}" \
+            "${ethv_qcr_resolved:-unknown}" >>"$ethv_qcr_inventory"
+        log_info "[QPS615] downstream=${ethv_qcr_device##*/} vendor=${ethv_qcr_vendor:-unknown} device=${ethv_qcr_id:-unknown} driver=${ethv_qcr_driver:-unbound}"
+
+        if [ "$ethv_qcr_vendor" = "0x1179" ] && \
+           [ "$ethv_qcr_id" = "0x0220" ]; then
+            QPS615_ETHERNET_DEVICE_COUNT=$((QPS615_ETHERNET_DEVICE_COUNT + 1))
+            ethv_qcr_modalias="$(ethv_read_first_line "$ethv_qcr_device/modalias" 2>/dev/null || true)"
+            ethv_qcr_driver_override="$(ethv_read_first_line "$ethv_qcr_device/driver_override" 2>/dev/null || true)"
+            ethv_qcr_of_node="$(readlink -f "$ethv_qcr_device/of_node" 2>/dev/null || true)"
+            ethv_qcr_runtime_status="$(ethv_read_first_line "$ethv_qcr_device/power/runtime_status" 2>/dev/null || true)"
+            ethv_qcr_port_declaration="absent"
+            case "$ethv_qcr_driver_override" in
+                ''|'(null)')
+                    ethv_qcr_driver_override="none"
+                    ;;
+                *)
+                    QPS615_ETHERNET_OVERRIDE_COUNT=$((QPS615_ETHERNET_OVERRIDE_COUNT + 1))
+                    ;;
+            esac
+            if [ -n "$ethv_qcr_of_node" ]; then
+                QPS615_ETHERNET_OF_NODE_COUNT=$((QPS615_ETHERNET_OF_NODE_COUNT + 1))
+                if [ -e "$ethv_qcr_of_node/phy-reset-gpios" ] || \
+                   [ -e "$ethv_qcr_of_node/qcom,phy-rst-gpio" ]; then
+                    ethv_qcr_port_declaration="declared"
+                    QPS615_ETHERNET_DECLARED_COUNT=$((QPS615_ETHERNET_DECLARED_COUNT + 1))
+                fi
+            fi
+            printf 'ethernet-function\t%s\tdriver=%s\tmodalias=%s\tdriver_override=%s\tof_node=%s\tport_configuration=%s\truntime_status=%s\n' \
+                "${ethv_qcr_device##*/}" \
+                "${ethv_qcr_driver:-unbound}" \
+                "${ethv_qcr_modalias:-unavailable}" \
+                "$ethv_qcr_driver_override" \
+                "${ethv_qcr_of_node:-unavailable}" \
+                "$ethv_qcr_port_declaration" \
+                "${ethv_qcr_runtime_status:-unknown}" >>"$ethv_qcr_inventory"
+            log_info "[QPS615-ETH] function=${ethv_qcr_device##*/} driver=${ethv_qcr_driver:-unbound} port_configuration=$ethv_qcr_port_declaration driver_override=$ethv_qcr_driver_override of_node=${ethv_qcr_of_node:-unavailable} runtime_status=${ethv_qcr_runtime_status:-unknown} modalias=${ethv_qcr_modalias:-unavailable}"
+
+            case "$ethv_qcr_driver" in
+                tc956x*)
+                QPS615_DRIVER_DEVICE_COUNT=$((QPS615_DRIVER_DEVICE_COUNT + 1))
+                if [ "$ethv_qcr_port_declaration" = "declared" ]; then
+                    QPS615_DECLARED_DRIVER_DEVICE_COUNT=$((QPS615_DECLARED_DRIVER_DEVICE_COUNT + 1))
+                fi
+                for ethv_qcr_netdev in "$ethv_qcr_device"/net/*; do
+                    [ -d "$ethv_qcr_netdev" ] || continue
+                    QPS615_NETDEV_COUNT=$((QPS615_NETDEV_COUNT + 1))
+                    if [ "$ethv_qcr_port_declaration" = "declared" ]; then
+                        QPS615_DECLARED_NETDEV_COUNT=$((QPS615_DECLARED_NETDEV_COUNT + 1))
+                    fi
+                    printf 'netdev\t%s\t%s\n' \
+                        "${ethv_qcr_device##*/}" \
+                        "${ethv_qcr_netdev##*/}" >>"$ethv_qcr_inventory"
+                    log_info "[QPS615] ethernet_function=${ethv_qcr_device##*/} netdev=${ethv_qcr_netdev##*/}"
+                done
+                    ;;
+                "")
+                    QPS615_UNBOUND_ETHERNET_COUNT=$((QPS615_UNBOUND_ETHERNET_COUNT + 1))
+                    ;;
+                *)
+                    QPS615_UNBOUND_ETHERNET_COUNT=$((QPS615_UNBOUND_ETHERNET_COUNT + 1))
+                    log_warn "[QPS615-ETH] function=${ethv_qcr_device##*/} is bound to unexpected driver=$ethv_qcr_driver"
+                    ;;
+            esac
+        fi
+    done
+
+    QPS615_FIRMWARE_PATH="$(find_image_firmware TC956X_Firmware_PCIeBridge.bin 2>/dev/null || true)"
+    if [ -n "$QPS615_FIRMWARE_PATH" ]; then
+        log_info "[QPS615] firmware=$QPS615_FIRMWARE_PATH"
+    else
+        log_warn "[QPS615] firmware TC956X_Firmware_PCIeBridge.bin was not found"
+    fi
+
+    ethv_qcr_module_candidate="$(find_kernel_module tc956x_pcie_eth 2>/dev/null | awk '/^\// { print; exit }' || true)"
+    ethv_qcr_running_kernel="$(uname -r 2>/dev/null || true)"
+    case "$ethv_qcr_module_candidate" in
+        "/lib/modules/$ethv_qcr_running_kernel/"*)
+            QPS615_MODULE_PATH="$ethv_qcr_module_candidate"
+            QPS615_MODULE_STATE="available"
+            ;;
+        "")
+            ;;
+        *)
+            log_warn "[QPS615-ETH] tc956x_pcie_eth exists only outside the running-kernel module tree: $ethv_qcr_module_candidate"
+            ;;
+    esac
+
+    if [ -d /sys/module/tc956x_pcie_eth ]; then
+        QPS615_MODULE_STATE="loaded-or-built-in"
+    fi
+
+    if [ -r /sys/module/tc956x_pcie_eth/parameters/tc956x_eth_ports_bdf ]; then
+        QPS615_MODULE_PORT_BDFS="$(
+            ethv_read_first_line \
+                /sys/module/tc956x_pcie_eth/parameters/tc956x_eth_ports_bdf \
+                2>/dev/null || true
+        )"
+        ethv_qcr_nonzero_bdfs="$(
+            printf '%s' "$QPS615_MODULE_PORT_BDFS" |
+                tr -d '0,[:space:]'
+        )"
+        if [ -n "$QPS615_MODULE_PORT_BDFS" ] && \
+           [ -z "$ethv_qcr_nonzero_bdfs" ]; then
+            QPS615_MODULE_PORT_CONFIG="driver-defaults"
+        elif [ -n "$QPS615_MODULE_PORT_BDFS" ]; then
+            QPS615_MODULE_PORT_CONFIG="configured"
+        fi
+        printf 'module-configuration\ttc956x_eth_ports_bdf=%s\tstate=%s\n' \
+            "${QPS615_MODULE_PORT_BDFS:-unreadable}" \
+            "$QPS615_MODULE_PORT_CONFIG" >>"$ethv_qcr_inventory"
+        log_info "[QPS615-ETH] module_parameter=tc956x_eth_ports_bdf value=${QPS615_MODULE_PORT_BDFS:-unreadable} state=$QPS615_MODULE_PORT_CONFIG"
+    fi
+
+    if [ -d /sys/bus/pci/drivers/tc956x_pci-eth ]; then
+        QPS615_PCI_DRIVER_PATH="/sys/bus/pci/drivers/tc956x_pci-eth"
+        QPS615_PCI_DRIVER_STATE="registered"
+        log_info "[QPS615-ETH] pci_driver=tc956x_pci-eth state=registered path=$QPS615_PCI_DRIVER_PATH"
+    elif [ "$QPS615_MODULE_STATE" = "loaded-or-built-in" ]; then
+        log_warn "[QPS615-ETH] module is loaded but PCI driver tc956x_pci-eth is not registered"
+    fi
+    printf 'pci-driver\tname=tc956x_pci-eth\tstate=%s\tpath=%s\n' \
+        "$QPS615_PCI_DRIVER_STATE" \
+        "${QPS615_PCI_DRIVER_PATH:-unavailable}" >>"$ethv_qcr_inventory"
+
+    QPS615_PCI_AUTOPROBE="$(
+        ethv_read_first_line /sys/bus/pci/drivers_autoprobe 2>/dev/null || true
+    )"
+    [ -n "$QPS615_PCI_AUTOPROBE" ] || QPS615_PCI_AUTOPROBE="unknown"
+    printf 'pci-autoprobe\tstate=%s\n' \
+        "$QPS615_PCI_AUTOPROBE" >>"$ethv_qcr_inventory"
+    log_info "[QPS615-ETH] pci_drivers_autoprobe=$QPS615_PCI_AUTOPROBE"
+
+    if [ -n "$QPS615_MODULE_PATH" ]; then
+        log_info "[QPS615-ETH] module=tc956x_pcie_eth state=$QPS615_MODULE_STATE path=$QPS615_MODULE_PATH"
+    elif [ "$QPS615_MODULE_STATE" = "loaded-or-built-in" ]; then
+        log_info "[QPS615-ETH] module=tc956x_pcie_eth state=$QPS615_MODULE_STATE path=built-in-or-unexposed"
+    else
+        log_warn "[QPS615-ETH] module=tc956x_pcie_eth was not found for the running kernel"
+    fi
+
+    log_info "[QPS615] summary bridge_functions=$QPS615_SWITCH_COUNT downstream=$QPS615_DOWNSTREAM_COUNT ethernet_devices=$QPS615_ETHERNET_DEVICE_COUNT declared_ethernet_ports=$QPS615_ETHERNET_DECLARED_COUNT bound_ethernet_devices=$QPS615_DRIVER_DEVICE_COUNT bound_declared_ports=$QPS615_DECLARED_DRIVER_DEVICE_COUNT unbound_ethernet_devices=$QPS615_UNBOUND_ETHERNET_COUNT of_nodes=$QPS615_ETHERNET_OF_NODE_COUNT driver_overrides=$QPS615_ETHERNET_OVERRIDE_COUNT netdevs=$QPS615_NETDEV_COUNT declared_port_netdevs=$QPS615_DECLARED_NETDEV_COUNT artifact=$ethv_qcr_inventory"
+
+    if [ "$QPS615_DOWNSTREAM_COUNT" -eq 0 ]; then
+        QPS615_TOPOLOGY_FAILURE_REASON="QPS615 bridge is enumerated but exposes no downstream PCIe functions"
+    elif [ -z "$QPS615_FIRMWARE_PATH" ]; then
+        QPS615_TOPOLOGY_FAILURE_REASON="required TC956X_Firmware_PCIeBridge.bin is not readable in a standard firmware root"
+    fi
+
+    if [ "$QPS615_ETHERNET_DEVICE_COUNT" -eq 0 ]; then
+        QPS615_ETHERNET_SKIP_REASON="QPS615 is enumerated but exposes no Toshiba 1179:0220 Ethernet functions"
+    elif [ "$QPS615_ETHERNET_DECLARED_COUNT" -eq 0 ] && \
+         [ "$QPS615_DRIVER_DEVICE_COUNT" -eq 0 ]; then
+        QPS615_ETHERNET_SKIP_REASON="$QPS615_ETHERNET_DEVICE_COUNT embedded Ethernet function(s) are enumerated, but no runtime DT port configuration declares them for Ethernet use"
+    elif [ "$QPS615_DECLARED_DRIVER_DEVICE_COUNT" -lt "$QPS615_ETHERNET_DECLARED_COUNT" ]; then
+        if [ "$QPS615_PCI_AUTOPROBE" = "0" ]; then
+            QPS615_ETHERNET_FAILURE_REASON="$QPS615_ETHERNET_DECLARED_COUNT declared QPS615 Ethernet port(s) are not ready because PCI driver autoprobe is disabled"
+        elif [ "$QPS615_ETHERNET_OVERRIDE_COUNT" -gt 0 ]; then
+            QPS615_ETHERNET_FAILURE_REASON="$QPS615_ETHERNET_DECLARED_COUNT declared QPS615 Ethernet port(s) are not ready and $QPS615_ETHERNET_OVERRIDE_COUNT function(s) have a driver override"
+        elif [ "$QPS615_MODULE_STATE" = "loaded-or-built-in" ]; then
+            if [ "$QPS615_PCI_DRIVER_STATE" != "registered" ]; then
+                QPS615_ETHERNET_FAILURE_REASON="$QPS615_ETHERNET_DECLARED_COUNT declared QPS615 Ethernet port(s) are not bound, tc956x_pcie_eth is loaded but PCI driver tc956x_pci-eth is not registered"
+            else
+                QPS615_ETHERNET_FAILURE_REASON="$QPS615_ETHERNET_DECLARED_COUNT declared QPS615 Ethernet port(s) did not bind after automatic matching, PCI driver tc956x_pci-eth is registered and endpoint probe did not complete"
+            fi
+        elif [ -n "$QPS615_MODULE_PATH" ]; then
+            QPS615_ETHERNET_FAILURE_REASON="$QPS615_ETHERNET_DECLARED_COUNT declared QPS615 Ethernet port(s) are not bound although module $QPS615_MODULE_PATH is available"
+        else
+            QPS615_ETHERNET_FAILURE_REASON="$QPS615_ETHERNET_DECLARED_COUNT declared QPS615 Ethernet port(s) are not bound and tc956x_pcie_eth is not available for the running kernel"
+        fi
+    elif [ "$QPS615_DECLARED_NETDEV_COUNT" -lt "$QPS615_DECLARED_DRIVER_DEVICE_COUNT" ]; then
+        QPS615_ETHERNET_FAILURE_REASON="$QPS615_DECLARED_DRIVER_DEVICE_COUNT declared TC956x Ethernet port(s) are bound but only $QPS615_DECLARED_NETDEV_COUNT netdev(s) are exposed"
+    elif [ "$QPS615_ETHERNET_DECLARED_COUNT" -eq 0 ] && \
+         [ "$QPS615_NETDEV_COUNT" -lt "$QPS615_DRIVER_DEVICE_COUNT" ]; then
+        QPS615_ETHERNET_FAILURE_REASON="$QPS615_DRIVER_DEVICE_COUNT TC956x Ethernet function(s) are bound without an explicit runtime DT port declaration, but only $QPS615_NETDEV_COUNT netdev(s) are exposed"
+    fi
+
+    if [ -n "$QPS615_TOPOLOGY_FAILURE_REASON" ]; then
+        QPS615_FAILURE_REASON="$QPS615_TOPOLOGY_FAILURE_REASON"
+    else
+        QPS615_FAILURE_REASON="$QPS615_ETHERNET_FAILURE_REASON"
+    fi
+
+    export QPS615_SWITCH_COUNT QPS615_DOWNSTREAM_COUNT QPS615_ETHERNET_DEVICE_COUNT
+    export QPS615_ETHERNET_DECLARED_COUNT QPS615_DRIVER_DEVICE_COUNT
+    export QPS615_DECLARED_DRIVER_DEVICE_COUNT QPS615_UNBOUND_ETHERNET_COUNT QPS615_NETDEV_COUNT
+    export QPS615_DECLARED_NETDEV_COUNT
+    export QPS615_ETHERNET_OF_NODE_COUNT QPS615_ETHERNET_OVERRIDE_COUNT
+    export QPS615_FIRMWARE_PATH QPS615_MODULE_PATH QPS615_MODULE_STATE
+    export QPS615_MODULE_PORT_BDFS QPS615_MODULE_PORT_CONFIG
+    export QPS615_PCI_DRIVER_PATH QPS615_PCI_DRIVER_STATE
+    export QPS615_PCI_AUTOPROBE
+    export QPS615_TOPOLOGY_FAILURE_REASON QPS615_ETHERNET_FAILURE_REASON
+    export QPS615_ETHERNET_SKIP_REASON QPS615_FAILURE_REASON
+
+    [ -z "$QPS615_FAILURE_REASON" ]
+}
+
 # ethv_get_driver <interface>
 #   Query the bound network driver through ethtool or the sysfs driver link.
 #   stdout: driver name, or an empty line when unavailable.

@@ -1,7 +1,7 @@
 metadata:
   name: ethernet-inventory-validation
   format: "Lava-Test Test Definition 1.0"
-  description: "Inventory physical Ethernet interfaces, MAC drivers, PHY identity, device-tree identity, queue topology, and platform bindings without changing network configuration."
+  description: "Inventory Ethernet interfaces, drivers, PHY and queue topology, including runtime-gated QPS615 readiness, without changing network configuration."
   os:
     - linux
   scope:
