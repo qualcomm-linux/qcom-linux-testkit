@@ -1340,6 +1340,8 @@ pkg_apt_update() {
     pkg_run_cmd_retry "apt-update" \
         env DEBIAN_FRONTEND=noninteractive \
         "$PKG_APT_GET" update -y \
+        --allow-releaseinfo-change-origin \
+        --allow-releaseinfo-change-label \
         -o Acquire::Retries=2 \
         -o Acquire::Languages=none \
         -o "DPkg::Lock::Timeout=${PKG_APT_LOCK_TIMEOUT}"
