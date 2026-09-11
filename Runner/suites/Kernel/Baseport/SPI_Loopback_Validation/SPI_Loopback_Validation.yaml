@@ -1,0 +1,25 @@
+metadata:
+  name: SPI_Loopback_Validation
+  format: "Lava-Test Test Definition 1.0"
+  description: "Run bounded exact-byte loopback on an auto-detected or selected spidev fixture"
+  os:
+    - linux
+  scope:
+    - functional
+
+params:
+  SPI_DEVICE: ""
+  SPI_SPEED_HZ: "1000000"
+  SPI_BITS_PER_WORD: "8"
+  SPI_MODES: "0,1,2,3"
+  SPI_LOOPBACK_TYPE: "auto"
+  SPI_LOOPBACK_PAYLOAD: "QLI_SPI_LOOPBACK"
+  SPI_LOOPBACK_TIMEOUT: "10"
+  SPI_LOOPBACK_FIXTURE: "0"
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/SPI_Loopback_Validation
+    - SPI_DEVICE="${SPI_DEVICE}" SPI_SPEED_HZ="${SPI_SPEED_HZ}" SPI_BITS_PER_WORD="${SPI_BITS_PER_WORD}" SPI_MODES="${SPI_MODES}" SPI_LOOPBACK_TYPE="${SPI_LOOPBACK_TYPE}" SPI_LOOPBACK_PAYLOAD="${SPI_LOOPBACK_PAYLOAD}" SPI_LOOPBACK_TIMEOUT="${SPI_LOOPBACK_TIMEOUT}" SPI_LOOPBACK_FIXTURE="${SPI_LOOPBACK_FIXTURE}" ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh SPI_Loopback_Validation.res

@@ -1,0 +1,15 @@
+metadata:
+  name: SPI_Validation
+  format: "Lava-Test Test Definition 1.0"
+  description: "Validate SPI controller, master, client, and driver runtime readiness"
+  os:
+    - linux
+  scope:
+    - functional
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/SPI_Validation
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh SPI_Validation.res
