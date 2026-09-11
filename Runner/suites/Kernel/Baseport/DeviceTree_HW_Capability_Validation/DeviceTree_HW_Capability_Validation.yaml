@@ -1,7 +1,7 @@
 metadata:
   name: DeviceTree_HW_Capability_Validation
   format: "Lava-Test Test Definition 1.0"
-  description: "Validate runtime device-tree identity, enabled hardware controllers, driver binding, and kernel health"
+  description: "Validate runtime device-tree identity, controller binding, PMIC GLINK/UCSI, thermal, power, and kernel health"
   os:
     - linux
   scope:

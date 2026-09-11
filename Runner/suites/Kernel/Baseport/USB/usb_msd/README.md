@@ -7,21 +7,18 @@ SPDX-License-Identifier: BSD-3-Clause
 
 ## Overview
 
-This shell script executes on the DUT (Device-Under-Test) and verifies USB Mass Storage Devices (MSD).
+This shell script executes on the DUT and validates USB mass-storage devices.
 The test validation scope includes:
 - Successful enumeration of MSD devices
 - For each device:
-  - Determine and report bound transport driver (`uas` or `usb-storage`) from the MSD interface for debug visibility
+  - Determine and report the bound transport driver
   - Discover associated block devices via sysfs
-  - If block device is missing, print device information to facilitate debug
-- Print a table of enumerated devices:
+  - Wait a bounded time for asynchronous block-device creation
+  - Read 512 bytes from each block device by default without modifying media
 
-```
-DEVICE    VID:PID   DRIVER            PRODUCT
--------------------------------------------------------------------------------
-<dev>     <vid:pid> <uas|usb-storage> <product>
-```
-The test PASS requires all detected MSD devices to have associated block device nodes.
+The test passes only when every detected MSD interface is driver-bound, exposes
+its block device, and completes the enabled read validation. A missing external
+MSD fixture is reported as `SKIP`.
 ---
 
 ## Setup
@@ -45,3 +42,20 @@ The test PASS requires all detected MSD devices to have associated block device 
 cd Runner
 ./run-test.sh usb_msd
 ```
+
+Run directly with defaults:
+
+```sh
+cd Runner/suites/Kernel/Baseport/USB/usb_msd
+./run.sh
+```
+
+Disable the read-only media check or adjust enumeration wait time:
+
+```sh
+./run.sh --read-verify 0 --wait-seconds 20
+```
+
+Equivalent environment variables are `USB_MSD_READ_VERIFY` and
+`USB_MSD_WAIT_SECONDS`. Runtime evidence is retained under
+`results/usb_msd/`.
