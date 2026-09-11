@@ -42,6 +42,7 @@ log_info "------------------- Starting $TESTNAME Testcase ----------------------
 log_info "=== Test Initialization ==="
 
 # --- Tunables (override via env) ----------------------------------------------
+BOOT_TO="${BOOT_TO:-30}" # wait for a processor to reach running (s)
 STOP_TO="${STOP_TO:-10}" # remoteproc stop timeout (s)
 START_TO="${START_TO:-10}" # remoteproc start timeout (s)
 POLL_I="${POLL_I:-1}" # state poll interval (s)
@@ -53,10 +54,11 @@ FATAL_ON_UNSUSPENDED="${FATAL_ON_UNSUSPENDED:-0}" # 1 = abort if audio not suspe
 DO_SSR=0
 
 usage() {
-    echo "Usage: $0 [--ssr] [--pre-stop-delay SEC] [--fatal-on-unsuspended] [--stop-to SEC] [--start-to SEC] [--poll-i SEC]" >&2
+    echo "Usage: $0 [--ssr] [--pre-stop-delay SEC] [--fatal-on-unsuspended] [--boot-to SEC] [--stop-to SEC] [--start-to SEC] [--poll-i SEC]" >&2
     echo " --ssr Perform ADSP stop/start (SSR). Default: OFF" >&2
     echo " --pre-stop-delay SEC Delay before stop when --ssr is used (default: $PRE_STOP_DELAY)" >&2
     echo " --fatal-on-unsuspended Abort if audio not suspended/unsupported after delay (only meaningful with --ssr)" >&2
+    echo " --boot-to SEC Boot-state wait (default: $BOOT_TO, 0 disables)" >&2
     echo " --stop-to SEC Stop timeout (default: $STOP_TO)" >&2
     echo " --start-to SEC Start timeout (default: $START_TO)" >&2
     echo " --poll-i SEC Poll interval (default: $POLL_I)" >&2
@@ -80,6 +82,15 @@ while [ $# -gt 0 ]; do
         --fatal-on-unsuspended)
             FATAL_ON_UNSUSPENDED=1
             shift
+            ;;
+        --boot-to)
+            if [ $# -lt 2 ]; then
+                log_fail "Missing value for --boot-to"
+                usage
+                exit 2
+            fi
+            BOOT_TO="$2"
+            shift 2
             ;;
         --stop-to)
             if [ $# -lt 2 ]; then
@@ -120,7 +131,7 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-log_info "Tunables: STOP_TO=$STOP_TO START_TO=$START_TO POLL_I=$POLL_I PRE_STOP_DELAY=$PRE_STOP_DELAY FATAL_ON_UNSUSPENDED=$FATAL_ON_UNSUSPENDED"
+log_info "Tunables: BOOT_TO=$BOOT_TO STOP_TO=$STOP_TO START_TO=$START_TO POLL_I=$POLL_I PRE_STOP_DELAY=$PRE_STOP_DELAY FATAL_ON_UNSUSPENDED=$FATAL_ON_UNSUSPENDED"
 log_info "SSR control: DO_SSR=$DO_SSR (0=no stop/start, 1=do stop/start)"
 
 # --- Audio readiness snapshot (no hardcoding, no long wait) -------------------
@@ -264,6 +275,10 @@ while IFS='|' read -r rpath rstate rfirm rname; do
     stop_res="NA"
     start_res="NA"
     ping_res="SKIPPED"
+
+    # Boot check: the instance list snapshot was taken moments after login,
+    # so let a processor still coming up reach running before judging it.
+    rstate="$(wait_remoteproc_boot_state "$rpath" "$inst_id" "$BOOT_TO" "$POLL_I")"
 
     if [ "$rstate" = "running" ]; then
         log_pass "$inst_id: boot check PASS"

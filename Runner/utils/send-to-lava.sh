@@ -13,26 +13,41 @@
 #
 # This script minimizes that risk by:
 # - validating/sanitizing result-file content before emitting signals
-# - lowering kernel console_loglevel only for the tiny critical section where
-# the LAVA signal line is printed, when /proc/sys/kernel/printk is writable
+# - lowering kernel console_loglevel for the critical section where the LAVA
+# signal lines are printed, when /proc/sys/kernel/printk is writable
 # - emitting each LAVA signal as one userspace printf operation
-# - restoring the exact original printk settings immediately afterwards
+# - holding the quiet window open until the bytes have left the serial link
+# - restoring the exact original printk settings afterwards
 # - removing the temporary signal buffer explicitly after emission
 #
+# The drain delay matters: printf returns when the line reaches the tty
+# buffer, not when the UART has sent it, so the quiet window must stay open
+# until the signal has cleared the wire. The same delay before the first
+# printf lets kernel output already queued on the UART finish first.
+#
 # Important: this does not suppress kernel logs during test execution. The
-# printk loglevel is changed only around the LAVA signal printf, after the test
-# has already completed and is reporting the result. Kernel messages generated
-# during that short window remain available in the kernel ring buffer via dmesg.
+# printk loglevel is changed only around the LAVA signal emission, after the
+# test has already completed and is reporting the result. Kernel messages
+# generated during that short window remain available in the kernel ring buffer
+# via dmesg.
 #
 # If /proc/sys/kernel/printk is not writable, the script does not change printk
 # settings and falls back to the existing safe printf behavior. It intentionally
 # does not use "dmesg -n" as a fallback because that cannot restore the exact
 # original console loglevel.
+#
+# Tunables:
+#   LAVA_SIGNAL_DRAIN_SECONDS - console drain delay, default 0.3, "0" disables
 
 RESULT_FILE="${1:-}"
 SIGNAL_FILE="${TMPDIR:-/tmp}/lava_signals_$$.log"
 PRINTK_SAVED=""
 PRINTK_CHANGED=0
+LAVA_SIGNAL_DRAIN_SECONDS="${LAVA_SIGNAL_DRAIN_SECONDS:-0.3}"
+# Reject anything but a plain, optionally fractional, number.
+case "$LAVA_SIGNAL_DRAIN_SECONDS" in
+    ''|.|*[!0-9.]*|*.*.*) LAVA_SIGNAL_DRAIN_SECONDS=0.3 ;;
+esac
 
 valid_result() {
     case "$1" in
@@ -78,6 +93,20 @@ save_and_quiet_kernel_console() {
     fi
 
     return 0
+}
+
+# Sleep so the quiet window covers the bytes still leaving the UART.
+drain_kernel_console() {
+    # No quiet window, nothing to protect.
+    [ "$PRINTK_CHANGED" = "1" ] || return 0
+
+    # Zero in any spelling (0, 0.0, 00, ...) disables the drain.
+    case "$(printf '%s' "$LAVA_SIGNAL_DRAIN_SECONDS" | tr -d '0.')" in
+        '') return 0 ;;
+    esac
+
+    # Whole-second fallback for shells without fractional sleep.
+    sleep "$LAVA_SIGNAL_DRAIN_SECONDS" 2>/dev/null || sleep 1
 }
 
 restore_kernel_console() {
@@ -163,19 +192,25 @@ else
     echo "[WARNING] Result file missing: $RESULT_FILE" >&2
 fi
 
-# Emit signals with the smallest possible critical section.
-#
-# Kernel console quieting is applied only for the individual printf and restored
-# immediately afterwards. Test execution logs remain visible; only asynchronous
-# printk injection into the LAVA protocol line is avoided.
+# Quiet printk across the whole emission for one result file, draining
+# before the first signal and after each one, so printk only resumes once
+# the last signal has cleared the wire however many lines the file holds.
 if [ -s "$SIGNAL_FILE" ]; then
-    while IFS= read -r signal_line || [ -n "$signal_line" ]; do
+    # Read first: the INT/TERM trap deletes SIGNAL_FILE without exiting,
+    # and the emission must survive that.
+    signal_lines="$(cat "$SIGNAL_FILE")"
+
+    save_and_quiet_kernel_console
+    drain_kernel_console
+
+    printf '%s\n' "$signal_lines" | while IFS= read -r signal_line; do
         [ -n "$signal_line" ] || continue
 
-        save_and_quiet_kernel_console
         printf '\n%s\n\n' "$signal_line"
-        restore_kernel_console
-    done < "$SIGNAL_FILE"
+        drain_kernel_console
+    done
+
+    restore_kernel_console
 fi
 
 # Explicit cleanup after signal emission. The trap remains as backup for early
