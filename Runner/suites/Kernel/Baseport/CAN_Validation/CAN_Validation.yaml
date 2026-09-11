@@ -1,0 +1,15 @@
+metadata:
+  name: CAN_Validation
+  format: "Lava-Test Test Definition 1.0"
+  description: "Validate CAN controller binding and SocketCAN runtime readiness"
+  os:
+    - linux
+  scope:
+    - functional
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/CAN_Validation
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh CAN_Validation.res

@@ -1,0 +1,22 @@
+metadata:
+  name: CAN_Internal_Loopback_Validation
+  format: "Lava-Test Test Definition 1.0"
+  description: "Run transactional exact-frame loopback on an auto-detected or selected CAN interface"
+  os:
+    - linux
+  scope:
+    - functional
+
+params:
+  CAN_INTERFACE: ""
+  CAN_LOOPBACK_MODE: "auto"
+  CAN_BITRATE: "500000"
+  CAN_DBITRATE: "2000000"
+  CAN_LOOPBACK_TIMEOUT: "10"
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/CAN_Internal_Loopback_Validation
+    - CAN_INTERFACE="${CAN_INTERFACE}" CAN_LOOPBACK_MODE="${CAN_LOOPBACK_MODE}" CAN_BITRATE="${CAN_BITRATE}" CAN_DBITRATE="${CAN_DBITRATE}" CAN_LOOPBACK_TIMEOUT="${CAN_LOOPBACK_TIMEOUT}" ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh CAN_Internal_Loopback_Validation.res
