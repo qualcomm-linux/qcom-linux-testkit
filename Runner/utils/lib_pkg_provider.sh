@@ -518,15 +518,14 @@ pkg_overlay_requested_from_args() {
     [ "$overlay_requested" -eq 1 ]
 }
 
-# Return success when optional overlay package-set recovery is applicable.
+# Return success when host-distro package recovery is applicable.
 #
-# Yocto/qcom-distro and other embedded images must not regress. They should keep
-# their existing image-provided packages and skip optional overlay package-set
-# recovery unless explicitly supported later.
-pkg_optional_package_set_supported_os() {
-    optional_os_id="$1"
+# Yocto/qcom-distro and other embedded images must not regress. They keep their
+# image-provided packages unless an exact OS-specific policy is added later.
+pkg_package_recovery_supported_os() {
+    recovery_os_id="$1"
 
-    case "$optional_os_id" in
+    case "$recovery_os_id" in
         debian|ubuntu|centos)
             return 0
             ;;
@@ -534,6 +533,11 @@ pkg_optional_package_set_supported_os() {
             return 1
             ;;
     esac
+}
+
+# Return success when optional overlay package-set recovery is applicable.
+pkg_optional_package_set_supported_os() {
+    pkg_package_recovery_supported_os "$1"
 }
 
 # Ensure an optional package-set only when overlay mode is explicitly requested.
@@ -2319,6 +2323,35 @@ pkg_ensure_required_package_set_present() {
     pkg_verify_package_set_installed "$perps_set"
 }
 
+# Ensure a mapped required package set on supported general-purpose distros.
+#
+# Return values:
+#   0 - package set is ready
+#   1 - mapped package recovery failed
+#   2 - OS is image-managed or no exact OS mapping exists
+pkg_ensure_host_distro_package_set_present() {
+    pehdps_set="$1"
+    pehdps_os_id="$(pkg_detect_os_id)"
+    pehdps_map_file="$(pkg_resolve_path "$PKG_PACKAGE_MAP")"
+
+    [ -n "$pehdps_set" ] || return 1
+
+    if ! pkg_package_recovery_supported_os "$pehdps_os_id"; then
+        pkg_log_info "Package-set recovery is not enabled for image-managed OS, set=$pehdps_set os=$pehdps_os_id"
+        return 2
+    fi
+
+    if [ ! -r "$pehdps_map_file" ] ||
+       ! pkg_lookup_key_in_map \
+           "$pehdps_map_file" \
+           "${pehdps_os_id}:package-set:${pehdps_set}" >/dev/null 2>&1; then
+        pkg_log_info "Package-set recovery skipped, no exact OS mapping for set=$pehdps_set os=$pehdps_os_id"
+        return 2
+    fi
+
+    pkg_ensure_required_package_set_present "$pehdps_set"
+}
+
 # Avoid package-manager/network work when an optional package set is complete.
 pkg_ensure_optional_package_set_present() {
     peops_set="$1"
@@ -2376,4 +2409,3 @@ pkg_package_has_file_matching() {
 
     return 1
 }
-
