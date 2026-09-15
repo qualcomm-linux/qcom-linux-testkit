@@ -2762,9 +2762,18 @@ audio_remoteproc_is_modem() {
 }
 
 # Return success when runtime platform evidence identifies a Shikra target.
-# The preflight runs before the suites call detect_platform, so inspect both
-# any already-populated platform variables and the standard runtime DT paths.
+#
+# Delegates to platform_identity_matches() from functestlib.sh when available
+# (the shared single source of truth for board identity consumed by both audio
+# and video). Falls back to an inline implementation with identical logic for
+# environments where functestlib.sh is not sourced before audio_common.sh.
 audio_platform_is_shikra() {
+  if command -v platform_identity_matches >/dev/null 2>&1; then
+    platform_identity_matches "shikra"
+    return
+  fi
+
+  # Inline fallback — identical logic to platform_runtime_identity() + match.
   apis_identity="${PLATFORM_MACHINE:-} ${PLATFORM_TARGET:-}"
   apis_identity="$apis_identity ${PLATFORM_SOC_MACHINE:-}"
   apis_identity="$apis_identity ${PLATFORM_DT_MODEL:-}"
