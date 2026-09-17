@@ -36,6 +36,9 @@ fi
  
 # shellcheck disable=SC1090,SC1091
 . "$TOOLS/lib_fastrpc.sh"
+
+# shellcheck disable=SC1090,SC1091
+. "$TOOLS/lib_diag.sh"
  
 # Optional generic package-set recovery.
 # This must be a clean no-op when no package-set mapping exists for the active OS/provider.
@@ -52,7 +55,8 @@ fi
 
 # Defaults
 REPEAT=1
-TIMEOUT=""
+TIMEOUT=120
+HEALTHCHECK_TIMEOUT=15
 ARCH=""
 BIN_DIR="" # directory that CONTAINS fastrpc_test
 ASSETS_DIR="" # kept for compatibility/logging (not used by new layout)
@@ -63,13 +67,17 @@ CLI_DOMAIN_NAME=""
 DOMAIN_MODE="all-supported" # Default: test all supported domains
 PD_MODE="both" # Default: test both PDs where supported
 
+# usage
+# Print the supported FastRPC test CLI, environment overrides, and selection policy.
+# Inputs: none. Output: help text on stdout.
+# Returns: 0. Side effects: none.
 usage() {
     cat <<EOF
 Usage: $0 [OPTIONS]
 
 **Enhanced Test Coverage**:
   This test now validates FastRPC across all supported DSP domains and PD modes.
-  - Tests all detected domains: ADSP, MDSP, SDSP, CDSP, CDSP1, GPDSP0, GPDSP1
+  - Tests all detected domains: ADSP, MDSP, SDSP, CDSP, CDSP1, GDSP0, GDSP1
   - Tests both signed and unsigned Protection Domains where hardware supports them
   - For legacy single-domain testing: use --domain-mode single --domain <N>
 
@@ -77,13 +85,14 @@ Options:
   --arch <name> Architecture (only if explicitly provided)
   --bin-dir <path> Directory containing 'fastrpc_test' (default: /usr/bin)
   --assets-dir <path> (compat) previously used when assets lived under 'linux/'
-  --domain <0|1|2|3|4|5|6> DSP domain: 0=ADSP, 1=MDSP, 2=SDSP, 3=CDSP, 4=CDSP1, 5=GPDSP0, 6=GPDSP1
-  --domain-name <name> DSP domain by name: adsp|mdsp|sdsp|cdsp|cdsp1|gpdsp0|gpdsp1
+  --domain <0|1|2|3|4|5|6> DSP domain: 0=ADSP, 1=MDSP, 2=SDSP, 3=CDSP, 4=CDSP1, 5=GDSP0, 6=GDSP1
+  --domain-name <name> DSP domain by name: adsp|mdsp|sdsp|cdsp|cdsp1|gdsp0|gdsp1
   --domain-mode <all-supported|single> Discover all supported domains or run only one (default: all-supported)
   --pd-mode <both|signed-only|unsigned-only> Select PD mode(s) to run (default: both)
   --unsigned-pd Use '-U 1' (user/unsigned PD). Overrides --pd-mode for compatibility
   --repeat <N> Number of repetitions (default: 1)
-  --timeout <sec> Timeout for each run (no timeout if omitted)
+  --timeout <sec> Timeout for each run (default: 120, must be greater than zero)
+  --healthcheck-timeout <sec> Timeout for fastrpc-healthcheck (default: 15)
   --verbose Extra logging for CI debugging
   --help Show this help
 
@@ -99,6 +108,7 @@ Env:
   FASTRPC_DOMAIN_NAME=adsp|... Named domain; CLI wins.
   FASTRPC_UNSIGNED_PD=0|1 Sets PD (-U value). CLI --unsigned-pd overrides to 1.
   FASTRPC_EXTRA_FLAGS Extra flags appended (space-separated).
+  FASTRPC_HEALTHCHECK_BIN Optional path to fastrpc-healthcheck.
   ALLOW_BIN_FASTRPC=1 Permit using /bin/fastrpc_test when --bin-dir=/bin.
 
 Notes:
@@ -113,33 +123,91 @@ Notes:
       /usr/lib/<multiarch>
       /usr/lib/<multiarch>/fastrpc_test
       /usr/share/fastrpc_test
+    RPM-based:
+      /usr/lib64
+      /usr/lib64/fastrpc_test
+      /usr/share/fastrpc_test
 - Optional overrides:
     FASTRPC_LIB_SYS_DIR
     FASTRPC_LIB_TEST_DIR
     FASTRPC_SKEL_BASE
-- Domain mapping: ADSP=0 MDSP=1 SDSP=2 CDSP=3 CDSP1=4 GPDSP0=5 GPDSP1=6
-- PD support: ADSP/MDSP/SDSP support signed only; CDSP/CDSP1/GPDSP support both.
+- Domain mapping: ADSP=0 MDSP=1 SDSP=2 CDSP=3 CDSP1=4 GDSP0=5 GDSP1=6
+- With healthcheck, domain and PD support come from its live capability report.
+- Without healthcheck, domains come from remoteproc plus endpoint discovery, while PD support uses a conservative protocol fallback map.
 EOF
 }
 
-# --------------------- Parse arguments -------------------------
-while [ $# -gt 0 ]; do
-    case "$1" in
-        --arch) ARCH="$2"; shift 2 ;;
-        --bin-dir) BIN_DIR="$2"; shift 2 ;;
-        --assets-dir) ASSETS_DIR="$2"; shift 2 ;;
-        --domain) CLI_DOMAIN="$2"; shift 2 ;;
-        --domain-name) CLI_DOMAIN_NAME="$2"; shift 2 ;;
-        --domain-mode) DOMAIN_MODE="$2"; shift 2 ;;
-        --pd-mode) PD_MODE="$2"; shift 2 ;;
-        --unsigned-pd) UNSIGNED_PD_FLAG=1; shift ;;
-        --repeat) REPEAT="$2"; shift 2 ;;
-        --timeout) TIMEOUT="$2"; shift 2 ;;
-        --verbose) VERBOSE=1; shift ;;
-        --help) usage; exit 0 ;;
-        *) echo "[ERROR] Unknown argument: $1" >&2; usage; echo "$TESTNAME : FAIL" >"$RESULT_FILE"; exit 0 ;;
-    esac
-done
+# parse_args ARG...
+# Parse command-line policy and compatibility options into suite configuration globals.
+# Inputs: the original command-line argument vector. Output: no stdout contract.
+# Returns: 0 for valid input, and exits the suite after help or invalid input.
+# Side effects: updates option globals and writes a FAIL result for unknown arguments.
+parse_args() {
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --arch)
+                ARCH="$2"
+                shift 2
+                ;;
+            --bin-dir)
+                BIN_DIR="$2"
+                shift 2
+                ;;
+            --assets-dir)
+                ASSETS_DIR="$2"
+                shift 2
+                ;;
+            --domain)
+                CLI_DOMAIN="$2"
+                shift 2
+                ;;
+            --domain-name)
+                CLI_DOMAIN_NAME="$2"
+                shift 2
+                ;;
+            --domain-mode)
+                DOMAIN_MODE="$2"
+                shift 2
+                ;;
+            --pd-mode)
+                PD_MODE="$2"
+                shift 2
+                ;;
+            --unsigned-pd)
+                UNSIGNED_PD_FLAG=1
+                shift
+                ;;
+            --repeat)
+                REPEAT="$2"
+                shift 2
+                ;;
+            --timeout)
+                TIMEOUT="$2"
+                shift 2
+                ;;
+            --healthcheck-timeout)
+                HEALTHCHECK_TIMEOUT="$2"
+                shift 2
+                ;;
+            --verbose)
+                VERBOSE=1
+                shift
+                ;;
+            --help)
+                usage
+                exit 0
+                ;;
+            *)
+                echo "[ERROR] Unknown argument: $1" >&2
+                usage
+                echo "$TESTNAME : FAIL" >"$RESULT_FILE"
+                exit 0
+                ;;
+        esac
+    done
+}
+
+parse_args "$@"
 
 # ---- Back-compat: accept --assets-dir but ignore in the new auto-discovered layout.
 # Export so external tooling (or legacy wrappers) can still read it.
@@ -157,10 +225,27 @@ export UNSIGNED_PD_FLAG
 export VERBOSE
 
 # ---------- Validation ----------
-case "$REPEAT" in *[!0-9]*|"") log_error "Invalid --repeat: $REPEAT"; echo "$TESTNAME : FAIL" >"$RESULT_FILE"; exit 0 ;; esac
-if [ -n "$TIMEOUT" ]; then
-    case "$TIMEOUT" in *[!0-9]*|"") log_error "Invalid --timeout: $TIMEOUT"; echo "$TESTNAME : FAIL" >"$RESULT_FILE"; exit 0 ;; esac
-fi
+case "$REPEAT" in
+    *[!0-9]*|""|0)
+        log_error "Invalid --repeat: $REPEAT"
+        echo "$TESTNAME : FAIL" >"$RESULT_FILE"
+        exit 0
+        ;;
+esac
+case "$TIMEOUT" in
+    *[!0-9]*|""|0)
+        log_error "Invalid --timeout: $TIMEOUT"
+        echo "$TESTNAME : FAIL" >"$RESULT_FILE"
+        exit 0
+        ;;
+esac
+case "$HEALTHCHECK_TIMEOUT" in
+    *[!0-9]*|""|0)
+        log_error "Invalid --healthcheck-timeout: $HEALTHCHECK_TIMEOUT"
+        echo "$TESTNAME : FAIL" >"$RESULT_FILE"
+        exit 0
+        ;;
+esac
 # Validate enhanced options
 case "$DOMAIN_MODE" in all-supported|single) : ;; *) log_error "Invalid --domain-mode: $DOMAIN_MODE"; echo "$TESTNAME : FAIL" >"$RESULT_FILE"; exit 0 ;; esac
 case "$PD_MODE" in both|signed-only|unsigned-only) : ;; *) log_error "Invalid --pd-mode: $PD_MODE"; echo "$TESTNAME : FAIL" >"$RESULT_FILE"; exit 0 ;; esac
@@ -185,7 +270,6 @@ log_info "-------------------Starting $TESTNAME Testcase------------------------
 log_info "Kernel: $(uname -a 2>/dev/null || echo N/A)"
 log_info "Date(UTC): $(date -u 2>/dev/null || echo N/A)"
 log_soc_info
-SOC_MACHINE="$(tr -s ' ' < /sys/devices/soc0/machine 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
 
 # -------------------- Binary directory resolution -----------------
 if [ -n "$BIN_DIR" ]; then
@@ -213,6 +297,50 @@ if [ ! -x "$RUN_BIN" ]; then
     exit 0
 fi
 
+# -------------------- Logging root -----------------------------
+TS="$(date +%Y%m%d-%H%M%S)"
+LOG_ROOT="./logs_${TESTNAME}_${TS}"
+if ! mkdir -p "$LOG_ROOT"; then
+    log_error "Cannot create $LOG_ROOT"
+    echo "$TESTNAME : FAIL" >"$RESULT_FILE"
+    exit 0
+fi
+
+log_info "Evidence directory: $test_path/$LOG_ROOT"
+
+# -------------------- Capability discovery ---------------------
+FASTRPC_HEALTHCHECK_LOG="$LOG_ROOT/fastrpc_healthcheck.log"
+FASTRPC_HEALTHCHECK_TSV="$LOG_ROOT/fastrpc_healthcheck.tsv"
+export FASTRPC_HEALTHCHECK_TSV
+
+fastrpc_capture_healthcheck \
+    "$FASTRPC_HEALTHCHECK_LOG" \
+    "$HEALTHCHECK_TIMEOUT"
+healthcheck_status=$?
+
+case "$healthcheck_status" in
+    0)
+        if fastrpc_parse_healthcheck \
+            "$FASTRPC_HEALTHCHECK_LOG" \
+            "$FASTRPC_HEALTHCHECK_TSV"; then
+            export FASTRPC_HEALTHCHECK_DSP_LIB_DIR
+            log_info "[FASTRPC-POLICY] capability_source=fastrpc-healthcheck domain_source=healthcheck pd_source=healthcheck parsed=$FASTRPC_HEALTHCHECK_TSV"
+            fastrpc_log_healthcheck_records
+        else
+            rm -f "$FASTRPC_HEALTHCHECK_TSV"
+            log_warn "[FASTRPC-POLICY] capability_source=runtime-fallback domain_source=remoteproc-endpoint pd_source=protocol-fallback-map reason=healthcheck-output-unrecognized artifact=$FASTRPC_HEALTHCHECK_LOG"
+        fi
+        ;;
+    1)
+        rm -f "$FASTRPC_HEALTHCHECK_TSV"
+        log_warn "[FASTRPC-POLICY] capability_source=runtime-fallback domain_source=remoteproc-endpoint pd_source=protocol-fallback-map reason=healthcheck-failed artifact=$FASTRPC_HEALTHCHECK_LOG"
+        ;;
+    2)
+        rm -f "$FASTRPC_HEALTHCHECK_TSV"
+        log_info "[FASTRPC-POLICY] capability_source=runtime-fallback domain_source=remoteproc-endpoint pd_source=protocol-fallback-map reason=fastrpc-healthcheck-not-installed"
+        ;;
+esac
+
 # -------------------- Runtime layout discovery --------------------
 fastrpc_setup_runtime_layout
 
@@ -228,8 +356,19 @@ ensure_usr_lib_dsp_symlinks
 log_dsp_remoteproc_status
 
 # -------------------- Domain and PD selection -------------------
-# Resolve domains and PDs to test
 DOMAINS_TO_TEST="$(resolve_domains_to_test)"
+
+SELECTION_SOURCE="auto"
+if [ -n "$CLI_DOMAIN_NAME" ] || [ -n "$CLI_DOMAIN" ] ||
+   [ "$DOMAIN_MODE" = "single" ]; then
+    SELECTION_SOURCE="explicit"
+fi
+
+if [ -z "$DOMAINS_TO_TEST" ] && [ "$SELECTION_SOURCE" = "explicit" ]; then
+    log_fail "$TESTNAME FAIL - explicitly requested domain is invalid or unavailable"
+    echo "$TESTNAME : FAIL" >"$RESULT_FILE"
+    exit 0
+fi
 
 if [ -z "$DOMAINS_TO_TEST" ]; then
     log_skip "$TESTNAME SKIP - no mapped/supported domains detected"
@@ -237,50 +376,34 @@ if [ -z "$DOMAINS_TO_TEST" ]; then
     exit 0
 fi
 
-# -------------------- SoC-specific domain blacklist --------------------
-# QRB2210: FastRPC not supported - skip entire test
-# QCS9075, QCS8275, QCS8300, QCS9100: GPDSP0 (domain 5) and GPDSP1 (domain 6) not supported currently
-# SM8850: libhap_example HAP_mem DMA not supported - treat as known skip per invocation
-#
-# Do not skip Glymur CRD by SoC name. Newer Glymur/Debian images expose
-# ADSP/CDSP remoteproc instances and FastRPC skeletons, so runtime discovery
-# should decide whether the test can run.
-soc_skip_all=0
-soc_skip_gpdsp=0
- 
-case "$SOC_MACHINE" in
-    *QRB2210*|*"Glymur CRD"*)
-        soc_skip_all=1
-        ;;
-    *QCS9075*|*QCS8275*|*QCS8300*|*QCS9100*)
-        soc_skip_gpdsp=1
-        ;;
-esac
-
-if [ "$soc_skip_all" -eq 1 ]; then
-    log_skip "$TESTNAME SKIP - SoC $SOC_MACHINE does not support FastRPC"
+if ! fastrpc_validate_runtime_artifacts; then
+    log_skip "$TESTNAME SKIP - FastRPC test artifacts are incomplete: $FASTRPC_ARTIFACT_ERROR"
     echo "$TESTNAME : SKIP" >"$RESULT_FILE"
     exit 0
 fi
 
-if [ "$soc_skip_gpdsp" -eq 1 ]; then
-    filtered=""
-    for d in $DOMAINS_TO_TEST; do
-        case "$d" in
-            5|6) log_info "SoC $SOC_MACHINE: skipping $(domain_to_name "$d") (not supported)" ;;
-            *) filtered="${filtered:+$filtered }$d" ;;
-        esac
-    done
-    DOMAINS_TO_TEST="$filtered"
-fi
+# Validate every selected domain before handing it to fastrpc_test.
+for d in $DOMAINS_TO_TEST; do
+    fastrpc_domain_ready "$d"
+    domain_ready_status=$?
 
-if [ -z "$DOMAINS_TO_TEST" ]; then
-    log_skip "$TESTNAME SKIP - no supported domains remain after SoC filter ($SOC_MACHINE)"
-    echo "$TESTNAME : SKIP" >"$RESULT_FILE"
-    exit 0
-fi
+    if [ "$domain_ready_status" -ne 0 ]; then
+        log_fail "$TESTNAME FAIL - $(domain_to_name "$d") is not ready, selection=$SELECTION_SOURCE"
+        echo "$TESTNAME : FAIL" >"$RESULT_FILE"
+        exit 0
+    fi
+
+    if ! fastrpc_domain_endpoint_available "$d"; then
+        label="$(domain_to_endpoint_label "$d")"
+        log_fail "$TESTNAME FAIL - $(domain_to_name "$d"): /dev/fastrpc-${label}[-secure] not found"
+        echo "$TESTNAME : FAIL" >"$RESULT_FILE"
+        exit 0
+    fi
+
+done
 
 log_info "Domain mode: $DOMAIN_MODE"
+log_info "Domain selection source: $SELECTION_SOURCE"
 log_info "Domains to test: $DOMAINS_TO_TEST"
 
 # Build human-readable domain names
@@ -299,23 +422,23 @@ log_info "PD mode: $PD_MODE"
 
 # -------------------- Buffering tool availability ---------------
 HAVE_STDBUF=0; command -v stdbuf >/dev/null 2>&1 && HAVE_STDBUF=1
-HAVE_SCRIPT=0; command -v script >/dev/null 2>&1 && HAVE_SCRIPT=1
-HAVE_TIMEOUT=0; command -v timeout >/dev/null 2>&1 && HAVE_TIMEOUT=1
 
 buf_label="none"
 if [ $HAVE_STDBUF -eq 1 ]; then
     buf_label="stdbuf -oL -eL"
-elif [ $HAVE_SCRIPT -eq 1 ]; then
-    buf_label="script -q"
 fi
 
-# -------------------- Logging root -----------------------------
-TS="$(date +%Y%m%d-%H%M%S)"
-LOG_ROOT="./logs_${TESTNAME}_${TS}"
-mkdir -p "$LOG_ROOT" || { log_error "Cannot create $LOG_ROOT"; echo "$TESTNAME : FAIL" >"$RESULT_FILE"; exit 0; }
+log_info "Repeats: $REPEAT | Timeout: ${TIMEOUT}s | Buffering: $buf_label"
 
-tmo_label="none"; [ -n "$TIMEOUT" ] && tmo_label="${TIMEOUT}s"
-log_info "Repeats: $REPEAT | Timeout: $tmo_label | Buffering: $buf_label"
+matrix_combinations=0
+for matrix_domain in $DOMAINS_TO_TEST; do
+    for matrix_pd in $(effective_pds_for_domain "$matrix_domain"); do
+        [ -n "$matrix_pd" ] && matrix_combinations=$((matrix_combinations + 1))
+    done
+done
+matrix_invocations=$((matrix_combinations * REPEAT))
+matrix_timeout_budget=$((matrix_invocations * TIMEOUT))
+log_info "[FASTRPC-MATRIX] combinations=$matrix_combinations repeats=$REPEAT invocations=$matrix_invocations maximum_timeout_budget=${matrix_timeout_budget}s"
 
 # -------------------- Run loop ---------------------------------
 # Nested loop over domains and PDs
@@ -359,7 +482,7 @@ for DOMAIN in $DOMAINS_TO_TEST; do
             iter_rc="$LOG_ROOT/${iter_tag}.rc"
             iter_cmd="$LOG_ROOT/${iter_tag}.cmd"
             iter_env="$LOG_ROOT/${iter_tag}.env"
-            iter_dmesg="$LOG_ROOT/${iter_tag}.dmesg"
+            iter_dmesg="$LOG_ROOT/${iter_tag}_kernel"
             iso_now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
             set -- -d "$DOMAIN" -t linux
@@ -391,16 +514,13 @@ for DOMAIN in $DOMAINS_TO_TEST; do
             (
                 cd "$RUN_DIR" || exit 127
                 if [ $HAVE_STDBUF -eq 1 ]; then
-                     runWithTimeoutIfSet stdbuf -oL -eL ./fastrpc_test "$@"
-                elif [ $HAVE_SCRIPT -eq 1 ]; then
-                    cmd_str="./fastrpc_test$(cmd_to_string "$@")"
-                    if [ -n "$TIMEOUT" ] && [ $HAVE_TIMEOUT -eq 1 ]; then
-                        script -q -c "timeout $TIMEOUT $cmd_str" /dev/null
-                    else
-                        script -q -c "$cmd_str" /dev/null
-                    fi
+                    diag_run_with_timeout \
+                        "$TIMEOUT" \
+                        stdbuf -oL -eL ./fastrpc_test "$@"
                 else
-                    runWithTimeoutIfSet ./fastrpc_test "$@"
+                    diag_run_with_timeout \
+                        "$TIMEOUT" \
+                        ./fastrpc_test "$@"
                 fi
             ) >"$iter_log" 2>&1
             rc=$?
@@ -415,7 +535,11 @@ for DOMAIN in $DOMAINS_TO_TEST; do
 
             if [ "$rc" -ne 0 ]; then
                 log_fail "$iter_tag: fastrpc_test exited $rc"
-                dmesg | tail -n 300 > "$iter_dmesg" 2>/dev/null
+                mkdir -p "$iter_dmesg"
+                scan_dmesg_errors \
+                    "$iter_dmesg" \
+                    "fastrpc|remoteproc|adsprpc|cdsprpc|sdsprpc" \
+                    "" || true
                 log_dsp_remoteproc_status
             fi
 
@@ -433,15 +557,10 @@ for DOMAIN in $DOMAINS_TO_TEST; do
             fi
 
             # Track invocation result immediately
-            # SM8850: libhap_example HAP_mem DMA handle not supported - treat as known skip
             if [ "$rc" -eq 0 ] && [ -r "$iter_log" ] && grep -F -q -e "All tests completed successfully" -e "All applicable tests PASSED" "$iter_log"; then
                 PASS_COUNT=$((PASS_COUNT+1))
                 combo_pass=$((combo_pass+1))
                 log_pass "$iter_tag: success"
-            elif case "$SOC_MACHINE" in *SM8850*) true ;; *) false ;; esac && only_hap_example_failed "$iter_log"; then
-                PASS_COUNT=$((PASS_COUNT+1))
-                combo_pass=$((combo_pass+1))
-                log_pass "$iter_tag: success (libhap_example.so HAP_mem skipped on $SOC_MACHINE - DMA handle not supported)"
             else
                 combo_fail=$((combo_fail+1))
                 log_warn "$iter_tag: success pattern not found"
@@ -478,8 +597,8 @@ overall_subtests_pass=0
 overall_subtests_fail=0
 overall_subtests_skip=0
 
-# shellcheck disable=SC2034 # _pass_cnt/_fail_cnt consumed from tracker but not used in display
-while IFS=: read -r domain pd_val _pass_cnt _fail_cnt combo_total_tests combo_pass_tests combo_fail_tests combo_skip_tests; do
+# shellcheck disable=SC2034 # pass_cnt/fail_cnt consumed from tracker but not used in display
+while IFS=: read -r domain pd_val pass_cnt fail_cnt combo_total_tests combo_pass_tests combo_fail_tests combo_skip_tests; do
     [ -z "$domain" ] && continue
 
     dom_name="$(domain_to_name "$domain")"
