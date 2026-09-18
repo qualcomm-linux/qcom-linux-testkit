@@ -1,33 +1,44 @@
-# FastRPC Test Script for Qualcomm Linux-based Platforms (Yocto)
+# FastRPC Test Script for Qualcomm Linux-based Platforms
 
 ## Overview
 
-The **fastrpc_test** runner validates FastRPC (Fast Remote Procedure Call) on Qualcomm targets, offloading work to DSP domains (e.g., **CDSP**).  
-It wraps the public [fastrpc test application](https://github.com/quic/fastrpc) with **robust logging, parameter control, and CI-friendly output**.
+The **fastrpc_test** runner validates FastRPC (Fast Remote Procedure Call) on Qualcomm targets,
+offloading work to all supported DSP domains (ADSP, MDSP, SDSP, CDSP, CDSP1, GDSP0, GDSP1).
+It wraps the public [fastrpc test application](https://github.com/quic/fastrpc) with **robust
+logging, parameter control, and CI-friendly output**.
 
 Supported capabilities:
-- Auto-detect architecture from SoC ID.
-- Multiple iterations and optional timeouts.
-- Precise control over where the binary and assets live via `--bin-dir` and `--assets-dir`.
-- Unbuffered output via `stdbuf` or `script` when available (falls back gracefully).
+- Uses `fastrpc-healthcheck` when available to discover online DSPs, FastRPC support, signed and
+  unsigned PD support, firmware information, DSP library paths, and DMA-BUF heap readiness.
+- When healthcheck is unavailable, discovers runnable domains from remoteproc state and FastRPC
+  character endpoints. The fallback cannot discover PD support directly, so it uses the documented
+  conservative protocol map. Host, test, and DSP skeleton libraries remain runtime-discovered.
+- Multiple iterations with a required finite timeout.
+- Precise control over binary location via `--bin-dir`.
+- Line-buffered output through `stdbuf` when available.
 
 ## Features
 
 - **Calculator**, **HAP**, and **Multithreading** examples (as provided by `fastrpc_test`)
-- CI-ready logs with timestamps and per-iteration results
-- Parameterized control (`--arch`, `--repeat`, `--timeout`, `--bin-dir`, `--assets-dir`, `--verbose`)
-- Auto-detection fallback for binary and assets
-- Silent directory scan (no noisy `ls` dumps)
+- CI-ready logs with timestamps and per-iteration, per-domain/PD results
+- Parameterized control (`--arch`, `--repeat`, `--timeout`, `--bin-dir`, `--domain-mode`,
+  `--domain`, `--domain-name`, `--pd-mode`, `--unsigned-pd`, `--verbose`)
+- Auto-discovery of system libraries and DSP skeletons for both Yocto and Debian layouts
+- Runtime domain and PD discovery without SoC-name filtering
 
 ## Prerequisites
 
 Have these on the target (or specify paths with the flags below):
 
 - `fastrpc_test` binary (from [github.com/quic/fastrpc](https://github.com/quic/fastrpc))
-- A **parent directory** that contains a `linux/` subfolder with the required libraries (often alongside the binary), and architecture folders such as `v68`, `v73`, `v75`.
+- Optional `fastrpc-healthcheck`. When installed, this is the primary distro-independent
+  capability source.
+- FastRPC system libraries and DSP skeletons auto-discovered from standard locations:
+  - Yocto: `/usr/local/lib`, `/usr/local/lib/fastrpc_test`, `/usr/local/share/fastrpc_test`
+  - Debian: `/usr/lib/<multiarch>`, `/usr/lib/<multiarch>/fastrpc_test`, `/usr/share/fastrpc_test`
+  - RPM-based images: `/usr/lib64`, `/usr/lib64/fastrpc_test`, `/usr/share/fastrpc_test`
 - Optional but recommended:
-  - `stdbuf` **or** `script` (for unbuffered stdout/stderr)
-  - `timeout` (GNU coreutils) for wall-clock limiting; the script provides a portable fallback if missing.
+  - `stdbuf` for line-buffered output. Execution remains bounded without it.
 
 ## Directory Structure
 
@@ -38,7 +49,8 @@ Runner/
 │   │   ├── CDSP/
 │   │   │   ├── fastrpc_test/
 │   │   │   │   ├── run.sh
-│   │   │   │   ├── fastrpc_test_README.md 
+│   │   │   │   ├── fastrpc_test_README.md
+│   │   │   │   ├── fastrpc_test.yaml
 ```
 
 ## Usage
@@ -49,69 +61,66 @@ Runner/
 Usage: run.sh [OPTIONS]
 
 Options:
-  --arch <name> Architecture (only if explicitly provided)
-  --bin-dir <path> Directory containing 'fastrpc_test' (default: /usr/bin)
-  --assets-dir <path> Directory that CONTAINS 'linux/' (info only; we run from the binary dir)
-  --user-pd Use '-U 1' (user/unsigned PD). Default is '-U 0'.
-  --repeat <N> Number of repetitions (default: 1)
-  --timeout <sec> Timeout for each run (no timeout if omitted)
-  --verbose Extra logging for CI debugging
-  --help Show this help
+  --arch <name>                    Architecture (only if explicitly provided)
+  --bin-dir <path>                 Directory containing 'fastrpc_test' (default: /usr/bin)
+  --domain <0|1|2|3|4|5|6>        DSP domain: 0=ADSP 1=MDSP 2=SDSP 3=CDSP 4=CDSP1 5=GDSP0 6=GDSP1
+  --domain-name <name>             DSP domain: adsp|mdsp|sdsp|cdsp|cdsp1|gdsp0|gdsp1
+  --domain-mode <all-supported|single>  Discover all domains or run only one (default: all-supported)
+  --pd-mode <both|signed-only|unsigned-only>  Select PD mode(s) to run (default: both)
+  --unsigned-pd                    Use '-U 1' (user/unsigned PD). Overrides --pd-mode.
+  --repeat <N>                     Number of repetitions (default: 1)
+  --timeout <sec>                  Timeout for each run (default: 120, must be greater than zero)
+  --healthcheck-timeout <sec>      Timeout for fastrpc-healthcheck (default: 15)
+  --verbose                        Extra logging for CI debugging
+  --help                           Show this help
 
 Env:
-  FASTRPC_USER_PD=0|1 Sets PD (-U value). CLI --user-pd overrides to 1.
-  FASTRPC_EXTRA_FLAGS Extra flags appended to the command.
-  ALLOW_BIN_FASTRPC=1 Permit using /bin/fastrpc_test (otherwise refused).
-
-The test executes FROM the assets directory so 'fastrpc_test' can find deps.
+  FASTRPC_DOMAIN=0|1|2|3|4|5|6    Sets domain; CLI --domain/--domain-name wins.
+  FASTRPC_DOMAIN_NAME=adsp|...     Named domain; CLI wins.
+  FASTRPC_UNSIGNED_PD=0|1          Sets PD (-U value). CLI --unsigned-pd overrides to 1.
+  FASTRPC_EXTRA_FLAGS              Extra flags appended (space-separated).
+  FASTRPC_HEALTHCHECK_BIN          Optional path to fastrpc-healthcheck.
+  ALLOW_BIN_FASTRPC=1              Permit using /bin/fastrpc_test when --bin-dir=/bin.
 ```
 
 ### Quick start
 
 ```bash
-# If fastrpc_test is already in PATH and assets are discoverable:
+# Default: dynamically discover runnable domains and supported PD modes
+./run.sh
+
+# With repeat and timeout:
 ./run.sh --repeat 3 --timeout 60
 ```
 
 ### Common scenarios
 
 ```bash
-# Default expects /usr/bin/fastrpc_test and /usr/bin/linux
-./run.sh
-
-Common scenarios
-
-# 1) Use a custom binary directory (we will cd there and run ./fastrpc_test)
+# 1) Use a custom binary directory
 ./run.sh --bin-dir /tmp/stage/usr/bin
 
-# 2) Opt into user/unsigned PD (-U 1)
-./run.sh --user-pd
-# or via env
-FASTRPC_USER_PD=1 ./run.sh
+# 2) Run only unsigned (user) PD across all domains
+./run.sh --pd-mode unsigned-only
 
-# 3) Add extra flags (kept intact; -U is appended last as '-U 0/1')
-FASTRPC_EXTRA_FLAGS="-d 3" ./run.sh
+# 3) Run only signed PD
+./run.sh --pd-mode signed-only
 
-# 4) Allow /bin explicitly (generally discouraged unless required)
-ALLOW_BIN_FASTRPC=1 ./run.sh --bin-dir /bin
+# 4) Force a specific domain (CDSP)
+./run.sh --domain 3
+# or by name:
+./run.sh --domain-name cdsp
 
-# 5) Run multiple iterations with a timeout and verbose logs
+# 5) Force GDSP0 with unsigned PD
+./run.sh --domain-name gdsp0 --pd-mode unsigned-only
+
+# 6) Run SDSP via environment variable with unsigned PD
+FASTRPC_DOMAIN=2 FASTRPC_UNSIGNED_PD=1 ./run.sh
+
+# 7) Run multiple iterations with verbose logs
 ./run.sh --repeat 3 --timeout 120 --verbose
 
-Force CDSP explicitly:
-  
-# 6) ./run.sh --domain 3
-# or
-# 6) ./run.sh --domain-name cdsp
- 
-Use ADSP and user PD:
-  
-# 7) ./run.sh --domain-name adsp --user-pd
- 
-From env (CI):
- 
-FASTRPC_DOMAIN=2 FASTRPC_USER_PD=1 ./run.sh
-# => SDSP with -U 1
+# 8) Allow /bin explicitly (generally discouraged)
+ALLOW_BIN_FASTRPC=1 ./run.sh --bin-dir /bin
 ```
 
 ### LAVA integration example
@@ -125,34 +134,60 @@ FASTRPC_DOMAIN=2 FASTRPC_USER_PD=1 ./run.sh
 
 ```
 [INFO] 2025-09-02 10:44:46 - -------------------Starting fastrpc_test Testcase----------------------------
-[INFO] 2025-09-02 10:44:46 - Using binary: /usr/bin/fastrpc_test
-[INFO] 2025-09-02 10:44:46 - PD setting: -U 0 (use --user-pd to set -U 1)
-[INFO] 2025-09-02 10:44:46 - Run dir: /usr/bin (launching ./fastrpc_test)
-[INFO] 2025-09-02 10:44:46 - Executing: ./fastrpc_test -d 3 -t linux -U 0
------ iter1 output begin -----
+[INFO] 2025-09-02 10:44:46 - Domain mode: all-supported
+[INFO] 2025-09-02 10:44:46 - Domains to test: 0 3
+[INFO] 2025-09-02 10:44:46 - PD mode: both
+[INFO] 2025-09-02 10:44:46 - Running ADSP_signed_iter1 | domain=ADSP | pd=signed
+[INFO] 2025-09-02 10:44:46 - Executing: ./fastrpc_test -d 0 -t linux -U 0
+----- ADSP_signed_iter1 output begin -----
 ... fastrpc_test output ...
------ iter1 output end -----
-[PASS] 2025-09-02 10:44:50 - iter1: success
-[PASS] 2025-09-02 10:44:50 - fastrpc_test : Test Passed (1/1)
+----- ADSP_signed_iter1 output end -----
+[PASS] 2025-09-02 10:44:50 - ADSP_signed_iter1: success
+...
+[INFO] ================================================================================
+[INFO]  FastRPC Test Summary
+[INFO] ================================================================================
+[INFO] Domain     | PD Mode     |  Total |   Pass |   Fail |   Skip | Status
+[INFO] --------------------------------------------------------------------------------
+[INFO] ADSP       | Signed      |      5 |      5 |      0 |      0 | PASS
+[INFO] CDSP       | Signed      |      5 |      5 |      0 |      0 | PASS
+[INFO] CDSP       | Unsigned    |      5 |      5 |      0 |      0 | PASS
+[PASS] 2025-09-02 10:44:50 - fastrpc_test : Test Passed (3/3)
 ```
 
 ## CI debugging aids
-- Binary resolved to /bin/fastrpc_test: By default this is blocked to avoid loader/ramdisk mismatches. Set ALLOW_BIN_FASTRPC=1 and/or --bin-dir /bin if you intentionally need it.
-- Error resolving path .../linux: Ensure linux/ is next to the binary (e.g., /usr/bin/linux). The script runs from the binary dir specifically to make this work.
-- Session create errors with -U 1: If you opt into user/unsigned PD and see 0x80000416, confirm your image includes unsigned shells/policies (or revert to the default -U 0).
-- Per-iteration logs: `logs_fastrpc_test_<timestamp>/iterN.out` (+ `iterN.rc`)
-- Summary result file: `fastrpc_test.res` (`PASS` / `FAIL`)
-- Verbose mode: adds environment, resolutions, and timing details
-- Graceful fallbacks when `stdbuf`, `script`, or `timeout` are missing
-- Silent scan (no directory spam) during auto-detection
+
+- **Capability source**: The startup log reports `capability_source`, `domain_source`, and
+  `pd_source`. Raw and normalized healthcheck output is retained in the run log directory.
+- **Offline automatic domain**: Logged and excluded from automatic selection. Other runnable
+  domains continue.
+- **Offline explicitly requested domain**: Fails with the healthcheck or remoteproc state.
+- **Missing runtime artifacts**: Skips before executing `fastrpc_test` and prints the missing
+  system library, test library, or skeleton evidence.
+- **Binary resolved to /bin/fastrpc_test**: Blocked by default. Set `ALLOW_BIN_FASTRPC=1` or
+  use `--bin-dir` to a non-`/bin` path.
+- **Session create errors with -U 1**: If unsigned PD returns `0x80000416`, confirm your image
+  includes unsigned shells/policies (or use `--pd-mode signed-only`).
+- **Domain not discovered**: Check `dmesg` for remoteproc firmware load errors. The test
+  requires the DSP remoteproc to be registered and its firmware present in DT.
+- **Per-iteration logs**: `logs_fastrpc_test_<timestamp>/<domain>_<pd>_iter<N>.out` (+ `.rc`, `.env`, `.cmd`)
+- **Summary result file**: `fastrpc_test.res` (`PASS` / `FAIL` / `SKIP`)
+- **Verbose mode**: adds environment, library resolution, and timing details
 
 ## Notes
 
-- If `--arch` is omitted, the script maps `/sys/devices/soc0/soc_id` to a known arch (defaulting to `v68` when unknown).
-- If `fastrpc_test` isn’t in `PATH`, use `--bin-dir` or add it to `PATH`.
-- If you see `Error resolving path .../linux: No such file or directory`, point `--assets-dir` to the **parent** directory that actually contains a `linux/` subfolder.
-- The script changes working directory to the resolved **assets** dir before invoking `fastrpc_test`, which is required for the binary to locate its shared libs/skeletons.
+- Domain and PD support are derived from `fastrpc-healthcheck` when available. The fallback uses
+  runtime remoteproc and endpoint evidence, with a conservative protocol mapping for PD support.
+- This suite runs the public `fastrpc_test` character-device path and therefore requires either
+  `/dev/fastrpc-<domain>` or `/dev/fastrpc-<domain>-secure` for every selected domain.
+- DSP skeleton directories are discovered dynamically by locating `.so` artifacts instead of
+  assuming fixed ABI directory names such as `v68` or `v75`.
+- Override library discovery with `FASTRPC_LIB_SYS_DIR`, `FASTRPC_LIB_TEST_DIR`, or
+  `FASTRPC_SKEL_BASE`. CLI domain selection takes precedence over environment selection, which
+  takes precedence over runtime discovery.
+- If `fastrpc_test` is not in the default path, use `--bin-dir` to specify its location.
 
 ## License
 
-SPDX-License-Identifier: BSD-3-ClauseCopyright (c) Qualcomm Technologies, Inc.
+SPDX-License-Identifier: BSD-3-Clause
+Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
