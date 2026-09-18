@@ -1,0 +1,16 @@
+metadata:
+  name: TGU-Enable-Disable
+  format: "Lava-Test Test Definition 1.0"
+  description: "Verifies Trace Generation Unit (TGU) functionality by enabling and disabling TGUs while routing to ETR and ETF sinks."
+  os:
+    - linux
+  scope:
+    - coresight
+    - kernel
+
+run:
+  steps:
+    - REPO_PATH=$PWD || true
+    - cd Runner/suites/Kernel/DEBUG/TGU-Enable-Disable || true
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh TGU-Enable-Disable.res || true
