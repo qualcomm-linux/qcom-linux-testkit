@@ -1,0 +1,16 @@
+metadata:
+  name: Reset-All-Sinks-Base
+  format: "Lava-Test Test Definition 1.0"
+  description: "Validates the correctness and robustness of CoreSight reset logic when multiple trace sinks are enabled simultaneously. "
+  os:
+    - linux
+  scope:
+    - coresight
+    - kernel
+
+run:
+  steps:
+    - REPO_PATH=$PWD || true
+    - cd Runner/suites/Kernel/DEBUG/Reset-All-Sinks-Base || true
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh Reset-All-Sinks-Base.res || true
