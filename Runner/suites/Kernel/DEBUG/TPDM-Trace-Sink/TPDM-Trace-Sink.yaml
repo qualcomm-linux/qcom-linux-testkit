@@ -1,0 +1,16 @@
+metadata:
+  name: TPDM-Trace-Sink
+  format: "Lava-Test Test Definition 1.0"
+  description: "Iterates over available TMC trace sinks (excluding tmc_etf1) and TPDM sources (excluding turing-llm), enables them, dumps sink trace data to /tmp, and safely disables them."
+  os:
+    - linux
+  scope:
+    - coresight
+    - kernel
+
+run:
+  steps:
+    - REPO_PATH=$PWD || true
+    - cd Runner/suites/Kernel/DEBUG/TPDM-Trace-Sink || true
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh TPDM-Trace-Sink.res || true
