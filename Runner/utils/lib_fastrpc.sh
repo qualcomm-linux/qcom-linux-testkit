@@ -221,6 +221,41 @@ fastrpc_setup_runtime_layout() {
     [ -n "${SDSP_LIBRARY_PATH:-}" ] && log_info "SDSP_LIBRARY_PATH=${SDSP_LIBRARY_PATH}"
 }
 
+# fastrpc_capture_qrtr_evidence <result-dir>
+# Capture optional QRTR service topology alongside FastRPC artifacts without
+# making QRTR a prerequisite for platforms whose FastRPC transport differs.
+fastrpc_capture_qrtr_evidence() {
+    fcqe_result_dir="${1:-}"
+    fcqe_topology="$fcqe_result_dir/qrtr_topology.log"
+
+    [ -n "$fcqe_result_dir" ] || return 3
+
+    if ! command -v qrtr_capture_topology >/dev/null 2>&1; then
+        log_info "QRTR topology helper is unavailable, continuing FastRPC validation"
+        return 0
+    fi
+
+    log_info "FastRPC QRTR diagnostics: capturing bounded service topology timeout=${QRTR_LOOKUP_TIMEOUT:-10}s artifact=$fcqe_topology"
+    qrtr_capture_topology "$fcqe_topology" "${QRTR_LOOKUP_TIMEOUT:-10}"
+    fcqe_status=$?
+
+    case "$fcqe_status" in
+        0)
+            log_info "Captured QRTR service topology for FastRPC diagnostics"
+            log_file_with_label "qrtr-lookup" "$fcqe_topology"
+            ;;
+        2)
+            log_info "QRTR runtime or qrtr-lookup is unavailable, continuing FastRPC validation"
+            ;;
+        *)
+            log_warn "QRTR runtime is present but its bounded topology query failed, continuing the independent FastRPC test"
+            log_file_with_label "qrtr-lookup" "$fcqe_topology"
+            ;;
+    esac
+
+    return 0
+}
+
 # -------------------- FastRPC test orchestration helpers --------------------
 
 # shellcheck disable=SC2317

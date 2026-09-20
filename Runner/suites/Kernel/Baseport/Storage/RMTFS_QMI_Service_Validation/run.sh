@@ -43,6 +43,7 @@ RES_FILE="$SCRIPT_DIR/$TESTNAME.res"
 SERVICE_ID="${RMTFS_QMI_SERVICE:-14}"
 SERVICE_VERSION="${RMTFS_QMI_VERSION:-1}"
 SERVICE_INSTANCE="${RMTFS_QMI_INSTANCE:-0}"
+QRTR_LOOKUP_TIMEOUT="${QRTR_LOOKUP_TIMEOUT:-10}"
 rm -f "$RES_FILE"
 
 # shellcheck disable=SC2317
@@ -69,6 +70,13 @@ finish_result() {
 
 trap cleanup_on_exit 0
 trap 'exit 1' 1 2 15
+
+OS_ID=$(pkg_detect_os_id 2>/dev/null || echo unknown)
+RUN_LOG="$SCRIPT_DIR/qrtr_lookup_rmtfs.log"
+rm -f "$RUN_LOG"
+log_info "Starting $TESTNAME on OS=$OS_ID"
+log_info "Configuration: RMTFS_QMI_SERVICE=$SERVICE_ID RMTFS_QMI_VERSION=$SERVICE_VERSION RMTFS_QMI_INSTANCE=$SERVICE_INSTANCE QRTR_LOOKUP_TIMEOUT=${QRTR_LOOKUP_TIMEOUT}s"
+log_info "Validation target: public linux-msm/rmtfs service=$SERVICE_ID version=$SERVICE_VERSION instance=$SERVICE_INSTANCE"
 
 RMTFS_RUNTIME_DIR="$SCRIPT_DIR/rmtfs_runtime"
 rmtfs_runtime_prepare "$RMTFS_RUNTIME_DIR"
@@ -102,32 +110,31 @@ if ! rmtfs_start_service_if_available || \
     finish_result FAIL
 fi
 
-if ! command -v qrtr-lookup >/dev/null 2>&1; then
-    log_skip "$TESTNAME SKIP: qrtr-lookup is not installed"
-    finish_result SKIP
-fi
+log_info "Validating public linux-msm/rmtfs registration: service=$SERVICE_ID version=$SERVICE_VERSION instance=$SERVICE_INSTANCE"
 
-OS_ID=$(pkg_detect_os_id 2>/dev/null || echo unknown)
-RUN_LOG="$SCRIPT_DIR/qrtr_lookup_rmtfs.log"
-rm -f "$RUN_LOG" "$RES_FILE"
-log_info "Starting $TESTNAME on OS=$OS_ID"
-log_info "Expecting public linux-msm/rmtfs registration: service=$SERVICE_ID version=$SERVICE_VERSION instance=$SERVICE_INSTANCE"
-
-qrtr-lookup "$SERVICE_ID" > "$RUN_LOG" 2>&1
+qrtr_capture_topology "$RUN_LOG" "$QRTR_LOOKUP_TIMEOUT"
 LOOKUP_RC=$?
-while IFS= read -r line; do
-    if [ -n "$line" ]; then
-        log_info "[qrtr-lookup] $line"
-    fi
-done < "$RUN_LOG"
 
-if [ "$LOOKUP_RC" -ne 0 ]; then
-    log_fail "$TESTNAME FAIL: qrtr-lookup returned $LOOKUP_RC"
-    finish_result FAIL
-fi
+case "$LOOKUP_RC" in
+    0)
+        log_file_with_label "qrtr-lookup" "$RUN_LOG"
+        ;;
+    2)
+        log_skip "$TESTNAME SKIP: QRTR runtime or qrtr-lookup is unavailable"
+        finish_result SKIP
+        ;;
+    *)
+        log_file_with_label "qrtr-lookup" "$RUN_LOG"
+        log_fail "$TESTNAME FAIL: bounded QRTR topology query failed"
+        finish_result FAIL
+        ;;
+esac
 
-if awk -v service="$SERVICE_ID" -v version="$SERVICE_VERSION" -v instance="$SERVICE_INSTANCE" \
-    'NR > 1 && $1 == service && $2 == version && $3 == instance { found=1 } END { exit !found }' "$RUN_LOG"; then
+if qrtr_topology_has_service \
+    "$RUN_LOG" \
+    "$SERVICE_ID" \
+    "$SERVICE_VERSION" \
+    "$SERVICE_INSTANCE"; then
     log_pass "$TESTNAME PASS: RMTFS QMI service registration found"
     finish_result PASS
 fi

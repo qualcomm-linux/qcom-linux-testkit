@@ -5,6 +5,11 @@
 The **fastrpc_test** runner validates FastRPC (Fast Remote Procedure Call) on Qualcomm targets, offloading work to DSP domains (e.g., **CDSP**).  
 It wraps the public [fastrpc test application](https://github.com/quic/fastrpc) with **robust logging, parameter control, and CI-friendly output**.
 
+When QRTR and `qrtr-lookup` are available, the suite captures one bounded QRTR
+service-topology snapshot with its normal artifacts. This remains diagnostic
+evidence and does not make QRTR a prerequisite for FastRPC transports on other
+platforms. `QRTR_LOOKUP_TIMEOUT` optionally overrides the ten-second default.
+
 Supported capabilities:
 - Auto-detect architecture from SoC ID.
 - Multiple iterations and optional timeouts.
@@ -54,14 +59,17 @@ Options:
   --assets-dir <path> Directory that CONTAINS 'linux/' (info only; we run from the binary dir)
   --user-pd Use '-U 1' (user/unsigned PD). Default is '-U 0'.
   --repeat <N> Number of repetitions (default: 1)
-  --timeout <sec> Timeout for each run (no timeout if omitted)
+  --timeout <sec> Timeout for each run (default: 60)
   --verbose Extra logging for CI debugging
   --help Show this help
 
 Env:
-  FASTRPC_USER_PD=0|1 Sets PD (-U value). CLI --user-pd overrides to 1.
+  FASTRPC_UNSIGNED_PD=0|1 Sets PD (-U value). CLI --unsigned-pd overrides to 1.
+  FASTRPC_REPEAT=<N> Number of repetitions (default: 1).
+  FASTRPC_TEST_TIMEOUT=<sec> Per-run timeout (default: 60).
   FASTRPC_EXTRA_FLAGS Extra flags appended to the command.
   ALLOW_BIN_FASTRPC=1 Permit using /bin/fastrpc_test (otherwise refused).
+  QRTR_LOOKUP_TIMEOUT=<sec> Bound optional QRTR diagnostics (default: 10).
 
 The test executes FROM the assets directory so 'fastrpc_test' can find deps.
 ```
@@ -73,11 +81,19 @@ The test executes FROM the assets directory so 'fastrpc_test' can find deps.
 ./run.sh --repeat 3 --timeout 60
 ```
 
+To override the default bounded QRTR diagnostic window:
+
+```sh
+QRTR_LOOKUP_TIMEOUT=20 ./run.sh --repeat 1 --timeout 60
+```
+
 ### Common scenarios
 
 ```bash
 # Default expects /usr/bin/fastrpc_test and /usr/bin/linux
 ./run.sh
+
+# Effective defaults: repeat=1, per-run timeout=60s, QRTR lookup timeout=10s
 
 Common scenarios
 
@@ -87,7 +103,7 @@ Common scenarios
 # 2) Opt into user/unsigned PD (-U 1)
 ./run.sh --user-pd
 # or via env
-FASTRPC_USER_PD=1 ./run.sh
+FASTRPC_UNSIGNED_PD=1 ./run.sh
 
 # 3) Add extra flags (kept intact; -U is appended last as '-U 0/1')
 FASTRPC_EXTRA_FLAGS="-d 3" ./run.sh
@@ -110,7 +126,7 @@ Use ADSP and user PD:
  
 From env (CI):
  
-FASTRPC_DOMAIN=2 FASTRPC_USER_PD=1 ./run.sh
+FASTRPC_DOMAIN=2 FASTRPC_UNSIGNED_PD=1 ./run.sh
 # => SDSP with -U 1
 ```
 
@@ -142,6 +158,9 @@ FASTRPC_DOMAIN=2 FASTRPC_USER_PD=1 ./run.sh
 - Session create errors with -U 1: If you opt into user/unsigned PD and see 0x80000416, confirm your image includes unsigned shells/policies (or revert to the default -U 0).
 - Per-iteration logs: `logs_fastrpc_test_<timestamp>/iterN.out` (+ `iterN.rc`)
 - Summary result file: `fastrpc_test.res` (`PASS` / `FAIL`)
+- Optional QRTR evidence: `logs_fastrpc_test_<timestamp>/qrtr_topology.log`
+- Failure-only kernel evidence: `logs_fastrpc_test_<timestamp>/dmesg_snapshot.log`
+  and `dmesg_errors.log`
 - Verbose mode: adds environment, resolutions, and timing details
 - Graceful fallbacks when `stdbuf`, `script`, or `timeout` are missing
 - Silent scan (no directory spam) during auto-detection

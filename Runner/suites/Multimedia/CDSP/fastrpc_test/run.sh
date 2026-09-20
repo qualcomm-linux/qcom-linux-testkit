@@ -51,8 +51,8 @@ if [ -f "$TOOLS/lib_pkg_provider.sh" ]; then
 fi
 
 # Defaults
-REPEAT=1
-TIMEOUT=""
+REPEAT="${FASTRPC_REPEAT:-1}"
+TIMEOUT="${FASTRPC_TEST_TIMEOUT:-60}"
 ARCH=""
 BIN_DIR="" # directory that CONTAINS fastrpc_test
 ASSETS_DIR="" # kept for compatibility/logging (not used by new layout)
@@ -62,6 +62,7 @@ CLI_DOMAIN=""
 CLI_DOMAIN_NAME=""
 DOMAIN_MODE="all-supported" # Default: test all supported domains
 PD_MODE="both" # Default: test both PDs where supported
+QRTR_LOOKUP_TIMEOUT="${QRTR_LOOKUP_TIMEOUT:-10}"
 
 usage() {
     cat <<EOF
@@ -83,7 +84,7 @@ Options:
   --pd-mode <both|signed-only|unsigned-only> Select PD mode(s) to run (default: both)
   --unsigned-pd Use '-U 1' (user/unsigned PD). Overrides --pd-mode for compatibility
   --repeat <N> Number of repetitions (default: 1)
-  --timeout <sec> Timeout for each run (no timeout if omitted)
+  --timeout <sec> Timeout for each run (default: 60)
   --verbose Extra logging for CI debugging
   --help Show this help
 
@@ -98,8 +99,11 @@ Env:
   FASTRPC_DOMAIN=0|1|2|3|4|5|6 Sets domain; CLI --domain/--domain-name wins.
   FASTRPC_DOMAIN_NAME=adsp|... Named domain; CLI wins.
   FASTRPC_UNSIGNED_PD=0|1 Sets PD (-U value). CLI --unsigned-pd overrides to 1.
+  FASTRPC_REPEAT=<N> Number of repetitions (default: 1).
+  FASTRPC_TEST_TIMEOUT=<sec> Per-run timeout (default: 60).
   FASTRPC_EXTRA_FLAGS Extra flags appended (space-separated).
   ALLOW_BIN_FASTRPC=1 Permit using /bin/fastrpc_test when --bin-dir=/bin.
+  QRTR_LOOKUP_TIMEOUT=<sec> Bound optional QRTR diagnostics (default: 10).
 
 Notes:
 - Script *cd*s into the binary directory and launches ./fastrpc_test.
@@ -184,6 +188,7 @@ log_info "----------------------------------------------------------------------
 log_info "-------------------Starting $TESTNAME Testcase----------------------------"
 log_info "Kernel: $(uname -a 2>/dev/null || echo N/A)"
 log_info "Date(UTC): $(date -u 2>/dev/null || echo N/A)"
+log_info "Configuration: repeat=$REPEAT execution_timeout=${TIMEOUT:-none} QRTR_LOOKUP_TIMEOUT=${QRTR_LOOKUP_TIMEOUT}s"
 log_soc_info
 SOC_MACHINE="$(tr -s ' ' < /sys/devices/soc0/machine 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
 
@@ -314,6 +319,8 @@ TS="$(date +%Y%m%d-%H%M%S)"
 LOG_ROOT="./logs_${TESTNAME}_${TS}"
 mkdir -p "$LOG_ROOT" || { log_error "Cannot create $LOG_ROOT"; echo "$TESTNAME : FAIL" >"$RESULT_FILE"; exit 0; }
 
+fastrpc_capture_qrtr_evidence "$LOG_ROOT"
+
 tmo_label="none"; [ -n "$TIMEOUT" ] && tmo_label="${TIMEOUT}s"
 log_info "Repeats: $REPEAT | Timeout: $tmo_label | Buffering: $buf_label"
 
@@ -359,7 +366,6 @@ for DOMAIN in $DOMAINS_TO_TEST; do
             iter_rc="$LOG_ROOT/${iter_tag}.rc"
             iter_cmd="$LOG_ROOT/${iter_tag}.cmd"
             iter_env="$LOG_ROOT/${iter_tag}.env"
-            iter_dmesg="$LOG_ROOT/${iter_tag}.dmesg"
             iso_now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
             set -- -d "$DOMAIN" -t linux
@@ -415,7 +421,6 @@ for DOMAIN in $DOMAINS_TO_TEST; do
 
             if [ "$rc" -ne 0 ]; then
                 log_fail "$iter_tag: fastrpc_test exited $rc"
-                dmesg | tail -n 300 > "$iter_dmesg" 2>/dev/null
                 log_dsp_remoteproc_status
             fi
 
@@ -455,6 +460,12 @@ for DOMAIN in $DOMAINS_TO_TEST; do
 "
     done
 done
+
+if [ "$PASS_COUNT" -ne "$TOTAL_COUNT" ]; then
+    scan_dmesg_errors \
+        "$LOG_ROOT" \
+        'fastrpc|remoteproc|qcom.*(adsp|cdsp|sdsp)|adsp|cdsp|sdsp' || true
+fi
 
 # -------------------- Finalize --------------------------------
 # Build detailed summary table from tracked results
