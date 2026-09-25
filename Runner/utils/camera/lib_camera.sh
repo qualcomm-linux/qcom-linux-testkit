@@ -504,28 +504,54 @@ camx_find_icp_firmware() {
 # -----------------------------------------------------------------------------
 # Package helpers (Yocto/QLI proprietary builds)
 # -----------------------------------------------------------------------------
+# List installed CAMX packages using the image package database.
+# Arguments: none.
+# Stdout: installed CAMX package names and versions.
+# Returns: 0 when at least one CAMX package is installed, 1 otherwise.
+# Side effects: queries the available package manager without modifying state.
 camx_opkg_list_camx() {
   out=""
  
   if command -v opkg >/dev/null 2>&1; then
     out="$(opkg list-installed 2>/dev/null | grep -i '^camx' || true)"
-    [ -n "$out" ] || return 1
-    printf '%s\n' "$out"
-    return 0
+    if [ -n "$out" ]; then
+      printf '%s\n' "$out"
+      return 0
+    fi
+  fi
+
+  if command -v dpkg-query >/dev/null 2>&1; then
+    out="$(
+      dpkg-query -W \
+        -f='${binary:Package}\t${Status}\t${Version}\n' \
+        2>/dev/null \
+        | awk '
+            $2 == "install" && $3 == "ok" && $4 == "installed" &&
+              tolower($1) ~ /^camx/ {
+                print $1, $5
+              }
+          '
+    )"
+    if [ -n "$out" ]; then
+      printf '%s\n' "$out"
+      return 0
+    fi
   fi
  
   if command -v dnf >/dev/null 2>&1; then
     out="$(dnf list installed 2>/dev/null | grep -i '^camx' || true)"
-    [ -n "$out" ] || return 1
-    printf '%s\n' "$out"
-    return 0
+    if [ -n "$out" ]; then
+      printf '%s\n' "$out"
+      return 0
+    fi
   fi
  
   if command -v rpm >/dev/null 2>&1; then
     out="$(rpm -qa 2>/dev/null | grep -i '^camx' || true)"
-    [ -n "$out" ] || return 1
-    printf '%s\n' "$out"
-    return 0
+    if [ -n "$out" ]; then
+      printf '%s\n' "$out"
+      return 0
+    fi
   fi
  
   return 1
@@ -634,7 +660,7 @@ nhx_resolve_json_file() {
   return 1
 }
 
-# Stage resolved NHX JSON into the path expected by /usr/bin/nhx.sh.
+# Stage resolved NHX JSON into the path expected by the NHX launcher.
 # nhx.sh expects an argument without ".json" and internally looks under:
 # /etc/camera/test/NHX/${JSON_FILE}.json
 #
@@ -851,8 +877,11 @@ run_cmd_live_to_log() {
 }
 
 # -----------------------------------------------------------------------------
-# Pick board-specific camera module from DT compatible/model
-# -----------------------------------------------------------------------------
+# Select the board-specific camera module from root DT compatible and model data.
+# Arguments: none.
+# Stdout: selected module name on success, otherwise no output.
+# Returns: 0 when a supported board is identified, 1 otherwise.
+# Side effects: reads the runtime device tree.
 camx_pick_camera_module() {
   compat_list=""
   model_str=""
@@ -877,6 +906,10 @@ $model_str" in
       ;;
     *qcs615-ride*|*iq-615-evk*|*qcs615*)
       printf '%s\n' "camera_qcs615"
+      return 0
+      ;;
+    *glymur*|*x1e80100*)
+      printf '%s\n' "camera_x1e80100"
       return 0
       ;;
   esac
