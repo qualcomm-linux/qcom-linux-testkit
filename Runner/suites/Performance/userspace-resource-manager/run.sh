@@ -52,7 +52,7 @@ if [ -f "$TOOLS/lib_pkg_provider.sh" ]; then
 fi
 
 log_info "=== Checking Dependencies ==="
-if ! check_dependencies awk grep pgrep date printf; then
+if ! check_dependencies awk grep date printf; then
     log_skip "$TESTNAME SKIP – base tools missing"
     echo "$TESTNAME SKIP" >"$RES_FILE"
     exit 0
@@ -61,27 +61,144 @@ fi
 # ---------- Lock (avoid concurrent runs on same host) ----------
 LOCKFILE="/tmp/${TESTNAME}.lock"
 LOCKDIR="/tmp/${TESTNAME}.lockdir"
+lock_flock=0
+cleanup_done=0
+nodes_tmp_base=""
+CURRENT_CMD_PID=""
+CURRENT_WATCHER_PID=""
+CURRENT_WATCHER_SLEEP_PID=""
+CURRENT_WATCHER_SLEEP_PID_FILE=""
+CURRENT_TIMEOUT_MARKER_FILE=""
+
+# Emit targeted lock diagnostics when flock acquisition fails.  Avoid broad
+# process-name matching such as "run.sh" because it can report the newly
+# started invocation rather than the actual lock holder; prefer kernel/file
+# descriptor views when the platform provides them.
+log_lock_diagnostics() {
+    log_info "Lock file: $LOCKFILE"
+
+    if command -v lslocks >/dev/null 2>&1; then
+        if lslocks 2>/dev/null | grep -F "$LOCKFILE" >/dev/null 2>&1; then
+            log_info "lslocks entries for $LOCKFILE:"
+            lslocks 2>/dev/null | grep -F "$LOCKFILE" | while IFS= read -r line; do
+                log_info " [lslocks] $line"
+            done
+        else
+            log_info "No lslocks entry found for $LOCKFILE"
+        fi
+    fi
+
+    if command -v fuser >/dev/null 2>&1; then
+        fuser_output="$(fuser "$LOCKFILE" 2>/dev/null || true)"
+        if [ -n "$fuser_output" ]; then
+            log_info "Processes with lock file open from fuser (not necessarily lock owners): $fuser_output"
+        fi
+    fi
+
+    if [ -d /proc ] && command -v readlink >/dev/null 2>&1; then
+        proc_found=0
+        for fd in /proc/[0-9]*/fd/*; do
+            [ -e "$fd" ] || continue
+            fd_target="$(readlink "$fd" 2>/dev/null || true)"
+            [ "$fd_target" = "$LOCKFILE" ] || continue
+            pid="${fd#/proc/}"
+            pid="${pid%%/*}"
+            [ "$pid" = "$$" ] && continue
+            cmd="$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null || true)"
+            log_info " [proc-fd] pid=$pid fd=${fd##*/} cmd=${cmd:-<unavailable>}"
+            proc_found=1
+        done
+        if [ "$proc_found" -eq 0 ]; then
+            log_info "No other /proc/*/fd references found for $LOCKFILE"
+        fi
+    fi
+}
+
+# Single cleanup path for normal exit, INT and TERM.
+# Keep lock release, timeout-process cleanup and node-staging cleanup together
+# so later setup code does not overwrite the lock trap.  The timeout wrapper
+# tracks both the command and its watcher/sleep process because inherited file
+# descriptors from those background processes can otherwise keep the flock
+# active after the parent shell exits.
+# shellcheck disable=SC2317  # Invoked indirectly by trap handlers.
+cleanup() {
+    [ "$cleanup_done" -eq 0 ] || return 0
+    cleanup_done=1
+
+    if [ -z "$CURRENT_WATCHER_SLEEP_PID" ] && [ -n "$CURRENT_WATCHER_SLEEP_PID_FILE" ] && [ -r "$CURRENT_WATCHER_SLEEP_PID_FILE" ]; then
+        CURRENT_WATCHER_SLEEP_PID="$(cat "$CURRENT_WATCHER_SLEEP_PID_FILE" 2>/dev/null || true)"
+    fi
+
+    if [ -n "$CURRENT_WATCHER_PID" ]; then
+        kill "$CURRENT_WATCHER_PID" >/dev/null 2>&1 || true
+        wait "$CURRENT_WATCHER_PID" 2>/dev/null || true
+        CURRENT_WATCHER_PID=""
+    fi
+
+    if [ -n "$CURRENT_WATCHER_SLEEP_PID" ]; then
+        kill "$CURRENT_WATCHER_SLEEP_PID" >/dev/null 2>&1 || true
+        wait "$CURRENT_WATCHER_SLEEP_PID" 2>/dev/null || true
+        CURRENT_WATCHER_SLEEP_PID=""
+    fi
+
+    if [ -n "$CURRENT_WATCHER_SLEEP_PID_FILE" ]; then
+        rm -f "$CURRENT_WATCHER_SLEEP_PID_FILE" 2>/dev/null || true
+        CURRENT_WATCHER_SLEEP_PID_FILE=""
+    fi
+
+    if [ -n "$CURRENT_TIMEOUT_MARKER_FILE" ]; then
+        rm -f "$CURRENT_TIMEOUT_MARKER_FILE" 2>/dev/null || true
+        CURRENT_TIMEOUT_MARKER_FILE=""
+    fi
+
+    if [ -n "$CURRENT_CMD_PID" ]; then
+        kill "$CURRENT_CMD_PID" >/dev/null 2>&1 || true
+        wait "$CURRENT_CMD_PID" 2>/dev/null || true
+        CURRENT_CMD_PID=""
+    fi
+
+    if [ "$lock_flock" -eq 1 ]; then
+        flock -u 9 >/dev/null 2>&1 || true
+        exec 9>&- || true
+        lock_flock=0
+    else
+        rmdir "$LOCKDIR" 2>/dev/null || true
+    fi
+
+    if [ -n "$nodes_tmp_base" ]; then
+        rm -rf "$nodes_tmp_base" 2>/dev/null || true
+        nodes_tmp_base=""
+    fi
+}
+
+# shellcheck disable=SC2317  # Invoked indirectly by INT/TERM traps.
+cleanup_signal() {
+    cleanup
+    trap - EXIT INT TERM
+    exit "$1"
+}
 
 if command -v flock >/dev/null 2>&1; then
-  exec 9>"$LOCKFILE"
-  if ! flock -n 9; then
-    log_warn "Another ${TESTNAME} run is active; skipping"
-    log_info "Active URM-related processes:"
-    pgrep -af 'userspace-resource-manager|Urm(Component|Integration)Tests|run.sh' || true
-    echo "$TESTNAME SKIP" >"$RES_FILE"
-    exit 0
-  fi
-  lock_flock=1
-  trap 'exec 9>&-' EXIT INT TERM
+    exec 9>"$LOCKFILE"
+    if ! flock -n 9; then
+        exec 9>&- || true
+        log_warn "Another ${TESTNAME} run is active; skipping"
+        log_lock_diagnostics
+        echo "$TESTNAME SKIP" >"$RES_FILE"
+        exit 0
+    fi
+    lock_flock=1
 else
-  if ! mkdir "$LOCKDIR" 2>/dev/null; then
-    log_warn "Another ${TESTNAME} run is active or stale fallback lockdir exists: $LOCKDIR"
-    echo "$TESTNAME SKIP" >"$RES_FILE"
-    exit 0
-  fi
-  lock_flock=0
-  trap 'rmdir "$LOCKDIR" 2>/dev/null || true' EXIT INT TERM
+    if ! mkdir "$LOCKDIR" 2>/dev/null; then
+        log_warn "Another ${TESTNAME} run is active or stale fallback lockdir exists: $LOCKDIR"
+        echo "$TESTNAME SKIP" >"$RES_FILE"
+        exit 0
+    fi
+    lock_flock=0
 fi
+trap cleanup EXIT
+trap 'cleanup_signal 130' INT
+trap 'cleanup_signal 143' TERM
 
 # ---------- Approved list (pinned whitelist) ----------
 APPROVED_TESTS="
@@ -97,7 +214,7 @@ print_usage() {
     cat <<EOF
 Usage: $0 [--all] [--bin <name|absolute>] [--list] [--timeout SECS]
 Policy:
-  - Service INACTIVE => overall SKIP (end early)
+  - Service absent/non-applicable => overall SKIP; active but unrestartable => overall FAIL
   - Base configs: suites require common/, tests/configs and tests/nodes (skip if any of them are missing)
   - Any test FAIL => overall FAIL
   - No FAIL & PASS>0 => overall PASS
@@ -107,7 +224,7 @@ Options:
   --all Run all approved tests (default)
   --bin NAME|PATH Run only one approved test
   --list Print approved set and coverage and exit
-  --timeout SECS Per-binary timeout if run_with_timeout() exists (default: 1200)
+  --timeout SECS Per-binary timeout in seconds (default: 1200)
 EOF
 }
 RUN_MODE="all"
@@ -222,15 +339,149 @@ per_suite_timeout() {
             ;;
     esac
 }
+# Child processes must not inherit the flock FD.  Otherwise a completed
+# parent shell can release/close its copy while a test binary or timeout helper
+# still keeps FD 9 open, causing the next run to see a stale active flock.
+# Only close FD 9 when this script actually acquired the flock path; the
+# mkdir fallback does not use FD 9.
+close_lock_fd_in_child() {
+    if [ "$lock_flock" -eq 1 ]; then
+        exec 9>&-
+    fi
+}
+
+# Local timeout runner for this owned script.  It replaces the shared
+# run_with_timeout() path here so the command, watcher and watcher sleep all
+# drop the lock FD before running, and so the watcher/sleep PIDs can be killed
+# and waited during normal completion or cleanup.
+# Contract:
+#   Args: TIMEOUT_SECS COMMAND [ARG...]. TIMEOUT_SECS must be a positive
+#         integer to enable timeout enforcement; empty, zero, or non-numeric
+#         values run COMMAND directly without a watcher.
+#   Returns: COMMAND's exit status on normal completion; 124 when this helper's
+#            watcher expires; other signal-derived statuses are preserved when
+#            they did not come from this timeout watcher.
+#   Spawns: one COMMAND process, one watcher subshell, and one watcher sleep
+#           process when timeout enforcement is enabled.
+#   Retained files: temporary watcher sleep/timeout marker files under LOGDIR
+#                   while running only; this helper removes them before return,
+#                   and cleanup() owns removal on interruption.
+run_cmd_with_timeout_no_lock_fd() {
+    timeout_secs="$1"
+    shift
+    command_display="$*"
+
+    case "$timeout_secs" in
+        ''|*[!0-9]*|0)
+            (
+                close_lock_fd_in_child
+                exec "$@"
+            )
+            return $?
+            ;;
+    esac
+
+    (
+        close_lock_fd_in_child
+        exec "$@"
+    ) &
+    cmd_pid=$!
+    CURRENT_CMD_PID="$cmd_pid"
+
+    sleep_pid_file="${LOGDIR:-/tmp}/.${TESTNAME}.timeout-sleep.$$.$cmd_pid"
+    timeout_marker_file="${LOGDIR:-/tmp}/.${TESTNAME}.timeout-expired.$$.$cmd_pid"
+    CURRENT_WATCHER_SLEEP_PID_FILE="$sleep_pid_file"
+    CURRENT_TIMEOUT_MARKER_FILE="$timeout_marker_file"
+
+    (
+        close_lock_fd_in_child
+        sleep "$timeout_secs" &
+        sleep_pid=$!
+        printf '%s\n' "$sleep_pid" >"$sleep_pid_file" 2>/dev/null || true
+        trap 'kill "$sleep_pid" >/dev/null 2>&1 || true; wait "$sleep_pid" 2>/dev/null || true; rm -f "$sleep_pid_file" 2>/dev/null || true; exit 0' INT TERM
+        wait "$sleep_pid" 2>/dev/null
+        sleep_rc=$?
+        trap - INT TERM
+        rm -f "$sleep_pid_file" 2>/dev/null || true
+        if [ "$sleep_rc" -eq 0 ]; then
+            printf 'timeout after %ss: %s\n' "$timeout_secs" "$command_display" >"$timeout_marker_file" 2>/dev/null || true
+            echo "[TIMEOUT] command exceeded ${timeout_secs}s: $command_display" >&2
+            kill "$cmd_pid" >/dev/null 2>&1 || true
+            sleep 2
+            kill -KILL "$cmd_pid" >/dev/null 2>&1 || true
+        fi
+    ) &
+    watcher_pid=$!
+    CURRENT_WATCHER_PID="$watcher_pid"
+
+    wait "$cmd_pid" 2>/dev/null
+    status=$?
+
+    if [ -r "$timeout_marker_file" ]; then
+        status=124
+    fi
+    if [ -r "$sleep_pid_file" ]; then
+        CURRENT_WATCHER_SLEEP_PID="$(cat "$sleep_pid_file" 2>/dev/null || true)"
+    fi
+    kill "$watcher_pid" >/dev/null 2>&1 || true
+    wait "$watcher_pid" 2>/dev/null || true
+    if [ -n "$CURRENT_WATCHER_SLEEP_PID" ]; then
+        kill "$CURRENT_WATCHER_SLEEP_PID" >/dev/null 2>&1 || true
+        wait "$CURRENT_WATCHER_SLEEP_PID" 2>/dev/null || true
+    fi
+    rm -f "$sleep_pid_file" "$timeout_marker_file" 2>/dev/null || true
+    CURRENT_CMD_PID=""
+    CURRENT_WATCHER_PID=""
+    CURRENT_WATCHER_SLEEP_PID=""
+    CURRENT_WATCHER_SLEEP_PID_FILE=""
+    CURRENT_TIMEOUT_MARKER_FILE=""
+
+    return "$status"
+}
+
 run_cmd_maybe_timeout() {
     bin="$1"
     shift
     secs="$(per_suite_timeout "$(basename "$bin")")"
-    if command -v run_with_timeout >/dev/null 2>&1; then
-        run_with_timeout "$secs" "$bin" "$@"
-    else
-        "$bin" "$@"
+    run_cmd_with_timeout_no_lock_fd "$secs" "$bin" "$@"
+}
+
+service_restarted=0
+ensure_service_restarted() {
+    [ "$service_restarted" -eq 0 ] || return 0
+
+    if ! command -v systemctl >/dev/null 2>&1; then
+        log_fail "[SERVICE] systemctl not available; cannot perform required restart for $SERVICE_NAME"
+        return 1
     fi
+
+    log_info "[SERVICE] Restarting $SERVICE_NAME before first runnable suite"
+    if ! systemctl restart "$SERVICE_NAME" >"$LOGDIR/service_restart.log" 2>&1; then
+        log_fail "[SERVICE] $SERVICE_NAME required restart failed"
+        systemctl status "$SERVICE_NAME" --no-pager -l >"$LOGDIR/service_restart_status.log" 2>&1 || true
+        if command -v journalctl >/dev/null 2>&1; then
+            journalctl -u "$SERVICE_NAME" -n 100 --no-pager >"$LOGDIR/service_restart_journal.log" 2>&1 || true
+        fi
+        return 1
+    fi
+
+    attempt=1
+    while [ "$attempt" -le 10 ]; do
+        if systemctl is-active --quiet "$SERVICE_NAME"; then
+            log_pass "[SERVICE] $SERVICE_NAME is active after required restart (attempt $attempt)"
+            service_restarted=1
+            return 0
+        fi
+        sleep 1
+        attempt=$((attempt+1))
+    done
+
+    log_fail "[SERVICE] $SERVICE_NAME not active after required restart"
+    systemctl status "$SERVICE_NAME" --no-pager -l >"$LOGDIR/service_restart_status.log" 2>&1 || true
+    if command -v journalctl >/dev/null 2>&1; then
+        journalctl -u "$SERVICE_NAME" -n 100 --no-pager >"$LOGDIR/service_restart_journal.log" 2>&1 || true
+    fi
+    return 1
 }
 
 # ---------- Banner & deps ----------
@@ -259,10 +510,10 @@ else
     log_warn "[SERVICE] $SERVICE_NAME not active — attempting enable/start"
 
     if command -v systemctl >/dev/null 2>&1; then
-        systemctl enable urm >/dev/null 2>&1 || true
+        systemctl enable "$SERVICE_NAME" >/dev/null 2>&1 || true
         systemctl daemon-reload >/dev/null 2>&1 || true
-        systemctl start urm >/dev/null 2>&1 || true
-        systemctl status urm --no-pager -l >/dev/null 2>&1 || true
+        systemctl start "$SERVICE_NAME" >/dev/null 2>&1 || true
+        systemctl status "$SERVICE_NAME" --no-pager -l >/dev/null 2>&1 || true
     else
         log_warn "[SERVICE] systemctl not available; cannot auto-start $SERVICE_NAME"
     fi
@@ -270,9 +521,17 @@ else
     if check_systemd_services "$SERVICE_NAME"; then
         log_pass "[SERVICE] $SERVICE_NAME is active after start attempt"
     else
-        log_skip "[SERVICE] $SERVICE_NAME not active — overall SKIP"
-        echo "$TESTNAME SKIP" >"$RES_FILE"
-        exit 0
+        if command -v systemctl >/dev/null 2>&1 && systemctl status "$SERVICE_NAME" --no-pager -l 2>&1 | grep -qi 'could not be found\|not-found'; then
+            log_skip "[SERVICE] $SERVICE_NAME not found — overall SKIP"
+            echo "$TESTNAME SKIP" >"$RES_FILE"
+            exit 0
+        fi
+        log_fail "[SERVICE] $SERVICE_NAME not active after start attempt"
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl status "$SERVICE_NAME" --no-pager -l >"$LOGDIR/service_initial_status.log" 2>&1 || true
+        fi
+        echo "$TESTNAME FAIL" >"$RES_FILE"
+        exit 1
     fi
 fi
 
@@ -445,8 +704,8 @@ fi
 # read-only node files under /usr/share/urm/tests/nodes (or /var/lib/urm),
 # so we copy them into a mktemp-owned directory before running the tests.
 # mktemp -d guarantees a fresh unique base exclusively owned by this run;
-# the trap registered immediately after removes only that base directory
-# on exit, interrupt, or termination.
+# the common cleanup trap removes this directory together with the lock on
+# exit, interrupt, or termination.
 RUNTIME_NODES_DIR=""
 if [ "$TEST_NODES_OK" -eq 1 ]; then
     nodes_tmp_base="$(mktemp -d)"
@@ -454,11 +713,6 @@ if [ "$TEST_NODES_OK" -eq 1 ]; then
         log_warn "[NODES] mktemp -d failed — suites requiring nodes will SKIP"
         TEST_NODES_OK=0
     else
-        if [ "$lock_flock" -eq 1 ]; then
-            trap 'rm -rf "$nodes_tmp_base"; exec 9>&-' EXIT INT TERM
-        else
-            trap 'rm -rf "$nodes_tmp_base"; rmdir "$LOCKDIR" 2>/dev/null || true' EXIT INT TERM
-        fi
         RUNTIME_NODES_DIR="$nodes_tmp_base/urm/tests/nodes"
         if ! mkdir -p "$RUNTIME_NODES_DIR"; then
             log_warn "[NODES] Failed to create staging directory $RUNTIME_NODES_DIR — suites requiring nodes will SKIP"
@@ -513,6 +767,12 @@ run_one() {
         return 2
     fi
 
+    if ! ensure_service_restarted; then
+        echo "FAIL" >"$tres"
+        echo "[FAIL] $name – required $SERVICE_NAME restart failed" >>"$LOGDIR/summary.txt"
+        return 1
+    fi
+
     log_info "--- Running $bin ---"
     log_info "[CI] Logging to $tlog"
     run_cmd_maybe_timeout "$bin" --npath "$RUNTIME_NODES_DIR" >"$tlog" 2>&1
@@ -531,6 +791,12 @@ run_one() {
             echo "[FAIL] $name (rc=$rc)" >>"$LOGDIR/summary.txt"
             return 1
             ;;
+        124)
+            log_fail "[TEST] $name TIMEOUT"
+            echo "FAIL" >"$tres"
+            echo "[FAIL] $name (timeout)" >>"$LOGDIR/summary.txt"
+            return 1
+            ;;
         *)
             log_fail "[TEST] $name UNKNOWN RC=$rc"
             echo "FAIL" >"$tres"
@@ -540,6 +806,7 @@ run_one() {
     esac
 }
 
+log_info "Proceeding with test-cases"
 for t in $TESTS; do
     run_one "$t"
     rc=$?
