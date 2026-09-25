@@ -8,13 +8,14 @@
 # - default to the upstream MSM/freedreno base stack
 # - --overlay selects the Qualcomm KGSL/Adreno package and boot stack
 # - --auto validates the currently selected stack without changing it
-# - use a 60 FPS functional cap in automatic FPS mode
-# - keep the normal compositor-synchronized client path
+# - use the unsynchronized client benchmark with a 60 FPS functional target in
+#   automatic FPS mode because packaged clients may not report synchronized
+#   redraws
 #
 # Yocto and other image-based distributions:
 # - preserve the existing image-selected graphics and Weston flow
 # - do not install/remove graphics packages or alter boot artifacts
-# - preserve the existing detected-refresh FPS policy and client arguments
+# - preserve the existing detected-refresh FPS policy and synchronized client
 #
 # PASS/FAIL/SKIP is written to the result file. After testcase execution, the
 # runner exits 0 for compatibility with the existing LAVA flow.
@@ -126,6 +127,7 @@ while [ "$#" -gt 0 ]; do
 
         --strict-refresh-fps)
             FPS_EXPECT_MODE="detected"
+            REQUIRE_FPS=1
             ;;
 
         --require-fps)
@@ -155,6 +157,11 @@ FPS options:
   --require-fps         Require FPS evidence, default
   --no-require-fps      Record FPS when available but do not gate on it
 
+Defaults:
+  Desktop automatic mode uses the unsynchronized client benchmark and a
+  minimum-throughput gate. Image-based and strict-refresh runs remain
+  compositor-synchronized.
+
 Other options:
   -h, --help            Show this help
 
@@ -166,6 +173,7 @@ Environment:
   EXPECT_FPS_DEFAULT          Fallback expected FPS, default: 60
   FPS_TOL_PCT                 Fixed-mode tolerance, default: 10
   MIN_FPS_PCT                 Minimum percentage, default: 85
+  REQUIRE_FPS                 0 or 1, default: 1
   DESKTOP_FUNCTIONAL_FPS_CAP  Desktop auto-mode FPS cap, default: 60
   TIME_SYNC_WAIT              Clock sync wait bound in seconds, 0 disables, default: 20
   CLOCK_STEP_TOLERANCE        Wall-clock step tolerance in seconds, default: 2
@@ -593,7 +601,32 @@ log_info "Wayland session user, ${DISPLAY_WAYLAND_SESSION_USER:-current-user}"
 log_info "XDG_RUNTIME_DIR, ${DISPLAY_WAYLAND_SESSION_RUNTIME_DIR:-${XDG_RUNTIME_DIR:-<unset>}}"
 log_info "WAYLAND_DISPLAY, $(basename "${DISPLAY_WAYLAND_SOCKET:-${WAYLAND_DISPLAY:-<unset>}}")"
 
-log_info "Client mode, compositor-synchronized weston-simple-egl"
+SIMPLE_EGL_CLIENT_ARG=""
+SIMPLE_EGL_LAUNCH_MODE="compositor-synchronized"
+SIMPLE_EGL_FPS_SOURCE="client-synchronized"
+
+if [ "${DISPLAY_TEST_FPS_POLICY:-shared}" = "desktop-functional-cap" ]; then
+    simple_egl_help="$("$BIN" -h 2>&1)"
+
+    if printf '%s\n' "$simple_egl_help" |
+        grep -Eq '(^|[[:space:]])-b([[:space:]]|$)'; then
+        SIMPLE_EGL_CLIENT_ARG="-b"
+        SIMPLE_EGL_LAUNCH_MODE="desktop-unsynchronized-benchmark"
+        SIMPLE_EGL_FPS_SOURCE="client-unsynchronized-benchmark"
+        log_info "Benchmark FPS is unsynchronized EGL throughput, not display refresh"
+    else
+        log_warn "weston-simple-egl does not advertise -b, keeping compositor-synchronized mode"
+    fi
+fi
+
+log_info "Client mode, $SIMPLE_EGL_LAUNCH_MODE"
+
+set -- "$BIN"
+
+if [ -n "$SIMPLE_EGL_CLIENT_ARG" ]; then
+    set -- "$@" "$SIMPLE_EGL_CLIENT_ARG"
+fi
+
 # Retain the existing environment on Yocto. Upstream weston-simple-egl prints
 # FPS unconditionally, while vendor builds may also honor these variables.
 SIMPLE_EGL_FPS=1
@@ -626,7 +659,7 @@ if command -v run_with_timeout >/dev/null 2>&1; then
                 stdbuf \
                 -oL \
                 -eL \
-                "$BIN" >>"$RUN_LOG" 2>&1
+                "$@" >>"$RUN_LOG" 2>&1
             rc=$?
         else
             log_warn "stdbuf is unavailable, running the client without line buffering"
@@ -634,7 +667,7 @@ if command -v run_with_timeout >/dev/null 2>&1; then
             display_run_in_wayland_session \
                 timeout \
                 "$DURATION" \
-                "$BIN" >>"$RUN_LOG" 2>&1
+                "$@" >>"$RUN_LOG" 2>&1
             rc=$?
         fi
     elif command -v stdbuf >/dev/null 2>&1; then
@@ -644,7 +677,7 @@ if command -v run_with_timeout >/dev/null 2>&1; then
             stdbuf \
             -oL \
             -eL \
-            "$BIN" >>"$RUN_LOG" 2>&1
+            "$@" >>"$RUN_LOG" 2>&1
         rc=$?
     else
         log_warn "stdbuf is unavailable, running the client without line buffering"
@@ -652,7 +685,7 @@ if command -v run_with_timeout >/dev/null 2>&1; then
         run_with_timeout \
             "$DURATION" \
             display_run_in_wayland_session \
-            "$BIN" >>"$RUN_LOG" 2>&1
+            "$@" >>"$RUN_LOG" 2>&1
         rc=$?
     fi
 else
@@ -671,7 +704,7 @@ else
     [ -n "$duration_secs" ] || duration_secs=30
     [ -n "$stop_grace_secs" ] || stop_grace_secs=3
 
-    display_run_in_wayland_session "$BIN" >>"$RUN_LOG" 2>&1 &
+    display_run_in_wayland_session "$@" >>"$RUN_LOG" 2>&1 &
     APP_PID=$!
     run_elapsed=0
 
@@ -759,13 +792,13 @@ if [ "$fps_count" -eq 0 ]; then
 fi
 
 if [ "${DISPLAY_TEST_FPS_POLICY:-shared}" = "desktop-functional-cap" ]; then
-    log_info "Result summary, rc=${rc} elapsed=${elapsed}s fps=${fps_for_summary} mode=desktop-functional refresh=${DISPLAY_TEST_FPS_REFRESH:-unknown}Hz target=${DISPLAY_TEST_FPS_EXPECTED:-unknown} min_ok=${DISPLAY_TEST_FPS_MIN_OK:-unknown} graphics=${DISPLAY_BUILD_FLAVOUR} source=client-synchronized"
+    log_info "Result summary, rc=${rc} elapsed=${elapsed}s fps=${fps_for_summary} mode=desktop-functional target=${DISPLAY_TEST_FPS_EXPECTED:-unknown} min_ok=${DISPLAY_TEST_FPS_MIN_OK:-unknown} graphics=${DISPLAY_BUILD_FLAVOUR} source=${SIMPLE_EGL_FPS_SOURCE}"
 elif [ "${DISPLAY_TEST_FPS_POLICY:-shared}" = "desktop-session-connectivity" ]; then
-    log_info "Result summary, rc=${rc} elapsed=${elapsed}s fps=${fps_for_summary} mode=desktop-session-connectivity graphics=${DISPLAY_BUILD_FLAVOUR} source=client-synchronized"
+    log_info "Result summary, rc=${rc} elapsed=${elapsed}s fps=${fps_for_summary} mode=desktop-session-connectivity graphics=${DISPLAY_BUILD_FLAVOUR} source=${SIMPLE_EGL_FPS_SOURCE}"
 elif [ "${DISPLAY_FPS_MODE:-}" = "detected" ]; then
-    log_info "Result summary, rc=${rc} elapsed=${elapsed}s fps=${fps_for_summary} mode=${DISPLAY_FPS_MODE} refresh=${DISPLAY_FPS_DETECTED_HZ}Hz expected=${DISPLAY_FPS_EXPECTED} min_ok=${DISPLAY_FPS_MIN_OK} graphics=${DISPLAY_BUILD_FLAVOUR} source=client-synchronized"
+    log_info "Result summary, rc=${rc} elapsed=${elapsed}s fps=${fps_for_summary} mode=${DISPLAY_FPS_MODE} refresh=${DISPLAY_FPS_DETECTED_HZ}Hz expected=${DISPLAY_FPS_EXPECTED} min_ok=${DISPLAY_FPS_MIN_OK} graphics=${DISPLAY_BUILD_FLAVOUR} source=${SIMPLE_EGL_FPS_SOURCE}"
 else
-    log_info "Result summary, rc=${rc} elapsed=${elapsed}s fps=${fps_for_summary} mode=${DISPLAY_FPS_MODE} expected=${DISPLAY_FPS_EXPECTED} range=[${DISPLAY_FPS_MIN_OK},${DISPLAY_FPS_MAX_OK}] graphics=${DISPLAY_BUILD_FLAVOUR} source=client-synchronized"
+    log_info "Result summary, rc=${rc} elapsed=${elapsed}s fps=${fps_for_summary} mode=${DISPLAY_FPS_MODE} expected=${DISPLAY_FPS_EXPECTED} range=[${DISPLAY_FPS_MIN_OK},${DISPLAY_FPS_MAX_OK}] graphics=${DISPLAY_BUILD_FLAVOUR} source=${SIMPLE_EGL_FPS_SOURCE}"
 fi
 
 final="PASS"
@@ -822,10 +855,11 @@ fi
     printf '%s\n' "os_id=$OS_ID"
     printf '%s\n' "runtime_model=${DISPLAY_RUNTIME_MODEL:-unknown}"
     printf '%s\n' "wayland_socket=${DISPLAY_WAYLAND_SOCKET:-unknown}"
-    printf '%s\n' "simple_egl_launch_mode=compositor-synchronized"
-    printf '%s\n' "simple_egl_client_arg=none"
-    printf '%s\n' "fps_sample_source=client-synchronized"
+    printf '%s\n' "simple_egl_launch_mode=$SIMPLE_EGL_LAUNCH_MODE"
+    printf '%s\n' "simple_egl_client_arg=${SIMPLE_EGL_CLIENT_ARG:-none}"
+    printf '%s\n' "fps_sample_source=$SIMPLE_EGL_FPS_SOURCE"
     printf '%s\n' "fps_gate_policy=${DISPLAY_TEST_FPS_POLICY:-shared}"
+    printf '%s\n' "fps_required=$REQUIRE_FPS"
     printf '%s\n' "fps_gate_refresh=${DISPLAY_TEST_FPS_REFRESH:-unknown}"
     printf '%s\n' "fps_gate_expected=${DISPLAY_TEST_FPS_EXPECTED:-unknown}"
     printf '%s\n' "fps_gate_minimum=${DISPLAY_TEST_FPS_MIN_OK:-unknown}"

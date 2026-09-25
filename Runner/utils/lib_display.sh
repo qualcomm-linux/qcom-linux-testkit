@@ -5971,6 +5971,10 @@ display_resolve_test_fps_gate_policy() {
     return 0
 }
 
+# Apply the resolved FPS policy to one test result.
+# Arguments: average FPS, sample count, and 0 or 1 indicating whether FPS is required.
+# Returns: 0 when the selected policy passes or is diagnostic, 1 on a required FPS failure.
+# Side effects: emits the policy decision through the shared logging helpers.
 display_apply_test_fps_gate_policy() {
     datfgp_avg="${1:--}"
     datfgp_count="${2:-0}"
@@ -6007,14 +6011,19 @@ display_apply_test_fps_gate_policy() {
         return 0
     fi
 
-    if [ "$datfgp_count" -eq 0 ]; then
-        if [ "$datfgp_require" -ne 0 ]; then
-            log_fail "Desktop functional FPS gate enabled but no FPS samples were found"
-            return 1
+    if [ "$datfgp_require" -eq 0 ]; then
+        if [ "$datfgp_count" -eq 0 ]; then
+            log_warn "No FPS samples were produced by the desktop client, compositor connectivity and EGL execution were validated"
+        else
+            log_info "Recording desktop FPS samples without performance gating, samples=$datfgp_count avg=$datfgp_avg"
         fi
 
-        log_warn "No FPS samples were found, FPS gating was not requested"
         return 0
+    fi
+
+    if [ "$datfgp_count" -eq 0 ]; then
+        log_fail "Desktop functional FPS gate enabled but no FPS samples were found"
+        return 1
     fi
 
     if ! printf '%s\n' "$datfgp_avg" |
@@ -6028,7 +6037,7 @@ display_apply_test_fps_gate_policy() {
             awk -v value="$datfgp_avg" 'BEGIN { printf "%.0f", value + 0.0 }'
         )"
 
-        log_fail "Average FPS below desktop functional threshold, avg=$datfgp_avg (~$datfgp_rounded) < ${DISPLAY_TEST_FPS_MIN_OK:-1} (target=${DISPLAY_TEST_FPS_EXPECTED:-unknown}, output=${DISPLAY_TEST_FPS_REFRESH:-unknown}Hz)"
+        log_fail "Average FPS below desktop functional threshold, avg=$datfgp_avg (~$datfgp_rounded) < ${DISPLAY_TEST_FPS_MIN_OK:-1} (target=${DISPLAY_TEST_FPS_EXPECTED:-unknown})"
         return 1
     fi
 
@@ -6036,6 +6045,6 @@ display_apply_test_fps_gate_policy() {
         awk -v value="$datfgp_avg" 'BEGIN { printf "%.0f", value + 0.0 }'
     )"
 
-    log_info "Desktop functional FPS gate passed, avg=$datfgp_avg (~$datfgp_rounded) >= ${DISPLAY_TEST_FPS_MIN_OK:-1} (target=${DISPLAY_TEST_FPS_EXPECTED:-unknown}, output=${DISPLAY_TEST_FPS_REFRESH:-unknown}Hz)"
+    log_info "Desktop functional FPS gate passed, avg=$datfgp_avg (~$datfgp_rounded) >= ${DISPLAY_TEST_FPS_MIN_OK:-1} (target=${DISPLAY_TEST_FPS_EXPECTED:-unknown})"
     return 0
 }

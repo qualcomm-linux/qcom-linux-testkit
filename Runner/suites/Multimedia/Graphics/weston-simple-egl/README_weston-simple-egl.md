@@ -26,6 +26,8 @@ Yocto images must provide the required client and Weston runtime. On Ubuntu and 
 - `./run.sh --base` selects the upstream MSM/freedreno stack and ensures the OS-specific Mesa package set.
 - `./run.sh --overlay` selects the Qualcomm KGSL/Adreno stack and ensures the OS-specific overlay package set. Package or DKMS changes can require a reboot before validation continues.
 - Debian uses `libgbm-msm1`, while Ubuntu uses `libgbm-msm`. Set `GPU_OVERLAY_GBM_PACKAGE` only when an explicit override is required.
+- Desktop automatic mode runs `weston-simple-egl -b` when the client advertises that option. This is an unsynchronized EGL throughput benchmark with a minimum functional FPS gate, not a display-refresh measurement.
+- Yocto, other image-based runs, and `--strict-refresh-fps` keep the compositor-synchronized client mode. FPS evidence remains required by default. Use `--no-require-fps` only when connectivity and EGL execution are the intended coverage.
 - On Ubuntu, the test reuses an active GNOME Wayland session when Weston is not running. A root-launched test executes the client as the Wayland socket owner without stopping or restarting GDM.
 - GDM can throttle an unfocused greeter client. That path validates compositor connectivity and EGL startup while recording, but not performance-gating, any FPS samples.
 
