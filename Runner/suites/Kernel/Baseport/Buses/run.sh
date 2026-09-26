@@ -42,7 +42,12 @@ TESTNAME="Buses"
 RES_FILE="$SCRIPT_DIR/$TESTNAME.res"
 RESULT_DIR="$SCRIPT_DIR/results/$TESTNAME"
 
-I2C_LEGACY_TEST_ENABLE="${I2C_LEGACY_TEST_ENABLE:-auto}"
+I2C_LEGACY_TEST_ENABLE="${I2C_LEGACY_TEST_ENABLE:-0}"
+I2C_EEPROM_MODE="${I2C_EEPROM_MODE:-auto}"
+I2C_EEPROM_DEVICE="${I2C_EEPROM_DEVICE:-auto}"
+I2C_EEPROM_OFFSET="${I2C_EEPROM_OFFSET:-}"
+I2C_EEPROM_LENGTH="${I2C_EEPROM_LENGTH:-}"
+I2C_EEPROM_TIMEOUT="${I2C_EEPROM_TIMEOUT:-60}"
 I2C_TEST_ADAPTER="${I2C_TEST_ADAPTER:-auto}"
 I2C_TEST_TIMEOUT="${I2C_TEST_TIMEOUT:-15}"
 I2C_DMESG_STRICT="${I2C_DMESG_STRICT:-0}"
@@ -66,6 +71,12 @@ Usage: ./run.sh [options]
 
 Options:
   --legacy-test          Run image-provided i2c-msm-test after inventory.
+  --eeprom-mode MODE     auto, off, probe, or integrity, default: auto.
+  --eeprom-test          Select EEPROM integrity mode.
+  --eeprom-device PATH   Select a sysfs EEPROM or NVMEM data file.
+  --eeprom-offset BYTES  Start of an explicitly safe writable range.
+  --eeprom-length BYTES  Length of an explicitly safe writable range.
+  --eeprom-timeout SEC   EEPROM runner timeout, default: 60.
   --adapter BUS          Use /dev/i2c-BUS or an explicit /dev/i2c-* path.
   --timeout SECONDS      Legacy command timeout, default: 15.
   --tools-timeout SEC    i2c-tools command timeout, default: 10.
@@ -78,11 +89,16 @@ Options:
   --write ADDRESS REG VALUE
                          Transactionally write, read back, and restore a register.
   --write-mode MODE      b or w, default: b.
-  --allow-write          Confirm the selected register is safe to modify.
+  --allow-write          Confirm the selected register or EEPROM is safe to modify.
   -h, --help             Show this help.
 
 Environment:
   I2C_LEGACY_TEST_ENABLE=auto|0|1
+  I2C_EEPROM_MODE=auto|off|probe|integrity
+  I2C_EEPROM_DEVICE=auto|PATH
+  I2C_EEPROM_OFFSET=BYTES
+  I2C_EEPROM_LENGTH=BYTES
+  I2C_EEPROM_TIMEOUT=SECONDS
   I2C_TEST_ADAPTER=auto|BUS|/dev/i2c-BUS
   I2C_TEST_TIMEOUT=SECONDS
   I2C_DMESG_STRICT=0|1
@@ -93,8 +109,10 @@ Environment:
   I2C_WRITE_MODE, I2C_ALLOW_WRITE=0|1, I2C_TOOLS_TIMEOUT=SECONDS
 
 Scanning and register operations auto-select a unique character adapter when
-possible. Use --adapter when multiple adapters exist. Writes also require
---allow-write and always attempt to restore the original value.
+possible. A scan can also derive its adapter from one discovered EEPROM. Use
+--adapter when the target remains ambiguous. Writes require --allow-write and
+always attempt to restore the original value. EEPROM integrity mode additionally
+requires an explicit safe offset and length.
 EOF
 }
 
@@ -104,6 +122,35 @@ parse_args() {
             --legacy-test)
                 I2C_LEGACY_TEST_ENABLE=1
                 shift
+                ;;
+            --eeprom-mode)
+                [ "$#" -ge 2 ] || return 1
+                I2C_EEPROM_MODE="$2"
+                shift 2
+                ;;
+            --eeprom-test)
+                I2C_EEPROM_MODE=integrity
+                shift
+                ;;
+            --eeprom-device)
+                [ "$#" -ge 2 ] || return 1
+                I2C_EEPROM_DEVICE="$2"
+                shift 2
+                ;;
+            --eeprom-offset)
+                [ "$#" -ge 2 ] || return 1
+                I2C_EEPROM_OFFSET="$2"
+                shift 2
+                ;;
+            --eeprom-length)
+                [ "$#" -ge 2 ] || return 1
+                I2C_EEPROM_LENGTH="$2"
+                shift 2
+                ;;
+            --eeprom-timeout)
+                [ "$#" -ge 2 ] || return 1
+                I2C_EEPROM_TIMEOUT="$2"
+                shift 2
                 ;;
             --adapter)
                 [ "$#" -ge 2 ] || return 1
@@ -194,6 +241,38 @@ handle_signal() {
     exit 1
 }
 
+# i2c_select_eeprom_adapter
+# Prints the adapter number for one dynamically discovered I2C EEPROM.
+i2c_select_eeprom_adapter() {
+    isea_runner="$TOOLS/i2c_eeprom_runner.py"
+    isea_log="$RESULT_DIR/i2c_eeprom_adapter_discovery.log"
+    isea_report="$RESULT_DIR/i2c_eeprom_adapter_discovery.tsv"
+
+    command -v python3 >/dev/null 2>&1 || return 1
+    [ -f "$isea_runner" ] || return 1
+
+    run_with_timeout_log \
+        "$I2C_EEPROM_TIMEOUT" \
+        "$isea_log" \
+        python3 "$isea_runner" \
+        --mode discover \
+        --device "$I2C_EEPROM_DEVICE" \
+        --report "$isea_report"
+    isea_status=$?
+    [ "$isea_status" -eq 0 ] || return 1
+    grep -q '^I2C_EEPROM_RESULT status=PASS ' "$isea_log" || return 1
+
+    isea_adapter=$(awk -F '\t' '$1 == "adapter" { print $2; exit }' "$isea_report")
+    case "$isea_adapter" in
+        ''|*[!0-9]*)
+            return 1
+            ;;
+    esac
+    [ -c "/dev/i2c-$isea_adapter" ] || return 1
+
+    printf '%s\n' "$isea_adapter"
+}
+
 parse_args "$@" || {
     usage >&2
     exit 2
@@ -205,6 +284,22 @@ case "$I2C_LEGACY_TEST_ENABLE" in
     *)
         log_warn "Invalid I2C_LEGACY_TEST_ENABLE='$I2C_LEGACY_TEST_ENABLE', using auto"
         I2C_LEGACY_TEST_ENABLE=auto
+        ;;
+esac
+
+case "$I2C_EEPROM_MODE" in
+    auto|off|probe|integrity)
+        ;;
+    *)
+        log_error "I2C_EEPROM_MODE must be auto, off, probe, or integrity"
+        exit 2
+        ;;
+esac
+
+case "$I2C_EEPROM_TIMEOUT" in
+    ''|*[!0-9]*|0)
+        log_error "I2C_EEPROM_TIMEOUT must be a positive integer"
+        exit 2
         ;;
 esac
 
@@ -239,6 +334,17 @@ case "$I2C_SCAN_ENABLE:$I2C_ALLOW_WRITE" in
         exit 2
         ;;
 esac
+
+if [ "$I2C_EEPROM_MODE" = "integrity" ] && [ "$I2C_ALLOW_WRITE" -ne 1 ]; then
+    log_error "EEPROM integrity validation requires --allow-write or I2C_ALLOW_WRITE=1"
+    exit 2
+fi
+
+if [ "$I2C_EEPROM_MODE" = "integrity" ] &&
+   { [ -z "$I2C_EEPROM_OFFSET" ] || [ -z "$I2C_EEPROM_LENGTH" ]; }; then
+    log_error "EEPROM integrity validation requires --eeprom-offset and --eeprom-length"
+    exit 2
+fi
 
 case "$I2C_SCAN_MODE" in
     quick|read)
@@ -298,7 +404,9 @@ TMPDIR="$SCRIPT_DIR"
 
 log_info "--------------------------------------------------------------------------"
 log_info "Starting $TESTNAME I2C Testcase"
-log_info "Configuration: legacy_test=$I2C_LEGACY_TEST_ENABLE adapter=$I2C_TEST_ADAPTER timeout=${I2C_TEST_TIMEOUT}s tools_timeout=${I2C_TOOLS_TIMEOUT}s scan=$I2C_SCAN_ENABLE scan_mode=$I2C_SCAN_MODE read=${I2C_READ_ADDRESS:-disabled}:${I2C_READ_REGISTER:-disabled}:$I2C_READ_MODE write=${I2C_WRITE_ADDRESS:-disabled}:${I2C_WRITE_REGISTER:-disabled}:$I2C_WRITE_MODE allow_write=$I2C_ALLOW_WRITE dmesg_strict=$I2C_DMESG_STRICT"
+log_info "EEPROM configuration: mode=$I2C_EEPROM_MODE device=$I2C_EEPROM_DEVICE offset=${I2C_EEPROM_OFFSET:-auto} length=${I2C_EEPROM_LENGTH:-auto} timeout=${I2C_EEPROM_TIMEOUT}s allow_write=$I2C_ALLOW_WRITE"
+log_info "Legacy configuration: enabled=$I2C_LEGACY_TEST_ENABLE adapter=$I2C_TEST_ADAPTER timeout=${I2C_TEST_TIMEOUT}s"
+log_info "i2c-tools configuration: timeout=${I2C_TOOLS_TIMEOUT}s scan=$I2C_SCAN_ENABLE scan_mode=$I2C_SCAN_MODE read=${I2C_READ_ADDRESS:-disabled}:${I2C_READ_REGISTER:-disabled}:$I2C_READ_MODE write=${I2C_WRITE_ADDRESS:-disabled}:${I2C_WRITE_REGISTER:-disabled}:$I2C_WRITE_MODE allow_write=$I2C_ALLOW_WRITE dmesg_strict=$I2C_DMESG_STRICT"
 
 if ! CHECK_DEPS_RECOVER=0 CHECK_DEPS_NO_EXIT=1 check_dependencies \
     awk \
@@ -356,22 +464,38 @@ fi
 i2c_tools_explicit=0
 if [ "$I2C_SCAN_ENABLE" -eq 1 ] ||
    [ -n "$I2C_READ_ADDRESS" ] ||
-   [ -n "$I2C_WRITE_ADDRESS" ]; then
+   [ -n "$I2C_WRITE_ADDRESS" ] ||
+   [ "$I2C_LEGACY_TEST_ENABLE" = "1" ]; then
     i2c_tools_explicit=1
+fi
+
+if [ "$I2C_TEST_ADAPTER" != "auto" ] && [ "$i2c_tools_explicit" -eq 0 ]; then
+    log_info "The selected adapter is inactive because no scan, register, or legacy operation was requested"
 fi
 
 if [ "$i2c_tools_explicit" -eq 1 ] && [ "$I2C_TEST_ADAPTER" = "auto" ]; then
     I2C_TEST_ADAPTER=$(i2c_tools_select_adapter)
     i2c_adapter_selection_status=$?
+    if [ "$i2c_adapter_selection_status" -eq 1 ] &&
+       [ -z "$I2C_READ_ADDRESS" ] &&
+       [ -z "$I2C_WRITE_ADDRESS" ] &&
+       { [ "$I2C_SCAN_ENABLE" -eq 1 ] ||
+         [ "$I2C_LEGACY_TEST_ENABLE" = "1" ]; }; then
+        I2C_TEST_ADAPTER=$(i2c_select_eeprom_adapter)
+        i2c_adapter_selection_status=$?
+        if [ "$i2c_adapter_selection_status" -eq 0 ]; then
+            log_info "I2C scan adapter selected from the discovered EEPROM: i2c-$I2C_TEST_ADAPTER"
+        fi
+    fi
     case "$i2c_adapter_selection_status" in
         0)
             log_info "I2C functional adapter auto-selected: i2c-$I2C_TEST_ADAPTER"
             ;;
         1)
-            test_result_finish "FAIL" "$TESTNAME FAIL: multiple I2C character adapters are available, select one with --adapter or I2C_TEST_ADAPTER"
+            test_result_finish "SKIP" "$TESTNAME SKIP: multiple I2C adapters are available and no unique functional adapter could be discovered"
             ;;
         *)
-            test_result_finish "FAIL" "$TESTNAME FAIL: no I2C character adapter is available for the explicitly requested operation"
+            test_result_finish "SKIP" "$TESTNAME SKIP: no I2C character adapter is available for the explicitly requested operation"
             ;;
     esac
 fi
@@ -384,11 +508,7 @@ case "$i2c_tools_package_status" in
         log_info "I2C userspace package set is ready"
         ;;
     1)
-        if [ "$i2c_tools_explicit" -eq 1 ]; then
-            log_warn "i2c-tools package recovery failed on $(pkg_detect_os_id), explicit operations will verify the required commands directly"
-        else
-            test_result_record "SKIP" "I2C userspace diagnostics are unavailable because i2c-tools package recovery failed on $(pkg_detect_os_id)"
-        fi
+        log_warn "i2c-tools package recovery failed on $(pkg_detect_os_id), checking for image-provided commands"
         ;;
     2)
         log_info "I2C package recovery is not applicable, using image-provided tools"
@@ -398,7 +518,7 @@ case "$i2c_tools_package_status" in
         ;;
 esac
 
-if [ "$i2c_tools_package_status" -ne 1 ]; then
+if command -v i2cdetect >/dev/null 2>&1; then
     log_info "I2C userspace validation: listing adapters and querying adapter functionality without transferring device data"
     i2c_tools_validate_adapters "$RESULT_DIR" "$I2C_TOOLS_TIMEOUT"
     i2c_tools_status=$?
@@ -416,6 +536,8 @@ if [ "$i2c_tools_package_status" -ne 1 ]; then
             test_result_record "FAIL" "I2C adapter functionality helper returned unexpected status $i2c_tools_status"
             ;;
     esac
+else
+    test_result_record "SKIP" "I2C userspace diagnostics are unavailable because i2c-tools are absent"
 fi
 
 if [ "$I2C_SCAN_ENABLE" -eq 1 ]; then
@@ -434,7 +556,7 @@ if [ "$I2C_SCAN_ENABLE" -eq 1 ]; then
             test_result_record "FAIL" "Explicit I2C address scan failed on adapter $I2C_TEST_ADAPTER"
             ;;
         2)
-            test_result_record "FAIL" "Explicit I2C address scan requires i2cdetect and an accessible adapter"
+            test_result_record "SKIP" "Explicit I2C address scan is unavailable because i2cdetect or an accessible adapter is absent"
             ;;
         *)
             test_result_record "FAIL" "Explicit I2C address scan configuration is invalid"
@@ -462,7 +584,7 @@ if [ -n "$I2C_READ_ADDRESS" ]; then
             test_result_record "FAIL" "Explicit I2C register read or expected-value comparison failed"
             ;;
         2)
-            test_result_record "FAIL" "Explicit I2C register read requires i2cget and an accessible adapter"
+            test_result_record "SKIP" "Explicit I2C register read is unavailable because i2cget or an accessible adapter is absent"
             ;;
         *)
             test_result_record "FAIL" "Explicit I2C register read configuration is invalid"
@@ -489,12 +611,69 @@ if [ -n "$I2C_WRITE_ADDRESS" ]; then
             test_result_record "FAIL" "Explicit I2C register write, read-back, or restoration failed"
             ;;
         2)
-            test_result_record "FAIL" "Explicit I2C register write requires i2cget, i2cset, and an accessible adapter"
+            test_result_record "SKIP" "Explicit I2C register write is unavailable because i2cget, i2cset, or an accessible adapter is absent"
             ;;
         *)
             test_result_record "FAIL" "Explicit I2C register write configuration is invalid"
             ;;
     esac
+fi
+
+if [ "$I2C_EEPROM_MODE" != "off" ]; then
+    eeprom_runner="$TOOLS/i2c_eeprom_runner.py"
+    eeprom_log="$RESULT_DIR/i2c_eeprom.log"
+    eeprom_report="$RESULT_DIR/i2c_eeprom.tsv"
+
+    if ! command -v python3 >/dev/null 2>&1; then
+        test_result_record "SKIP" "EEPROM validation is unavailable because python3 is absent"
+    elif [ ! -f "$eeprom_runner" ]; then
+        test_result_record "FAIL" "EEPROM validation runner is missing: $eeprom_runner"
+    else
+        eeprom_runner_mode=$I2C_EEPROM_MODE
+        [ "$eeprom_runner_mode" = "auto" ] && eeprom_runner_mode=probe
+
+        set -- python3 "$eeprom_runner" \
+            --mode "$eeprom_runner_mode" \
+            --device "$I2C_EEPROM_DEVICE" \
+            --report "$eeprom_report"
+        if [ -n "$I2C_EEPROM_OFFSET" ]; then
+            set -- "$@" --offset "$I2C_EEPROM_OFFSET"
+        fi
+        if [ -n "$I2C_EEPROM_LENGTH" ]; then
+            set -- "$@" --length "$I2C_EEPROM_LENGTH"
+        fi
+
+        log_info "Running dynamically discovered I2C EEPROM validation"
+        run_with_timeout_log \
+            "$I2C_EEPROM_TIMEOUT" \
+            "$eeprom_log" \
+            "$@"
+        eeprom_status=$?
+        log_file_with_label "I2C-EEPROM" "$eeprom_log"
+
+        case "$eeprom_status" in
+            0)
+                if grep -q '^I2C_EEPROM_RESULT status=PASS ' "$eeprom_log"; then
+                    test_result_record "PASS" "I2C EEPROM $eeprom_runner_mode validation completed, report=$eeprom_report"
+                else
+                    test_result_record "FAIL" "I2C EEPROM runner exited successfully without a PASS marker"
+                fi
+                ;;
+            2)
+                if grep -q '^I2C_EEPROM_RESULT status=SKIP ' "$eeprom_log"; then
+                    test_result_record "SKIP" "I2C EEPROM environment is unavailable, see $eeprom_log"
+                else
+                    test_result_record "FAIL" "I2C EEPROM runner returned SKIP without a result marker"
+                fi
+                ;;
+            3)
+                test_result_record "FAIL" "I2C EEPROM validation configuration is invalid, see $eeprom_log"
+                ;;
+            *)
+                test_result_record "FAIL" "I2C EEPROM validation failed or timed out, rc=$eeprom_status artifact=$eeprom_log"
+                ;;
+        esac
+    fi
 fi
 
 if [ "$I2C_LEGACY_TEST_ENABLE" != 0 ]; then
@@ -513,7 +692,7 @@ if [ "$I2C_LEGACY_TEST_ENABLE" != 0 ]; then
             ;;
         4)
             if [ "$I2C_LEGACY_TEST_ENABLE" = "1" ]; then
-                test_result_record "FAIL" "Legacy I2C functional test has no usable adapter: requested=$I2C_TEST_ADAPTER"
+                test_result_record "SKIP" "Legacy I2C functional test has no uniquely selectable adapter: requested=$I2C_TEST_ADAPTER"
             else
                 test_result_record "SKIP" "Automatic legacy I2C validation found no usable character-device adapter"
             fi
@@ -523,7 +702,7 @@ if [ "$I2C_LEGACY_TEST_ENABLE" != 0 ]; then
             ;;
     esac
 else
-    test_result_record "SKIP" "Legacy i2c-msm-test was disabled by configuration"
+    log_info "Legacy i2c-msm-test compatibility was not requested, using the in-repository EEPROM validator"
 fi
 
 log_info "I2C kernel-health validation: capturing controller errors without changing bus state"

@@ -1,14 +1,23 @@
 metadata:
   name: Buses
   format: "Lava-Test Test Definition 1.0"
-  description: "Validate I2C runtime state, adapter capabilities, and explicitly selected transfers"
+  description: "Validate I2C runtime state, adapter capabilities, and dynamically discovered EEPROM access"
   os:
     - linux
   scope:
     - functional
 
 params:
-  I2C_LEGACY_TEST_ENABLE: "auto"
+  # Safe CI defaults: use the in-repository read-only EEPROM path and do not
+  # invoke the optional legacy binary or any active bus operation.
+  I2C_LEGACY_TEST_ENABLE: "0"
+  I2C_EEPROM_MODE: "auto"
+  I2C_EEPROM_DEVICE: "auto"
+  # Integrity mode must receive a target-approved range and explicit write
+  # authorization from the job definition.
+  I2C_EEPROM_OFFSET: ""
+  I2C_EEPROM_LENGTH: ""
+  I2C_EEPROM_TIMEOUT: "60"
   I2C_TEST_ADAPTER: "auto"
   I2C_TEST_TIMEOUT: "15"
   I2C_DMESG_STRICT: "0"
