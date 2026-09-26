@@ -1,0 +1,24 @@
+metadata:
+  name: OPTEE_Native_Validation
+  format: "Lava-Test Test Definition 1.0"
+  description: "Auto-discover native OP-TEE and run a bounded allowlisted xtest subset"
+  os:
+    - linux
+  scope:
+    - functional
+
+params:
+  OPTEE_XTEST_BIN: "xtest"
+  OPTEE_XTEST_CASES: "1001,1002"
+  OPTEE_XTEST_TIMEOUT: "30"
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/OPTEE_Native_Validation
+    - >-
+      ./run.sh
+      --xtest "${OPTEE_XTEST_BIN}"
+      --cases "${OPTEE_XTEST_CASES}"
+      --timeout "${OPTEE_XTEST_TIMEOUT}" || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh OPTEE_Native_Validation.res
