@@ -1,0 +1,20 @@
+metadata:
+  name: DMA_BUF_Heap_Validation
+  format: "Lava-Test Test Definition 1.0"
+  description: "Validate DMA-BUF heaps with allocation, shared mapping, synchronized CPU read/write, zeroing, and release"
+  os:
+    - linux
+  scope:
+    - functional
+
+params:
+  DMABUF_HEAPS: "auto"
+  DMABUF_ALLOCATION_BYTES: "65536"
+  DMABUF_TIMEOUT: "15"
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/DMA_BUF_Heap_Validation
+    - ./run.sh --heaps "${DMABUF_HEAPS}" --size "${DMABUF_ALLOCATION_BYTES}" --timeout "${DMABUF_TIMEOUT}" || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh DMA_BUF_Heap_Validation.res

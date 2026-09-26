@@ -231,6 +231,14 @@ log_info "----------------------------------------------------------------------
 log_info "Starting $TESTNAME"
 log_info "Configuration: channel=$DMA_CHANNEL iterations=$DMA_ITERATIONS timeout_ms=$DMA_TIMEOUT_MS run_timeout_seconds=$RUN_TIMEOUT_SECONDS"
 
+dmatest_config=$(kernel_config_value CONFIG_DMATEST 2>/dev/null || true)
+if [ -n "$dmatest_config" ]; then
+    log_info "[DMAENGINE-CONFIG] $dmatest_config"
+else
+    dmatest_config="unavailable"
+    log_info "[DMAENGINE-CONFIG] CONFIG_DMATEST=unavailable, running-kernel configuration could not be read"
+fi
+
 if ! CHECK_DEPS_NO_EXIT=1 check_dependencies awk grep sed wc tr basename sleep cp; then
     test_result_finish "SKIP" "$TESTNAME SKIP: required base utilities are unavailable"
 fi
@@ -256,6 +264,19 @@ if [ -d "$DMATEST_DIR" ]; then
         test_result_finish "SKIP" "$TESTNAME SKIP: dmatest already has configured channels"
     fi
 else
+    case "$dmatest_config" in
+        CONFIG_DMATEST=n)
+            test_result_finish \
+                "SKIP" \
+                "$TESTNAME SKIP: CONFIG_DMATEST is disabled in the running kernel. Enable CONFIG_DMATEST=m and package the matching dmatest.ko, or enable CONFIG_DMATEST=y"
+            ;;
+        CONFIG_DMATEST=y)
+            test_result_finish \
+                "FAIL" \
+                "$TESTNAME FAIL: CONFIG_DMATEST=y but $DMATEST_DIR is unavailable, the built-in dmatest runtime did not initialize"
+            ;;
+    esac
+
     module_path=$(find_kernel_module dmatest)
     if [ -n "$module_path" ]; then
         case "$module_path" in
@@ -268,7 +289,18 @@ else
         esac
     fi
     if [ -z "$module_path" ]; then
-        test_result_finish "SKIP" "$TESTNAME SKIP: dmatest is neither built in nor available for the running kernel"
+        case "$dmatest_config" in
+            CONFIG_DMATEST=m)
+                test_result_finish \
+                    "FAIL" \
+                    "$TESTNAME FAIL: CONFIG_DMATEST=m but the matching dmatest.ko is missing from /lib/modules/$(uname -r). Package the module with the running kernel"
+                ;;
+            *)
+                test_result_finish \
+                    "SKIP" \
+                    "$TESTNAME SKIP: CONFIG_DMATEST could not be determined and no matching dmatest module is available. Enable CONFIG_DMATEST=m and package dmatest.ko with the running kernel, or enable CONFIG_DMATEST=y"
+                ;;
+        esac
     fi
     if ! load_kernel_module "$module_path"; then
         test_result_finish "FAIL" "$TESTNAME FAIL: the image-provided dmatest module could not be loaded"

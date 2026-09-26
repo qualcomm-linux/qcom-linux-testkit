@@ -26,9 +26,13 @@ With `auto`, the suite selects the first idle channel accepted by `dmatest`.
 Use an explicit channel when the platform reserves particular DMA channels for
 validation.
 
-The suite skips when no suitable idle channel exists or `dmatest` is absent
-for the running kernel. Modules found only under a different kernel tree are
-not loaded.
+The suite records the running kernel's `CONFIG_DMATEST` value before checking
+the runtime driver. It skips with an image-build recommendation when the option
+is disabled or the running-kernel configuration is unavailable. If
+`CONFIG_DMATEST=m` declares module support but the matching `dmatest.ko` is
+missing, or `CONFIG_DMATEST=y` is reported without the built-in runtime
+parameters, the suite fails because the running image is incomplete or broken.
+Modules found only under a different kernel tree are not loaded.
 It refuses to interrupt an existing dmatest run or configured test list. If it
 loads the module, it unloads only that module. For a pre-existing idle module,
 it restores scalar parameters after releasing the selected channel.
