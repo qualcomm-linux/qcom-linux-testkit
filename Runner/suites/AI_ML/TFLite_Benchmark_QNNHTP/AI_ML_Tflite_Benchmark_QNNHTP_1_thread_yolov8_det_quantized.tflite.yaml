@@ -1,0 +1,26 @@
+metadata:
+  name: AI_ML_Tflite_Benchmark_QNNHTP_1_thread_yolov8_det_quantized.tflite
+  format: "Lava-Test Test Definition 1.0"
+  description: "Config 2/overlay benchmark of a provisioned TFLite graph through the QNN HTP external delegate"
+  os:
+    - linux
+  scope:
+    - performance
+
+params:
+  TFLITE_TIMEOUT: "120"
+  TFLITE_BENCHMARK_BINARY: ""
+  TFLITE_MODEL: ""
+  TFLITE_FETCH_MODEL: "0"
+  TFLITE_AI_HUB_VERSION: "0.63.0"
+  TFLITE_MODEL_FETCH_TIMEOUT: "300"
+  TFLITE_CONFIGURATION: "auto"
+  TFLITE_DELEGATE_LIBRARY: ""
+  TFLITE_DELEGATE_OPTIONS: ""
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/AI_ML/TFLite_Benchmark_QNNHTP
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh AI_ML_Tflite_Benchmark_QNNHTP_1_thread_yolov8_det_quantized.tflite.res

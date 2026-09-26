@@ -1,0 +1,24 @@
+metadata:
+  name: AI_ML_Tflite_Benchmark_GPU_1_thread_inception_v3_quant.tflite
+  format: "Lava-Test Test Definition 1.0"
+  description: "Config 2/overlay benchmark of a provisioned TFLite graph with the built-in GPU delegate"
+  os:
+    - linux
+  scope:
+    - performance
+
+params:
+  TFLITE_TIMEOUT: "120"
+  TFLITE_BENCHMARK_BINARY: ""
+  TFLITE_MODEL: ""
+  TFLITE_FETCH_MODEL: "0"
+  TFLITE_AI_HUB_VERSION: "0.63.0"
+  TFLITE_MODEL_FETCH_TIMEOUT: "300"
+  TFLITE_CONFIGURATION: "auto"
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/AI_ML/TFLite_Benchmark_GPU
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh AI_ML_Tflite_Benchmark_GPU_1_thread_inception_v3_quant.tflite.res

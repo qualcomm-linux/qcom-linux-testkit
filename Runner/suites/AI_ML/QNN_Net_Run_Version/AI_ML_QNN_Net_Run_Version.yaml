@@ -1,0 +1,19 @@
+metadata:
+  name: AI_ML_QNN_Net_Run_Version
+  format: "Lava-Test Test Definition 1.0"
+  description: "Config 2/overlay validation of the image-provided qnn-net-run tool and its version output"
+  os:
+    - linux
+  scope:
+    - functional
+
+params:
+  QNN_VERSION_TIMEOUT: "10"
+  QNN_NET_RUN_BINARY: ""
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/AI_ML/QNN_Net_Run_Version
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh AI_ML_QNN_Net_Run_Version.res
