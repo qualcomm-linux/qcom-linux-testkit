@@ -8722,6 +8722,61 @@ detect_platform() {
     return 0
 }
 
+# -----------------------------------------------------------------------------
+# platform_runtime_identity
+#
+# Prints a lowercased, space-joined identity string built from all available
+# platform evidence (soc0 sysfs, device-tree model/compatible, and any vars
+# already exported by detect_platform). Callers treat an empty result as
+# "no match" rather than falling back to a name heuristic.
+# This is the single source of truth for board identity shared by audio,
+# video, and any other subsystem library.
+# -----------------------------------------------------------------------------
+platform_runtime_identity() {
+    pri_identity="${PLATFORM_MACHINE:-} ${PLATFORM_TARGET:-}"
+    pri_identity="$pri_identity ${PLATFORM_SOC_MACHINE:-}"
+    pri_identity="$pri_identity ${PLATFORM_DT_MODEL:-}"
+    pri_identity="$pri_identity ${PLATFORM_DT_COMPAT:-}"
+
+    for pri_dtf in \
+        /proc/device-tree/model \
+        /proc/device-tree/compatible \
+        /sys/firmware/devicetree/base/model \
+        /sys/firmware/devicetree/base/compatible
+    do
+        if [ -r "$pri_dtf" ]; then
+            pri_dtv="$(tr '\000' ' ' <"$pri_dtf" 2>/dev/null || true)"
+            pri_identity="$pri_identity $pri_dtv"
+        fi
+    done
+
+    printf '%s\n' "$pri_identity" | tr '[:upper:]' '[:lower:]'
+}
+
+# -----------------------------------------------------------------------------
+# platform_identity_matches <substr>
+#
+# Returns 0 when <substr> (case-insensitive) appears anywhere in the runtime
+# platform identity string produced by platform_runtime_identity().
+# Returns 1 when there is no match or the identity string is empty.
+# -----------------------------------------------------------------------------
+platform_identity_matches() {
+    pim_tok="$1"
+    [ -n "$pim_tok" ] || return 1
+
+    pim_identity="$(platform_runtime_identity)"
+    pim_tok_l="$(printf '%s' "$pim_tok" | tr '[:upper:]' '[:lower:]')"
+
+    case "$pim_identity" in
+        *"$pim_tok_l"*)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
 # ---------- minimal root / FS helpers (Yocto-safe, no underscores) ----------
 isroot() { uid="$(id -u 2>/dev/null || echo 1)"; [ "$uid" -eq 0 ]; }
 
