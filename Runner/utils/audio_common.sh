@@ -2779,39 +2779,13 @@ audio_remoteproc_is_modem() {
 }
 
 # Return success when runtime platform evidence identifies a Shikra target.
-# The preflight runs before the suites call detect_platform, so inspect both
-# any already-populated platform variables and the standard runtime DT paths.
+#
+# All repository callers source functestlib.sh before audio_common.sh,
+# including child user-session paths. platform_identity_matches() from
+# functestlib.sh is therefore always available and is the single contract.
+# If standalone sourcing is required, source functestlib.sh explicitly first.
 audio_platform_is_shikra() {
-  apis_identity="${PLATFORM_MACHINE:-} ${PLATFORM_TARGET:-}"
-  apis_identity="$apis_identity ${PLATFORM_SOC_MACHINE:-}"
-  apis_identity="$apis_identity ${PLATFORM_DT_MODEL:-}"
-  apis_identity="$apis_identity ${PLATFORM_DT_COMPAT:-}"
-
-  for apis_file in \
-    /proc/device-tree/model \
-    /proc/device-tree/compatible \
-    /sys/firmware/devicetree/base/model \
-    /sys/firmware/devicetree/base/compatible
-  do
-    if [ -r "$apis_file" ]; then
-      apis_value="$(tr '\000' ' ' <"$apis_file" 2>/dev/null || true)"
-      apis_identity="$apis_identity $apis_value"
-    fi
-  done
-
-  apis_identity="$(
-    printf '%s\n' "$apis_identity" |
-      tr '[:upper:]' '[:lower:]'
-  )"
-
-  case "$apis_identity" in
-    *shikra*)
-      return 0
-      ;;
-    *)
-      return 1
-      ;;
-  esac
+  platform_identity_matches "shikra"
 }
 
 # Reorder an inventory so a modem-hosted audio path is considered before DSP
