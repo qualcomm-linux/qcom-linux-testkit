@@ -67,6 +67,11 @@ When no backend is requested, the suite uses automatic selection. A real PipeWir
 
 If automatic selection finds no physical managed microphone source, the suite probes direct ALSA capture. It selects a card and PCM from the available device inventory, applies only mixer controls exposed by that card, and runs `arecord -D <device>`. This discovers the VA-DMIC capture route from its controls without selecting a form factor or assuming card `0`.
 
+Use the separate `AudioRouteRecord` suite when a fixture-aware job must require
+capture from the wired 3.5 mm headset microphone. It dynamically discovers the
+route or accepts exact mixer, PCM, and ALSA-device overrides, and it never falls
+back to an internal microphone.
+
 An explicit backend request is never replaced:
 
 - `--backend pipewire` or `AUDIO_BACKEND=pipewire` runs `pw-record` only and skips if PipeWire has no physical microphone source.

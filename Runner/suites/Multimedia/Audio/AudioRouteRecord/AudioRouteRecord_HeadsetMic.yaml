@@ -1,0 +1,25 @@
+metadata:
+  name: audio-route-record-headset-microphone
+  format: "Lava-Test Test Definition 1.0"
+  description: "Validate capture through a dynamically discovered 3.5 mm headset microphone route"
+  os:
+    - linux
+  scope:
+    - functional
+
+params:
+  MIXER_CONTROL: ""
+  MIXER_VALUE: ""
+  PCM_LABEL: ""
+  ALSA_DEVICE: ""
+  CAPTURE_DURATION: "3"
+  STRICT_SIGNAL: "1"
+  MIN_RMS_DBFS: "-60"
+  DMESG_SCAN: "1"
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Multimedia/Audio/AudioRouteRecord/
+    - ./run.sh --source headset-mic --mixer-control "${MIXER_CONTROL}" --mixer-value "${MIXER_VALUE}" --pcm-label "${PCM_LABEL}" --alsa-device "${ALSA_DEVICE}" --duration "${CAPTURE_DURATION}" --strict-signal "${STRICT_SIGNAL}" --min-rms-dbfs "${MIN_RMS_DBFS}" --dmesg-scan "${DMESG_SCAN}" --res-suffix HeadsetMic --lava-testcase-id AudioRouteRecord_HeadsetMic || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh AudioRouteRecord_HeadsetMic.res

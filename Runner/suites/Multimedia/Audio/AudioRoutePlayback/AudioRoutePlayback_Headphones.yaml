@@ -1,0 +1,23 @@
+metadata:
+  name: audio-route-playback-headphones
+  format: "Lava-Test Test Definition 1.0"
+  description: "Validate playback through a dynamically discovered 3.5 mm headphone route"
+  os:
+    - linux
+  scope:
+    - functional
+
+params:
+  MIXER_CONTROL: ""
+  MIXER_VALUE: ""
+  PCM_LABEL: ""
+  ALSA_DEVICE: ""
+  PLAYBACK_DURATION: "3"
+  DMESG_SCAN: "1"
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Multimedia/Audio/AudioRoutePlayback/
+    - ./run.sh --route headphones --mixer-control "${MIXER_CONTROL}" --mixer-value "${MIXER_VALUE}" --pcm-label "${PCM_LABEL}" --alsa-device "${ALSA_DEVICE}" --duration "${PLAYBACK_DURATION}" --dmesg-scan "${DMESG_SCAN}" --res-suffix Headphones --lava-testcase-id AudioRoutePlayback_Headphones || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh AudioRoutePlayback_Headphones.res

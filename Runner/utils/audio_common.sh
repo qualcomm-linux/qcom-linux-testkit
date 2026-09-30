@@ -3053,19 +3053,1388 @@ audio_alsa_set_control_if_present() {
     cset "iface=MIXER,name=$aascip_name" "$aascip_value" >/dev/null 2>&1
 }
 
-# List unique ALSA card indexes from procfs and the playback/capture inventories.
-audio_alsa_card_indexes() {
-  {
-    sed -n 's/^[[:space:]]*\([0-9][0-9]*\)[[:space:]].*/\1/p' \
-      /proc/asound/cards 2>/dev/null
-    aplay -l 2>/dev/null |
-      sed -n 's/^card[[:space:]]*\([0-9][0-9]*\):.*/\1/p'
-    arecord -l 2>/dev/null |
-      sed -n 's/^card[[:space:]]*\([0-9][0-9]*\):.*/\1/p'
-  } | awk '!seen[$0]++'
+# audio_alsa_route_run <command> [arguments...]
+# Run one ALSA route-discovery or mixer command with a fixed finite bound. The
+# command stdout/stderr and return code are preserved, and no state is retained.
+audio_alsa_route_run() {
+  audio_exec_with_timeout 5s env LC_ALL=C "$@"
 }
 
-# Extract the card index from an hw:CARD,DEV or plughw:CARD,DEV identifier.
+# audio_alsa_route_control_exists <card-index> <control-name>
+# Return 0 only when the exact control is listed within the bounded probe. The
+# function emits no stdout and does not mutate mixer state.
+audio_alsa_route_control_exists() {
+  aarce_card="$1"
+  aarce_name="$2"
+  aarce_controls=""
+
+  command -v amixer >/dev/null 2>&1 || return 1
+
+  aarce_controls="$(
+    audio_alsa_route_run amixer -c "$aarce_card" controls
+  )"
+  aarce_rc=$?
+  if [ "$aarce_rc" -ne 0 ]; then
+    printf '%s\n' \
+      "amixer controls probe failed or timed out for card $aarce_card, rc=$aarce_rc" >&2
+    return 2
+  fi
+
+  printf '%s\n' "$aarce_controls" |
+    grep -F "name='$aarce_name'" >/dev/null 2>&1
+}
+
+# audio_generate_u8_stereo_tone <output> <seconds> [rate] [frequency]
+# Generate a bounded unsigned 8-bit stereo square wave without external audio
+# assets. The function emits no stdout, replaces only the requested output,
+# and returns 0 only when the exact expected byte count was written.
+audio_generate_u8_stereo_tone() {
+  agust_output="$1"
+  agust_seconds="$2"
+  agust_rate="${3:-48000}"
+  agust_frequency="${4:-1000}"
+
+  if [ -z "$agust_output" ] ||
+     ! is_unsigned_number "$agust_seconds" ||
+     ! is_unsigned_number "$agust_rate" ||
+     ! is_unsigned_number "$agust_frequency" ||
+     [ "$agust_seconds" -le 0 ] ||
+     [ "$agust_rate" -le 0 ] ||
+     [ "$agust_frequency" -le 0 ]; then
+    printf '%s\n' 'invalid tone output, duration, rate, or frequency' >&2
+    return 1
+  fi
+
+  agust_half_period=$((agust_rate / (agust_frequency * 2)))
+  if [ "$agust_half_period" -le 0 ]; then
+    printf '%s\n' \
+      "tone frequency $agust_frequency is too high for rate $agust_rate" >&2
+    return 1
+  fi
+
+  agust_frames=$((agust_seconds * agust_rate))
+  agust_expected_bytes=$((agust_frames * 2))
+  rm -f "$agust_output"
+
+  if ! audio_exec_with_timeout 15s env LC_ALL=C awk \
+      -v frames="$agust_frames" \
+      -v half_period="$agust_half_period" '
+        BEGIN {
+          cycle_frames = half_period * 2
+          cycle = ""
+          for (frame = 0; frame < cycle_frames; frame++) {
+            value = frame < half_period ? 80 : 176
+            cycle = cycle sprintf("%c%c", value, value)
+          }
+
+          cycles = int(frames / cycle_frames)
+          for (cycle_index = 0; cycle_index < cycles; cycle_index++) {
+            printf "%s", cycle
+          }
+
+          remaining = frames - (cycles * cycle_frames)
+          for (frame = 0; frame < remaining; frame++) {
+            value = frame < half_period ? 80 : 176
+            printf "%c%c", value, value
+          }
+        }
+      ' >"$agust_output"; then
+    rm -f "$agust_output"
+    printf '%s\n' "could not generate playback tone: $agust_output" >&2
+    return 1
+  fi
+
+  agust_actual_bytes="$(file_size_bytes "$agust_output" 2>/dev/null || echo 0)"
+  if [ "$agust_actual_bytes" -ne "$agust_expected_bytes" ] 2>/dev/null; then
+    printf '%s\n' \
+      "playback tone size mismatch: expected=$agust_expected_bytes observed=${agust_actual_bytes:-0}" >&2
+    return 1
+  fi
+
+  return 0
+}
+
+# audio_alsa_playback_route_name_pattern <route>
+# Print one extended regular expression for generic playback PCM and mixer
+# names. Returns 1 for an unsupported route and has no side effects.
+audio_alsa_playback_route_name_pattern() {
+  aaprnp_route="$1"
+
+  case "$aaprnp_route" in
+    hdmi)
+      printf '%s\n' 'hdmi|high[ _-]*definition[ _-]*multimedia'
+      ;;
+    displayport)
+      printf '%s\n' 'display[ _-]*port|(^|[^[:alnum:]])e?dp[0-9]*([^[:alnum:]]|$)'
+      ;;
+    headphones)
+      printf '%s\n' 'headphone|headset|3[.]5|(^|[^[:alnum:]])hsj([^[:alnum:]]|$)|(^|[^[:alnum:]])hp[ _-]*(out|rx)([^[:alnum:]]|$)'
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+# audio_alsa_playback_pcm_device_for_label <card-index> <pcm-label>
+# Print the first exact-label playback device number on one card. Procfs is
+# preferred, with aplay inventory as fallback. Returns 1 when no match exists.
+audio_alsa_playback_pcm_device_for_label() {
+  aappdfl_card="$1"
+  aappdfl_label="$2"
+  aappdfl_devices=""
+
+  if [ -r /proc/asound/pcm ]; then
+    aappdfl_devices="$({
+      awk -v wanted_card="$aappdfl_card" -v wanted_label="$aappdfl_label" '
+        {
+          key = $1
+          sub(/:$/, "", key)
+          split(key, parts, "-")
+          line = tolower($0)
+          label = tolower(wanted_label)
+          label_pos = index(line, label)
+          label_after = substr(line, label_pos + length(label), 1)
+
+          if ((parts[1] + 0) == wanted_card &&
+              label_pos > 0 &&
+              label_after !~ /[[:alnum:]_]/ &&
+              line ~ /playback/) {
+            device = parts[2] + 0
+            if (!seen[device]++) print device
+          }
+        }
+      ' /proc/asound/pcm
+    } 2>/dev/null)"
+  fi
+
+  if [ -z "$aappdfl_devices" ] && command -v aplay >/dev/null 2>&1; then
+    aappdfl_inventory="$(audio_alsa_route_run aplay -l)"
+    aappdfl_rc=$?
+    if [ "$aappdfl_rc" -ne 0 ]; then
+      printf '%s\n' \
+        "aplay inventory failed or timed out while resolving '$aappdfl_label', rc=$aappdfl_rc" >&2
+      return 2
+    fi
+
+    aappdfl_devices="$({
+      printf '%s\n' "$aappdfl_inventory" |
+        awk -v wanted_card="$aappdfl_card" -v wanted_label="$aappdfl_label" '
+          {
+            line = tolower($0)
+            label = tolower(wanted_label)
+            label_pos = index(line, label)
+            label_after = substr(line, label_pos + length(label), 1)
+            parsed = $0
+
+            if (line !~ /^card[[:space:]]+[0-9]+:/ ||
+                label_pos == 0 ||
+                label_after ~ /[[:alnum:]_]/) {
+              next
+            }
+
+            sub(/^card[[:space:]]+/, "", parsed)
+            split(parsed, card_parts, ":")
+            if ((card_parts[1] + 0) != wanted_card) {
+              next
+            }
+
+            sub(/^.*device[[:space:]]+/, "", parsed)
+            sub(/:.*/, "", parsed)
+            device = parsed + 0
+            if (!seen[device]++) print device
+          }
+        '
+    } 2>/dev/null)"
+  fi
+
+  if [ -z "$aappdfl_devices" ]; then
+    return 1
+  fi
+
+  aappdfl_count="$(
+    printf '%s\n' "$aappdfl_devices" |
+      sed '/^[[:space:]]*$/d' |
+      wc -l |
+      tr -d '[:space:]'
+  )"
+  if [ "${aappdfl_count:-0}" -gt 1 ] 2>/dev/null; then
+    printf '%s\n' \
+      "PCM label '$aappdfl_label' matches multiple playback devices on card $aappdfl_card, provide --alsa-device" >&2
+    return 2
+  fi
+
+  printf '%s\n' "$aappdfl_devices" | sed -n '1p'
+}
+
+# audio_alsa_playback_control_is_output <route> <control-name>
+# Return 0 when a route-matching control is safe to treat as playback. Headset
+# microphone, capture, and TX controls are rejected for the headphones route.
+audio_alsa_playback_control_is_output() {
+  aapcio_route="$1"
+  aapcio_control="$2"
+
+  if [ "$aapcio_route" != "headphones" ]; then
+    return 0
+  fi
+
+  if printf '%s\n' "$aapcio_control" |
+      grep -Eiq 'mic|microphone|capture|record|(^|[^[:alnum:]])tx([^[:alnum:]]|$)'; then
+    return 1
+  fi
+
+  return 0
+}
+
+# audio_alsa_resolve_playback_route <route> [control] [value] [label] [device]
+# Resolve a generic or explicitly selected playback route. On success, export
+# AUDIO_ALSA_ROUTE_* selection fields and return 0. Diagnostics go to stderr,
+# and the function does not mutate mixer state.
+audio_alsa_resolve_playback_route() {
+  aarp_route="$1"
+  aarp_requested_control="${2:-}"
+  aarp_requested_value="${3:-}"
+  aarp_requested_label="${4:-}"
+  aarp_requested_device="${5:-}"
+  aarp_pattern=""
+
+  AUDIO_ALSA_ROUTE_CARD=""
+  AUDIO_ALSA_ROUTE_DEVICE=""
+  AUDIO_ALSA_ROUTE_CONTROL=""
+  AUDIO_ALSA_ROUTE_VALUE=""
+  AUDIO_ALSA_ROUTE_PCM_LABEL=""
+  AUDIO_ALSA_ROUTE_PLAYBACK_DEVICE=""
+  AUDIO_ALSA_ROUTE_DISCOVERY=""
+
+  aarp_pattern="$(
+    audio_alsa_playback_route_name_pattern "$aarp_route"
+  )" || {
+    printf '%s\n' "unsupported audio route: $aarp_route" >&2
+    return 1
+  }
+
+  if [ -n "$aarp_requested_device" ]; then
+    AUDIO_ALSA_ROUTE_PLAYBACK_DEVICE="$aarp_requested_device"
+    AUDIO_ALSA_ROUTE_CARD="$(audio_alsa_device_card "$aarp_requested_device")"
+    AUDIO_ALSA_ROUTE_DEVICE="$({
+      printf '%s\n' "$aarp_requested_device" |
+        sed -n 's/^\(plug\)\{0,1\}hw:[0-9][0-9]*,\([0-9][0-9]*\).*/\2/p'
+    } 2>/dev/null)"
+    AUDIO_ALSA_ROUTE_CONTROL="$aarp_requested_control"
+    if [ -n "$AUDIO_ALSA_ROUTE_CONTROL" ]; then
+      AUDIO_ALSA_ROUTE_VALUE="${aarp_requested_value:-1}"
+    fi
+    AUDIO_ALSA_ROUTE_PCM_LABEL="${aarp_requested_label:-explicit-device}"
+    AUDIO_ALSA_ROUTE_DISCOVERY="explicit-device"
+
+    if [ -n "$AUDIO_ALSA_ROUTE_CONTROL" ]; then
+      if [ -z "$AUDIO_ALSA_ROUTE_CARD" ]; then
+        printf '%s\n' \
+          "a numeric hw:CARD,DEVICE or plughw:CARD,DEVICE is required when a mixer control is supplied with an ALSA device" >&2
+        return 1
+      fi
+
+      audio_alsa_route_control_exists \
+        "$AUDIO_ALSA_ROUTE_CARD" "$AUDIO_ALSA_ROUTE_CONTROL"
+      aarp_control_rc=$?
+      case "$aarp_control_rc" in
+        0)
+          ;;
+        2)
+          return 1
+          ;;
+        *)
+          printf '%s\n' \
+            "requested mixer control is absent on ALSA card $AUDIO_ALSA_ROUTE_CARD: $AUDIO_ALSA_ROUTE_CONTROL" >&2
+          return 1
+          ;;
+      esac
+    fi
+
+    export AUDIO_ALSA_ROUTE_CARD AUDIO_ALSA_ROUTE_DEVICE
+    export AUDIO_ALSA_ROUTE_CONTROL AUDIO_ALSA_ROUTE_VALUE
+    export AUDIO_ALSA_ROUTE_PCM_LABEL
+    export AUDIO_ALSA_ROUTE_PLAYBACK_DEVICE AUDIO_ALSA_ROUTE_DISCOVERY
+    return 0
+  fi
+
+  aarp_cards="$(audio_alsa_card_indexes playback)"
+  aarp_cards_rc=$?
+  if [ "$aarp_cards_rc" -ne 0 ]; then
+    return 1
+  fi
+
+  if [ -n "$aarp_requested_label" ]; then
+    aarp_label_match_count=0
+    for aarp_card in $aarp_cards; do
+      aarp_device="$(
+        audio_alsa_playback_pcm_device_for_label \
+          "$aarp_card" "$aarp_requested_label"
+      )"
+      aarp_device_rc=$?
+
+      if [ "$aarp_device_rc" -eq 2 ]; then
+        return 1
+      fi
+
+      if [ -z "$aarp_device" ]; then
+        continue
+      fi
+
+      if [ -n "$aarp_requested_control" ]; then
+        audio_alsa_route_control_exists \
+          "$aarp_card" "$aarp_requested_control"
+        aarp_control_rc=$?
+        case "$aarp_control_rc" in
+          0)
+            ;;
+          2)
+            return 1
+            ;;
+          *)
+            continue
+            ;;
+        esac
+      fi
+
+      aarp_label_match_count=$((aarp_label_match_count + 1))
+      aarp_label_card="$aarp_card"
+      aarp_label_device="$aarp_device"
+    done
+
+    if [ "$aarp_label_match_count" -gt 1 ]; then
+      printf '%s\n' \
+        "PCM label '$aarp_requested_label' matches multiple playback cards, provide --alsa-device" >&2
+      return 1
+    fi
+
+    if [ "$aarp_label_match_count" -eq 1 ]; then
+      AUDIO_ALSA_ROUTE_CARD="$aarp_label_card"
+      AUDIO_ALSA_ROUTE_DEVICE="$aarp_label_device"
+      AUDIO_ALSA_ROUTE_CONTROL="$aarp_requested_control"
+      if [ -n "$AUDIO_ALSA_ROUTE_CONTROL" ]; then
+        AUDIO_ALSA_ROUTE_VALUE="${aarp_requested_value:-1}"
+      fi
+      AUDIO_ALSA_ROUTE_PCM_LABEL="$aarp_requested_label"
+      AUDIO_ALSA_ROUTE_PLAYBACK_DEVICE="plughw:$aarp_label_card,$aarp_label_device"
+      AUDIO_ALSA_ROUTE_DISCOVERY="pcm-label"
+      export AUDIO_ALSA_ROUTE_CARD AUDIO_ALSA_ROUTE_DEVICE
+      export AUDIO_ALSA_ROUTE_CONTROL AUDIO_ALSA_ROUTE_VALUE
+      export AUDIO_ALSA_ROUTE_PCM_LABEL
+      export AUDIO_ALSA_ROUTE_PLAYBACK_DEVICE AUDIO_ALSA_ROUTE_DISCOVERY
+      return 0
+    fi
+  fi
+
+  if [ -z "$aarp_requested_control" ] &&
+     [ -z "$aarp_requested_label" ] &&
+     command -v aplay >/dev/null 2>&1; then
+    aarp_aplay_inventory="$(audio_alsa_route_run aplay -l)"
+    aarp_aplay_rc=$?
+    if [ "$aarp_aplay_rc" -ne 0 ]; then
+      printf '%s\n' \
+        "aplay inventory failed or timed out during $aarp_route discovery, rc=$aarp_aplay_rc" >&2
+      return 1
+    fi
+
+    aarp_pcm_lines="$(
+      printf '%s\n' "$aarp_aplay_inventory" |
+        grep -Ei "$aarp_pattern"
+    )"
+
+    aarp_pcm_count="$({
+      printf '%s\n' "$aarp_pcm_lines" |
+        sed '/^[[:space:]]*$/d' |
+        wc -l |
+        tr -d '[:space:]'
+    } 2>/dev/null)"
+
+    if [ "${aarp_pcm_count:-0}" -gt 1 ] 2>/dev/null; then
+      printf '%s\n' \
+        "multiple $aarp_route playback PCMs were discovered, provide --pcm-label or --alsa-device" >&2
+      printf '%s\n' "$aarp_pcm_lines" >&2
+      return 1
+    fi
+
+    aarp_pcm_line="$(printf '%s\n' "$aarp_pcm_lines" | sed -n '1p')"
+    if [ -n "$aarp_pcm_line" ]; then
+      AUDIO_ALSA_ROUTE_CARD="$({
+        printf '%s\n' "$aarp_pcm_line" |
+          sed -n 's/^card[[:space:]]*\([0-9][0-9]*\):.*/\1/p'
+      } 2>/dev/null)"
+      AUDIO_ALSA_ROUTE_DEVICE="$({
+        printf '%s\n' "$aarp_pcm_line" |
+          sed -n 's/^card[[:space:]]*[0-9][0-9]*:.*device[[:space:]]*\([0-9][0-9]*\):.*/\1/p'
+      } 2>/dev/null)"
+      AUDIO_ALSA_ROUTE_PCM_LABEL="$({
+        printf '%s\n' "$aarp_pcm_line" |
+          sed -n 's/^.*device[[:space:]]*[0-9][0-9]*:[[:space:]]*\([^[]*\).*/\1/p' |
+          sed 's/[[:space:]]*$//'
+      } 2>/dev/null)"
+
+      if [ -n "$AUDIO_ALSA_ROUTE_CARD" ] &&
+         [ -n "$AUDIO_ALSA_ROUTE_DEVICE" ]; then
+        AUDIO_ALSA_ROUTE_PLAYBACK_DEVICE="plughw:$AUDIO_ALSA_ROUTE_CARD,$AUDIO_ALSA_ROUTE_DEVICE"
+        AUDIO_ALSA_ROUTE_DISCOVERY="pcm-name"
+        export AUDIO_ALSA_ROUTE_CARD AUDIO_ALSA_ROUTE_DEVICE
+        export AUDIO_ALSA_ROUTE_CONTROL AUDIO_ALSA_ROUTE_VALUE
+        export AUDIO_ALSA_ROUTE_PCM_LABEL
+        export AUDIO_ALSA_ROUTE_PLAYBACK_DEVICE AUDIO_ALSA_ROUTE_DISCOVERY
+        return 0
+      fi
+    fi
+  fi
+
+  if ! command -v amixer >/dev/null 2>&1; then
+    printf '%s\n' "amixer is unavailable for mixer-route discovery" >&2
+    return 1
+  fi
+
+  aarp_control_match_count=0
+  for aarp_card in $aarp_cards; do
+    aarp_control_inventory="$(
+      audio_alsa_route_run amixer -c "$aarp_card" controls
+    )"
+    aarp_control_inventory_rc=$?
+    if [ "$aarp_control_inventory_rc" -ne 0 ]; then
+      printf '%s\n' \
+        "amixer controls probe failed or timed out for card $aarp_card, rc=$aarp_control_inventory_rc" >&2
+      return 1
+    fi
+
+    if [ -n "$aarp_requested_control" ]; then
+      aarp_controls="$({
+        printf '%s\n' "$aarp_control_inventory" |
+          sed -n "s/.*name='\([^']*\)'.*/\1/p" |
+          grep -F -x "$aarp_requested_control"
+      } 2>/dev/null)"
+    else
+      aarp_controls="$({
+        printf '%s\n' "$aarp_control_inventory" |
+          sed -n "s/.*name='\([^']*\)'.*/\1/p" |
+          grep -Ei "$aarp_pattern"
+      } 2>/dev/null)"
+    fi
+
+    if [ -z "$aarp_controls" ]; then
+      continue
+    fi
+
+    while [ -n "$aarp_controls" ]; do
+      aarp_control="$(printf '%s\n' "$aarp_controls" | sed -n '1p')"
+      aarp_controls="$(printf '%s\n' "$aarp_controls" | sed '1d')"
+
+      if ! audio_alsa_playback_control_is_output \
+          "$aarp_route" "$aarp_control"; then
+        printf '%s\n' \
+          "ignoring capture-oriented control during $aarp_route playback discovery: $aarp_control" >&2
+        continue
+      fi
+
+      if [ -n "$aarp_requested_label" ]; then
+        aarp_label="$aarp_requested_label"
+      else
+        aarp_label="$({
+          printf '%s\n' "$aarp_control" |
+            sed -n 's/.*\(MultiMedia[0-9][0-9]*\).*/\1/p'
+        } 2>/dev/null)"
+      fi
+
+      if [ -z "$aarp_label" ]; then
+        printf '%s\n' \
+          "mixer control has no discoverable PCM label, provide a PCM label or ALSA device override: $aarp_control" >&2
+        continue
+      fi
+
+      aarp_device="$(
+        audio_alsa_playback_pcm_device_for_label \
+          "$aarp_card" "$aarp_label"
+      )"
+      aarp_device_rc=$?
+
+      if [ "$aarp_device_rc" -eq 2 ]; then
+        return 1
+      fi
+
+      if [ -z "$aarp_device" ]; then
+        printf '%s\n' \
+          "no playback PCM matches $aarp_label on ALSA card $aarp_card" >&2
+        continue
+      fi
+
+      aarp_control_match_count=$((aarp_control_match_count + 1))
+      aarp_control_card="$aarp_card"
+      aarp_control_device="$aarp_device"
+      aarp_control_name="$aarp_control"
+      aarp_control_label="$aarp_label"
+    done
+  done
+
+  if [ "$aarp_control_match_count" -gt 1 ]; then
+    printf '%s\n' \
+      "multiple $aarp_route mixer-to-PCM mappings were discovered, provide an exact --mixer-control with --pcm-label or --alsa-device" >&2
+    return 1
+  fi
+
+  if [ "$aarp_control_match_count" -eq 1 ]; then
+      AUDIO_ALSA_ROUTE_CARD="$aarp_control_card"
+      AUDIO_ALSA_ROUTE_DEVICE="$aarp_control_device"
+      AUDIO_ALSA_ROUTE_CONTROL="$aarp_control_name"
+      AUDIO_ALSA_ROUTE_VALUE="${aarp_requested_value:-1}"
+      AUDIO_ALSA_ROUTE_PCM_LABEL="$aarp_control_label"
+      AUDIO_ALSA_ROUTE_PLAYBACK_DEVICE="plughw:$aarp_control_card,$aarp_control_device"
+      AUDIO_ALSA_ROUTE_DISCOVERY="mixer-control"
+      export AUDIO_ALSA_ROUTE_CARD AUDIO_ALSA_ROUTE_DEVICE
+      export AUDIO_ALSA_ROUTE_CONTROL AUDIO_ALSA_ROUTE_VALUE
+      export AUDIO_ALSA_ROUTE_PCM_LABEL
+      export AUDIO_ALSA_ROUTE_PLAYBACK_DEVICE AUDIO_ALSA_ROUTE_DISCOVERY
+      return 0
+  fi
+
+  printf '%s\n' \
+    "no $aarp_route playback route was found from PCM names, mixer controls, or supplied overrides" >&2
+  return 1
+}
+
+# audio_alsa_find_playback_route <route> [control] [value] [label] [device]
+# Print card|device|control|value|pcm-label|playback-device after resolution.
+# Diagnostics go to stderr, and the function does not mutate mixer state.
+audio_alsa_find_playback_route() {
+  if ! audio_alsa_resolve_playback_route "$@"; then
+    return 1
+  fi
+
+  printf '%s|%s|%s|%s|%s|%s\n' \
+    "$AUDIO_ALSA_ROUTE_CARD" \
+    "$AUDIO_ALSA_ROUTE_DEVICE" \
+    "$AUDIO_ALSA_ROUTE_CONTROL" \
+    "$AUDIO_ALSA_ROUTE_VALUE" \
+    "$AUDIO_ALSA_ROUTE_PCM_LABEL" \
+    "$AUDIO_ALSA_ROUTE_PLAYBACK_DEVICE"
+}
+
+# audio_alsa_prepare_playback_route
+# Snapshot and apply the already resolved AUDIO_ALSA_ROUTE_* mixer selection.
+# The function emits no stdout, exports restoration state, and returns 1 when
+# no route is resolved or mixer snapshot/mutation fails.
+audio_alsa_prepare_playback_route() {
+  if [ -z "${AUDIO_ALSA_ROUTE_PLAYBACK_DEVICE:-}" ]; then
+    printf '%s\n' 'no playback route has been resolved' >&2
+    return 1
+  fi
+
+  AUDIO_ALSA_ROUTE_MIXER_CHANGED=0
+  AUDIO_ALSA_ROUTE_PREVIOUS_VALUE=""
+
+  if [ -z "$AUDIO_ALSA_ROUTE_CONTROL" ]; then
+    export AUDIO_ALSA_ROUTE_PREVIOUS_VALUE AUDIO_ALSA_ROUTE_MIXER_CHANGED
+    return 0
+  fi
+
+  AUDIO_ALSA_ROUTE_PREVIOUS_VALUE="$({
+    audio_alsa_route_run amixer -c "$AUDIO_ALSA_ROUTE_CARD" \
+      cget "iface=MIXER,name=$AUDIO_ALSA_ROUTE_CONTROL" 2>/dev/null |
+      sed -n 's/^[[:space:]]*: values=//p' |
+      sed -n '1p'
+  } 2>/dev/null)"
+
+  if [ -z "$AUDIO_ALSA_ROUTE_PREVIOUS_VALUE" ]; then
+    printf '%s\n' \
+      "could not snapshot mixer control: $AUDIO_ALSA_ROUTE_CONTROL" >&2
+    return 1
+  fi
+
+  AUDIO_ALSA_ROUTE_MIXER_CHANGED=1
+  export AUDIO_ALSA_ROUTE_PREVIOUS_VALUE AUDIO_ALSA_ROUTE_MIXER_CHANGED
+
+  if ! audio_alsa_route_run amixer -c "$AUDIO_ALSA_ROUTE_CARD" \
+      cset "iface=MIXER,name=$AUDIO_ALSA_ROUTE_CONTROL" \
+      "$AUDIO_ALSA_ROUTE_VALUE" >/dev/null 2>&1; then
+    audio_alsa_restore_playback_route >/dev/null 2>&1 || true
+    printf '%s\n' \
+      "could not set playback mixer control $AUDIO_ALSA_ROUTE_CONTROL to $AUDIO_ALSA_ROUTE_VALUE" >&2
+    return 1
+  fi
+
+  return 0
+}
+
+# audio_alsa_restore_playback_route
+# Restore the mixer value saved by audio_alsa_prepare_playback_route. The
+# function emits no stdout and returns 1 only when required state is missing or
+# the restore operation fails.
+audio_alsa_restore_playback_route() {
+  case "${AUDIO_ALSA_ROUTE_MIXER_CHANGED:-0}" in
+    1)
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+
+  if [ -z "${AUDIO_ALSA_ROUTE_CARD:-}" ] ||
+     [ -z "${AUDIO_ALSA_ROUTE_CONTROL:-}" ] ||
+     [ -z "${AUDIO_ALSA_ROUTE_PREVIOUS_VALUE:-}" ]; then
+    return 1
+  fi
+
+  audio_alsa_route_run amixer -c "$AUDIO_ALSA_ROUTE_CARD" \
+    cset "iface=MIXER,name=$AUDIO_ALSA_ROUTE_CONTROL" \
+    "$AUDIO_ALSA_ROUTE_PREVIOUS_VALUE" >/dev/null 2>&1
+  aarpr_rc=$?
+  if [ "$aarpr_rc" -eq 0 ]; then
+    AUDIO_ALSA_ROUTE_MIXER_CHANGED=0
+    export AUDIO_ALSA_ROUTE_MIXER_CHANGED
+  fi
+  return "$aarpr_rc"
+}
+
+# audio_alsa_capture_playback_route_inventory <output-file>
+# Write ALSA card, playback PCM, mixer, and UCM inventory to the requested
+# artifact. The function emits no stdout and does not mutate target state.
+audio_alsa_capture_playback_route_inventory() {
+  aacpri_output="$1"
+
+  if [ -z "$aacpri_output" ]; then
+    return 1
+  fi
+
+  {
+    printf '%s\n' '### /proc/asound/cards'
+    if [ -r /proc/asound/cards ]; then
+      cat /proc/asound/cards
+    else
+      printf '%s\n' '/proc/asound/cards is unavailable'
+    fi
+
+    printf '%s\n' '### /proc/asound/pcm'
+    if [ -r /proc/asound/pcm ]; then
+      cat /proc/asound/pcm
+    else
+      printf '%s\n' '/proc/asound/pcm is unavailable'
+    fi
+
+    printf '%s\n' '### aplay -l'
+    if command -v aplay >/dev/null 2>&1; then
+      audio_alsa_route_run aplay -l ||
+        printf '%s\n' 'aplay -l failed or timed out'
+    else
+      printf '%s\n' 'aplay is unavailable'
+    fi
+
+    for aacpri_card in $(audio_alsa_card_indexes); do
+      printf '### amixer -c %s controls\n' "$aacpri_card"
+      if command -v amixer >/dev/null 2>&1; then
+        audio_alsa_route_run amixer -c "$aacpri_card" controls ||
+          printf '%s\n' "amixer controls failed or timed out for card $aacpri_card"
+      else
+        printf '%s\n' 'amixer is unavailable'
+      fi
+    done
+
+    printf '%s\n' '### alsaucm listcards'
+    if command -v alsaucm >/dev/null 2>&1; then
+      audio_alsa_route_run alsaucm listcards ||
+        printf '%s\n' 'alsaucm listcards failed or timed out'
+    else
+      printf '%s\n' 'alsaucm is unavailable'
+    fi
+  } >"$aacpri_output" 2>&1
+}
+
+# audio_alsa_capture_route_name_pattern <source>
+# Print the generic headset-microphone expression used for ALSA capture
+# discovery. Returns 1 for an unsupported source and has no side effects.
+audio_alsa_capture_route_name_pattern() {
+  aacrnp_source="$1"
+
+  case "$aacrnp_source" in
+    headset-mic)
+      printf '%s\n' 'head(set|phone)[ _-]*(mic|microphone)|3[.]5.*(mic|microphone)|(mic|microphone).*3[.]5|(^|[^[:alnum:]])hsj?[ _-]*(mic|tx)([^[:alnum:]]|$)|(^|[^[:alnum:]])hsmic([^[:alnum:]]|$)'
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+# audio_alsa_capture_pcm_device_for_label <card-index> <pcm-label>
+# Print the first exact-label capture device number on one ALSA card. Procfs is
+# preferred, with arecord inventory as fallback. Returns 1 when no match exists.
+audio_alsa_capture_pcm_device_for_label() {
+  aacpdfl_card="$1"
+  aacpdfl_label="$2"
+  aacpdfl_devices=""
+
+  if [ -r /proc/asound/pcm ]; then
+    aacpdfl_devices="$({
+      awk -v wanted_card="$aacpdfl_card" -v wanted_label="$aacpdfl_label" '
+        {
+          key = $1
+          sub(/:$/, "", key)
+          split(key, parts, "-")
+          line = tolower($0)
+          label = tolower(wanted_label)
+          label_pos = index(line, label)
+          label_after = substr(line, label_pos + length(label), 1)
+
+          if ((parts[1] + 0) == wanted_card &&
+              label_pos > 0 &&
+              label_after !~ /[[:alnum:]_]/ &&
+              line ~ /capture/) {
+            device = parts[2] + 0
+            if (!seen[device]++) print device
+          }
+        }
+      ' /proc/asound/pcm
+    } 2>/dev/null)"
+  fi
+
+  if [ -z "$aacpdfl_devices" ] && command -v arecord >/dev/null 2>&1; then
+    aacpdfl_inventory="$(audio_alsa_route_run arecord -l)"
+    aacpdfl_rc=$?
+    if [ "$aacpdfl_rc" -ne 0 ]; then
+      printf '%s\n' \
+        "arecord inventory failed or timed out while resolving '$aacpdfl_label', rc=$aacpdfl_rc" >&2
+      return 2
+    fi
+
+    aacpdfl_devices="$({
+      printf '%s\n' "$aacpdfl_inventory" |
+        awk -v wanted_card="$aacpdfl_card" -v wanted_label="$aacpdfl_label" '
+          {
+            line = tolower($0)
+            label = tolower(wanted_label)
+            label_pos = index(line, label)
+            label_after = substr(line, label_pos + length(label), 1)
+            parsed = $0
+
+            if (line !~ /^card[[:space:]]+[0-9]+:/ ||
+                label_pos == 0 ||
+                label_after ~ /[[:alnum:]_]/) {
+              next
+            }
+
+            sub(/^card[[:space:]]+/, "", parsed)
+            split(parsed, card_parts, ":")
+            if ((card_parts[1] + 0) != wanted_card) {
+              next
+            }
+
+            sub(/^.*device[[:space:]]+/, "", parsed)
+            sub(/:.*/, "", parsed)
+            device = parsed + 0
+            if (!seen[device]++) print device
+          }
+        '
+    } 2>/dev/null)"
+  fi
+
+  if [ -z "$aacpdfl_devices" ]; then
+    return 1
+  fi
+
+  aacpdfl_count="$(
+    printf '%s\n' "$aacpdfl_devices" |
+      sed '/^[[:space:]]*$/d' |
+      wc -l |
+      tr -d '[:space:]'
+  )"
+  if [ "${aacpdfl_count:-0}" -gt 1 ] 2>/dev/null; then
+    printf '%s\n' \
+      "PCM label '$aacpdfl_label' matches multiple capture devices on card $aacpdfl_card, provide --alsa-device" >&2
+    return 2
+  fi
+
+  printf '%s\n' "$aacpdfl_devices" | sed -n '1p'
+}
+
+# audio_alsa_resolve_capture_route <source> [control] [value] [label] [device]
+# Resolve a generic or explicitly selected capture route. On success, export
+# AUDIO_ALSA_CAPTURE_ROUTE_* fields and return 0. Diagnostics go to stderr,
+# and the function does not mutate mixer state.
+audio_alsa_resolve_capture_route() {
+  aacrr_source="$1"
+  aacrr_requested_control="${2:-}"
+  aacrr_requested_value="${3:-}"
+  aacrr_requested_label="${4:-}"
+  aacrr_requested_device="${5:-}"
+  aacrr_pattern=""
+
+  AUDIO_ALSA_CAPTURE_ROUTE_CARD=""
+  AUDIO_ALSA_CAPTURE_ROUTE_DEVICE=""
+  AUDIO_ALSA_CAPTURE_ROUTE_CONTROL=""
+  AUDIO_ALSA_CAPTURE_ROUTE_VALUE=""
+  AUDIO_ALSA_CAPTURE_ROUTE_PCM_LABEL=""
+  AUDIO_ALSA_CAPTURE_ROUTE_DEVICE_NAME=""
+  AUDIO_ALSA_CAPTURE_ROUTE_DISCOVERY=""
+
+  aacrr_pattern="$(
+    audio_alsa_capture_route_name_pattern "$aacrr_source"
+  )" || {
+    printf '%s\n' "unsupported audio capture source: $aacrr_source" >&2
+    return 1
+  }
+
+  if [ -n "$aacrr_requested_device" ]; then
+    AUDIO_ALSA_CAPTURE_ROUTE_DEVICE_NAME="$aacrr_requested_device"
+    AUDIO_ALSA_CAPTURE_ROUTE_CARD="$(
+      audio_alsa_device_card "$aacrr_requested_device"
+    )"
+    AUDIO_ALSA_CAPTURE_ROUTE_DEVICE="$({
+      printf '%s\n' "$aacrr_requested_device" |
+        sed -n 's/^\(plug\)\{0,1\}hw:[0-9][0-9]*,\([0-9][0-9]*\).*/\2/p'
+    } 2>/dev/null)"
+    AUDIO_ALSA_CAPTURE_ROUTE_CONTROL="$aacrr_requested_control"
+    if [ -n "$AUDIO_ALSA_CAPTURE_ROUTE_CONTROL" ]; then
+      AUDIO_ALSA_CAPTURE_ROUTE_VALUE="${aacrr_requested_value:-1}"
+    fi
+    AUDIO_ALSA_CAPTURE_ROUTE_PCM_LABEL="${aacrr_requested_label:-explicit-device}"
+    AUDIO_ALSA_CAPTURE_ROUTE_DISCOVERY="explicit-device"
+
+    if [ -n "$AUDIO_ALSA_CAPTURE_ROUTE_CONTROL" ]; then
+      if [ -z "$AUDIO_ALSA_CAPTURE_ROUTE_CARD" ]; then
+        printf '%s\n' \
+          "a numeric hw:CARD,DEVICE or plughw:CARD,DEVICE is required when a mixer control is supplied with an ALSA device" >&2
+        return 1
+      fi
+
+      audio_alsa_route_control_exists \
+        "$AUDIO_ALSA_CAPTURE_ROUTE_CARD" \
+        "$AUDIO_ALSA_CAPTURE_ROUTE_CONTROL"
+      aacrr_control_rc=$?
+      case "$aacrr_control_rc" in
+        0)
+          ;;
+        2)
+          return 1
+          ;;
+        *)
+          printf '%s\n' \
+            "requested capture mixer control is absent on ALSA card $AUDIO_ALSA_CAPTURE_ROUTE_CARD: $AUDIO_ALSA_CAPTURE_ROUTE_CONTROL" >&2
+          return 1
+          ;;
+      esac
+    fi
+
+    export AUDIO_ALSA_CAPTURE_ROUTE_CARD AUDIO_ALSA_CAPTURE_ROUTE_DEVICE
+    export AUDIO_ALSA_CAPTURE_ROUTE_CONTROL AUDIO_ALSA_CAPTURE_ROUTE_VALUE
+    export AUDIO_ALSA_CAPTURE_ROUTE_PCM_LABEL
+    export AUDIO_ALSA_CAPTURE_ROUTE_DEVICE_NAME
+    export AUDIO_ALSA_CAPTURE_ROUTE_DISCOVERY
+    return 0
+  fi
+
+  aacrr_cards="$(audio_alsa_card_indexes capture)"
+  aacrr_cards_rc=$?
+  if [ "$aacrr_cards_rc" -ne 0 ]; then
+    return 1
+  fi
+
+  if [ -n "$aacrr_requested_label" ]; then
+    aacrr_label_match_count=0
+    for aacrr_card in $aacrr_cards; do
+      aacrr_device="$(
+        audio_alsa_capture_pcm_device_for_label \
+          "$aacrr_card" "$aacrr_requested_label"
+      )"
+      aacrr_device_rc=$?
+
+      if [ "$aacrr_device_rc" -eq 2 ]; then
+        return 1
+      fi
+
+      if [ -z "$aacrr_device" ]; then
+        continue
+      fi
+
+      if [ -n "$aacrr_requested_control" ]; then
+        audio_alsa_route_control_exists \
+          "$aacrr_card" "$aacrr_requested_control"
+        aacrr_control_rc=$?
+        case "$aacrr_control_rc" in
+          0)
+            ;;
+          2)
+            return 1
+            ;;
+          *)
+            continue
+            ;;
+        esac
+      fi
+
+      aacrr_label_match_count=$((aacrr_label_match_count + 1))
+      aacrr_label_card="$aacrr_card"
+      aacrr_label_device="$aacrr_device"
+    done
+
+    if [ "$aacrr_label_match_count" -gt 1 ]; then
+      printf '%s\n' \
+        "PCM label '$aacrr_requested_label' matches multiple capture cards, provide --alsa-device" >&2
+      return 1
+    fi
+
+    if [ "$aacrr_label_match_count" -eq 1 ]; then
+      AUDIO_ALSA_CAPTURE_ROUTE_CARD="$aacrr_label_card"
+      AUDIO_ALSA_CAPTURE_ROUTE_DEVICE="$aacrr_label_device"
+      AUDIO_ALSA_CAPTURE_ROUTE_CONTROL="$aacrr_requested_control"
+      if [ -n "$AUDIO_ALSA_CAPTURE_ROUTE_CONTROL" ]; then
+        AUDIO_ALSA_CAPTURE_ROUTE_VALUE="${aacrr_requested_value:-1}"
+      fi
+      AUDIO_ALSA_CAPTURE_ROUTE_PCM_LABEL="$aacrr_requested_label"
+      AUDIO_ALSA_CAPTURE_ROUTE_DEVICE_NAME="plughw:$aacrr_label_card,$aacrr_label_device"
+      AUDIO_ALSA_CAPTURE_ROUTE_DISCOVERY="pcm-label"
+      export AUDIO_ALSA_CAPTURE_ROUTE_CARD AUDIO_ALSA_CAPTURE_ROUTE_DEVICE
+      export AUDIO_ALSA_CAPTURE_ROUTE_CONTROL AUDIO_ALSA_CAPTURE_ROUTE_VALUE
+      export AUDIO_ALSA_CAPTURE_ROUTE_PCM_LABEL
+      export AUDIO_ALSA_CAPTURE_ROUTE_DEVICE_NAME
+      export AUDIO_ALSA_CAPTURE_ROUTE_DISCOVERY
+      return 0
+    fi
+  fi
+
+  if [ -z "$aacrr_requested_control" ] &&
+     [ -z "$aacrr_requested_label" ] &&
+     command -v arecord >/dev/null 2>&1; then
+    aacrr_arecord_inventory="$(audio_alsa_route_run arecord -l)"
+    aacrr_arecord_rc=$?
+    if [ "$aacrr_arecord_rc" -ne 0 ]; then
+      printf '%s\n' \
+        "arecord inventory failed or timed out during $aacrr_source discovery, rc=$aacrr_arecord_rc" >&2
+      return 1
+    fi
+
+    aacrr_pcm_lines="$(
+      printf '%s\n' "$aacrr_arecord_inventory" |
+        grep -Ei "$aacrr_pattern"
+    )"
+
+    aacrr_pcm_count="$({
+      printf '%s\n' "$aacrr_pcm_lines" |
+        sed '/^[[:space:]]*$/d' |
+        wc -l |
+        tr -d '[:space:]'
+    } 2>/dev/null)"
+
+    if [ "${aacrr_pcm_count:-0}" -gt 1 ] 2>/dev/null; then
+      printf '%s\n' \
+        "multiple $aacrr_source capture PCMs were discovered, provide --pcm-label or --alsa-device" >&2
+      printf '%s\n' "$aacrr_pcm_lines" >&2
+      return 1
+    fi
+
+    aacrr_pcm_line="$(printf '%s\n' "$aacrr_pcm_lines" | sed -n '1p')"
+    if [ -n "$aacrr_pcm_line" ]; then
+      AUDIO_ALSA_CAPTURE_ROUTE_CARD="$({
+        printf '%s\n' "$aacrr_pcm_line" |
+          sed -n 's/^card[[:space:]]*\([0-9][0-9]*\):.*/\1/p'
+      } 2>/dev/null)"
+      AUDIO_ALSA_CAPTURE_ROUTE_DEVICE="$({
+        printf '%s\n' "$aacrr_pcm_line" |
+          sed -n 's/^card[[:space:]]*[0-9][0-9]*:.*device[[:space:]]*\([0-9][0-9]*\):.*/\1/p'
+      } 2>/dev/null)"
+      AUDIO_ALSA_CAPTURE_ROUTE_PCM_LABEL="$({
+        printf '%s\n' "$aacrr_pcm_line" |
+          sed -n 's/^.*device[[:space:]]*[0-9][0-9]*:[[:space:]]*\([^[]*\).*/\1/p' |
+          sed 's/[[:space:]]*$//'
+      } 2>/dev/null)"
+
+      if [ -n "$AUDIO_ALSA_CAPTURE_ROUTE_CARD" ] &&
+         [ -n "$AUDIO_ALSA_CAPTURE_ROUTE_DEVICE" ]; then
+        AUDIO_ALSA_CAPTURE_ROUTE_DEVICE_NAME="plughw:$AUDIO_ALSA_CAPTURE_ROUTE_CARD,$AUDIO_ALSA_CAPTURE_ROUTE_DEVICE"
+        AUDIO_ALSA_CAPTURE_ROUTE_DISCOVERY="pcm-name"
+        export AUDIO_ALSA_CAPTURE_ROUTE_CARD AUDIO_ALSA_CAPTURE_ROUTE_DEVICE
+        export AUDIO_ALSA_CAPTURE_ROUTE_CONTROL AUDIO_ALSA_CAPTURE_ROUTE_VALUE
+        export AUDIO_ALSA_CAPTURE_ROUTE_PCM_LABEL
+        export AUDIO_ALSA_CAPTURE_ROUTE_DEVICE_NAME
+        export AUDIO_ALSA_CAPTURE_ROUTE_DISCOVERY
+        return 0
+      fi
+    fi
+  fi
+
+  if [ -z "$aacrr_requested_control" ] &&
+     [ -z "$aacrr_requested_label" ] &&
+     [ -r /proc/asound/pcm ]; then
+    aacrr_proc_lines="$({
+      grep -Ei "$aacrr_pattern" /proc/asound/pcm |
+        grep -Ei 'capture'
+    } 2>/dev/null)"
+
+    aacrr_proc_count="$({
+      printf '%s\n' "$aacrr_proc_lines" |
+        sed '/^[[:space:]]*$/d' |
+        wc -l |
+        tr -d '[:space:]'
+    } 2>/dev/null)"
+
+    if [ "${aacrr_proc_count:-0}" -gt 1 ] 2>/dev/null; then
+      printf '%s\n' \
+        "multiple $aacrr_source capture PCMs were discovered in procfs, provide --pcm-label or --alsa-device" >&2
+      printf '%s\n' "$aacrr_proc_lines" >&2
+      return 1
+    fi
+
+    aacrr_proc_line="$(printf '%s\n' "$aacrr_proc_lines" | sed -n '1p')"
+    if [ -n "$aacrr_proc_line" ]; then
+      aacrr_key="$(printf '%s\n' "$aacrr_proc_line" | awk '{print $1}')"
+      aacrr_key="${aacrr_key%:}"
+      AUDIO_ALSA_CAPTURE_ROUTE_CARD="${aacrr_key%%-*}"
+      AUDIO_ALSA_CAPTURE_ROUTE_DEVICE="${aacrr_key#*-}"
+      AUDIO_ALSA_CAPTURE_ROUTE_PCM_LABEL="$({
+        printf '%s\n' "$aacrr_proc_line" |
+          sed -n 's/^[^:]*:[[:space:]]*\([^:]*\).*/\1/p' |
+          sed 's/[[:space:]]*$//'
+      } 2>/dev/null)"
+
+      if [ -n "$AUDIO_ALSA_CAPTURE_ROUTE_CARD" ] &&
+         [ -n "$AUDIO_ALSA_CAPTURE_ROUTE_DEVICE" ]; then
+        AUDIO_ALSA_CAPTURE_ROUTE_DEVICE_NAME="plughw:$AUDIO_ALSA_CAPTURE_ROUTE_CARD,$AUDIO_ALSA_CAPTURE_ROUTE_DEVICE"
+        AUDIO_ALSA_CAPTURE_ROUTE_DISCOVERY="proc-pcm-name"
+        export AUDIO_ALSA_CAPTURE_ROUTE_CARD AUDIO_ALSA_CAPTURE_ROUTE_DEVICE
+        export AUDIO_ALSA_CAPTURE_ROUTE_CONTROL AUDIO_ALSA_CAPTURE_ROUTE_VALUE
+        export AUDIO_ALSA_CAPTURE_ROUTE_PCM_LABEL
+        export AUDIO_ALSA_CAPTURE_ROUTE_DEVICE_NAME
+        export AUDIO_ALSA_CAPTURE_ROUTE_DISCOVERY
+        return 0
+      fi
+    fi
+  fi
+
+  if ! command -v amixer >/dev/null 2>&1; then
+    printf '%s\n' "amixer is unavailable for capture-route discovery" >&2
+    return 1
+  fi
+
+  aacrr_control_match_count=0
+  for aacrr_card in $aacrr_cards; do
+    aacrr_control_inventory="$(
+      audio_alsa_route_run amixer -c "$aacrr_card" controls
+    )"
+    aacrr_control_inventory_rc=$?
+    if [ "$aacrr_control_inventory_rc" -ne 0 ]; then
+      printf '%s\n' \
+        "amixer controls probe failed or timed out for card $aacrr_card, rc=$aacrr_control_inventory_rc" >&2
+      return 1
+    fi
+
+    if [ -n "$aacrr_requested_control" ]; then
+      aacrr_controls="$({
+        printf '%s\n' "$aacrr_control_inventory" |
+          sed -n "s/.*name='\([^']*\)'.*/\1/p" |
+          grep -F -x "$aacrr_requested_control"
+      } 2>/dev/null)"
+    else
+      aacrr_controls="$({
+        printf '%s\n' "$aacrr_control_inventory" |
+          sed -n "s/.*name='\([^']*\)'.*/\1/p" |
+          grep -Ei "$aacrr_pattern"
+      } 2>/dev/null)"
+    fi
+
+    if [ -z "$aacrr_controls" ]; then
+      continue
+    fi
+
+    while [ -n "$aacrr_controls" ]; do
+      aacrr_control="$(printf '%s\n' "$aacrr_controls" | sed -n '1p')"
+      aacrr_controls="$(printf '%s\n' "$aacrr_controls" | sed '1d')"
+
+      if [ -n "$aacrr_requested_label" ]; then
+        aacrr_label="$aacrr_requested_label"
+      else
+        aacrr_label="$({
+          printf '%s\n' "$aacrr_control" |
+            sed -n 's/.*\(MultiMedia[0-9][0-9]*\).*/\1/p'
+        } 2>/dev/null)"
+      fi
+
+      if [ -z "$aacrr_label" ]; then
+        printf '%s\n' \
+          "capture mixer control has no discoverable PCM label, provide --pcm-label or --alsa-device: $aacrr_control" >&2
+        continue
+      fi
+
+      aacrr_device="$(
+        audio_alsa_capture_pcm_device_for_label \
+          "$aacrr_card" "$aacrr_label"
+      )"
+      aacrr_device_rc=$?
+
+      if [ "$aacrr_device_rc" -eq 2 ]; then
+        return 1
+      fi
+
+      if [ -z "$aacrr_device" ]; then
+        printf '%s\n' \
+          "no capture PCM matches $aacrr_label on ALSA card $aacrr_card" >&2
+        continue
+      fi
+
+      aacrr_control_match_count=$((aacrr_control_match_count + 1))
+      aacrr_control_card="$aacrr_card"
+      aacrr_control_device="$aacrr_device"
+      aacrr_control_name="$aacrr_control"
+      aacrr_control_label="$aacrr_label"
+    done
+  done
+
+  if [ "$aacrr_control_match_count" -gt 1 ]; then
+    printf '%s\n' \
+      "multiple $aacrr_source mixer-to-PCM mappings were discovered, provide an exact --mixer-control with --pcm-label or --alsa-device" >&2
+    return 1
+  fi
+
+  if [ "$aacrr_control_match_count" -eq 1 ]; then
+      AUDIO_ALSA_CAPTURE_ROUTE_CARD="$aacrr_control_card"
+      AUDIO_ALSA_CAPTURE_ROUTE_DEVICE="$aacrr_control_device"
+      AUDIO_ALSA_CAPTURE_ROUTE_CONTROL="$aacrr_control_name"
+      AUDIO_ALSA_CAPTURE_ROUTE_VALUE="${aacrr_requested_value:-1}"
+      AUDIO_ALSA_CAPTURE_ROUTE_PCM_LABEL="$aacrr_control_label"
+      AUDIO_ALSA_CAPTURE_ROUTE_DEVICE_NAME="plughw:$aacrr_control_card,$aacrr_control_device"
+      AUDIO_ALSA_CAPTURE_ROUTE_DISCOVERY="mixer-control"
+      export AUDIO_ALSA_CAPTURE_ROUTE_CARD AUDIO_ALSA_CAPTURE_ROUTE_DEVICE
+      export AUDIO_ALSA_CAPTURE_ROUTE_CONTROL AUDIO_ALSA_CAPTURE_ROUTE_VALUE
+      export AUDIO_ALSA_CAPTURE_ROUTE_PCM_LABEL
+      export AUDIO_ALSA_CAPTURE_ROUTE_DEVICE_NAME
+      export AUDIO_ALSA_CAPTURE_ROUTE_DISCOVERY
+      return 0
+  fi
+
+  printf '%s\n' \
+    "no $aacrr_source capture route was found from PCM names, mixer controls, or supplied overrides" >&2
+  return 1
+}
+
+# audio_alsa_find_capture_route <source> [control] [value] [label] [device]
+# Print card|device|control|value|pcm-label|capture-device after resolution.
+# Diagnostics go to stderr, and the function does not mutate mixer state.
+audio_alsa_find_capture_route() {
+  if ! audio_alsa_resolve_capture_route "$@"; then
+    return 1
+  fi
+
+  printf '%s|%s|%s|%s|%s|%s\n' \
+    "$AUDIO_ALSA_CAPTURE_ROUTE_CARD" \
+    "$AUDIO_ALSA_CAPTURE_ROUTE_DEVICE" \
+    "$AUDIO_ALSA_CAPTURE_ROUTE_CONTROL" \
+    "$AUDIO_ALSA_CAPTURE_ROUTE_VALUE" \
+    "$AUDIO_ALSA_CAPTURE_ROUTE_PCM_LABEL" \
+    "$AUDIO_ALSA_CAPTURE_ROUTE_DEVICE_NAME"
+}
+
+# audio_alsa_prepare_capture_route
+# Snapshot and apply the already resolved AUDIO_ALSA_CAPTURE_ROUTE_* mixer
+# selection. The function emits no stdout, exports restoration state, and
+# returns 1 when no route is resolved or mixer snapshot/mutation fails.
+audio_alsa_prepare_capture_route() {
+  if [ -z "${AUDIO_ALSA_CAPTURE_ROUTE_DEVICE_NAME:-}" ]; then
+    printf '%s\n' 'no capture route has been resolved' >&2
+    return 1
+  fi
+
+  AUDIO_ALSA_CAPTURE_ROUTE_MIXER_CHANGED=0
+  AUDIO_ALSA_CAPTURE_ROUTE_PREVIOUS_VALUE=""
+
+  if [ -z "$AUDIO_ALSA_CAPTURE_ROUTE_CONTROL" ]; then
+    export AUDIO_ALSA_CAPTURE_ROUTE_PREVIOUS_VALUE
+    export AUDIO_ALSA_CAPTURE_ROUTE_MIXER_CHANGED
+    return 0
+  fi
+
+  AUDIO_ALSA_CAPTURE_ROUTE_PREVIOUS_VALUE="$({
+    audio_alsa_route_run amixer -c "$AUDIO_ALSA_CAPTURE_ROUTE_CARD" \
+      cget "iface=MIXER,name=$AUDIO_ALSA_CAPTURE_ROUTE_CONTROL" 2>/dev/null |
+      sed -n 's/^[[:space:]]*: values=//p' |
+      sed -n '1p'
+  } 2>/dev/null)"
+
+  if [ -z "$AUDIO_ALSA_CAPTURE_ROUTE_PREVIOUS_VALUE" ]; then
+    printf '%s\n' \
+      "could not snapshot capture mixer control: $AUDIO_ALSA_CAPTURE_ROUTE_CONTROL" >&2
+    return 1
+  fi
+
+  AUDIO_ALSA_CAPTURE_ROUTE_MIXER_CHANGED=1
+  export AUDIO_ALSA_CAPTURE_ROUTE_PREVIOUS_VALUE
+  export AUDIO_ALSA_CAPTURE_ROUTE_MIXER_CHANGED
+
+  if ! audio_alsa_route_run amixer -c "$AUDIO_ALSA_CAPTURE_ROUTE_CARD" \
+      cset "iface=MIXER,name=$AUDIO_ALSA_CAPTURE_ROUTE_CONTROL" \
+      "$AUDIO_ALSA_CAPTURE_ROUTE_VALUE" >/dev/null 2>&1; then
+    audio_alsa_restore_capture_route >/dev/null 2>&1 || true
+    printf '%s\n' \
+      "could not set capture mixer control $AUDIO_ALSA_CAPTURE_ROUTE_CONTROL to $AUDIO_ALSA_CAPTURE_ROUTE_VALUE" >&2
+    return 1
+  fi
+
+  return 0
+}
+
+# audio_alsa_restore_capture_route
+# Restore the mixer value saved by audio_alsa_prepare_capture_route. The
+# function emits no stdout and returns 1 only when required state is missing or
+# the restore operation fails.
+audio_alsa_restore_capture_route() {
+  case "${AUDIO_ALSA_CAPTURE_ROUTE_MIXER_CHANGED:-0}" in
+    1)
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+
+  if [ -z "${AUDIO_ALSA_CAPTURE_ROUTE_CARD:-}" ] ||
+     [ -z "${AUDIO_ALSA_CAPTURE_ROUTE_CONTROL:-}" ] ||
+     [ -z "${AUDIO_ALSA_CAPTURE_ROUTE_PREVIOUS_VALUE:-}" ]; then
+    return 1
+  fi
+
+  audio_alsa_route_run amixer -c "$AUDIO_ALSA_CAPTURE_ROUTE_CARD" \
+    cset "iface=MIXER,name=$AUDIO_ALSA_CAPTURE_ROUTE_CONTROL" \
+    "$AUDIO_ALSA_CAPTURE_ROUTE_PREVIOUS_VALUE" >/dev/null 2>&1
+  aarc_restore_rc=$?
+  if [ "$aarc_restore_rc" -eq 0 ]; then
+    AUDIO_ALSA_CAPTURE_ROUTE_MIXER_CHANGED=0
+    export AUDIO_ALSA_CAPTURE_ROUTE_MIXER_CHANGED
+  fi
+  return "$aarc_restore_rc"
+}
+
+# audio_alsa_capture_route_inventory <output-file>
+# Write ALSA card, capture PCM, mixer, and UCM inventory to the requested
+# artifact. The function emits no stdout and does not mutate target state.
+audio_alsa_capture_route_inventory() {
+  aacri_output="$1"
+
+  if [ -z "$aacri_output" ]; then
+    return 1
+  fi
+
+  {
+    printf '%s\n' '### /proc/asound/cards'
+    if [ -r /proc/asound/cards ]; then
+      cat /proc/asound/cards
+    else
+      printf '%s\n' '/proc/asound/cards is unavailable'
+    fi
+
+    printf '%s\n' '### /proc/asound/pcm'
+    if [ -r /proc/asound/pcm ]; then
+      cat /proc/asound/pcm
+    else
+      printf '%s\n' '/proc/asound/pcm is unavailable'
+    fi
+
+    printf '%s\n' '### arecord -l'
+    if command -v arecord >/dev/null 2>&1; then
+      audio_alsa_route_run arecord -l ||
+        printf '%s\n' 'arecord -l failed or timed out'
+    else
+      printf '%s\n' 'arecord is unavailable'
+    fi
+
+    for aacri_card in $(audio_alsa_card_indexes); do
+      printf '### amixer -c %s controls\n' "$aacri_card"
+      if command -v amixer >/dev/null 2>&1; then
+        audio_alsa_route_run amixer -c "$aacri_card" controls ||
+          printf '%s\n' "amixer controls failed or timed out for card $aacri_card"
+      else
+        printf '%s\n' 'amixer is unavailable'
+      fi
+    done
+
+    printf '%s\n' '### alsaucm listcards'
+    if command -v alsaucm >/dev/null 2>&1; then
+      audio_alsa_route_run alsaucm listcards ||
+        printf '%s\n' 'alsaucm listcards failed or timed out'
+    else
+      printf '%s\n' 'alsaucm is unavailable'
+    fi
+  } >"$aacri_output" 2>&1
+}
+
+# audio_alsa_card_indexes [playback|capture|all]
+# Print unique ALSA card indexes, preferring procfs and using only the requested
+# bounded ALSA inventory fallback. Diagnostics go to stderr, and the function
+# returns 1 when an available fallback command fails before finding any card.
+audio_alsa_card_indexes() {
+  aaci_mode="${1:-all}"
+  aaci_cards="$(
+    sed -n 's/^[[:space:]]*\([0-9][0-9]*\)[[:space:]].*/\1/p' \
+      /proc/asound/cards 2>/dev/null
+  )"
+  aaci_probe_failed=0
+
+  if [ -n "$aaci_cards" ]; then
+    printf '%s\n' "$aaci_cards" | awk '!seen[$0]++'
+    return 0
+  fi
+
+  case "$aaci_mode" in
+    playback|all)
+      if command -v aplay >/dev/null 2>&1; then
+        aaci_inventory="$(audio_alsa_route_run aplay -l)"
+        aaci_rc=$?
+        if [ "$aaci_rc" -eq 0 ]; then
+          aaci_cards="$(
+            printf '%s\n' "$aaci_inventory" |
+              sed -n 's/^card[[:space:]]*\([0-9][0-9]*\):.*/\1/p'
+          )"
+        else
+          printf '%s\n' \
+            "aplay inventory failed or timed out while listing ALSA cards, rc=$aaci_rc" >&2
+          aaci_probe_failed=1
+        fi
+      fi
+      ;;
+    capture)
+      ;;
+    *)
+      printf '%s\n' "invalid ALSA card inventory mode: $aaci_mode" >&2
+      return 1
+      ;;
+  esac
+
+  case "$aaci_mode" in
+    capture|all)
+      if command -v arecord >/dev/null 2>&1; then
+        aaci_inventory="$(audio_alsa_route_run arecord -l)"
+        aaci_rc=$?
+        if [ "$aaci_rc" -eq 0 ]; then
+          aaci_capture_cards="$(
+            printf '%s\n' "$aaci_inventory" |
+              sed -n 's/^card[[:space:]]*\([0-9][0-9]*\):.*/\1/p'
+          )"
+          if [ -n "$aaci_capture_cards" ]; then
+            if [ -n "$aaci_cards" ]; then
+              aaci_cards="$aaci_cards
+$aaci_capture_cards"
+            else
+              aaci_cards="$aaci_capture_cards"
+            fi
+          fi
+        else
+          printf '%s\n' \
+            "arecord inventory failed or timed out while listing ALSA cards, rc=$aaci_rc" >&2
+          aaci_probe_failed=1
+        fi
+      fi
+      ;;
+  esac
+
+  if [ -n "$aaci_cards" ]; then
+    printf '%s\n' "$aaci_cards" | awk '!seen[$0]++'
+    return 0
+  fi
+
+  [ "$aaci_probe_failed" -eq 0 ]
+}
+
+# audio_alsa_device_card <alsa-device>
+# Print the numeric card index from hw:CARD,DEV or plughw:CARD,DEV. The function
+# emits an empty string for nonnumeric aliases and has no side effects.
 audio_alsa_device_card() {
   printf '%s\n' "$1" |
     sed -n 's/^\(plug\)\{0,1\}hw:\([0-9][0-9]*\),.*/\2/p'
@@ -6833,6 +8202,8 @@ audio_validate_recorded_wav_od() {
   avrwo_min_active="${AUDIO_RECORD_MIN_ACTIVE_SAMPLES:-100}"
   avrwo_min_distinct="${AUDIO_RECORD_MIN_DISTINCT_SAMPLES:-4}"
   avrwo_threshold_lsb="${AUDIO_RECORD_SAMPLE_THRESHOLD_LSB:-${AUDIO_RECORD_SAMPLE_THRESHOLD:-8}}"
+  avrwo_strict_signal="${AUDIO_RECORD_STRICT_SIGNAL:-0}"
+  avrwo_min_rms_dbfs="${AUDIO_RECORD_MIN_RMS_DBFS:--60}"
 
   command -v od >/dev/null 2>&1 || return 1
   command -v dd >/dev/null 2>&1 || return 1
@@ -6987,7 +8358,9 @@ EOF
       -v bits="$avrwo_bits" \
       -v min_active="$avrwo_min_active" \
       -v min_distinct="$avrwo_min_distinct" \
-      -v threshold_lsb="$avrwo_threshold_lsb" '
+      -v threshold_lsb="$avrwo_threshold_lsb" \
+      -v strict_signal="$avrwo_strict_signal" \
+      -v min_rms_dbfs="$avrwo_min_rms_dbfs" '
     function abs_value(value) {
       return value < 0 ? -value : value
     }
@@ -6999,10 +8372,17 @@ EOF
     function consume_sample(raw, sign_limit, full_range, threshold, key) {
       sign_limit = power2(bits - 1)
       full_range = power2(bits)
-      if (raw >= sign_limit) raw -= full_range
+      if (bits == 8) {
+        raw -= 128
+      } else if (raw >= sign_limit) {
+        raw -= full_range
+      }
 
       samples++
       if (raw != 0) nonzero_samples++
+
+      normalized = raw / sign_limit
+      sum_squares += normalized * normalized
 
       threshold = (threshold_lsb / 32768.0) * sign_limit
       if (threshold < 0) threshold = 0
@@ -7036,22 +8416,33 @@ EOF
       }
     }
     END {
-      printf "%d|%d|%d|%d\n", samples, nonzero_samples, active_samples, distinct_samples
+      rms = samples > 0 ? sqrt(sum_squares / samples) : 0
+      rms_dbfs = rms > 0 ? 20 * log(rms) / log(10) : -999
+      printf "%d|%d|%d|%d|%.2f\n", samples, nonzero_samples, active_samples, distinct_samples, rms_dbfs
       if (samples <= 0 || nonzero_samples <= 0 || active_samples < min_active || distinct_samples < min_distinct) {
         exit 1
       }
+      if (strict_signal == 1 && rms_dbfs < min_rms_dbfs) exit 1
     }
-  ')" || return 1
+  ')"
+  avrwo_stats_rc=$?
 
   IFS='|' read -r \
     avrwo_samples \
     avrwo_nonzero_samples \
     avrwo_active_samples \
-    avrwo_distinct_samples <<EOF
+    avrwo_distinct_samples \
+    avrwo_rms_dbfs <<EOF
 $avrwo_stats
 EOF
 
-  AUDIO_WAV_VALIDATION_SUMMARY="AUDIO_WAV_VALIDATION status=PASS reason=pcm-signal-activity-present validator=od analyzed_samples=$avrwo_samples nonzero_samples=$avrwo_nonzero_samples active_samples=$avrwo_active_samples distinct_samples=$avrwo_distinct_samples"
+  if [ "$avrwo_stats_rc" -ne 0 ]; then
+    AUDIO_WAV_VALIDATION_SUMMARY="AUDIO_WAV_VALIDATION status=FAIL reason=pcm-signal-validation-failed validator=od analyzed_samples=${avrwo_samples:-0} nonzero_samples=${avrwo_nonzero_samples:-0} active_samples=${avrwo_active_samples:-0} distinct_samples=${avrwo_distinct_samples:-0} rms_dbfs=${avrwo_rms_dbfs:--999} strict_signal=$avrwo_strict_signal min_rms_dbfs=$avrwo_min_rms_dbfs"
+    export AUDIO_WAV_VALIDATION_SUMMARY
+    return 1
+  fi
+
+  AUDIO_WAV_VALIDATION_SUMMARY="AUDIO_WAV_VALIDATION status=PASS reason=pcm-signal-activity-present validator=od analyzed_samples=$avrwo_samples nonzero_samples=$avrwo_nonzero_samples active_samples=$avrwo_active_samples distinct_samples=$avrwo_distinct_samples rms_dbfs=$avrwo_rms_dbfs strict_signal=$avrwo_strict_signal min_rms_dbfs=$avrwo_min_rms_dbfs"
   export AUDIO_WAV_VALIDATION_SUMMARY
   return 0
 }
@@ -7113,7 +8504,9 @@ audio_validate_recorded_wav() {
     return 0
   fi
 
-  AUDIO_WAV_VALIDATION_SUMMARY="AUDIO_WAV_VALIDATION status=FAIL reason=od-fallback-validation-failed"
+  if [ -z "$AUDIO_WAV_VALIDATION_SUMMARY" ]; then
+    AUDIO_WAV_VALIDATION_SUMMARY="AUDIO_WAV_VALIDATION status=FAIL reason=od-fallback-validation-failed"
+  fi
   export AUDIO_WAV_VALIDATION_SUMMARY
   [ -n "$avrw_log" ] && printf '%s\n' "$AUDIO_WAV_VALIDATION_SUMMARY" >>"$avrw_log"
   log_fail "$AUDIO_WAV_VALIDATION_SUMMARY"

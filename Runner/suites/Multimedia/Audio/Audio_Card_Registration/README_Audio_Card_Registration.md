@@ -49,7 +49,10 @@ This test intentionally does not:
 - Change mixer controls
 - Download or use audio clips
 
-Playback and record functionality should remain covered by the existing `AudioPlayback` and `AudioRecord` tests.
+Generic playback and record functionality remains covered by `AudioPlayback`
+and `AudioRecord`. Connector-specific HDMI, DisplayPort/eDP, and 3.5 mm
+playback routing is covered by `AudioRoutePlayback`. Wired headset-microphone
+capture routing is covered by `AudioRouteRecord`.
 
 ## Default Behavior
 
