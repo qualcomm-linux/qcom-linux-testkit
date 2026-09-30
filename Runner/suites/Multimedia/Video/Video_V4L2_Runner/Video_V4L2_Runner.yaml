@@ -1,7 +1,12 @@
 metadata:
   name: video-v4l2-runner
   format: "Lava-Test Test Definition 1.0"
-  description: "These scripts automate validation of video **encoding** and **decoding** on Qualcomm Linux platforms running a Yocto-based rootfs."
+  description: >
+    Automates V4L2 video encoding and decoding validation on Qualcomm Linux
+    platforms (LeMans, Monaco, Kodiak, Shikra) using iris_v4l2_test.
+    Shikra is upstream-only (qcom_iris driver); set VIDEO_STACK=upstream.
+    Level 4.0 is automatically applied to bundled Shikra encoder fixtures.
+    Set VIDEO_POLICY_SCOPE=all to extend the rewrite to user-supplied configs.
   os:
     - linux
   scope:
@@ -10,10 +15,19 @@ metadata:
 params:
   # path to iris_v4l2_test binary
   APP_PATH: "/usr/bin/iris_v4l2_test"
-  # specific config can be selected. Available: h264Decoder.json, h264Encoder.json, h265Decoder.json, h265Encoder.json, vp9Decoder.json. Default is to use all of them
+  # specific config can be selected. Available: base_h264Decoder.json,
+  # base_h264Encoder.json, base_h265Decoder.json, base_h265Encoder.json,
+  # base_vp9Decoder.json, overlay_*.json. Default is to use all of them.
   CONFIG_PATH: "./"
-  # platform is autodetected by the test script
+  # platform is autodetected by the test script (lemans|monaco|kodiak|shikra)
   PLATFORM: ""
+  # stack selection: auto|upstream|downstream|base|overlay|both
+  # Shikra supports upstream only; use VIDEO_STACK=upstream or leave as auto.
+  VIDEO_STACK: "auto"
+  # policy scope: bundled (default) | all
+  # 'bundled' restricts Level-4.0 rewrite to the four bundled encoder fixtures.
+  # 'all' applies the rewrite to every config including user-supplied ones.
+  VIDEO_POLICY_SCOPE: "bundled"
   LOGLEVEL: 15
   RETRY_ON_FAIL: 5
   POST_TEST_SLEEP: 10
@@ -22,5 +36,5 @@ run:
   steps:
     - REPO_PATH=$PWD
     - cd Runner/suites/Multimedia/Video/Video_V4L2_Runner/
-    - ./run.sh --app "${APP_PATH}" --config "${CONFIG_PATH}" --platform "${PLATFORM}" --loglevel "${LOGLEVEL}" --retry-on-fail "${RETRY_ON_FAIL}" --post-test-sleep "${POST_TEST_SLEEP}" || true
+    - VIDEO_POLICY_SCOPE="${VIDEO_POLICY_SCOPE}" ./run.sh --app "${APP_PATH}" --config "${CONFIG_PATH}" --platform "${PLATFORM}" --stack "${VIDEO_STACK}" --loglevel "${LOGLEVEL}" --retry-on-fail "${RETRY_ON_FAIL}" --post-test-sleep "${POST_TEST_SLEEP}" || true
     - $REPO_PATH/Runner/utils/send-to-lava.sh Video_V4L2_Runner.res || true
