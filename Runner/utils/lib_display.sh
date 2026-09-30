@@ -207,7 +207,8 @@ display_connected_summary() {
     ds_base="/sys/class/drm"
 
     if [ ! -d "$ds_base" ]; then
-        log_warn "display_connected_summary: $ds_base not found"
+        # stderr: callers capture stdout as the summary.
+        log_warn "display_connected_summary: $ds_base not found" >&2
         printf '%s\n' "none"
         return 0
     fi
@@ -2595,6 +2596,69 @@ display_detect_build_flavour() {
     return 0
 }
 
+# Wait for at least one connected DRM connector to appear.
+#
+# Hot-plug detection is asynchronous, so a single sysfs read right after boot
+# can report "none" on a board that does have a display. Poll instead.
+#
+# Tunables:
+#   DISPLAY_CONNECTOR_WAIT, seconds to wait, default 20
+#   DISPLAY_CONNECTOR_POLL, poll interval in seconds, default 2
+# Exports:
+#   DISPLAY_CONNECTED_SUMMARY, sysfs display summary, or none
+#   DISPLAY_CONNECTOR_WAIT_USED, the sanitized wait bound that was applied
+# Return:
+#   0 when at least one connected display is found
+#   1 when the wait expired with no connected display
+display_wait_for_connector() {
+    dwc_wait="${DISPLAY_CONNECTOR_WAIT:-20}"
+    dwc_poll="${DISPLAY_CONNECTOR_POLL:-2}"
+
+    is_unsigned_number "$dwc_wait" || dwc_wait=20
+    is_unsigned_number "$dwc_poll" || dwc_poll=2
+    [ "$dwc_poll" -gt 0 ] 2>/dev/null || dwc_poll=1
+
+    DISPLAY_CONNECTOR_WAIT_USED="$dwc_wait"
+    export DISPLAY_CONNECTOR_WAIT_USED
+
+    DISPLAY_CONNECTED_SUMMARY="none"
+    export DISPLAY_CONNECTED_SUMMARY
+
+    command -v display_connected_summary >/dev/null 2>&1 || return 1
+
+    # Connector nodes are created at driver bind, not by hot-plug: with none
+    # present there is nothing to wait for, skip immediately.
+    set -- /sys/class/drm/card*-*
+    if [ ! -e "$1" ]; then
+        DISPLAY_CONNECTOR_WAIT_USED=0
+        return 1
+    fi
+
+    dwc_start="$(get_monotonic_seconds)"
+    dwc_waited=0
+
+    while :; do
+        DISPLAY_CONNECTED_SUMMARY="$(display_connected_summary 2>/dev/null || true)"
+        export DISPLAY_CONNECTED_SUMMARY
+
+        if [ -n "$DISPLAY_CONNECTED_SUMMARY" ] &&
+           [ "$DISPLAY_CONNECTED_SUMMARY" != "none" ]; then
+            if [ "$dwc_waited" -gt 0 ]; then
+                log_info "Connector appeared after ${dwc_waited}s"
+            fi
+            return 0
+        fi
+
+        dwc_waited=$(($(get_monotonic_seconds) - dwc_start))
+        [ "$dwc_waited" -lt 0 ] && dwc_waited=0
+        [ "$dwc_waited" -ge "$dwc_wait" ] && break
+
+        sleep "$dwc_poll"
+    done
+
+    return 1
+}
+
 # Log display snapshots and require at least one connected DRM display.
 # This helper keeps display gating dynamic, no connector names or fixed paths are hardcoded.
 # Arguments:
@@ -2609,8 +2673,9 @@ display_log_snapshot_and_require_connector() {
     ds_testname="$1"
     ds_modetest_cap="${2:-200}"
 
-    DISPLAY_CONNECTED_SUMMARY="none"
-    export DISPLAY_CONNECTED_SUMMARY
+    # Settle first so the snapshots below describe the state the gate acts on;
+    # the verdict lands in DISPLAY_CONNECTED_SUMMARY.
+    display_wait_for_connector
 
     if command -v display_debug_snapshot >/dev/null 2>&1; then
         display_debug_snapshot "pre-display-check"
@@ -2627,13 +2692,8 @@ display_log_snapshot_and_require_connector() {
         log_warn "modetest not found in PATH, skipping modetest snapshot"
     fi
 
-    if command -v display_connected_summary >/dev/null 2>&1; then
-        DISPLAY_CONNECTED_SUMMARY="$(display_connected_summary 2>/dev/null || true)"
-        export DISPLAY_CONNECTED_SUMMARY
-    fi
-
     if [ -z "$DISPLAY_CONNECTED_SUMMARY" ] || [ "$DISPLAY_CONNECTED_SUMMARY" = "none" ]; then
-        log_warn "No connected DRM display found, skipping ${ds_testname}"
+        log_warn "No connected DRM display found after ${DISPLAY_CONNECTOR_WAIT_USED:-20}s, skipping ${ds_testname}"
         return 1
     fi
 

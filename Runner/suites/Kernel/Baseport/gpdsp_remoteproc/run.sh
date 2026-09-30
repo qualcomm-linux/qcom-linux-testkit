@@ -40,6 +40,7 @@ log_info "------------------- Starting $TESTNAME Testcase ----------------------
 log_info "=== Test Initialization ==="
 
 # Tunables
+BOOT_TO="${BOOT_TO:-30}"
 STOP_TO="${STOP_TO:-10}"
 START_TO="${START_TO:-10}"
 POLL_I="${POLL_I:-1}"
@@ -49,8 +50,9 @@ POLL_I="${POLL_I:-1}"
 DO_SSR=0
 
 usage() {
-    echo "Usage: $0 [--ssr] [--stop-to SEC] [--start-to SEC] [--poll-i SEC]" >&2
+    echo "Usage: $0 [--ssr] [--boot-to SEC] [--stop-to SEC] [--start-to SEC] [--poll-i SEC]" >&2
     echo " --ssr Perform $FW stop/start (SSR). Default: OFF" >&2
+    echo " --boot-to SEC Boot-state wait (default: $BOOT_TO, 0 disables)" >&2
     echo " --stop-to SEC Stop timeout (default: $STOP_TO)" >&2
     echo " --start-to SEC Start timeout (default: $START_TO)" >&2
     echo " --poll-i SEC Poll interval (default: $POLL_I)" >&2
@@ -61,6 +63,15 @@ while [ $# -gt 0 ]; do
         --ssr)
             DO_SSR=1
             shift
+            ;;
+        --boot-to)
+            if [ $# -lt 2 ]; then
+                log_fail "Missing value for --boot-to"
+                usage
+                exit 2
+            fi
+            BOOT_TO="$2"
+            shift 2
             ;;
         --stop-to)
             if [ $# -lt 2 ]; then
@@ -101,7 +112,7 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-log_info "Tunables: STOP_TO=$STOP_TO START_TO=$START_TO POLL_I=$POLL_I"
+log_info "Tunables: BOOT_TO=$BOOT_TO STOP_TO=$STOP_TO START_TO=$START_TO POLL_I=$POLL_I"
 log_info "SSR control: DO_SSR=$DO_SSR (0=no stop/start, 1=do stop/start)"
 
 # DT check for entries
@@ -142,7 +153,10 @@ while IFS='|' read -r rpath rstate rfirm rname; do
     start_res="NA"
     ping_res="SKIPPED"
 
-    # Boot check
+    # Boot check: the instance list snapshot was taken moments after login,
+    # so let a processor still coming up reach running before judging it.
+    rstate="$(wait_remoteproc_boot_state "$rpath" "$inst_id" "$BOOT_TO" "$POLL_I")"
+
     if [ "$rstate" = "running" ]; then
         log_pass "$inst_id: boot check PASS"
     else
