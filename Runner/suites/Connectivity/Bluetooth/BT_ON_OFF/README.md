@@ -25,6 +25,11 @@ Select an adapter and tune the retry delays:
 The command-line adapter overrides `BT_ADAPTER`. When neither is set, the
 shared Bluetooth helper selects a usable runtime controller.
 
+On CentOS, direct execution verifies the minimal `bluez`, `atheros-firmware`,
+and `expect` package set before runtime validation. Existing complete images
+avoid package-manager and network work. Debian and Ubuntu retain their existing
+preparation behavior, while Yocto continues to use image-provided components.
+
 ## Validation contract
 
 The test uses the exact BlueZ `Powered: yes|no` property as its power-state
@@ -46,6 +51,12 @@ Power ON completed with consecutive Powered=yes confirmations
 The test fails when the requested stable state is not observed within the
 bounded helper attempts. If a power-on attempt fails, the suite records
 diagnostics and can perform the configured controlled recovery before retrying.
+An all-zero runtime BD address remains a failure. Recovery uses
+`btmgmt public-addr` with an authoritative address read from the adapter
+device-tree node or from the exact Qualcomm NVM firmware selected by the kernel.
+It never hardcodes or generates an address. If firmware was newly provisioned
+and the HCI controller remains at `00:00:00:00:00:00`, reboot the target and
+rerun the test.
 
 ## LAVA
 

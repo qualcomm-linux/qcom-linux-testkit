@@ -177,12 +177,20 @@ if [ -z "$BT_MAC" ] && [ -z "$BT_NAME" ] && [ ! -f "./bt_device_list.txt" ]; the
     test_result_finish "SKIP" "No Bluetooth target and no bt_device_list.txt were provided"
 fi
 
-if ! bt_prepare_ubuntu_stack; then
-    test_result_finish "FAIL" "$TESTNAME FAIL - Ubuntu Bluetooth stack preparation failed"
+if ! bt_prepare_bluetooth_stack; then
+    test_result_finish "FAIL" "$TESTNAME FAIL - Bluetooth stack preparation failed"
 fi
 
-if ! check_dependencies bluetoothctl rfkill expect hciconfig; then
+if ! check_dependencies \
+    bluetoothctl \
+    rfkill \
+    expect \
+    l2ping; then
     test_result_finish "SKIP" "$TESTNAME SKIP - required Bluetooth tools are unavailable"
+fi
+
+if ! command -v hciconfig >/dev/null 2>&1; then
+    log_info "Optional hciconfig command is unavailable, using sysfs and bluetoothctl for adapter discovery"
 fi
 
 log_info "Ensuring Bluetooth runtime readiness before pairing"
@@ -191,7 +199,9 @@ if ! bt_ensure_runtime_ready \
     "$BT_RUNTIME_READY_WAIT" \
     "$BT_RUNTIME_RECOVERY_WAIT" \
     "$BT_RUNTIME_RECOVERY_ATTEMPTS"; then
-    test_result_finish "FAIL" "Bluetooth runtime remained unusable after bounded recovery attempts"
+    test_result_finish \
+        "FAIL" \
+        "${BT_RUNTIME_FAILURE_REASON:-Bluetooth runtime remained unusable after bounded recovery attempts}"
 fi
 
 BT_ADAPTER="$BT_RUNTIME_READY_ADAPTER"

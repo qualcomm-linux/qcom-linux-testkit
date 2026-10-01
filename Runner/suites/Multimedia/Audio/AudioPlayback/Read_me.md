@@ -60,7 +60,8 @@ The test suite includes 10 diverse audio clip configurations covering various sa
 Yocto images must provide the following components. The suite does not change
 the Yocto package flow.
 
-- PipeWire: `pw-play`, `wpctl`
+- PipeWire: `pw-play` or `pw-cat --playback`, plus `wpctl`. CentOS provides
+  these playback clients in the `pipewire-utils` image package.
 - PulseAudio: `paplay`, `pactl`
 - ALSA: `aplay`, `amixer`, `alsaucm` when UCM is available
 - Common tools: `pgrep`, `timeout`, `grep`, `tar`, and either `curl` or `wget`
@@ -70,10 +71,18 @@ the Yocto package flow.
 
 When run as root, the suite uses the shared package provider to install missing
 Ubuntu audio packages. It does not run a blanket distribution upgrade.
-When network download is enabled and neither `curl` nor `wget` is present, the
-same provider installs the OS-specific `audio-download` package set on Debian,
-Ubuntu, or CentOS. Image-managed Yocto targets remain non-installing and skip
-the download when neither tool is provided by the image.
+Network download uses an image-provided `curl` or `wget` and never installs a
+downloader package at runtime. Each displayed download attempt runs one client
+invocation with a finite deadline. When neither tool is available, the suite
+skips the download and reports the missing image prerequisite.
+
+If the target already has a valid global IPv4 address but the generic ICMP
+probe is blocked, the suite preserves the active interface and lets the bounded
+HTTPS download validate endpoint reachability. It does not cycle Wi-Fi, renew
+DHCP, or probe unrelated network services in that state. CentOS targets using
+the systemd-managed `NetworkManager.service` are recognized through `nmcli`
+when network activation is actually required. The absence of
+`systemd-networkd` or ConnMan is not reported when NetworkManager is active.
 
 - `auto` is the default profile. It selects `desktop` when `graphical.target`
   is active and otherwise selects `server`.
@@ -85,6 +94,25 @@ the download when neither tool is provided by the image.
 
 The optional `snd-soc-wcd938x` codec module is loaded only when the running
 kernel provides it. Targets without that module are unchanged.
+
+### CentOS Stream 10 overlay preparation
+
+An explicit `./run.sh --overlay` request ensures EPEL and the Qualcomm CentOS
+10 aarch64 and noarch repositories, refreshes DNF metadata, and installs:
+
+```text
+audioreach-dkms audioreach-pal audioreach-pipewire-plugin
+```
+
+If the DKMS package changes, the suite requests a reboot before validation.
+Base mode continues to use the components provided by the CentOS image.
+
+Backend client checks are read-only after package preparation. PipeWire uses
+`pw-play` when available and falls back to `pw-cat --playback`. A missing
+playback client does not start an additional package-manager transaction.
+Automatic backend selection falls back to an available ALSA path. An explicitly
+requested backend skips with the missing image-package prerequisite before any
+audio-clip download begins.
 
 ```sh
 # Let the suite detect a server or desktop Ubuntu image
@@ -101,13 +129,13 @@ AUDIO_PACKAGE_PROFILE=desktop AUDIO_PACKAGE_UPDATE=1 \
 
 ## Backend and Route Selection
 
-When no backend is requested, the suite uses automatic selection. A physical PipeWire audio sink uses `pw-play`, and a physical PulseAudio sink uses `paplay`. For the `speakers` route, a speaker endpoint takes precedence over headphones, then other physical outputs. Dummy, null, monitor, and loopback PipeWire sinks are not accepted as speaker routes.
+When no backend is requested, the suite uses automatic selection. A physical PipeWire audio sink uses `pw-play` or `pw-cat --playback`, and a physical PulseAudio sink uses `paplay`. For the `speakers` route, a speaker endpoint takes precedence over headphones, then other physical outputs. Dummy, null, monitor, and loopback PipeWire sinks are not accepted as speaker routes.
 
 If automatic selection finds no physical managed speaker sink, the suite probes direct ALSA playback. It selects an ALSA card and PCM from the available device inventory, applies only mixer controls exposed by that card, and runs `aplay -D <device>`. This supports the Shikra primary-MI2S, secondary-TDM, and codec-direct route capabilities without selecting a form factor or assuming card `0`.
 
 An explicit backend request is never replaced:
 
-- `--backend pipewire` or `AUDIO_BACKEND=pipewire` runs `pw-play` only and skips if PipeWire has no physical speaker sink.
+- `--backend pipewire` or `AUDIO_BACKEND=pipewire` runs `pw-play` or `pw-cat --playback` and skips if the `pipewire-utils` playback client or a physical PipeWire speaker sink is absent.
 - `--backend pulseaudio` or `AUDIO_BACKEND=pulseaudio` runs `paplay` only and skips if no matching sink is available.
 - `--backend alsa` or `AUDIO_BACKEND=alsa` runs `aplay` with the discovered ALSA route.
 

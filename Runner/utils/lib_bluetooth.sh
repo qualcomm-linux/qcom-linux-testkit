@@ -409,6 +409,82 @@ CONFIG_EOF
     return 0
 }
 
+# Prepare distribution-specific Bluetooth packages and services.
+# Ubuntu and Debian retain the existing preparation behavior. CentOS ensures
+# the minimal BlueZ and Qualcomm/Atheros firmware package set is present.
+# Yocto and other image-managed distributions return unchanged.
+bt_prepare_bluetooth_stack() {
+    if command -v pkg_detect_os_id >/dev/null 2>&1; then
+        bt_pbs_os_id="$(pkg_detect_os_id 2>/dev/null || echo unknown)"
+    else
+        bt_pbs_os_id="$(
+            bt_os_release_value ID 2>/dev/null |
+                tr '[:upper:]' '[:lower:]'
+        )"
+    fi
+
+    if [ "$bt_pbs_os_id" != "centos" ]; then
+        bt_prepare_ubuntu_stack
+        return $?
+    fi
+
+    if [ "$(id -u 2>/dev/null || echo 1)" -ne 0 ]; then
+        log_fail "CentOS Bluetooth stack preparation must run as root"
+        return 1
+    fi
+
+    if ! command -v pkg_ensure_required_package_set_present \
+        >/dev/null 2>&1; then
+        if [ -n "${TOOLS:-}" ] &&
+           [ -r "$TOOLS/lib_pkg_provider.sh" ]; then
+            # shellcheck disable=SC1090,SC1091
+            . "$TOOLS/lib_pkg_provider.sh"
+        fi
+    fi
+
+    if ! command -v pkg_ensure_required_package_set_present \
+        >/dev/null 2>&1; then
+        log_fail "Bluetooth package-set helper is unavailable"
+        return 1
+    fi
+
+    log_info "CentOS Bluetooth stack preparation: ensuring BlueZ, firmware, and expect packages"
+
+    bt_pbs_firmware_present_before=0
+    if command -v pkg_have_package >/dev/null 2>&1 &&
+       pkg_have_package atheros-firmware; then
+        bt_pbs_firmware_present_before=1
+    fi
+
+    if ! pkg_ensure_required_package_set_present bluetooth; then
+        log_fail "Failed to prepare CentOS Bluetooth packages"
+        return 1
+    fi
+
+    if [ "$bt_pbs_firmware_present_before" -eq 0 ]; then
+        log_warn "atheros-firmware was newly provisioned, reboot the target if the active HCI controller still reports an all-zero BD address"
+    fi
+
+    if command -v systemctl >/dev/null 2>&1; then
+        if ! systemctl start bluetooth.service >/dev/null 2>&1; then
+            log_fail "Failed to start bluetooth.service on CentOS"
+            systemctl status bluetooth.service --no-pager 2>/dev/null || true
+            return 1
+        fi
+
+        if ! systemctl is-active --quiet bluetooth.service; then
+            log_fail "bluetooth.service is not active on CentOS"
+            systemctl status bluetooth.service --no-pager 2>/dev/null || true
+            return 1
+        fi
+
+        log_pass "bluetooth.service is active"
+    fi
+
+    log_pass "CentOS Bluetooth stack packages are ready"
+    return 0
+}
+
 bt_has_controller() {
 # Use plain bluetoothctl list here; the expect wrapper is overkill and
 # sometimes swallows the "Controller ..." line for pipelines.
@@ -540,9 +616,10 @@ bt_scan_devices_expect() {
     mac_id="${MAC_ID:-}"
     [ -z "${mac_id}" ] && [ -n "${1:-}" ] && mac_id="$1"   # allow positional MAC
  
-    # Detect adapter; hciconfig prints "hci0:"; strip trailing colon.
+    # Prefer sysfs discovery because current BlueZ distributions may omit the
+    # deprecated hciconfig utility.
     if [ -z "${adapter}" ]; then
-        adapter="$(hciconfig 2>/dev/null | awk '/^hci[0-9]+/ {print $1}' | head -n1)"
+        adapter="$(listhcis 2>/dev/null | sed -n '1p')"
     fi
     adapter="${adapter%:}"
  
@@ -552,7 +629,9 @@ bt_scan_devices_expect() {
     fi
  
     log_info "Using Bluetooth adapter: ${adapter}"
-    hciconfig "${adapter}" up 2>/dev/null || true
+    if command -v hciconfig >/dev/null 2>&1; then
+        hciconfig "${adapter}" up 2>/dev/null || true
+    fi
     sleep 1
  
     # Expect flow (prompt-tolerant, in-memory capture)
@@ -2139,22 +2218,374 @@ findhcisysfs() {
     return 1
 }
 
+# Normalize and validate a Bluetooth address read from a runtime interface.
+# stdout: uppercase MAC when valid
+bt_normalize_bdaddr() {
+    bt_nba_addr="$(
+        printf '%s' "${1:-}" |
+            tr '[:lower:]' '[:upper:]' |
+            tr -d '[:space:]'
+    )"
+
+    case "$bt_nba_addr" in
+        00:00:00:00:00:00|'')
+            return 1
+            ;;
+        [0-9A-F][0-9A-F]:[0-9A-F][0-9A-F]:[0-9A-F][0-9A-F]:[0-9A-F][0-9A-F]:[0-9A-F][0-9A-F]:[0-9A-F][0-9A-F])
+            printf '%s\n' "$bt_nba_addr"
+            return 0
+            ;;
+    esac
+
+    return 1
+}
+
+# Resolve the device-tree node associated with an HCI adapter.
+# stdout: resolved DT node path
+bt_adapter_dt_node() {
+    bt_adn_adapter="${1:-}"
+    bt_adn_current=""
+    bt_adn_node=""
+
+    [ -n "$bt_adn_adapter" ] || return 1
+    [ -e "/sys/class/bluetooth/$bt_adn_adapter/device" ] || return 1
+
+    bt_adn_current="$(
+        readlink -f "/sys/class/bluetooth/$bt_adn_adapter/device" \
+            2>/dev/null || true
+    )"
+
+    while [ -n "$bt_adn_current" ] && [ "$bt_adn_current" != "/" ]; do
+        if [ -L "$bt_adn_current/of_node" ] ||
+           [ -d "$bt_adn_current/of_node" ]; then
+            bt_adn_node="$(
+                readlink -f "$bt_adn_current/of_node" 2>/dev/null || true
+            )"
+
+            if [ -n "$bt_adn_node" ] && [ -d "$bt_adn_node" ]; then
+                printf '%s\n' "$bt_adn_node"
+                return 0
+            fi
+        fi
+
+        bt_adn_parent="$(dirname "$bt_adn_current")"
+        [ "$bt_adn_parent" != "$bt_adn_current" ] || break
+        bt_adn_current="$bt_adn_parent"
+    done
+
+    return 1
+}
+
+# Read an authoritative Bluetooth address provisioned in device tree.
+# stdout: uppercase MAC when a valid six-byte property is present
+btgetdtbdaddr() {
+    bt_gdba_adapter="${1:-}"
+    bt_gdba_node=""
+    bt_gdba_property=""
+    bt_gdba_bytes=""
+    bt_gdba_addr=""
+
+    bt_gdba_node="$(bt_adapter_dt_node "$bt_gdba_adapter" 2>/dev/null || true)"
+    [ -n "$bt_gdba_node" ] || return 1
+
+    for bt_gdba_name in local-bd-address qcom,local-bd-address; do
+        bt_gdba_property="$bt_gdba_node/$bt_gdba_name"
+        [ -r "$bt_gdba_property" ] || continue
+
+        bt_gdba_bytes="$(
+            od -An -tx1 -N 6 -v "$bt_gdba_property" 2>/dev/null |
+                tr '\n' ' ' |
+                tr -s ' ' |
+                sed 's/^ //;s/ $//'
+        )"
+
+        # Intentional splitting of the six hexadecimal bytes returned by od.
+        # shellcheck disable=SC2086
+        set -- $bt_gdba_bytes
+        [ "$#" -eq 6 ] || continue
+
+        if [ -e "$bt_gdba_node/reversed-bd-address" ]; then
+            bt_gdba_addr="$6:$5:$4:$3:$2:$1"
+        else
+            bt_gdba_addr="$1:$2:$3:$4:$5:$6"
+        fi
+
+        if bt_normalize_bdaddr "$bt_gdba_addr"; then
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+# Resolve the exact Qualcomm NVM firmware selected by the current-boot driver
+# log. Avoid choosing an arbitrary NVM from a multi-board firmware package.
+# stdout: readable firmware path
+bt_find_loaded_nvm_firmware() {
+    bt_flnf_adapter="${1:-}"
+    bt_flnf_name=""
+    bt_flnf_log=""
+    bt_flnf_adapter_log=""
+
+    if command -v get_kernel_log >/dev/null 2>&1; then
+        bt_flnf_log="$(get_kernel_log 2>/dev/null || true)"
+    fi
+
+    [ -n "$bt_flnf_log" ] || return 1
+
+    if [ -n "$bt_flnf_adapter" ]; then
+        bt_flnf_adapter_log="$(
+            printf '%s\n' "$bt_flnf_log" |
+                grep -i -E "Bluetooth:[[:space:]]+${bt_flnf_adapter}:|${bt_flnf_adapter}:" \
+                2>/dev/null || true
+        )"
+
+        if [ -n "$bt_flnf_adapter_log" ]; then
+            bt_flnf_log="$bt_flnf_adapter_log"
+        fi
+    fi
+
+    bt_flnf_name="$(
+        printf '%s\n' "$bt_flnf_log" |
+            awk '
+                {
+                    lower = tolower($0)
+                    marker = "using nvm file:"
+                    start = index(lower, marker)
+
+                    if (start == 0) {
+                        marker = "qca downloading "
+                        start = index(lower, marker)
+                    }
+
+                    if (start == 0) {
+                        next
+                    }
+
+                    value = substr($0, start + length(marker))
+                    sub(/^[[:space:]]+/, "", value)
+                    split(value, fields, /[[:space:]]+/)
+                    gsub(/[,"]+$/, "", fields[1])
+
+                    name = tolower(fields[1])
+                    sub(/^.*\//, "", name)
+
+                    if (name ~ /^(msnv|cmnv|apnv|crnv|htnv|hmtnv|hpnv|wcnhpnv|nvm_)/) {
+                        print fields[1]
+                    }
+                }
+            ' |
+            tail -n 1
+    )"
+
+    [ -n "$bt_flnf_name" ] || return 1
+
+    case "$bt_flnf_name" in
+        /*)
+            for bt_flnf_path in \
+                "$bt_flnf_name" \
+                "$bt_flnf_name.xz" \
+                "$bt_flnf_name.zst"
+            do
+                if [ -r "$bt_flnf_path" ]; then
+                    printf '%s\n' "$bt_flnf_path"
+                    return 0
+                fi
+            done
+            ;;
+        *)
+            for bt_flnf_root in /lib/firmware /usr/lib/firmware; do
+                for bt_flnf_path in \
+                    "$bt_flnf_root/$bt_flnf_name" \
+                    "$bt_flnf_root/$bt_flnf_name.xz" \
+                    "$bt_flnf_root/$bt_flnf_name.zst"
+                do
+                    if [ -r "$bt_flnf_path" ]; then
+                        printf '%s\n' "$bt_flnf_path"
+                        return 0
+                    fi
+                done
+            done
+            ;;
+    esac
+
+    return 1
+}
+
+# Stream a raw or compressed firmware file to stdout.
+bt_stream_firmware() {
+    bt_sf_path="${1:-}"
+
+    [ -r "$bt_sf_path" ] || return 1
+
+    case "$bt_sf_path" in
+        *.xz)
+            if command -v xz >/dev/null 2>&1; then
+                xz -dc "$bt_sf_path"
+            elif command -v xzcat >/dev/null 2>&1; then
+                xzcat "$bt_sf_path"
+            else
+                return 1
+            fi
+            ;;
+        *.zst)
+            if command -v zstd >/dev/null 2>&1; then
+                zstd -q -d -c "$bt_sf_path"
+            elif command -v zstdcat >/dev/null 2>&1; then
+                zstdcat "$bt_sf_path"
+            else
+                return 1
+            fi
+            ;;
+        *)
+            command cat "$bt_sf_path"
+            ;;
+    esac
+}
+
+# Read the BD address from tag 2 of the exact Qualcomm TLV NVM selected by the
+# kernel. Qualcomm stores bdaddr_t bytes least-significant byte first.
+# stdout: uppercase MAC when the firmware contains a valid address
+btgetfirmwarebdaddr() {
+    bt_gfba_adapter="${1:-}"
+    bt_gfba_path="${2:-}"
+    bt_gfba_addr=""
+
+    if [ -z "$bt_gfba_path" ]; then
+        bt_gfba_path="$(
+            bt_find_loaded_nvm_firmware "$bt_gfba_adapter" \
+                2>/dev/null || true
+        )"
+    fi
+
+    [ -n "$bt_gfba_path" ] || return 1
+
+    bt_gfba_addr="$(
+        bt_stream_firmware "$bt_gfba_path" 2>/dev/null |
+            od -An -tu1 -v 2>/dev/null |
+            awk '
+                {
+                    for (i = 1; i <= NF; i++) {
+                        bytes[++count] = $i
+                    }
+                }
+
+                END {
+                    if (count < 4) {
+                        exit 1
+                    }
+
+                    type = bytes[1]
+                    tlv_length = bytes[2] + (bytes[3] * 256) + (bytes[4] * 65536)
+                    offset = 5
+
+                    if (type == 4) {
+                        if (count < 8) {
+                            exit 1
+                        }
+
+                        type = bytes[5]
+                        tlv_length = bytes[6] + (bytes[7] * 256) + (bytes[8] * 65536)
+                        offset = 9
+                    }
+
+                    if (type != 2) {
+                        exit 1
+                    }
+
+                    limit = offset + tlv_length - 1
+                    if (limit > count) {
+                        limit = count
+                    }
+
+                    while ((offset + 11) <= limit) {
+                        tag_id = bytes[offset] + (bytes[offset + 1] * 256)
+                        tag_len = bytes[offset + 2] + (bytes[offset + 3] * 256)
+                        data = offset + 12
+
+                        if ((data + tag_len - 1) > limit) {
+                            exit 1
+                        }
+
+                        if (tag_id == 2 && tag_len == 6) {
+                            printf "%02X:%02X:%02X:%02X:%02X:%02X\n", bytes[data + 5], bytes[data + 4], bytes[data + 3], bytes[data + 2], bytes[data + 1], bytes[data]
+                            exit 0
+                        }
+
+                        offset = data + tag_len
+                    }
+
+                    exit 1
+                }
+            '
+    )" || bt_gfba_addr=""
+
+    bt_normalize_bdaddr "$bt_gfba_addr"
+}
+
 # stdout: MAC if known (e.g. 00:00:00:00:5A:AD)
 # ret: 0=ok, 1=not found
 btgetbdaddr() {
     dev="${1:-}"
- 
+    addr=""
+
+    if [ -z "$dev" ]; then
+        dev="$(listhcis 2>/dev/null | sed -n '1p')"
+    fi
+
+    if [ -n "$dev" ] && [ -r "/sys/class/bluetooth/$dev/address" ]; then
+        addr="$(cat "/sys/class/bluetooth/$dev/address" 2>/dev/null || true)"
+
+        if bt_normalize_bdaddr "$addr"; then
+            return 0
+        fi
+    fi
+
     if command -v hciconfig >/dev/null 2>&1; then
         if [ -n "$dev" ]; then
             addr="$(hciconfig -a "$dev" 2>/dev/null | awk '/BD Address:/ {print $3; exit}')"
         else
             addr="$(hciconfig -a 2>/dev/null        | awk '/BD Address:/ {print $3; exit}')"
         fi
-        if [ -n "$addr" ]; then
-            # IMPORTANT: no log_info here, this is used in command substitution.
-            printf '%s\n' "$addr"
+        if bt_normalize_bdaddr "$addr"; then
             return 0
         fi
+    fi
+
+    if [ -n "$dev" ] && command -v btmgmt >/dev/null 2>&1; then
+        bt_gba_index="${dev#hci}"
+
+        case "$bt_gba_index" in
+            ''|*[!0-9]*)
+                ;;
+            *)
+                if command -v run_with_timeout >/dev/null 2>&1; then
+                    bt_gba_info="$(
+                        run_with_timeout 3 \
+                            btmgmt --index "$bt_gba_index" info \
+                            2>/dev/null || true
+                    )"
+                elif command -v timeout >/dev/null 2>&1; then
+                    bt_gba_info="$(
+                        timeout 3 btmgmt --index "$bt_gba_index" info \
+                            2>/dev/null || true
+                    )"
+                else
+                    bt_gba_info="$(
+                        btmgmt --index "$bt_gba_index" info 2>/dev/null || true
+                    )"
+                fi
+
+                addr="$(
+                    printf '%s\n' "$bt_gba_info" |
+                        awk 'tolower($1) == "addr" { print $2; exit }'
+                )"
+
+                if bt_normalize_bdaddr "$addr"; then
+                    return 0
+                fi
+                ;;
+        esac
     fi
  
     # No logging here either, caller will log if needed.
@@ -2258,46 +2689,130 @@ bt_controller_visible() {
 }
 
 # Usage: btensurepublicaddr hci0
+# Apply a public address through btmgmt using the numeric HCI index.
+btmgmtsetpublicaddr() {
+    bt_mspa_dev="${1:-}"
+    bt_mspa_addr="${2:-}"
+    bt_mspa_index="${bt_mspa_dev#hci}"
+    bt_mspa_output=""
+
+    command -v btmgmt >/dev/null 2>&1 || return 1
+
+    case "$bt_mspa_index" in
+        ''|*[!0-9]*)
+            return 1
+            ;;
+    esac
+
+    if ! bt_mspa_addr="$(bt_normalize_bdaddr "$bt_mspa_addr")"; then
+        return 1
+    fi
+
+    if command -v run_with_timeout >/dev/null 2>&1; then
+        if ! bt_mspa_output="$(
+            run_with_timeout 10 \
+                btmgmt --index "$bt_mspa_index" \
+                public-addr "$bt_mspa_addr" 2>&1
+        )"; then
+            log_warn "btmgmt failed to configure public address $bt_mspa_addr on $bt_mspa_dev"
+            [ -z "$bt_mspa_output" ] || printf '%s\n' "$bt_mspa_output" >&2
+            return 1
+        fi
+    elif command -v timeout >/dev/null 2>&1; then
+        if ! bt_mspa_output="$(
+            timeout 10 btmgmt --index "$bt_mspa_index" \
+                public-addr "$bt_mspa_addr" 2>&1
+        )"; then
+            log_warn "btmgmt failed to configure public address $bt_mspa_addr on $bt_mspa_dev"
+            [ -z "$bt_mspa_output" ] || printf '%s\n' "$bt_mspa_output" >&2
+            return 1
+        fi
+    elif ! bt_mspa_output="$(
+        btmgmt --index "$bt_mspa_index" public-addr "$bt_mspa_addr" 2>&1
+    )"; then
+        log_warn "btmgmt failed to configure public address $bt_mspa_addr on $bt_mspa_dev"
+        [ -z "$bt_mspa_output" ] || printf '%s\n' "$bt_mspa_output" >&2
+        return 1
+    fi
+
+    log_info "btmgmt configured public address $bt_mspa_addr on $bt_mspa_dev"
+    [ -z "$bt_mspa_output" ] || printf '%s\n' "$bt_mspa_output" >&2
+    return 0
+}
+
+# Usage: btensurepublicaddr hci0
 # Logic:
-#   - If bluetoothctl already sees a Controller -> no-op (no expect)
-#   - Else read BD from hciconfig and run "menu mgmt / public-addr <BD>" via btctl_script
+#   - If bluetoothctl already sees a Controller, do nothing
+#   - Otherwise use a valid runtime, device-tree, or selected NVM address
+#   - Prefer the direct btmgmt public-addr command used by MSL hosts
 # Return:
 #   0 = controller visible (already or now)
 #   1 = failed to make visible
 #   2 = could not read BD address
 btensurepublicaddr() {
     dev="${1:-}"
+    mac=""
+    mac_source=""
+    firmware_path=""
  
-    # Already visible: nothing to do.
-    if btcontrollervisible "$dev"; then
+    # A visible controller with a valid runtime address needs no bootstrap.
+    # Do not accept an all-zero controller merely because BlueZ lists it.
+    if btbdok "$dev" && btcontrollervisible "$dev"; then
         log_info "controller already visible via bluetoothctl, skip public-addr"
         return 0
     fi
 
-    if ! btbdok "$dev"; then
-        log_warn "Bluetooth adapter ${dev:-<unknown>} has no valid BD address, public-addr cannot be applied"
-        return 2
+    if btbdok "$dev"; then
+        mac="$(btgetbdaddr "$dev" 2>/dev/null | sed -n '1p')"
+        mac_source="runtime"
+    elif mac="$(btgetdtbdaddr "$dev" 2>/dev/null | sed -n '1p')" &&
+         [ -n "$mac" ]; then
+        mac_source="device-tree"
+    else
+        firmware_path="$(
+            bt_find_loaded_nvm_firmware "$dev" 2>/dev/null || true
+        )"
+
+        if [ -n "$firmware_path" ]; then
+            mac="$(
+                btgetfirmwarebdaddr "$dev" "$firmware_path" \
+                    2>/dev/null | sed -n '1p'
+            )"
+        fi
+
+        if [ -n "$mac" ]; then
+            mac_source="firmware-nvm:$firmware_path"
+        fi
     fi
- 
-    mac="$(
-        btgetbdaddr "$dev" 2>/dev/null \
-        | head -n 1 \
-        | awk '{print $NF}'
-    )"
- 
+
     if [ -z "$mac" ]; then
-        log_warn "could not read bd address ${dev:+for $dev} public-addr cannot be applied"
+        log_warn "Bluetooth adapter ${dev:-<unknown>} has no valid runtime, device-tree, or selected firmware NVM BD address, public-addr cannot be applied"
         return 2
     fi
- 
-    log_info "applying bluetoothctl public-addr $mac"
- 
-    btctl_script "menu mgmt
+
+    log_info "Applying public address $mac from $mac_source to $dev"
+
+    bt_public_addr_applied=0
+    if btmgmtsetpublicaddr "$dev" "$mac"; then
+        bt_public_addr_applied=1
+    elif command -v bluetoothctl >/dev/null 2>&1; then
+        log_warn "Direct btmgmt public-addr failed, trying the bluetoothctl management fallback"
+
+        if btctl_script "menu mgmt
 public-addr $mac
 back
-quit" >/dev/null 2>&1 || true
- 
-    # Poll for controller visibility (BlueZ can be async)
+quit" >/dev/null 2>&1; then
+            bt_public_addr_applied=1
+        fi
+    fi
+
+    if [ "$bt_public_addr_applied" -eq 0 ]; then
+        log_warn "Unable to apply public address $mac to $dev"
+        return 1
+    fi
+
+    # Poll for the runtime address and BlueZ controller visibility because both
+    # are updated asynchronously after the management command completes.
     i=0
     max_wait="${BT_CONTROLLER_VISIBLE_WAIT:-15}"
 
@@ -2307,19 +2822,17 @@ quit" >/dev/null 2>&1 || true
             ;;
     esac
 
-    max_attempts=$(((max_wait + 4) / 5))
-    [ "$max_attempts" -gt 0 ] || max_attempts=1
-
-    while [ "$i" -lt "$max_attempts" ]; do
-        if btcontrollervisible "$dev"; then
-            log_info "controller visible after public-addr $mac"
+    while [ "$i" -lt "$max_wait" ]; do
+        if btbdok "$dev" && btcontrollervisible "$dev"; then
+            log_info "Controller $dev is visible after applying public address $mac"
             return 0
         fi
+
         sleep 1
         i=$((i + 1))
     done
- 
-    log_warn "controller still not visible after public-addr $mac (after ${max_wait}s)"
+
+    log_warn "Controller $dev is not ready after applying public address $mac and waiting ${max_wait}s"
     return 1
 }
 
@@ -3177,37 +3690,57 @@ btpower() {
     return 1
 }
 
+# Return success for public Qualcomm/Atheros Bluetooth firmware and NVM names.
+bt_qca_firmware_name_supported() {
+    bt_qfns_name="$(basename "${1:-}")"
+
+    case "$bt_qfns_name" in
+        msbtfw*|msnv*|cmbtfw*|cmnv*|apbtfw*|apnv*|\
+        crbtfw*|crnv*|htbtfw*|htnv*|hmtbtfw*|hmtnv*|\
+        hpbtfw*|hpnv*|wcnhpbtfw*|wcnhpnv*)
+            return 0
+            ;;
+    esac
+
+    return 1
+}
+
+# Print the directory containing the first readable supported firmware file.
 btfwpresent() {
-    dir=""
-    pattern=""
-    file=""
- 
-    for d in /lib/firmware/qca /usr/lib/firmware/qca /lib/firmware /usr/lib/firmware; do
-        [ -d "$d" ] || continue
- 
-        for pattern in \
-            "msbtfw*.mbn" \
-            "msbtfw*.tlv" \
-            "msnv*.bin" \
-            "cmbtfw*.tlv" \
-            "cmnv*.bin" \
-            "hpbtfw*.tlv" \
-            "wcnhpbtfw*.tlv" \
-            "hmtbtfw*.tlv" \
-            "hmtnv*.bin" \
-            "hpnv*.bin" \
-            "wcnhpnv*.bin"
-        do
-            for file in "$d"/$pattern; do
-                if [ -e "$file" ]; then
-                    dir="$d"
-                    printf '%s\n' "$dir"
-                    return 0
-                fi
-            done
-        done
+    bt_fwp_file=""
+
+    for bt_fwp_root in \
+        /lib/firmware/qca \
+        /usr/lib/firmware/qca \
+        /lib/firmware \
+        /usr/lib/firmware
+    do
+        [ -d "$bt_fwp_root" ] || continue
+
+        bt_fwp_file="$(
+            find "$bt_fwp_root" -maxdepth 4 \
+                \( -type f -o -type l \) -print 2>/dev/null |
+            (
+                while IFS= read -r bt_fwp_candidate ||
+                      [ -n "$bt_fwp_candidate" ]; do
+                    [ -r "$bt_fwp_candidate" ] || continue
+
+                    if bt_qca_firmware_name_supported "$bt_fwp_candidate"; then
+                        printf '%s\n' "$bt_fwp_candidate"
+                        exit 0
+                    fi
+                done
+
+                exit 1
+            )
+        )" || bt_fwp_file=""
+
+        if [ -n "$bt_fwp_file" ]; then
+            dirname "$bt_fwp_file"
+            return 0
+        fi
     done
- 
+
     return 1
 }
 
@@ -3343,6 +3876,10 @@ bt_recover_runtime() {
         bt_rr_action=1
     fi
 
+    if [ -n "$bt_rr_adapter" ]; then
+        btensurepublicaddr "$bt_rr_adapter" || true
+    fi
+
     if [ -n "$bt_rr_adapter" ] && command -v hciconfig >/dev/null 2>&1; then
         hciconfig "$bt_rr_adapter" up >/dev/null 2>&1 || true
         bt_rr_action=1
@@ -3375,6 +3912,8 @@ bt_ensure_runtime_ready() {
     BT_RUNTIME_RECOVERED=0
     # shellcheck disable=SC2034
     BT_RUNTIME_READY_ADAPTER=""
+    # shellcheck disable=SC2034
+    BT_RUNTIME_FAILURE_REASON=""
 
     for bt_err_value in \
         "$bt_err_initial_wait" \
@@ -3388,6 +3927,17 @@ bt_ensure_runtime_ready() {
                 ;;
         esac
     done
+
+    bt_err_bootstrap_adapter="$bt_err_adapter"
+    if [ -z "$bt_err_bootstrap_adapter" ]; then
+        bt_err_bootstrap_adapter="$(listhcis 2>/dev/null | sed -n '1p')"
+    fi
+
+    if [ -n "$bt_err_bootstrap_adapter" ] &&
+       ! btbdok "$bt_err_bootstrap_adapter"; then
+        log_info "Bluetooth adapter $bt_err_bootstrap_adapter has no valid runtime BD address, attempting authoritative public-address bootstrap"
+        btensurepublicaddr "$bt_err_bootstrap_adapter" || true
+    fi
 
     if bt_wait_ready "$bt_err_initial_wait" 2 "$bt_err_adapter"; then
         return 0
@@ -3420,7 +3970,35 @@ bt_ensure_runtime_ready() {
         bt_err_attempt=$((bt_err_attempt + 1))
     done
 
-    log_error "Bluetooth runtime remained unusable after $bt_err_attempts controlled recovery attempts"
+    bt_err_final_adapter="$bt_err_adapter"
+    if [ -z "$bt_err_final_adapter" ]; then
+        bt_err_final_adapter="$(listhcis 2>/dev/null | sed -n '1p')"
+    fi
+
+    bt_err_raw_addr=""
+    if [ -n "$bt_err_final_adapter" ] &&
+       [ -r "/sys/class/bluetooth/$bt_err_final_adapter/address" ]; then
+        bt_err_raw_addr="$(
+            cat "/sys/class/bluetooth/$bt_err_final_adapter/address" \
+                2>/dev/null || true
+        )"
+        bt_err_raw_addr="$(
+            printf '%s' "$bt_err_raw_addr" |
+                tr '[:lower:]' '[:upper:]' |
+                tr -d '[:space:]'
+        )"
+    fi
+
+    if [ "$bt_err_raw_addr" = "00:00:00:00:00:00" ]; then
+        BT_RUNTIME_FAILURE_REASON="Bluetooth adapter $bt_err_final_adapter reports an all-zero BD address after recovery, verify Qualcomm firmware and platform BD-address provisioning, then reboot after any firmware package update"
+    elif [ -n "$bt_err_final_adapter" ]; then
+        BT_RUNTIME_FAILURE_REASON="Bluetooth adapter $bt_err_final_adapter has no valid runtime BD address after recovery, verify Qualcomm firmware and platform BD-address provisioning"
+    else
+        BT_RUNTIME_FAILURE_REASON="No Bluetooth HCI adapter appeared after recovery, verify the kernel driver, firmware, and hardware description"
+    fi
+
+    export BT_RUNTIME_FAILURE_REASON
+    log_error "$BT_RUNTIME_FAILURE_REASON"
     return 1
 }
 
@@ -3439,7 +4017,7 @@ btfwloaded() {
     fatal_re="${BTFW_FATAL_RE:-tx timeout|Reading QCA version information failed|failed to open firmware|firmware file.*not found|download.*firmware.*failed|failed to download.*firmware|timeout waiting for firmware|firmware.*load.*failed}"
  
     # Retry/transient hints.
-    transient_re="${BTFW_TRANSIENT_RE:-Retry BT power ON|retry bt power on|reset|re-init|reinit|failed.*\\(-110\\)}"
+    transient_re="${BTFW_TRANSIENT_RE:-Retry BT power ON|retry bt power on|reset|re-init|reinit|failed.*[(]-110[)]}"
  
     # ---- Collect recent relevant current-boot kernel log ----
     if command -v get_kernel_log >/dev/null 2>&1; then
@@ -3570,35 +4148,9 @@ bthcipresent() {
 btbdok() {
     dev="${1:-}"
     addr=""
- 
-    if [ -n "$dev" ] && [ -r "/sys/class/bluetooth/$dev/address" ]; then
-        addr="$(cat "/sys/class/bluetooth/$dev/address" 2>/dev/null || true)"
-    fi
- 
-    if [ -z "$addr" ] && command -v hciconfig >/dev/null 2>&1; then
-        if [ -n "$dev" ]; then
-            addr="$(hciconfig -a "$dev" 2>/dev/null | awk '/BD Address:/ {print $3; exit}')"
-        else
-            addr="$(hciconfig -a 2>/dev/null | awk '/BD Address:/ {print $3; exit}')"
-        fi
-    fi
- 
-    addr="$(printf '%s' "$addr" | tr '[:lower:]' '[:upper:]' | tr -d '[:space:]')"
- 
-    case "$addr" in
-        '')
-            return 1
-            ;;
-        00:00:00:00:00:00)
-            return 1
-            ;;
-        [0-9A-F][0-9A-F]:[0-9A-F][0-9A-F]:[0-9A-F][0-9A-F]:[0-9A-F][0-9A-F]:[0-9A-F][0-9A-F]:[0-9A-F][0-9A-F])
-            return 0
-            ;;
-        *)
-            return 1
-            ;;
-    esac
+
+    addr="$(btgetbdaddr "$dev" 2>/dev/null || true)"
+    [ -n "$addr" ]
 }
 
 # Robust polling after scan ON:
@@ -3742,57 +4294,41 @@ bt_scan_poll_off() {
     return 1
 }
 
-# Return BD address for a given HCI adapter using hciconfig.
+# Return BD address for a given HCI adapter using sysfs or hciconfig.
 # Prints empty output if the adapter is missing or address cannot be parsed.
 bt_hci_bdaddr() {
     adapter="$1"
 
     [ -n "$adapter" ] || return 1
 
-    if ! command -v hciconfig >/dev/null 2>&1; then
-        return 1
-    fi
-
-    hciconfig "$adapter" 2>/dev/null | awk '
-        /BD Address:/ {
-            for (i = 1; i <= NF; i++) {
-                if ($i == "Address:") {
-                    print $(i + 1)
-                    exit
-                }
-            }
-        }
-    '
+    btgetbdaddr "$adapter"
 }
 
 # Check whether an HCI adapter is usable for BT_ON_OFF.
-# Requires UP RUNNING state and a non-zero BD address.
+# Requires a non-zero BD address. When hciconfig is available, retain its
+# UP/RUNNING check. Otherwise use BlueZ controller visibility as the runtime
+# state evidence. Returns 0 when usable and 1 otherwise, with no output or
+# runtime state changes.
 bt_adapter_is_usable() {
     adapter="$1"
     out=""
-    addr=""
 
     [ -n "$adapter" ] || return 1
 
-    if ! command -v hciconfig >/dev/null 2>&1; then
+    if ! btbdok "$adapter"; then
         return 1
     fi
 
-    out="$(hciconfig "$adapter" 2>/dev/null || true)"
-    [ -n "$out" ] || return 1
+    if command -v hciconfig >/dev/null 2>&1; then
+        out="$(hciconfig "$adapter" 2>/dev/null || true)"
+        if printf '%s\n' "$out" | grep -q 'UP RUNNING'; then
+            return 0
+        fi
 
-    addr="$(bt_hci_bdaddr "$adapter" 2>/dev/null || true)"
-    case "$addr" in
-        ""|"00:00:00:00:00:00")
-            return 1
-            ;;
-    esac
-
-    if printf '%s\n' "$out" | grep -q 'UP RUNNING'; then
-        return 0
+        return 1
     fi
 
-    return 1
+    btcontrollervisible "$adapter"
 }
 
 # Select the best available Bluetooth adapter.
@@ -3845,7 +4381,7 @@ bt_log_hci_candidates() {
     usable="no"
 
     if ! command -v hciconfig >/dev/null 2>&1; then
-        log_warn "hciconfig not available; cannot log HCI adapter candidates."
+        log_info "Optional hciconfig is unavailable, using sysfs and BlueZ adapter evidence"
         return 0
     fi
 

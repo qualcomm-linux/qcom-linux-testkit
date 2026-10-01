@@ -113,13 +113,17 @@ WARN_COUNT=0
 log_info "------------------------------------------------------------"
 log_info "Starting $TESTNAME"
 
-if ! bt_prepare_ubuntu_stack; then
-    test_result_finish "FAIL" "$TESTNAME FAIL - Ubuntu Bluetooth stack preparation failed"
+if ! bt_prepare_bluetooth_stack; then
+    test_result_finish "FAIL" "$TESTNAME FAIL - Bluetooth stack preparation failed"
 fi
 
-log_info "Checking dependencies: bluetoothctl hciconfig lsmod"
-if ! check_dependencies bluetoothctl hciconfig lsmod; then
+log_info "Checking dependencies: bluetoothctl lsmod"
+if ! check_dependencies bluetoothctl lsmod; then
     test_result_finish "SKIP" "$TESTNAME SKIP - required Bluetooth tools are unavailable"
+fi
+
+if ! command -v hciconfig >/dev/null 2>&1; then
+    log_info "Optional hciconfig command is unavailable, using sysfs and bluetoothctl diagnostics"
 fi
 
 # ---------- Bluetooth runtime check/ readiness ----------
@@ -136,7 +140,9 @@ if bt_ensure_runtime_ready \
         test_result_record "PASS" "Bluetooth runtime exposed an HCI adapter with a valid BD address"
     fi
 else
-    test_result_record "FAIL" "Bluetooth runtime remained unusable after bounded recovery attempts"
+    test_result_record \
+        "FAIL" \
+        "${BT_RUNTIME_FAILURE_REASON:-Bluetooth runtime remained unusable after bounded recovery attempts}"
 fi
 
 ADAPTER="$BT_RUNTIME_READY_ADAPTER"
@@ -181,7 +187,7 @@ fi
 if fw_dir="$(btfwpresent 2>/dev/null)"; then
     test_result_record "PASS" "Firmware present in: $fw_dir"
 else
-    log_warn "No BT firmware matching msbtfw*/msnv* or cmbtfw*/cmnv* found under standard firmware paths."
+    log_warn "No supported Qualcomm Bluetooth firmware or NVM file found under standard firmware paths"
     WARN_COUNT=$((WARN_COUNT + 1))
 fi
 
@@ -248,7 +254,9 @@ if command -v btfwloaded >/dev/null 2>&1; then
                 log_warn "No retained BT firmware-load signature found, but BT runtime state is healthy."
                 WARN_COUNT=$((WARN_COUNT + 1))
             else
-                test_result_record "FAIL" "Firmware load/setup is incomplete and Bluetooth runtime state is unhealthy"
+                test_result_record \
+                    "FAIL" \
+                    "Firmware load/setup is incomplete and Bluetooth runtime is unhealthy, verify the image firmware package and reboot after provisioning new firmware"
             fi
             ;;
     esac
@@ -316,7 +324,9 @@ if [ -n "$ADAPTER" ]; then
     if btbdok "$ADAPTER"; then
         test_result_record "PASS" "BD address is valid for $ADAPTER"
     else
-        test_result_record "FAIL" "BD address is invalid or all zeros for $ADAPTER"
+        test_result_record \
+            "FAIL" \
+            "BD address is invalid or all zeros for $ADAPTER, verify Qualcomm firmware and platform BD-address provisioning"
     fi
 fi
 
@@ -341,8 +351,7 @@ log_info "=== hciconfig -a (if available) ==="
 if command -v hciconfig >/dev/null 2>&1; then
     hciconfig -a || true
 else
-    log_warn "hciconfig command not available."
-    WARN_COUNT=$((WARN_COUNT + 1))
+    log_info "Optional hciconfig command is unavailable"
 fi
 
 log_info "=== bluetoothctl list (controllers) ==="

@@ -378,8 +378,42 @@ wifi_dump_debug_info() {
     wifi_dump_runtime_info
 }
 
+# wifi_find_firmware_asset <root> <basename-pattern>...
+# Prints the first readable regular file or symlink matching the ordered
+# patterns. Returns 0 on a match and 1 when the root or asset is unavailable.
+# This helper does not modify the firmware tree.
+wifi_find_firmware_asset() {
+    wifi_ffa_root="$1"
+    shift
+
+    [ -d "$wifi_ffa_root" ] || return 1
+
+    for wifi_ffa_name in "$@"; do
+        wifi_ffa_path="$(
+            find "$wifi_ffa_root" \
+                \( -type f -o -type l \) \
+                -name "$wifi_ffa_name" \
+                -print 2>/dev/null |
+                while IFS= read -r wifi_ffa_candidate; do
+                    if [ -r "$wifi_ffa_candidate" ]; then
+                        printf '%s\n' "$wifi_ffa_candidate"
+                        break
+                    fi
+                done
+        )"
+
+        if [ -n "$wifi_ffa_path" ]; then
+            printf '%s\n' "$wifi_ffa_path"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
 # Detect WiFi firmware family and a representative firmware file under
-# /lib/firmware for ath12k, ath11k, or ath10k based platforms.
+# /lib/firmware for ath12k, ath11k, or ath10k based platforms. Firmware may be
+# an uncompressed file or a readable symlink/file with an .xz or .zst suffix.
 wifi_detect_firmware_info() {
     WIFI_FW_FILE=""
     WIFI_FW_FAMILY=""
@@ -387,18 +421,36 @@ wifi_detect_firmware_info() {
     WIFI_FW_SIZE=""
 
     if [ -d /lib/firmware/ath12k ]; then
-        WIFI_FW_FILE="$(find /lib/firmware/ath12k -type f -name amss.bin -print -quit 2>/dev/null)"
+        WIFI_FW_FILE="$(
+            wifi_find_firmware_asset \
+                /lib/firmware/ath12k \
+                amss.bin \
+                amss.bin.xz \
+                amss.bin.zst
+        )"
         if [ -n "$WIFI_FW_FILE" ]; then
             WIFI_FW_FAMILY="ath12k"
         fi
     fi
 
     if [ -z "$WIFI_FW_FILE" ] && [ -d /lib/firmware/ath11k ]; then
-        WIFI_FW_FILE="$(find /lib/firmware/ath11k -type f -name amss.bin -print -quit 2>/dev/null)"
+        WIFI_FW_FILE="$(
+            wifi_find_firmware_asset \
+                /lib/firmware/ath11k \
+                amss.bin \
+                amss.bin.xz \
+                amss.bin.zst
+        )"
         if [ -n "$WIFI_FW_FILE" ]; then
             WIFI_FW_FAMILY="ath11k"
         else
-            WIFI_FW_FILE="$(find /lib/firmware/ath11k -type f -name wpss.mbn -print -quit 2>/dev/null)"
+            WIFI_FW_FILE="$(
+                wifi_find_firmware_asset \
+                    /lib/firmware/ath11k \
+                    wpss.mbn \
+                    wpss.mbn.xz \
+                    wpss.mbn.zst
+            )"
             if [ -n "$WIFI_FW_FILE" ]; then
                 WIFI_FW_FAMILY="ath11k"
             fi
@@ -406,11 +458,23 @@ wifi_detect_firmware_info() {
     fi
 
     if [ -z "$WIFI_FW_FILE" ] && [ -d /lib/firmware/ath10k ]; then
-        WIFI_FW_FILE="$(find /lib/firmware/ath10k -type f -name wlanmdsp.mbn -print -quit 2>/dev/null)"
+        WIFI_FW_FILE="$(
+            wifi_find_firmware_asset \
+                /lib/firmware/ath10k \
+                wlanmdsp.mbn \
+                wlanmdsp.mbn.xz \
+                wlanmdsp.mbn.zst
+        )"
         if [ -n "$WIFI_FW_FILE" ]; then
             WIFI_FW_FAMILY="ath10k"
         else
-            WIFI_FW_FILE="$(find /lib/firmware/ath10k -type f -name 'firmware-*.bin' -print -quit 2>/dev/null)"
+            WIFI_FW_FILE="$(
+                wifi_find_firmware_asset \
+                    /lib/firmware/ath10k \
+                    'firmware-*.bin' \
+                    'firmware-*.bin.xz' \
+                    'firmware-*.bin.zst'
+            )"
             if [ -n "$WIFI_FW_FILE" ]; then
                 WIFI_FW_FAMILY="ath10k"
             fi
@@ -422,7 +486,7 @@ wifi_detect_firmware_info() {
     fi
 
     WIFI_FW_BASENAME="${WIFI_FW_FILE##*/}"
-    WIFI_FW_SIZE="$(stat -c%s "$WIFI_FW_FILE" 2>/dev/null || echo unknown)"
+    WIFI_FW_SIZE="$(stat -Lc%s "$WIFI_FW_FILE" 2>/dev/null || echo unknown)"
 
     # These variables are intentionally returned to callers through shell scope.
     : "$WIFI_FW_BASENAME" "$WIFI_FW_SIZE"
@@ -469,7 +533,7 @@ wifi_handle_firmware_family() {
             ;;
         ath11k)
             case "$basename" in
-                wpss.mbn)
+                wpss.mbn|wpss.mbn.xz|wpss.mbn.zst)
                     log_info "ath11k WPSS firmware detected, validating wpss remoteproc."
                     if validate_remoteproc_running "wpss"; then
                         log_info "Remoteproc 'wpss' is active and validated."
@@ -478,7 +542,7 @@ wifi_handle_firmware_family() {
                     log_fail "Remoteproc 'wpss' validation failed."
                     return 1
                     ;;
-                amss.bin)
+                amss.bin|amss.bin.xz|amss.bin.zst)
                     log_info "ath11k amss.bin firmware detected, handling PCI/AHB/SNOC class platform."
                     if wifi_load_first_available_module ath11k_pci ath11k_ahb ath11k_snoc ath11k; then
                         return 0

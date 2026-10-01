@@ -1750,8 +1750,9 @@ extract_tar_from_url() {
                     fi
  
                     log_info "Downloading $url -> $tarfile"
-                    if ! try_download "$url" "$tarfile"; then
-                        rc=$?
+                    try_download "$url" "$tarfile"
+                    rc=$?
+                    if [ "$rc" -ne 0 ]; then
                         if [ $rc -eq 60 ]; then
                             log_warn "TLS/handshake problem while downloading (cert/clock/firewall or minimal wget). Marking SKIP."
                             : > "$skip_sentinel" 2>/dev/null || true
@@ -9008,14 +9009,36 @@ net_log_iface_snapshot() {
 # ---- Bring the system online if possible (0 OK, 2 IP/no-internet, 1 no IP) ----
 ensure_network_online() {
     check_network_status_rc; net_rc=$?
-    if [ "$net_rc" -eq 0 ]; then
-        ensure_reasonable_clock || log_warn "Proceeding in limited-network mode."
-        unset net_rc
-        return 0
-    fi
+    case "$net_rc" in
+        0)
+            ensure_reasonable_clock || log_warn "Proceeding in limited-network mode."
+            unset net_rc
+            return 0
+            ;;
+        2)
+            log_info "[NET] A valid IP address is already assigned, preserving the existing network configuration"
+            log_info "[NET] The generic reachability probe was inconclusive, endpoint-specific validation will continue"
+            ensure_reasonable_clock || log_warn "Proceeding in limited-network mode."
+            unset net_rc
+            return 2
+            ;;
+    esac
 
-    if command -v systemctl >/dev/null 2>&1 && command -v check_systemd_services >/dev/null 2>&1; then
-        check_systemd_services NetworkManager systemd-networkd connman || true
+    net_nmcli_available=0
+    if command -v nmcli >/dev/null 2>&1 &&
+       nmcli general status >/dev/null 2>&1; then
+        net_nmcli_available=1
+        log_info "[NET] NetworkManager is available through nmcli"
+    elif command -v systemd_service_is_active >/dev/null 2>&1; then
+        if systemd_service_is_active NetworkManager; then
+            log_info "[NET] NetworkManager service is active"
+        elif systemd_service_is_active systemd-networkd; then
+            log_info "[NET] systemd-networkd service is active"
+        elif systemd_service_is_active connman; then
+            log_info "[NET] ConnMan service is active"
+        elif command -v check_systemd_services >/dev/null 2>&1; then
+            check_systemd_services NetworkManager systemd-networkd connman || true
+        fi
     fi
 
     net_had_any_ip=0
@@ -9031,20 +9054,26 @@ ensure_network_online() {
 
         if command -v is_link_up >/dev/null 2>&1; then
             if ! is_link_up "$net_ifc"; then
-                log_info "[NET] ${net_ifc}: link=down → skipping DHCP"
+                log_info "[NET] ${net_ifc}: link=down, skipping DHCP"
                 continue
             fi
         fi
 
-        log_info "[NET] ${net_ifc}: bringing up and requesting DHCP..."
-        if command -v bringup_interface >/dev/null 2>&1; then
-            bringup_interface "$net_ifc" 2 2 || true
-        fi
+        if [ "$net_nmcli_available" -eq 1 ]; then
+            log_info "[NET] ${net_ifc}: requesting an existing NetworkManager connection"
+            run_with_timeout 15 \
+                nmcli device connect "$net_ifc" >/dev/null 2>&1 || true
+        else
+            log_info "[NET] ${net_ifc}: bringing up and requesting DHCP..."
+            if command -v bringup_interface >/dev/null 2>&1; then
+                bringup_interface "$net_ifc" 2 2 || true
+            fi
 
-        if command -v run_dhcp_client >/dev/null 2>&1; then
-            run_dhcp_client "$net_ifc" 10 >/dev/null 2>&1 || true
-        elif command -v try_dhcp_client_safe >/dev/null 2>&1; then
-            try_dhcp_client_safe "$net_ifc" 8 || true
+            if command -v run_dhcp_client >/dev/null 2>&1; then
+                run_dhcp_client "$net_ifc" 10 >/dev/null 2>&1 || true
+            elif command -v try_dhcp_client_safe >/dev/null 2>&1; then
+                try_dhcp_client_safe "$net_ifc" 8 || true
+            fi
         fi
 
         net_log_iface_snapshot "$net_ifc"
@@ -9054,12 +9083,14 @@ ensure_network_online() {
             0)
                 log_pass "[NET] ${net_ifc}: internet reachable"
                 ensure_reasonable_clock || log_warn "Proceeding in limited-network mode."
-                unset net_ifaces net_ifc net_rc net_had_any_ip
+                unset net_ifaces net_ifc net_rc net_had_any_ip net_nmcli_available
                 return 0
                 ;;
             2)
                 log_warn "[NET] ${net_ifc}: IP assigned but internet not reachable"
-                net_had_any_ip=1
+                log_warn "[NET] Preserving the existing interface state for endpoint-specific validation"
+                unset net_ifaces net_ifc net_rc net_had_any_ip net_nmcli_available
+                return 2
                 ;;
             1)
                 log_info "[NET] ${net_ifc}: still no IP after DHCP attempt"
@@ -9074,10 +9105,13 @@ ensure_network_online() {
     fi
     if [ -n "$net_wifi" ]; then
         net_log_iface_snapshot "$net_wifi"
-        log_info "[NET] ${net_wifi}: bringing up Wi-Fi..."
-
-        if command -v bringup_interface >/dev/null 2>&1; then
-            bringup_interface "$net_wifi" 2 2 || true
+        if [ "$net_nmcli_available" -eq 1 ]; then
+            log_info "[NET] ${net_wifi}: using the existing NetworkManager configuration"
+        else
+            log_info "[NET] ${net_wifi}: bringing up Wi-Fi..."
+            if command -v bringup_interface >/dev/null 2>&1; then
+                bringup_interface "$net_wifi" 2 2 || true
+            fi
         fi
 
         net_creds=""
@@ -9111,7 +9145,7 @@ ensure_network_online() {
 
                 # If nmcli brought us up, do NOT fall back to wpa_supplicant
                 check_network_status_rc; net_rc=$?
-                if [ "$net_rc" -ne 0 ]; then
+                if [ "$net_rc" -eq 1 ]; then
                     log_info "[NET] ${net_wifi}: falling back to wpa_supplicant + DHCP"
                     if command -v wifi_connect_wpa_supplicant >/dev/null 2>&1; then
                         wifi_connect_wpa_supplicant "$net_wifi" "$net_ssid" "$net_pass" || true
@@ -9121,9 +9155,15 @@ ensure_network_online() {
                     fi
                 fi
             else
-                log_info "[NET] ${net_wifi}: no credentials provided → DHCP only"
-                if command -v run_dhcp_client >/dev/null 2>&1; then
-                    run_dhcp_client "$net_wifi" 10 >/dev/null 2>&1 || true
+                if [ "$net_nmcli_available" -eq 1 ]; then
+                    log_info "[NET] ${net_wifi}: no credentials provided, requesting a saved NetworkManager connection"
+                    run_with_timeout 15 \
+                        nmcli device connect "$net_wifi" >/dev/null 2>&1 || true
+                else
+                    log_info "[NET] ${net_wifi}: no credentials provided, DHCP only"
+                    if command -v run_dhcp_client >/dev/null 2>&1; then
+                        run_dhcp_client "$net_wifi" 10 >/dev/null 2>&1 || true
+                    fi
                 fi
             fi
 
@@ -9133,12 +9173,14 @@ ensure_network_online() {
                 0)
                     log_pass "[NET] ${net_wifi}: internet reachable"
                     ensure_reasonable_clock || log_warn "Proceeding in limited-network mode."
-                    unset net_wifi net_ifaces net_ifc net_rc net_had_any_ip net_creds net_ssid net_pass wifi_attempt wifi_max_attempts wifi_retry_delay
+                    unset net_wifi net_ifaces net_ifc net_rc net_had_any_ip net_creds net_ssid net_pass wifi_attempt wifi_max_attempts wifi_retry_delay net_nmcli_available
                     return 0
                     ;;
                 2)
                     log_warn "[NET] ${net_wifi}: IP assigned but internet not reachable"
-                    net_had_any_ip=1
+                    log_warn "[NET] Preserving the existing interface state for endpoint-specific validation"
+                    unset net_wifi net_ifaces net_ifc net_rc net_had_any_ip net_creds net_ssid net_pass wifi_attempt wifi_max_attempts wifi_retry_delay net_nmcli_available
+                    return 2
                     ;;
                 1)
                     log_info "[NET] ${net_wifi}: still no IP after connect/DHCP attempt"
@@ -9147,14 +9189,18 @@ ensure_network_online() {
 
             # If not last attempt, cooldown + cleanup before retry
             if [ "$wifi_attempt" -lt "$wifi_max_attempts" ]; then
-                if command -v wifi_cleanup >/dev/null 2>&1; then
-                    wifi_cleanup "$net_wifi" || true
-                fi
-                if command -v bringup_interface >/dev/null 2>&1; then
-                    bringup_interface "$net_wifi" 2 2 || true
+                if [ "$net_nmcli_available" -eq 1 ]; then
+                    log_info "[NET] ${net_wifi}: preserving NetworkManager state before retry"
+                else
+                    if command -v wifi_cleanup >/dev/null 2>&1; then
+                        wifi_cleanup "$net_wifi" || true
+                    fi
+                    if command -v bringup_interface >/dev/null 2>&1; then
+                        bringup_interface "$net_wifi" 2 2 || true
+                    fi
                 fi
                 if [ "$wifi_retry_delay" -gt 0 ] 2>/dev/null; then
-                    log_info "[NET] ${net_wifi}: retrying in ${wifi_retry_delay}s…"
+                    log_info "[NET] ${net_wifi}: retrying in ${wifi_retry_delay}s"
                     sleep "$wifi_retry_delay"
                 fi
             fi
@@ -9168,8 +9214,9 @@ ensure_network_online() {
     if command -v ensure_udhcpc_script >/dev/null 2>&1; then
         net_script_path="$(ensure_udhcpc_script 2>/dev/null || echo "")"
     fi
-    if [ -n "$net_script_path" ]; then
-        log_info "[NET] udhcpc default.script present → refreshing leases"
+    if [ -n "$net_script_path" ] &&
+       [ "$net_nmcli_available" -ne 1 ]; then
+        log_info "[NET] udhcpc default.script present, refreshing leases"
         for net_ifc in $net_ifaces $net_wifi; do
             [ -n "$net_ifc" ] || continue
             if command -v run_dhcp_client >/dev/null 2>&1; then
@@ -9181,7 +9228,7 @@ ensure_network_online() {
             0)
                 log_pass "[NET] connectivity restored after udhcpc fixup"
                 ensure_reasonable_clock || log_warn "Proceeding in limited-network mode."
-                unset net_script_path net_ifaces net_wifi net_ifc net_rc net_had_any_ip
+                unset net_script_path net_ifaces net_wifi net_ifc net_rc net_had_any_ip net_nmcli_available
                 return 0
                 ;;
             2)
@@ -9192,10 +9239,10 @@ ensure_network_online() {
     fi
 
     if [ "$net_had_any_ip" -eq 1 ] 2>/dev/null; then
-        unset net_script_path net_ifaces net_wifi net_ifc net_rc net_had_any_ip
+        unset net_script_path net_ifaces net_wifi net_ifc net_rc net_had_any_ip net_nmcli_available
         return 2
     fi
-    unset net_script_path net_ifaces net_wifi net_ifc net_rc net_had_any_ip
+    unset net_script_path net_ifaces net_wifi net_ifc net_rc net_had_any_ip net_nmcli_available
     return 1
 }
 

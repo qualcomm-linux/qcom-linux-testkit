@@ -111,12 +111,23 @@ Snapshot JSON files are currently expected only for targets where the files are 
 ## Desktop CAMX overlay flow
 
 Yocto and meta-qcom LAVA images keep their image-provided camera stack and do
-not use this flow. On Debian, Ubuntu, and CentOS, an explicit overlay request
-installs the `camera-nhx` package set:
+not use this flow. On Debian and Ubuntu, an explicit overlay request installs
+the `camera-nhx` package set:
 
 ```text
 camx-dkms camx-glymur libcamx-glymur1 camx-firmware-glymur camx-nhx
 ```
+
+On CentOS Stream 10, the runner follows the Qualcomm overlay installation
+guide and installs the Kodiak package set:
+
+```text
+camx-dkms camx-firmware-kodiak camx-kodiak libcamx-kodiak1
+```
+
+Before a missing CentOS package is installed, the shared package provider
+ensures EPEL and both `qualcomm-linux-aarch64` and
+`qualcomm-linux-noarch` repositories are enabled, then refreshes DNF metadata.
 
 `--overlay` requires the CAMX FIT DTB and uses the compatibility name `camx`.
 The same requirement can be stated explicitly with `--fit-dtb camx`:

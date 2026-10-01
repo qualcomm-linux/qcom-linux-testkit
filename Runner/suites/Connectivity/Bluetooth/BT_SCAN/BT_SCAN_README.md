@@ -59,6 +59,12 @@ Required runtime support:
 /sys/class/bluetooth/hci*
 ```
 
+On CentOS, direct execution verifies `bluez`, `atheros-firmware`, and `expect`
+before validation. If an attached controller exposes an all-zero address, the
+shared helper uses `btmgmt public-addr` with an authoritative address from
+device tree or the exact Qualcomm NVM firmware selected by the kernel. It does
+not hardcode or generate a Bluetooth address.
+
 The test automatically skips if no HCI adapter is found.
 
 ## Basic usage

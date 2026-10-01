@@ -102,6 +102,7 @@ fastcv_prepare_runtime_packages() {
     for fcprp_helper in \
         pkg_provider_init \
         pkg_ensure_host_distro_package_set_present \
+        pkg_prepare_qualcomm_rpm_overlay_repositories \
         pkg_ensure_required_package_set_present \
         pkg_verify_package_set_installed \
         pkg_package_recovery_supported_os; do
@@ -132,20 +133,7 @@ fastcv_prepare_runtime_packages() {
 
     case "$fcprp_os_id" in
         centos|rhel)
-            if ! command -v pkg_ensure_qualcomm_rpm_repository >/dev/null 2>&1; then
-                log_error "FastCV RPM repository preparation helper is unavailable"
-                fcprp_rc=1
-            elif ! pkg_ensure_required_package_set_present \
-                fastcv-rpm-prerequisites; then
-                log_error "FastCV EPEL repository prerequisite installation failed, os=$fcprp_os_id package=epel-release"
-                fcprp_rc=1
-            elif ! command -v pkg_rpm_repository_enabled >/dev/null 2>&1; then
-                log_error "FastCV RPM repository verification helper is unavailable"
-                fcprp_rc=1
-            elif ! pkg_rpm_repository_enabled epel; then
-                log_error "FastCV EPEL repository is not enabled after installing epel-release, os=$fcprp_os_id repository=epel"
-                fcprp_rc=1
-            elif ! pkg_ensure_qualcomm_rpm_repository; then
+            if ! pkg_prepare_qualcomm_rpm_overlay_repositories; then
                 fcprp_rc=1
             fi
             ;;

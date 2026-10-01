@@ -99,7 +99,15 @@ When a whitelist is specified (CLI or `BT_WHITELIST_ENV`), only devices whose MA
 
 ## Troubleshooting
 
-- Ensure `bluetoothctl`, `rfkill`, `expect`, and `hciconfig` are installed and in PATH.
+- Ensure `bluetoothctl`, `rfkill`, and `expect` are installed and in PATH.
+  CentOS direct execution verifies `bluez`, `atheros-firmware`, and `expect`
+  before starting the test.
+  `hciconfig` is optional because current CentOS BlueZ packages omit that
+  deprecated utility. The test uses sysfs and `bluetoothctl` when it is absent.
+- When an attached controller reports an all-zero address, the shared helper
+  invokes `btmgmt public-addr` with an authoritative address read from device
+  tree or the exact Qualcomm NVM firmware selected by the kernel. No address is
+  hardcoded or generated.
 - Confirm the DUT’s Bluetooth adapter is present and powered on.
 - For headless devices, ensure target is in discoverable/pairing mode.
 - Inspect `scan.log` and `pair.log` for detailed errors.

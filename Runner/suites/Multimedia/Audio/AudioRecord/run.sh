@@ -133,7 +133,7 @@ usage() {
 Usage: $0 [options]
   --backend {pipewire|pulseaudio|alsa}
   --source {mic|null}
-  --overlay              Prepare the Debian Qualcomm AudioReach overlay
+  --overlay              Prepare the Debian or CentOS Qualcomm AudioReach overlay
                          Without this flag, use the native/base stack.
   --config-name "record_config1" # Test specific config(s) by name (space-separated)
                                  # Also supports record_config1, record_config2, ..., record_config10
@@ -655,25 +655,28 @@ if [ "$backend_ok" -ne 1 ]; then
   exit 0
 fi
 
-# Dependencies per backend (include ALSA)
+# Package preparation has already completed above. Keep backend-client checks
+# read-only so automatic backend discovery cannot trigger package installation.
 case "$AUDIO_BACKEND" in
   pipewire)
-    if ! check_dependencies wpctl pw-record; then
-      log_skip "$TESTNAME SKIP - missing PipeWire utils"
+    if ! command -v wpctl >/dev/null 2>&1 ||
+       ! command -v pw-record >/dev/null 2>&1; then
+      log_skip "$TESTNAME SKIP - missing PipeWire recording utilities: wpctl and/or pw-record"
       echo "$RESULT_TESTNAME SKIP" > "$RES_FILE"
       exit 0
     fi
     ;;
   pulseaudio)
-    if ! check_dependencies pactl parecord; then
-      log_skip "$TESTNAME SKIP - missing PulseAudio utils"
+    if ! command -v pactl >/dev/null 2>&1 ||
+       ! command -v parecord >/dev/null 2>&1; then
+      log_skip "$TESTNAME SKIP - missing PulseAudio recording utilities: pactl and/or parecord"
       echo "$RESULT_TESTNAME SKIP" > "$RES_FILE"
       exit 0
     fi
     ;;
   alsa)
-    if ! check_dependencies arecord; then
-      log_skip "$TESTNAME SKIP - missing arecord"
+    if ! command -v arecord >/dev/null 2>&1; then
+      log_skip "$TESTNAME SKIP - missing ALSA recording utility: arecord"
       echo "$RESULT_TESTNAME SKIP" > "$RES_FILE"
       exit 0
     fi
@@ -889,22 +892,24 @@ fi
 # If fallback changed backend, ensure deps are present (non-fatal → SKIP)
 case "$AUDIO_BACKEND" in
   pipewire)
-    if ! check_dependencies wpctl pw-record; then
-      log_skip "$TESTNAME SKIP - missing PipeWire utils"
+    if ! command -v wpctl >/dev/null 2>&1 ||
+       ! command -v pw-record >/dev/null 2>&1; then
+      log_skip "$TESTNAME SKIP - missing PipeWire recording utilities: wpctl and/or pw-record"
       echo "$RESULT_TESTNAME SKIP" > "$RES_FILE"
       exit 0
     fi
     ;;
   pulseaudio)
-    if ! check_dependencies pactl parecord; then
-      log_skip "$TESTNAME SKIP - missing PulseAudio utils"
+    if ! command -v pactl >/dev/null 2>&1 ||
+       ! command -v parecord >/dev/null 2>&1; then
+      log_skip "$TESTNAME SKIP - missing PulseAudio recording utilities: pactl and/or parecord"
       echo "$RESULT_TESTNAME SKIP" > "$RES_FILE"
       exit 0
     fi
     ;;
   alsa)
-    if ! check_dependencies arecord; then
-      log_skip "$TESTNAME SKIP - missing arecord"
+    if ! command -v arecord >/dev/null 2>&1; then
+      log_skip "$TESTNAME SKIP - missing ALSA recording utility: arecord"
       echo "$RESULT_TESTNAME SKIP" > "$RES_FILE"
       exit 0
     fi
