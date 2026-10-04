@@ -4,16 +4,21 @@
 
 # FastRPC runtime layout helpers.
 #
-# Supports both Yocto/current and Debian package layouts.
+# Supports Yocto, Debian, Ubuntu, and RPM-based package layouts.
 #
 # Yocto/current:
 # libs : /usr/local/lib
 # test libs : /usr/local/lib/fastrpc_test
 # skeletons : dynamically discovered below /usr/local/share/fastrpc_test
 #
-# Debian:
+# Debian/Ubuntu:
 # libs : /usr/lib/<multiarch>
 # test libs : /usr/lib/<multiarch>/fastrpc_test
+# skeletons : dynamically discovered below /usr/share/fastrpc_test
+#
+# RPM-based:
+# libs : /usr/lib64
+# test libs : /usr/lib64/fastrpc_test
 # skeletons : dynamically discovered below /usr/share/fastrpc_test
 #
 # Optional environment overrides:
@@ -312,7 +317,7 @@ fastrpc_discover_runtime_layout() {
     FASTRPC_LIB_TEST_DIRS_CHECKED="$(fastrpc_append_word_unique "$FASTRPC_LIB_TEST_DIRS_CHECKED" "/usr/local/lib64/fastrpc_test")"
     FASTRPC_SKEL_BASES_CHECKED="$(fastrpc_append_word_unique "$FASTRPC_SKEL_BASES_CHECKED" "/usr/local/share/fastrpc_test")"
 
-    # Debian/multiarch layout.
+    # Debian/Ubuntu multiarch layout.
     if [ -n "$FASTRPC_MULTIARCH_TRIPLET" ]; then
         FASTRPC_LIB_SYS_DIRS_CHECKED="$(fastrpc_append_word_unique "$FASTRPC_LIB_SYS_DIRS_CHECKED" "/usr/lib/$FASTRPC_MULTIARCH_TRIPLET")"
         FASTRPC_LIB_TEST_DIRS_CHECKED="$(fastrpc_append_word_unique "$FASTRPC_LIB_TEST_DIRS_CHECKED" "/usr/lib/$FASTRPC_MULTIARCH_TRIPLET/fastrpc_test")"
@@ -659,6 +664,46 @@ extract_test_summary_counts() {
     case "$skipped" in ''|*[!0-9]*) skipped=0 ;; esac
 
     printf '%s:%s:%s:%s\n' "$total" "$passed" "$failed" "$skipped"
+}
+
+# fastrpc_invocation_domain_unsupported_reason LOG_FILE DOMAIN_ID
+# Detect output proving that the installed test payload cannot represent a selected FastRPC domain.
+# Inputs: retained invocation log and numeric domain ID. Output: a stable reason token on stdout.
+# Returns: 0 when client-side domain support is absent, 1 otherwise. Side effects: none.
+fastrpc_invocation_domain_unsupported_reason() {
+    invocation_log="$1"
+    invocation_domain="$2"
+
+    [ -r "$invocation_log" ] || return 1
+
+    case "$invocation_domain" in
+        ''|*[!0-9]*)
+            return 1
+            ;;
+    esac
+
+    if grep -Eiq \
+        "unable to get domain struct[[:space:]]+$invocation_domain([^[:digit:]]|$)" \
+        "$invocation_log"; then
+        printf '%s\n' "test-client-domain-table-missing"
+        return 0
+    fi
+
+    if grep -Eiq \
+        "domain([[:space:]]+id)?[[:space:]:=]+$invocation_domain([^[:digit:]]|$).*(unsupported|not supported|invalid)" \
+        "$invocation_log"; then
+        printf '%s\n' "test-client-domain-unsupported"
+        return 0
+    fi
+
+    if grep -Eiq \
+        "(unsupported|not supported|invalid).*domain([[:space:]]+id)?[[:space:]:=]+$invocation_domain([^[:digit:]]|$)" \
+        "$invocation_log"; then
+        printf '%s\n' "test-client-domain-unsupported"
+        return 0
+    fi
+
+    return 1
 }
 
 # log_dsp_remoteproc_status

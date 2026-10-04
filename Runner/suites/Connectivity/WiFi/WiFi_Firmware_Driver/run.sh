@@ -67,7 +67,8 @@ suite_rc=0
 
 log_info "=== WiFi Firmware Detection ==="
 if ! wifi_detect_firmware_info; then
-    log_skip "$TESTNAME SKIP - No ath12k/ath11k/ath10k WiFi firmware found under /lib/firmware"
+    log_skip \
+        "$TESTNAME SKIP - No readable ath12k/ath11k/ath10k WiFi firmware asset found under /lib/firmware, including .xz and .zst files"
     echo "$TESTNAME SKIP" >"$RES_FILE"
     exit 0
 fi

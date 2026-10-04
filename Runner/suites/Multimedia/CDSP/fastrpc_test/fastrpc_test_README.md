@@ -16,6 +16,9 @@ Supported capabilities:
   character endpoints. The fallback cannot discover PD support directly, so it uses the documented
   conservative protocol map. The fallback recognizes both `sdsp` and the public `slpi` remoteproc
   identity for the sensor DSP. Host, test, and DSP skeleton libraries remain runtime-discovered.
+  The functional invocation is the final capability proof. If an older or vendor-specific test
+  payload cannot represent a runtime-ready domain, that invocation is reported as FAIL without
+  relying on package-version or distribution checks.
 - Multiple iterations with a required finite timeout.
 - Precise control over binary location via `--bin-dir`.
 - Line-buffered output through `stdbuf` when available.
@@ -26,7 +29,7 @@ Supported capabilities:
 - CI-ready logs with timestamps and per-iteration, per-domain/PD results
 - Parameterized control (`--arch`, `--repeat`, `--timeout`, `--bin-dir`, `--domain-mode`,
   `--domain`, `--domain-name`, `--pd-mode`, `--unsigned-pd`, `--verbose`)
-- Auto-discovery of system libraries and DSP skeletons for both Yocto and Debian layouts
+- Auto-discovery of system libraries and DSP skeletons for Yocto, Debian, Ubuntu, and RPM layouts
 - Runtime domain and PD discovery without SoC-name filtering
 
 ## Prerequisites
@@ -40,16 +43,18 @@ Have these on the target (or specify paths with the flags below):
   is absent.
 - FastRPC system libraries and DSP skeletons auto-discovered from standard locations:
   - Yocto: `/usr/local/lib`, `/usr/local/lib/fastrpc_test`, `/usr/local/share/fastrpc_test`
-  - Debian: `/usr/lib/<multiarch>`, `/usr/lib/<multiarch>/fastrpc_test`, `/usr/share/fastrpc_test`
-  - RPM-based images: `/usr/lib64`, `/usr/lib64/fastrpc_test`, `/usr/share/fastrpc_test`
+  - Debian/Ubuntu: `/usr/lib/<multiarch>`, `/usr/lib/<multiarch>/fastrpc_test`, `/usr/share/fastrpc_test`
+  - CentOS and other RPM-based images: `/usr/lib64`, `/usr/lib64/fastrpc_test`, `/usr/share/fastrpc_test`
 - A selected DSP skeleton directory must contain the complete calculator, HAP example, and
   multithreading skeleton set. Discovered directories are prepended to the semicolon-separated
   `DSP_LIBRARY_PATH` used by the public `fastrpc_test` utility while preserving existing DSP
   search entries. The same merged value is exported through the domain-specific library paths.
 - Optional but recommended:
   - `stdbuf` for line-buffered output. Execution remains bounded without it.
-- The suite does not install packages at runtime. Missing optional image assets are reported as
-  SKIP unless the operator explicitly selected a domain whose required runtime library is absent.
+- The suite does not install packages at runtime on Yocto, Debian, Ubuntu, CentOS, or other
+  distributions. Provision `fastrpc_test`, its host libraries, and DSP skeletons in the image.
+- Missing optional image assets are reported as SKIP unless the operator explicitly selected a
+  domain whose required runtime library is absent.
 
 ## Directory Structure
 
@@ -141,7 +146,10 @@ An explicitly selected domain fails when it is unavailable, lacks its runtime li
 support the requested PD mode. Automatic selection from the runtime fallback excludes domains
 without complete remoteproc and endpoint evidence. When `fastrpc-healthcheck` reports an online,
 FastRPC-supported domain, a missing endpoint or required runtime library is treated as a broken
-installation and fails the suite.
+installation and fails the suite. The runner does not infer client capability from a distro name or
+package version. When runtime fallback discovers a domain but the installed `fastrpc_test` payload
+reports that it cannot represent that domain, the invocation is classified as FAIL so the image or
+package gap remains visible until a matching payload is provisioned. Other domains still execute.
 
 ### LAVA integration example
 
@@ -186,6 +194,10 @@ installation and fails the suite.
   domains continue.
 - **Unsupported automatic domain**: Logged with the healthcheck reason and excluded. Other
   runnable domains continue.
+- **Test payload lacks a runtime-ready domain**: A retained invocation log proving that the
+  installed client cannot represent the selected numeric domain is classified as FAIL. This is
+  feature probing, not a package-version check, so it behaves the same on Yocto, Debian, Ubuntu,
+  and CentOS and automatically starts passing when a capable package is provisioned.
 - **Offline explicitly requested domain**: Fails with the healthcheck or remoteproc state.
 - **Missing runtime artifacts**: When the capability source is `fastrpc-healthcheck`, a domain
   missing its endpoint or required runtime library fails the suite — healthcheck has declared it
@@ -194,6 +206,8 @@ installation and fails the suite.
   Missing shared test libraries or DSP skeletons skip the suite before execution.
 - **Binary resolved to /bin/fastrpc_test**: Blocked by default. Set `ALLOW_BIN_FASTRPC=1` or
   use `--bin-dir` to a non-`/bin` path.
+- **Missing binary on any distribution**: Package installation is not attempted. The suite reports
+  SKIP with the expected image-provided binary path.
 - **Session create errors with -U 1**: If unsigned PD returns `0x80000416`, confirm your image
   includes unsigned shells/policies (or use `--pd-mode signed-only`).
 - **Domain not discovered**: Check `dmesg` for remoteproc firmware load errors. The test
@@ -208,7 +222,8 @@ installation and fails the suite.
 
 - Domain and PD support are derived from `fastrpc-healthcheck` when available. The fallback is
   selected only when the tool is absent and uses runtime remoteproc and endpoint evidence, with
-  a conservative protocol mapping for PD support.
+  a conservative protocol mapping for PD support. Actual invocation output then provides the
+  distro-independent functional proof that the installed client supports the selected domain.
 - The existing `/usr/lib/dsp` compatibility links are prepared before healthcheck captures its
   capability report, so the report and the subsequent functional run observe the same layout.
 - This suite runs the public `fastrpc_test` character-device path and therefore requires either

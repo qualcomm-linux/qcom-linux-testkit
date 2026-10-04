@@ -10,7 +10,8 @@ This test is useful for verifying basic WiFi firmware and driver readiness befor
 
 - Required command-line utilities are available.
 - The SoC model is detected from device tree when available.
-- WiFi firmware is found under `/lib/firmware`.
+- WiFi firmware is found under `/lib/firmware`, including readable symlinks
+  and kernel-supported `.xz` or `.zst` compressed files.
 - The WiFi firmware family is detected.
 - Family-specific runtime preparation succeeds.
 - Family-specific modules are visible.
@@ -97,7 +98,8 @@ The test passes when:
 The test skips when:
 
 - Required tools are missing.
-- No supported WiFi firmware is found under `/lib/firmware`.
+- No supported uncompressed, `.xz`, or `.zst` WiFi firmware file or readable
+  symlink is found under `/lib/firmware`.
 
 ## FAIL criteria
 

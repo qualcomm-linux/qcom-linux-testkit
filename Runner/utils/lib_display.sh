@@ -5562,6 +5562,9 @@ display_prepare_desktop_graphics_stack() {
     dpdgs_rc=0
     dpdgs_package_changed=0
     dpdgs_boot_changed=0
+    dpdgs_dkms_package="kgsl-dkms"
+    dpdgs_dkms_before=""
+    dpdgs_dkms_after=""
 
     if [ -z "$dpdgs_gbm_package" ]; then
         if command -v pkg_detect_os_id >/dev/null 2>&1 &&
@@ -5582,6 +5585,7 @@ display_prepare_desktop_graphics_stack() {
             for dpdgs_helper in \
                 pkg_package_set_contains \
                 pkg_ensure_optional_package_set_present \
+                pkg_installed_package_version \
                 pkg_package_has_file_matching \
                 mrv_qcom_gpu_validate_boot_mode \
                 display_select_egl_vendor; do
@@ -5596,6 +5600,11 @@ display_prepare_desktop_graphics_stack() {
                 return 1
             fi
 
+            dpdgs_dkms_before="$(
+                pkg_installed_package_version \
+                    "$dpdgs_dkms_package" 2>/dev/null || true
+            )"
+
             if ! pkg_ensure_optional_package_set_present \
                 graphics \
                 qli-staging \
@@ -5603,6 +5612,17 @@ display_prepare_desktop_graphics_stack() {
                 --overlay; then
                 log_fail "$dpdgs_testname FAIL - failed to ensure Qualcomm graphics overlay package set"
                 return 1
+            fi
+
+            dpdgs_dkms_after="$(
+                pkg_installed_package_version \
+                    "$dpdgs_dkms_package" 2>/dev/null || true
+            )"
+
+            if [ "$dpdgs_dkms_before" != "$dpdgs_dkms_after" ]; then
+                log_info "Qualcomm graphics kernel package changed, package=$dpdgs_dkms_package version=${dpdgs_dkms_before:-not-installed}->${dpdgs_dkms_after:-not-installed}"
+                log_skip "$dpdgs_testname SKIP - Qualcomm overlay packages are ready, reboot required to activate KGSL"
+                return 2
             fi
 
             if ! pkg_package_has_file_matching \

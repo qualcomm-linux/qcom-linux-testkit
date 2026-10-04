@@ -10,7 +10,7 @@
 These scripts automate validation of video **encoding** and **decoding** on Qualcomm Linux platforms running a Yocto-based rootfs.
 They drive the public `iris_v4l2_test` app: <https://github.com/quic/v4l-video-test-app>.
 
-The suite includes a **reboot-free video stack switcher** (upstream ↔ downstream), a **Kodiak (QCS6490/RB3gen2) firmware swap flow**, and robust **pre-flight checks** (rootfs size, network bootstrap, module sanity, device nodes).
+The suite includes a **reboot-free video stack switcher** (upstream ↔ downstream), an optional **Kodiak (QCS6490/RB3gen2) firmware override flow**, and robust **pre-flight checks** (rootfs size, network bootstrap, module sanity, device nodes).
 
 ---
 
@@ -148,13 +148,23 @@ cd <target_path>/Runner
 | `--app /path/to/iris_v4l2_test` | Override test app path |
 | `--stack auto|upstream|downstream|base|overlay|up|down|both` | Select target stack (use `both` for BASE→OVERLAY two-pass) |
 | `--platform lemans|monaco|kodiak` | Force platform (else auto-detect) |
-| `--downstream-fw PATH` | **Kodiak**: path to DS firmware (e.g. `vpu20_1v.mbn`) |
+| `--downstream-fw PATH` | **Kodiak**: optional custom firmware override. Without it, the runner uses upstream image-provided firmware. |
 | `--ko-dir DIR[:DIR2:...]` | *(Opt‑in)* Additional directories to search for `.ko*` files during resolution |
 | `--ko-tree ROOT` | *(Opt‑in)* Use `modprobe -d ROOT` (expects `ROOT/lib/modules/$(uname -r)`) |
 | `--ko-tar FILE.tar[.gz|.xz|.zst]` | *(Opt‑in)* Unpack once into `/run/iris_mods/$KVER`; auto-derives `--ko-tree` or `--ko-dir` |
 | `--ko-prefer-custom` | *(Opt‑in)* Prefer custom module sources (KO_DIRS/KO_TREE) before system |
 
 > **Default remains unchanged.** If you omit all `--ko-*` flags, the runner uses the system module tree and `modinfo`/`modprobe` resolution only.
+
+On Debian and Ubuntu, selecting `--stack downstream`, `--stack overlay`, or the
+overlay half of `--stack both` uses the existing APT sources to prepare the
+`iris-vpu-dkms` package. On CentOS Stream 10, the same selection ensures EPEL
+and both Qualcomm RPM repositories, refreshes DNF metadata, and prepares the
+`iris-vpu` package. These packages run DKMS, `depmod`, and module activation in
+their post-install flow. Immediately after package provisioning, the runner
+validates the resulting module state without repeating `modprobe` operations.
+Yocto and other image-managed systems continue to use image-provided packages
+and the runner-managed module switch.
 
 ---
 
@@ -193,7 +203,10 @@ export PASSWORD="WIFI_PASSWORD"
 # or create ./ssid_list.txt with:  WIFI_SSID WIFI_PASSWORD
 ```
 
-When network remains unreachable and clips are missing, **decode cases are SKIPPED** (not failed).
+When a valid IP route exists but a generic ICMP probe is inconclusive, the
+runner preserves the interface and tries the configured media URL directly.
+When no IP route exists or the media endpoint is unavailable and clips are
+missing, **decode cases are SKIPPED** (not failed).
 
 ---
 
@@ -209,16 +222,22 @@ When network remains unreachable and clips are missing, **decode cases are SKIPP
 
 The runner:
 1. Prints **pre/post** module snapshots and any runtime/persistent modprobe blocks
-2. Switches stacks without reboot (uses runtime blacklists under `/run/modprobe.d`)
-3. **Refreshes** `/dev/video*` & `/dev/media*` with udev and **prunes** stale nodes
-4. Applies small **waits/retries** around unload/load and de‑blacklist/blacklist paths
+2. Uses package-managed module activation after provisioning on Debian, Ubuntu, and CentOS
+3. Switches stacks without reboot on Yocto/image-managed systems (uses runtime blacklists under `/run/modprobe.d`)
+4. **Refreshes** `/dev/video*` & `/dev/media*` with udev and **prunes** stale nodes
+5. Applies small **waits/retries** around unload/load and de‑blacklist/blacklist paths
 
 ---
 
 ## Kodiak Firmware Flows
 
-### Downstream (custom blob)
-When `--stack downstream` and you pass `--downstream-fw /path/to/vpu20_1v.mbn`:
+### Downstream
+
+Kodiak downstream runs use the upstream firmware already provisioned by the
+image. A separate firmware file is not required.
+
+When an explicit custom firmware override is needed, pass
+`--downstream-fw /path/to/vpu20_1v.mbn`:
 1. The blob is copied to: `/lib/firmware/qcom/vpu/vpu20_p1_gen2.mbn`
 2. Previous image is backed up to: `/opt/video-fw-backups/vpu20_p1_gen2.mbn.<timestamp>.bak`
 3. Runner tries **remoteproc restart**, then **module reload**, then **unbind/bind** (with short waits between steps)
@@ -260,7 +279,12 @@ export VIDEO_FW_BACKUP_DIR=/opt
 ./run.sh --stack upstream
 ```
 
-### Kodiak: downstream with custom firmware (live swap)
+### Kodiak: downstream with image-provided firmware
+```sh
+./run.sh --platform kodiak --stack downstream
+```
+
+### Kodiak: downstream with an optional custom firmware override
 ```sh
 ./run.sh --platform kodiak --stack downstream --downstream-fw /data/fw/vpu20_1v.mbn
 ```
@@ -350,4 +374,3 @@ export VIDEO_INTER_TEST_SLEEP=3
   Ensure time is sane (TLS), network is reachable, and provide Wi‑Fi creds via env or `ssid_list.txt`. The downloader uses BusyBox‑compatible flags with retries and a final TLS‑lenient attempt if needed. When the network remains unreachable, the runner **SKIPs** decode cases.
 
 ---
-

@@ -111,6 +111,11 @@ The test reports `FAIL` when:
 
 ## Command Line Usage
 
+On CentOS Stream 10, `--overlay` prepares EPEL and the Qualcomm aarch64 and
+noarch RPM repositories, refreshes DNF metadata, and installs
+`audioreach-dkms`, `audioreach-pal`, and `audioreach-pipewire-plugin`. The
+default mode continues to use image-provided audio components.
+
 ```sh
 ./run.sh [options]
 ```

@@ -38,6 +38,11 @@ fi
 # shellcheck disable=SC1091
 . "$TOOLS/lib_video.sh"
 
+if [ -r "$TOOLS/lib_pkg_provider.sh" ]; then
+    # shellcheck disable=SC1090,SC1091
+    . "$TOOLS/lib_pkg_provider.sh"
+fi
+
 TESTNAME="Video_V4L2_Runner"
 RES_FILE="./${TESTNAME}.res"
 
@@ -105,7 +110,7 @@ Usage: $0 [--config path.json|/path/dir] [--dir DIR] [--pattern GLOB]
           [--junit FILE] [--dry-run] [--verbose]
           [--stack auto|upstream|downstream|base|overlay|up|down|both]
           [--platform lemans|monaco|kodiak]
-          [--downstream-fw PATH] [--force]
+          [--downstream-fw PATH] [--force] # optional Kodiak firmware override
           [--app /path/to/iris_v4l2_test]
           [--ssid SSID] [--password PASS]
           [--ko-dir DIR[:DIR2:...]] # opt-in: search these dirs for .ko on failure
@@ -339,16 +344,6 @@ if [ -n "$VIDEO_APP" ] && [ -f "$VIDEO_APP" ] && [ ! -x "$VIDEO_APP" ]; then
     fi
 fi
 
-# ---- Default firmware path for Kodiak downstream if CLI not given ----
-if [ -z "${VIDEO_FW_DS:-}" ]; then
-    default_fw="/data/vendor/iris_test_app/firmware/vpu20_1v.mbn"
-    if [ -f "$default_fw" ]; then
-        VIDEO_FW_DS="$default_fw"
-        export VIDEO_FW_DS
-        log_info "Using default downstream firmware path: $VIDEO_FW_DS"
-    fi
-fi
-
 # Decide final app path: if --app given, require it; otherwise search PATH, /usr/bin, /data/vendor/iris_test_app
 final_app=""
 
@@ -478,7 +473,8 @@ else
     log_info "Sub-run: skipping initial network bring-up."
 fi
 
-# --- Early guard: bail out BEFORE any download if Kodiak-downstream lacks --downstream-fw ---
+# Validate an explicitly requested Kodiak firmware override before downloads.
+# Kodiak normally uses the firmware already provisioned by the image.
 early_plat="$VIDEO_PLATFORM"
 if [ -z "$early_plat" ]; then
     early_plat="$(video_detect_platform)"
@@ -486,10 +482,22 @@ fi
 
 early_stack="$(video_normalize_stack "$VIDEO_STACK")"
 
-if [ "$early_plat" = "kodiak" ] && [ "$early_stack" = "downstream" ] && [ -z "${VIDEO_FW_DS:-}" ]; then
-    log_skip "On Kodiak, downstream/overlay requires --downstream-fw <file>; skipping run."
-    printf '%s\n' "$TESTNAME SKIP" >"$RES_FILE"
-    exit 0
+if [ "$early_plat" = "kodiak" ]; then
+    case "$early_stack" in
+        downstream|both)
+            if [ -n "${VIDEO_FW_DS:-}" ] && [ ! -f "$VIDEO_FW_DS" ]; then
+                log_fail "$TESTNAME FAIL - requested Kodiak firmware override does not exist: $VIDEO_FW_DS"
+                printf '%s\n' "$TESTNAME FAIL" >"$RES_FILE"
+                exit 1
+            fi
+
+            if [ -n "${VIDEO_FW_DS:-}" ]; then
+                log_info "Kodiak downstream will use the explicit firmware override: $VIDEO_FW_DS"
+            else
+                log_info "Kodiak downstream will use upstream image-provided firmware"
+            fi
+            ;;
+    esac
 fi
 
 # --- Optional early fetch of bundle (best-effort, ALWAYS in LOG_ROOT) — only once
@@ -505,11 +513,20 @@ if [ "$TOP_LEVEL_RUN" -eq 1 ]; then
             export LOG_DIR
 
             if command -v check_network_status_rc >/dev/null 2>&1; then
-                if ! check_network_status_rc; then
-                    log_info "Network unreachable; skipping early media bundle fetch."
-                else
-                    extract_tar_from_url "$TAR_URL" || true
-                fi
+                check_network_status_rc
+                early_network_rc=$?
+
+                case "$early_network_rc" in
+                    1)
+                        log_info "No configured IP route is available, skipping early media bundle fetch"
+                        ;;
+                    0|2)
+                        if [ "$early_network_rc" -eq 2 ]; then
+                            log_info "Generic reachability is inconclusive, trying the configured media endpoint"
+                        fi
+                        extract_tar_from_url "$TAR_URL" || true
+                        ;;
+                esac
             else
                 extract_tar_from_url "$TAR_URL" || true
             fi
@@ -681,22 +698,9 @@ if [ "${VIDEO_STACK}" = "both" ]; then
     base_status="$(printf '%s\n' "$base_res_line" | awk '{print $2}')"
     overlay_status="$(printf '%s\n' "$overlay_res_line" | awk '{print $2}')"
 
-    overlay_reason=""
-    plat_for_reason="$VIDEO_PLATFORM"
-    if [ -z "$plat_for_reason" ]; then
-        plat_for_reason="$(video_detect_platform)"
-    fi
-    if [ "$overlay_status" = "SKIP" ] && [ "$plat_for_reason" = "kodiak" ] && [ -z "${VIDEO_FW_DS:-}" ]; then
-        overlay_reason="missing --downstream-fw"
-    fi
-
     if [ "$rc_base" -eq 0 ] && [ "$rc_overlay" -eq 0 ] ; then
         if [ "$base_status" = "PASS" ] && [ "$overlay_status" = "SKIP" ]; then
-            if [ -n "$overlay_reason" ]; then
-                log_info "[both] upstream/base executed and PASS; downstream/overlay SKIP ($overlay_reason). Overall PASS."
-            else
-                log_info "[both] upstream/base executed and PASS; downstream/overlay SKIP. Overall PASS."
-            fi
+            log_info "[both] upstream/base executed and PASS; downstream/overlay SKIP. Overall PASS."
         elif [ "$base_status" = "SKIP" ] && [ "$overlay_status" = "PASS" ]; then
             log_info "[both] downstream/overlay executed and PASS; upstream/base SKIP. Overall PASS."
         else
@@ -750,6 +754,65 @@ VIDEO_STACK="$(video_normalize_stack "$VIDEO_STACK")"
 pre_stack="$(video_stack_status "$plat")"
 log_info "Current video stack (pre): $pre_stack"
 
+VIDEO_OS_ID="unknown"
+if command -v pkg_detect_os_id >/dev/null 2>&1; then
+    VIDEO_OS_ID="$(pkg_detect_os_id 2>/dev/null || true)"
+elif [ -r /etc/os-release ]; then
+    VIDEO_OS_ID="$(
+        sed -n 's/^ID=//p' /etc/os-release |
+            sed -n '1p' |
+            tr -d '"' |
+            tr '[:upper:]' '[:lower:]'
+    )"
+fi
+
+VIDEO_PACKAGE_MANAGED_STACK=0
+VIDEO_PACKAGE_RECOVERY_APPLICABLE=0
+video_package_set_ready_before=0
+
+if [ "$VIDEO_STACK" = "downstream" ]; then
+    case "$VIDEO_OS_ID" in
+        debian|ubuntu|centos)
+            VIDEO_PACKAGE_RECOVERY_APPLICABLE=1
+            ;;
+    esac
+fi
+
+if [ "$VIDEO_PACKAGE_RECOVERY_APPLICABLE" -eq 1 ]; then
+    for required_helper in \
+        pkg_provider_init \
+        pkg_verify_package_set_installed \
+        pkg_ensure_optional_package_set_present; do
+        if ! command -v "$required_helper" >/dev/null 2>&1; then
+            log_fail "$TESTNAME FAIL - required video overlay package helper is unavailable: $required_helper"
+            printf '%s\n' "$TESTNAME FAIL" >"$RES_FILE"
+            exit 1
+        fi
+    done
+
+    pkg_provider_init
+
+    if pkg_verify_package_set_installed video-overlay; then
+        video_package_set_ready_before=1
+    fi
+
+    if ! pkg_ensure_optional_package_set_present \
+        video-overlay \
+        none \
+        auto \
+        --overlay; then
+        log_fail "$TESTNAME FAIL - failed to ensure Qualcomm video overlay package set"
+        printf '%s\n' "$TESTNAME FAIL" >"$RES_FILE"
+        exit 1
+    fi
+
+    log_pass "Qualcomm video overlay package set is ready"
+
+    if [ "$video_package_set_ready_before" -eq 0 ]; then
+        VIDEO_PACKAGE_MANAGED_STACK=1
+    fi
+fi
+
 # Kodiak + upstream → install backup firmware to /lib/firmware before switching
 if [ "$plat" = "kodiak" ]; then
     case "$VIDEO_STACK" in
@@ -760,21 +823,12 @@ if [ "$plat" = "kodiak" ]; then
     esac
 fi
 
-# ---- Enforce --downstream-fw on Kodiak when requesting downstream/overlay (SKIP if unmet) ----
-if [ "$plat" = "kodiak" ]; then
-    case "$VIDEO_STACK" in
-        downstream|overlay|down)
-            if [ -z "$VIDEO_FW_DS" ] || [ ! -f "$VIDEO_FW_DS" ]; then
-                log_skip "On Kodiak, downstream/overlay requires --downstream-fw <file>; skipping run."
-                printf '%s\n' "$TESTNAME SKIP" >"$RES_FILE"
-                exit 0
-            fi
-            ;;
-    esac
-fi
-
 # --- Optional cleanup: robust capture + normalization of post-stack value ---
-video_dump_stack_state "pre"
+video_stack_probe_mode="full"
+if [ "$VIDEO_PACKAGE_MANAGED_STACK" -eq 1 ]; then
+    video_stack_probe_mode="loaded-only"
+fi
+video_dump_stack_state "pre" "$video_stack_probe_mode"
 
 # --- Custom .ko staging (only if user provided --ko-dir) ---
 if [ -n "${KO_DIRS:-}" ]; then
@@ -808,7 +862,12 @@ video_step "" "Apply desired stack = $VIDEO_STACK"
 stack_tmp="$LOG_DIR/.ensure_stack.$$.out"
 : > "$stack_tmp"
 
-video_ensure_stack "$VIDEO_STACK" "$plat" >"$stack_tmp" 2>&1 || true
+if [ "$VIDEO_PACKAGE_MANAGED_STACK" -eq 1 ]; then
+    log_info "Package-managed video stack, validating module state without runner modprobe operations"
+    video_stack_status "$plat" >"$stack_tmp" 2>&1 || true
+else
+    video_ensure_stack "$VIDEO_STACK" "$plat" >"$stack_tmp" 2>&1 || true
+fi
 
 if [ -s "$stack_tmp" ]; then
     total_lines="$(wc -l < "$stack_tmp" 2>/dev/null | tr -d ' ')"
@@ -829,7 +888,7 @@ fi
 
 log_info "Video stack (post): $post_stack"
 
-video_dump_stack_state "post"
+video_dump_stack_state "post" "$video_stack_probe_mode"
 
 # --- Custom .ko load assist (only if user provided --ko-dir) ---
 if [ -n "${KO_DIRS:-}" ]; then
@@ -1069,7 +1128,10 @@ while IFS= read -r cfg; do
                 sleep "${NET_STABILIZE_SLEEP:-5}"
 
                 if command -v check_network_status_rc >/dev/null 2>&1; then
-                    if ! check_network_status_rc; then
+                    check_network_status_rc
+                    case_network_rc=$?
+
+                    if [ "$case_network_rc" -eq 1 ]; then
                         ce=2
                     fi
                 elif command -v check_network_status >/dev/null 2>&1; then

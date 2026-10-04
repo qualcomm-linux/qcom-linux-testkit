@@ -54,7 +54,8 @@ https://softwarecenter.qualcomm.com/nexus/rpm/centos/10/os/noarch/
 ```
 
 When needed, their definitions are written to
-`/etc/yum.repos.d/qualcomm-linux.repo`. The suite then checks and installs:
+`/etc/yum.repos.d/qualcomm-linux.repo`. The suite runs the documented metadata
+cleanup and cache refresh before it checks and installs:
 
 ```text
 qcom-fastcv-binaries libfastcvopt-devel

@@ -59,7 +59,8 @@ https://softwarecenter.qualcomm.com/nexus/rpm/centos/10/os/noarch/
 When neither repository ID is already enabled, the suite creates
 `/etc/yum.repos.d/qualcomm-linux.repo` with the
 `qualcomm-linux-aarch64` and `qualcomm-linux-noarch` definitions from the RPM
-image setup guide. It then checks and installs:
+image setup guide. The suite runs the documented metadata cleanup and cache
+refresh before it checks and installs:
 
 ```text
 qcom-fastcv-binaries libfastcvopt-devel

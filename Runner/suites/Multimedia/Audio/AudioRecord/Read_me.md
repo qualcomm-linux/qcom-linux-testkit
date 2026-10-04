@@ -81,6 +81,17 @@ If the matching remoteproc is `running`, the suite records its name and firmware
 
 ## Overlay Build Support
 
+On CentOS Stream 10, an explicit `./run.sh --overlay` request ensures EPEL and
+the Qualcomm aarch64 and noarch RPM repositories, refreshes DNF metadata, and
+installs `audioreach-dkms`, `audioreach-pal`, and
+`audioreach-pipewire-plugin`. If the DKMS package changes, reboot before
+rerunning validation. Yocto remains image-provided and non-installing.
+
+Backend client checks are read-only after package preparation. A missing
+`pw-record`, `wpctl`, `parecord`, `pactl`, or `arecord` does not start an
+additional package-manager transaction and instead produces a clean SKIP for
+the unavailable recording path.
+
 For overlay builds using audioreach kernel modules, the test automatically:
 - Detects the overlay build configuration
 - Sets required DMA heap permissions

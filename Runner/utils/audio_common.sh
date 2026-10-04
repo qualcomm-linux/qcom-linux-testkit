@@ -96,47 +96,24 @@ resolve_clip() {
 
 # audio_ensure_download_client
 # Ensures that curl or wget is available. Takes no arguments and emits no
-# machine-readable stdout. It may install the mapped audio-download package set
-# on Debian, Ubuntu, or CentOS and writes diagnostics through log_* helpers.
-# Returns 0 when a downloader is available and 1 otherwise. Image-managed
-# distributions are never modified.
+# machine-readable stdout. Returns 0 when an image-provided downloader is
+# available and 1 otherwise. Runtime package installation is intentionally not
+# attempted by an audio test.
 audio_ensure_download_client() {
   if command -v curl >/dev/null 2>&1 ||
      command -v wget >/dev/null 2>&1; then
     return 0
   fi
 
-  if command -v pkg_ensure_host_distro_package_set_present >/dev/null 2>&1; then
-    log_info "Audio asset download requires curl or wget, attempting mapped package recovery"
-    pkg_ensure_host_distro_package_set_present audio-download
-    aedc_recovery_rc=$?
-
-    case "$aedc_recovery_rc" in
-      0)
-        ;;
-      2)
-        log_warn "Audio downloader package recovery is not enabled for this image-managed OS"
-        ;;
-      *)
-        log_error "Failed to recover the audio-download package set"
-        ;;
-    esac
-  fi
-
-  if command -v curl >/dev/null 2>&1 ||
-     command -v wget >/dev/null 2>&1; then
-    return 0
-  fi
-
-  log_error "No downloader is available, install curl or wget"
+  log_error "No image-provided downloader is available, provision curl or wget"
   return 1
 }
 
 # audio_download_with_any <url> <outfile>
 # Downloads the non-empty URL to the output path using an available curl or
-# wget client. It may recover the OS-specific audio-download package set and
-# writes downloader output to stdout and stderr. Returns the downloader status,
-# or 1 when neither client is available. The caller owns output-file cleanup.
+# wget client and writes downloader output to stdout and stderr. Returns the
+# downloader status, or 1 when neither client is available. The caller owns
+# output-file cleanup.
 audio_download_with_any() {
   url="$1"
   out="$2"
@@ -185,10 +162,9 @@ audio_has_runnable_discovery_clips() {
 # audio_fetch_assets_from_url <url>
 # Downloads and extracts the audio archive URL into AUDIO_CLIPS_BASE_DIR. The
 # URL must be non-empty. The function writes diagnostic logs and temporary
-# archive files, installs the mapped audio-download package set on supported
-# host distributions only when neither curl nor wget exists, and emits no
+# archive files, uses only image-provided download clients, and emits no
 # machine-readable stdout. Returns 0 when runnable clips are ready and 1 when
-# downloader recovery, download, extraction, or validation fails.
+# download, extraction, or validation fails.
 audio_fetch_assets_from_url() {
   url="$1"
   clips_dir="${AUDIO_CLIPS_BASE_DIR:-AudioClips}"
@@ -229,26 +205,45 @@ audio_fetch_assets_from_url() {
     rm -f "$fetch_log" >/dev/null 2>&1 || true
 
     download_ok=0
+    fetch_client=""
 
-    if command -v curl >/dev/null 2>&1; then
-      log_info "exec: curl -fL --retry 3 --retry-delay 2 --connect-timeout 20 -o \"$archive_path\" \"$url\" (attempt ${fetch_attempt}/${fetch_attempts})"
-      if curl -fL --retry 3 --retry-delay 2 --connect-timeout 20 -o "$archive_path" "$url" >"$fetch_log" 2>&1; then
+    if command -v curl >/dev/null 2>&1 &&
+       command -v wget >/dev/null 2>&1; then
+      if [ $((fetch_attempt % 2)) -eq 1 ]; then
+        fetch_client="curl"
+      else
+        fetch_client="wget"
+      fi
+    elif command -v curl >/dev/null 2>&1; then
+      fetch_client="curl"
+    elif command -v wget >/dev/null 2>&1; then
+      fetch_client="wget"
+    fi
+
+    if [ "$fetch_client" = "curl" ]; then
+      log_info "exec: curl -fL --connect-timeout 20 --max-time 120 -o \"$archive_path\" \"$url\" (attempt ${fetch_attempt}/${fetch_attempts})"
+      if audio_exec_with_timeout 125 \
+          curl -fL \
+          --connect-timeout 20 \
+          --max-time 120 \
+          -o "$archive_path" \
+          "$url" >"$fetch_log" 2>&1; then
         download_ok=1
       else
         log_warn "curl download failed on attempt ${fetch_attempt}/${fetch_attempts}, showing last lines from $fetch_log"
         tail -n 20 "$fetch_log" 2>/dev/null || true
       fi
-    fi
-
-    if [ "$download_ok" -ne 1 ]; then
-      if command -v wget >/dev/null 2>&1; then
-        log_info "exec: wget --tries=3 --timeout=20 -O \"$archive_path\" \"$url\" (attempt ${fetch_attempt}/${fetch_attempts})"
-        if wget --tries=3 --timeout=20 -O "$archive_path" "$url" >"$fetch_log" 2>&1; then
-          download_ok=1
-        else
-          log_warn "wget download failed on attempt ${fetch_attempt}/${fetch_attempts}, showing last lines from $fetch_log"
-          tail -n 20 "$fetch_log" 2>/dev/null || true
-        fi
+    elif [ "$fetch_client" = "wget" ]; then
+      log_info "exec: wget --tries=1 --timeout=20 -O \"$archive_path\" \"$url\" (attempt ${fetch_attempt}/${fetch_attempts})"
+      if audio_exec_with_timeout 125 \
+          wget --tries=1 \
+          --timeout=20 \
+          -O "$archive_path" \
+          "$url" >"$fetch_log" 2>&1; then
+        download_ok=1
+      else
+        log_warn "wget download failed on attempt ${fetch_attempt}/${fetch_attempts}, showing last lines from $fetch_log"
+        tail -n 20 "$fetch_log" 2>/dev/null || true
       fi
     fi
 
@@ -5016,6 +5011,8 @@ audio_prepare_audioreach_udev_rule() {
 #   Debian overlay    - ensure audio-base and Debian AudioReach package sets
 #   Ubuntu server     - ensure ALSA utilities
 #   Ubuntu desktop    - ensure ALSA, PipeWire, PipeWire-Pulse, and WirePlumber
+#   CentOS base       - use image-provided components
+#   CentOS overlay    - ensure the documented Qualcomm AudioReach RPM set
 #   other distros     - no-op until their package mappings are verified
 #
 # Environment:
@@ -5071,7 +5068,7 @@ audio_prepare_test_packages() {
       log_info "Native image detected, Audio package preparation is not required"
       return 0
       ;;
-    debian|ubuntu)
+    debian|ubuntu|centos)
       ;;
     *)
       log_info "Audio package preparation is not enabled for os=$atp_os_id"
@@ -5079,7 +5076,7 @@ audio_prepare_test_packages() {
       ;;
   esac
  
-  # Debian and Ubuntu package preparation must run from root orchestration.
+  # Host-distribution package preparation must run from root orchestration.
   if [ "$(id -u 2>/dev/null || echo 1)" -ne 0 ]; then
     log_fail "Audio package preparation must run as root, os=$atp_os_id"
     return 1
@@ -5148,6 +5145,12 @@ audio_prepare_test_packages() {
     return 0
   fi
 
+  if [ "$atp_os_id" = "centos" ] &&
+     [ "$atp_overlay_requested" -eq 0 ]; then
+    log_info "CentOS base Audio mode uses image-provided components"
+    return 0
+  fi
+
   ###########################################################################
   # Debian base mode
   ###########################################################################
@@ -5169,7 +5172,7 @@ audio_prepare_test_packages() {
   fi
  
   ###########################################################################
-  # Debian AudioReach overlay mode
+  # Debian and CentOS AudioReach overlay mode
   ###########################################################################
  
   if ! command -v pkg_ensure_optional_package_set_present \
@@ -5184,24 +5187,37 @@ audio_prepare_test_packages() {
     return 1
   fi
  
+  case "$atp_os_id" in
+    centos)
+      atp_plugin_package="audioreach-pipewire-plugin"
+      atp_dkms_package="audioreach-dkms"
+      atp_support_package="audioreach-pal"
+      ;;
+    *)
+      atp_plugin_package="audioreach-pipewire-plugin"
+      atp_dkms_package="audioreach-kernel-dkms"
+      atp_support_package="audioreach-config"
+      ;;
+  esac
+
   # Capture AudioReach package versions before package preparation. These
   # values let us distinguish an already-ready target from an install or
   # upgrade performed during this invocation.
   atp_before_plugin="$(
     pkg_installed_package_version \
-      audioreach-pipewire-plugin 2>/dev/null ||
+      "$atp_plugin_package" 2>/dev/null ||
       true
   )"
  
   atp_before_dkms="$(
     pkg_installed_package_version \
-      audioreach-kernel-dkms 2>/dev/null ||
+      "$atp_dkms_package" 2>/dev/null ||
       true
   )"
  
-  atp_before_config="$(
+  atp_before_support="$(
     pkg_installed_package_version \
-      audioreach-config 2>/dev/null ||
+      "$atp_support_package" 2>/dev/null ||
       true
   )"
  
@@ -5214,31 +5230,31 @@ audio_prepare_test_packages() {
       auto \
       --overlay \
       "$@"; then
-    log_fail "Failed to ensure Debian AudioReach package set"
+    log_fail "Failed to ensure $atp_os_id AudioReach package set"
     return 1
   fi
  
   atp_after_plugin="$(
     pkg_installed_package_version \
-      audioreach-pipewire-plugin 2>/dev/null ||
+      "$atp_plugin_package" 2>/dev/null ||
       true
   )"
  
   atp_after_dkms="$(
     pkg_installed_package_version \
-      audioreach-kernel-dkms 2>/dev/null ||
+      "$atp_dkms_package" 2>/dev/null ||
       true
   )"
  
-  atp_after_config="$(
+  atp_after_support="$(
     pkg_installed_package_version \
-      audioreach-config 2>/dev/null ||
+      "$atp_support_package" 2>/dev/null ||
       true
   )"
  
   if [ "$atp_before_plugin" != "$atp_after_plugin" ] ||
      [ "$atp_before_dkms" != "$atp_after_dkms" ] ||
-     [ "$atp_before_config" != "$atp_after_config" ]; then
+     [ "$atp_before_support" != "$atp_after_support" ]; then
     AUDIO_OVERLAY_PACKAGES_CHANGED=1
     export AUDIO_OVERLAY_PACKAGES_CHANGED
  
@@ -5248,8 +5264,8 @@ audio_prepare_test_packages() {
       log_info "AudioReach PipeWire plugin version changed: ${atp_before_plugin:-not-installed} -> ${atp_after_plugin:-not-installed}"
     fi
  
-    if [ "$atp_before_config" != "$atp_after_config" ]; then
-      log_info "AudioReach configuration version changed: ${atp_before_config:-not-installed} -> ${atp_after_config:-not-installed}"
+    if [ "$atp_before_support" != "$atp_after_support" ]; then
+      log_info "AudioReach support package changed, package=$atp_support_package version=${atp_before_support:-not-installed}->${atp_after_support:-not-installed}"
     fi
  
     if [ "$atp_before_dkms" != "$atp_after_dkms" ]; then
@@ -5285,7 +5301,7 @@ audio_prepare_test_packages() {
     return 1
   fi
  
-  log_pass "Debian AudioReach package set is ready"
+  log_pass "$atp_os_id AudioReach package set is ready"
   return 0
 }
 

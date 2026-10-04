@@ -421,6 +421,8 @@ pkg_lookup_key_in_map() {
 }
 
 # Resolve command to package names using map.
+# Stdout is reserved for the mapped package list because callers use command
+# substitution. Diagnostics must be written to stderr.
 pkg_lookup_packages_for_command() {
     lookup_cmd="$1"
     lookup_provider="$(pkg_active_provider)"
@@ -429,7 +431,7 @@ pkg_lookup_packages_for_command() {
     lookup_map_file="$(pkg_resolve_path "$PKG_PACKAGE_MAP")"
 
     if [ ! -r "$lookup_map_file" ]; then
-        pkg_log_warn "Package map file is not readable, $lookup_map_file"
+        pkg_log_warn "Package map file is not readable, $lookup_map_file" >&2
         return 1
     fi
 
@@ -459,7 +461,7 @@ pkg_lookup_packages_for_command() {
         return 0
     fi
 
-    pkg_log_warn "No package mapping found for command, os=$lookup_os_id provider=$lookup_provider cmd=$lookup_cmd"
+    pkg_log_warn "No package mapping found for command, os=$lookup_os_id provider=$lookup_provider cmd=$lookup_cmd" >&2
     return 1
 }
 
@@ -617,6 +619,12 @@ pkg_ensure_optional_package_set() {
             if [ "${PKG_APT_DEBUSINE_SOURCE:-none}" != "$old_optional_source" ] ||
                [ "${PKG_APT_DEBUSINE_SUITE:-auto}" != "$old_optional_suite" ]; then
                 rm -f "${PKG_APT_UPDATED_MARK:-/tmp/qcom_testkit_apt_updated}" 2>/dev/null || true
+            fi
+            ;;
+        rpm)
+            if ! pkg_prepare_qualcomm_rpm_overlay_repositories; then
+                pkg_log_fail "Qualcomm RPM overlay repository preparation failed, os=$optional_os_id set=$optional_set_name"
+                return 1
             fi
             ;;
     esac
@@ -1656,7 +1664,7 @@ pkg_rpm_repository_enabled() {
     esac
     [ -n "$prre_tool" ] || return 1
 
-    if ! prre_repo_list="$($prre_tool repolist enabled 2>/dev/null)"; then
+    if ! prre_repo_list="$($prre_tool repolist 2>/dev/null)"; then
         return 1
     fi
 
@@ -1671,8 +1679,8 @@ pkg_rpm_repository_enabled() {
 # Returns: 0 when both repositories are already enabled or configured, and
 # 1 when the RPM provider, privileges, architecture, OS version, or
 # configuration fails.
-# Side effects: may create PKG_QCOM_RPM_REPO_FILE and invalidate the RPM
-# metadata-update marker. Existing repository definitions are not overwritten.
+# Side effects: may create PKG_QCOM_RPM_REPO_FILE and refresh RPM metadata.
+# Existing repository definitions are not overwritten.
 pkg_ensure_qualcomm_rpm_repository() {
     qrr_os_id="$(pkg_detect_os_id)"
     qrr_os_version="$(pkg_os_release_value VERSION_ID || true)"
@@ -1699,7 +1707,7 @@ pkg_ensure_qualcomm_rpm_repository() {
         return 1
     fi
 
-    if ! qrr_repo_list="$($qrr_tool repolist enabled 2>/dev/null)"; then
+    if ! qrr_repo_list="$($qrr_tool repolist 2>/dev/null)"; then
         pkg_log_fail "Could not inspect enabled RPM repositories, tool=$qrr_tool"
         return 1
     fi
@@ -1787,7 +1795,7 @@ pkg_ensure_qualcomm_rpm_repository() {
     rm -f "$qrr_temp_file"
     rm -f "$PKG_RPM_UPDATED_MARK" 2>/dev/null || true
 
-    if ! qrr_repo_list="$($qrr_tool repolist enabled 2>/dev/null)"; then
+    if ! qrr_repo_list="$($qrr_tool repolist 2>/dev/null)"; then
         pkg_log_fail "Could not verify enabled Qualcomm RPM repositories, tool=$qrr_tool file=$PKG_QCOM_RPM_REPO_FILE"
         rm -f "$PKG_QCOM_RPM_REPO_FILE"
         return 1
@@ -1803,7 +1811,12 @@ pkg_ensure_qualcomm_rpm_repository() {
         return 1
     fi
 
-    pkg_log_pass "Configured Qualcomm RPM repositories, file=$PKG_QCOM_RPM_REPO_FILE"
+    if ! pkg_rpm_update; then
+        pkg_log_fail "Qualcomm RPM repositories were configured but metadata refresh failed, file=$PKG_QCOM_RPM_REPO_FILE"
+        return 1
+    fi
+
+    pkg_log_pass "Configured Qualcomm RPM repositories and refreshed metadata, file=$PKG_QCOM_RPM_REPO_FILE"
     return 0
 }
 
@@ -1838,6 +1851,70 @@ pkg_rpm_update() {
     fi
 
     return "$rpm_update_rc"
+}
+
+# pkg_prepare_qualcomm_rpm_overlay_repositories
+# Prepare the documented CentOS 10 repositories used by Qualcomm overlays.
+# Inputs: none. Output: no machine-readable stdout contract.
+# Returns: 0 when EPEL and both Qualcomm repositories are enabled with current
+# metadata, 1 when repository preparation fails, and 0 when not applicable.
+# Side effects: on supported CentOS/RHEL aarch64 targets, may install
+# epel-release, create PKG_QCOM_RPM_REPO_FILE, clean RPM metadata, and rebuild
+# the package-manager cache. Call only from explicit package preparation paths.
+pkg_prepare_qualcomm_rpm_overlay_repositories() {
+    pqr_os_id="$(pkg_detect_os_id)"
+    pqr_provider="$(pkg_active_provider)"
+    pqr_epel_was_installed=0
+
+    case "$pqr_os_id" in
+        centos|rhel)
+            ;;
+        *)
+            return 0
+            ;;
+    esac
+
+    if [ "$pqr_provider" != "rpm" ]; then
+        pkg_log_fail "Qualcomm RPM overlay repository preparation requires the rpm provider, os=$pqr_os_id provider=$pqr_provider"
+        return 1
+    fi
+
+    if pkg_have_package epel-release; then
+        pqr_epel_was_installed=1
+    fi
+
+    if ! pkg_ensure_required_package_set_present \
+        qualcomm-rpm-prerequisites; then
+        pkg_log_fail "EPEL repository prerequisite installation failed, os=$pqr_os_id package=epel-release"
+        return 1
+    fi
+
+    if ! pkg_rpm_repository_enabled epel; then
+        pkg_log_fail "EPEL repository is not enabled after installing epel-release, os=$pqr_os_id repository=epel"
+        return 1
+    fi
+
+    if [ "$pqr_epel_was_installed" -eq 0 ]; then
+        rm -f "$PKG_RPM_UPDATED_MARK" 2>/dev/null || true
+    fi
+
+    if ! pkg_ensure_qualcomm_rpm_repository; then
+        return 1
+    fi
+
+    if ! pkg_rpm_repository_enabled qualcomm-linux-aarch64 ||
+       ! pkg_rpm_repository_enabled qualcomm-linux-noarch; then
+        pkg_log_fail "Qualcomm RPM repository verification failed, required=qualcomm-linux-aarch64,qualcomm-linux-noarch"
+        return 1
+    fi
+
+    if ! pkg_rpm_update; then
+        pkg_log_fail "Qualcomm RPM overlay metadata refresh failed"
+        return 1
+    fi
+
+    pkg_log_pass "Qualcomm RPM overlay repositories are ready, repositories=epel,qualcomm-linux-aarch64,qualcomm-linux-noarch"
+    return 0
 }
 
 # Optionally upgrade rpm packages.

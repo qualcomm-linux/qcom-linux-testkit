@@ -276,16 +276,19 @@ video_list_runtime_blocks() {
 # -------------------------------------------------------------------------
 video_dump_stack_state() {
     when="$1" # pre|post
+    probe_mode="${2:-full}"
 
     log_info "Modules ($when):"
     log_info "lsmod (iris/venus):"
     "$LSMOD" 2>/dev/null | awk 'NR==1 || $1 ~ /^(iris_vpu|qcom_iris|venus_core|venus_dec|venus_enc)$/ {print}'
 
-    video_modprobe_dryrun qcom_iris
-    video_modprobe_dryrun iris_vpu
-    video_modprobe_dryrun venus_core
-    video_modprobe_dryrun venus_dec
-    video_modprobe_dryrun venus_enc
+    if [ "$probe_mode" = "full" ]; then
+        video_modprobe_dryrun qcom_iris
+        video_modprobe_dryrun iris_vpu
+        video_modprobe_dryrun venus_core
+        video_modprobe_dryrun venus_dec
+        video_modprobe_dryrun venus_enc
+    fi
 
     log_info "runtime blocks:"
     video_list_runtime_blocks
@@ -974,9 +977,13 @@ video_hot_switch_modules() {
                     rc=1
                 fi
 
-                log_info "Kodiak: invoking firmware swap/reload helper (if VIDEO_FW_DS provided)"
-                if ! video_kodiak_swap_and_reload "${VIDEO_FW_DS}"; then
-                    log_warn "Kodiak: swap/reload helper reported failure (continuing)"
+                if [ -n "${VIDEO_FW_DS:-}" ] && [ -f "$VIDEO_FW_DS" ]; then
+                    log_info "Kodiak: applying the explicit downstream firmware override"
+                    if ! video_kodiak_swap_and_reload "$VIDEO_FW_DS"; then
+                        log_warn "Kodiak: firmware override swap/reload reported failure"
+                    fi
+                else
+                    log_info "Kodiak: using upstream image-provided firmware for the downstream stack"
                 fi
                 video_usleep "${MOD_SETTLE_SLEEP}"
 
@@ -1456,22 +1463,42 @@ video_ensure_clips_present_or_fetch() {
     fi
 
     if command -v ensure_network_online >/dev/null 2>&1; then
-        if ! ensure_network_online; then
-            log_warn "Network offline/limited; cannot fetch media bundle"
-            rm -f "$tmp_list" 2>/dev/null || true
-            return 2
-        fi
+        ensure_network_online
+        video_network_rc=$?
+
+        case "$video_network_rc" in
+            0)
+                ;;
+            1)
+                log_warn "No configured IP route is available, cannot fetch media bundle"
+                rm -f "$tmp_list" 2>/dev/null || true
+                return 2
+                ;;
+            2)
+                log_info "Generic reachability is inconclusive, trying the configured media endpoint"
+                ;;
+        esac
     fi
 
     if [ -n "$tu" ]; then
         log_info "Attempting fetch via TAR_URL=$tu"
-        if extract_tar_from_url "$tu"; then
-            rm -f "$tmp_list" 2>/dev/null || true
-            return 0
-        fi
-        log_warn "Fetch/extract failed for TAR_URL"
+        extract_tar_from_url "$tu"
+        video_fetch_rc=$?
         rm -f "$tmp_list" 2>/dev/null || true
-        return 1
+
+        case "$video_fetch_rc" in
+            0)
+                return 0
+                ;;
+            2)
+                log_warn "Media endpoint is unavailable for this environment"
+                return 2
+                ;;
+            *)
+                log_warn "Fetch/extract failed for TAR_URL"
+                return 1
+                ;;
+        esac
     fi
 
     log_warn "No TAR_URL provided; cannot fetch media bundle."

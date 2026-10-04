@@ -148,8 +148,8 @@ test_result_init "$TESTNAME" "$RES_FILE" || exit 1
 log_info "------------------------------------------------------------"
 log_info "Starting $TESTNAME Testcase"
 log_info "Config: BT_POWER_CYCLE_DELAY=${BT_POWER_CYCLE_DELAY}s BT_POWER_ON_ATTEMPTS=$BT_POWER_ON_ATTEMPTS BT_POWER_ON_RETRY_DELAY=${BT_POWER_ON_RETRY_DELAY}s BT_RESTART_SERVICE_ON_RETRY=$BT_RESTART_SERVICE_ON_RETRY"
-if ! bt_prepare_ubuntu_stack; then
-    test_result_finish "FAIL" "$TESTNAME FAIL - Ubuntu Bluetooth stack preparation failed"
+if ! bt_prepare_bluetooth_stack; then
+    test_result_finish "FAIL" "$TESTNAME FAIL - Bluetooth stack preparation failed"
 fi
 
 log_info "Checking dependency: bluetoothctl"
@@ -165,7 +165,9 @@ if ! bt_ensure_runtime_ready \
     "$BT_RUNTIME_READY_WAIT" \
     "$BT_RUNTIME_RECOVERY_WAIT" \
     "$BT_RUNTIME_RECOVERY_ATTEMPTS"; then
-    test_result_finish "FAIL" "Bluetooth runtime remained unusable after bounded recovery attempts"
+    test_result_finish \
+        "FAIL" \
+        "${BT_RUNTIME_FAILURE_REASON:-Bluetooth runtime remained unusable after bounded recovery attempts}"
 fi
 
 ADAPTER="$BT_RUNTIME_READY_ADAPTER"

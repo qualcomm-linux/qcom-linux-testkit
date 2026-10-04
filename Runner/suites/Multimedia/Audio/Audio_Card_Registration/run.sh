@@ -6,7 +6,7 @@
 # - validates ALSA sound card registration
 # - validates /dev/snd/controlC<N> nodes
 # - optionally validates PCM/playback/capture entries
-# - optionally prepares Debian AudioReach packages with --overlay
+# - optionally prepares Debian or CentOS AudioReach packages with --overlay
 # - does not start/restart PipeWire, PulseAudio, ADSP, or remoteproc
 # - does not play or record audio
 
@@ -49,7 +49,7 @@ fi
 
 TESTNAME="Audio_Card_Registration"
 
-# Only the explicit --overlay option enables Debian AudioReach preparation.
+# Only the explicit --overlay option enables AudioReach package preparation.
 # Ignore inherited values so native/base mode remains the default.
 AUDIO_OVERLAY_REQUESTED=0
 AUDIO_EARLY_HELP_REQUESTED=0
@@ -70,9 +70,9 @@ Usage: $0 [options]
 
 Options:
   --overlay
-      On Debian, ensure the Qualcomm AudioReach package set before validating
-      ALSA card registration. Without this flag, use the native/base audio
-      stack. This test never starts or restarts PipeWire.
+      On Debian or CentOS, ensure the Qualcomm AudioReach package set before
+      validating ALSA card registration. Without this flag, use the
+      native/base audio stack. This test never starts or restarts PipeWire.
 
   --wait-secs N
       Wait time for ALSA sound card registration.
@@ -547,4 +547,3 @@ fi
 
 log_info "------------------- Completed $TESTNAME Testcase --------------------------"
 exit 0
-

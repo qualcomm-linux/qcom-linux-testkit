@@ -3,8 +3,63 @@
 # SPDX-License-Identifier: BSD-3-Clause
 # KMSCube Validator Script (Yocto-Compatible, POSIX sh)
 
-# --- Robustly find and source init_env ---------------------------------------
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+usage() {
+    cat <<EOF
+Usage: ${0##*/} [--overlay] [--help]
+
+Run the KMSCube DRM/GBM validation.
+
+Options:
+  --overlay  Use the Qualcomm graphics overlay on supported desktop distros.
+  -h, --help Show this help text and exit without changing target state.
+EOF
+}
+
+parse_args() {
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --overlay)
+                OVERLAY_REQUESTED=1
+                ;;
+            -h|--help)
+                SHOW_HELP=1
+                ;;
+            --)
+                shift
+                if [ "$#" -gt 0 ]; then
+                    PARSE_ERROR="unexpected positional argument: $1"
+                    return 1
+                fi
+                break
+                ;;
+            *)
+                PARSE_ERROR="unknown argument: $1"
+                return 1
+                ;;
+        esac
+        shift
+    done
+
+    return 0
+}
+
+OVERLAY_REQUESTED=0
+SHOW_HELP=0
+PARSE_ERROR=""
+
+parse_args "$@"
+PARSE_RC=$?
+
+if [ "$SHOW_HELP" -eq 1 ]; then
+    usage
+    exit 0
+fi
+
+# ---------- Repo env + helpers ----------
+SCRIPT_DIR="$(
+    cd "$(dirname "$0")" || exit 1
+    pwd
+)"
 INIT_ENV=""
 SEARCH="$SCRIPT_DIR"
 
@@ -25,9 +80,12 @@ fi
 if [ -z "${__INIT_ENV_LOADED:-}" ]; then
     # shellcheck disable=SC1090
     . "$INIT_ENV"
+    __INIT_ENV_LOADED=1
 fi
 
-# shellcheck disable=SC1090,SC1091
+# shellcheck disable=SC1090
+. "$INIT_ENV"
+# shellcheck disable=SC1091
 . "$TOOLS/functestlib.sh"
 # shellcheck disable=SC1090,SC1091
 . "$TOOLS/lib_display.sh"
@@ -42,21 +100,28 @@ if [ -r "$TOOLS/lib_module_reload.sh" ]; then
     . "$TOOLS/lib_module_reload.sh"
 fi
 
-# --- Test metadata -----------------------------------------------------------
-TESTNAME="KMSCube"
-FRAME_COUNT="${FRAME_COUNT:-999}"
-EXPECTED_MIN=$((FRAME_COUNT - 1))
-
-test_path="$(find_test_case_by_name "$TESTNAME")"
+test_path="$(find_test_case_by_name KMSCube)"
 cd "$test_path" || exit 1
 
+TESTNAME="KMSCube"
 RES_FILE="./$TESTNAME.res"
 LOG_FILE="./${TESTNAME}_run.log"
+FAILURE_LOG="./${TESTNAME}_failure_markers.log"
+
+if [ "$PARSE_RC" -ne 0 ]; then
+    rm -f "$RES_FILE"
+    log_fail "$TESTNAME FAIL - $PARSE_ERROR"
+    usage >&2
+    printf '%s\n' "$TESTNAME FAIL" >"$RES_FILE"
+    exit 0
+fi
+
+FRAME_COUNT="${FRAME_COUNT:-999}"
+EXPECTED_MIN=$((FRAME_COUNT - 1))
 
 KMSCUBE_DRM_CONNECTOR=""
 KMSCUBE_DRM_DEV=""
 
-OVERLAY_REQUESTED=0
 OS_ID="unknown"
 DISTRO_GPU_HANDLING_SUPPORTED=0
 
@@ -70,12 +135,19 @@ GPU_BOOT_ARTIFACTS_CHANGED=0
 GPU_MODULE="msm_kgsl"
 GPU_OVERLAY_DEVICE="/dev/kgsl-3d0"
 GPU_OVERLAY_GBM_PACKAGE="${GPU_OVERLAY_GBM_PACKAGE:-}"
+GPU_KERNEL_PACKAGE="kgsl-dkms"
+GPU_KERNEL_VERSION_BEFORE=""
+GPU_KERNEL_VERSION_AFTER=""
 
 DISPLAY_MANAGER_SERVICE="${DISPLAY_MANAGER_SERVICE:-display-manager.service}"
 DISPLAY_MANAGER_STATE_FILE="/tmp/qcom-testkit-${TESTNAME}-display-manager.$$.state"
 weston_stopped_by_test=0
 
-rm -f "$RES_FILE" "$LOG_FILE" "$DISPLAY_MANAGER_STATE_FILE"
+rm -f \
+    "$RES_FILE" \
+    "$LOG_FILE" \
+    "$FAILURE_LOG" \
+    "$DISPLAY_MANAGER_STATE_FILE"
 
 trap '
 if [ "${weston_stopped_by_test:-0}" -eq 1 ] &&
@@ -90,15 +162,6 @@ rm -f "$DISPLAY_MANAGER_STATE_FILE"
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
-
-# --- Resolve requested graphics runtime mode ---------------------------------
-for kmscube_arg in "$@"; do
-    case "$kmscube_arg" in
-        --overlay)
-            OVERLAY_REQUESTED=1
-            ;;
-    esac
-done
 
 # --- Detect OS once ----------------------------------------------------------
 if command -v pkg_detect_os_id >/dev/null 2>&1; then
@@ -119,6 +182,9 @@ if [ -z "$GPU_OVERLAY_GBM_PACKAGE" ]; then
         ubuntu)
             GPU_OVERLAY_GBM_PACKAGE="libgbm-msm"
             ;;
+        centos|rhel)
+            GPU_OVERLAY_GBM_PACKAGE="gbm-msm-backend"
+            ;;
         *)
             GPU_OVERLAY_GBM_PACKAGE="libgbm-msm1"
             ;;
@@ -136,6 +202,8 @@ esac
 if [ "$DISTRO_GPU_HANDLING_SUPPORTED" -eq 1 ]; then
     for required_helper in \
         pkg_package_set_contains \
+        pkg_ensure_command \
+        pkg_installed_package_version \
         pkg_ensure_required_package_set_present \
         pkg_ensure_optional_package_set_present \
         pkg_restore_package_set \
@@ -160,6 +228,11 @@ if [ "$DISTRO_GPU_HANDLING_SUPPORTED" -eq 1 ]; then
             exit 0
         fi
 
+        GPU_KERNEL_VERSION_BEFORE="$(
+            pkg_installed_package_version \
+                "$GPU_KERNEL_PACKAGE" 2>/dev/null || true
+        )"
+
         if ! pkg_ensure_optional_package_set_present \
             graphics \
             qli-staging \
@@ -167,6 +240,18 @@ if [ "$DISTRO_GPU_HANDLING_SUPPORTED" -eq 1 ]; then
             "$@"; then
             log_fail "$TESTNAME FAIL - failed to ensure Qualcomm graphics overlay package set"
             echo "$TESTNAME FAIL" >"$RES_FILE"
+            exit 0
+        fi
+
+        GPU_KERNEL_VERSION_AFTER="$(
+            pkg_installed_package_version \
+                "$GPU_KERNEL_PACKAGE" 2>/dev/null || true
+        )"
+
+        if [ "$GPU_KERNEL_VERSION_BEFORE" != "$GPU_KERNEL_VERSION_AFTER" ]; then
+            log_info "Qualcomm graphics kernel package changed, package=$GPU_KERNEL_PACKAGE version=${GPU_KERNEL_VERSION_BEFORE:-not-installed}->${GPU_KERNEL_VERSION_AFTER:-not-installed}"
+            log_skip "$TESTNAME SKIP - Qualcomm overlay packages are ready, reboot required to activate KGSL"
+            echo "$TESTNAME SKIP" >"$RES_FILE"
             exit 0
         fi
 
@@ -189,7 +274,7 @@ if [ "$DISTRO_GPU_HANDLING_SUPPORTED" -eq 1 ]; then
             0)
                 ;;
             2)
-                log_skip "$TESTNAME SKIP - Qualcomm overlay packages are ready; reboot required to activate KGSL"
+                log_skip "$TESTNAME SKIP - Qualcomm overlay packages are ready, reboot required to activate KGSL"
                 echo "$TESTNAME SKIP" >"$RES_FILE"
                 exit 0
                 ;;
@@ -308,6 +393,29 @@ else
     log_info "Graphics package-stack and GPU boot-mode handling skipped for os=$OS_ID"
 fi
 
+# modetest provides connector diagnostics before the no-display decision.
+# CentOS continues with sysfs display detection when the command is absent
+# because no verified CentOS package currently provides it.
+if ! command -v modetest >/dev/null 2>&1; then
+    if [ "$OS_ID" = "centos" ]; then
+        log_warn "modetest is unavailable on CentOS, continuing with sysfs display detection"
+    elif [ "$DISTRO_GPU_HANDLING_SUPPORTED" -eq 1 ]; then
+        log_info "modetest is missing, attempting package recovery"
+
+        if ! pkg_ensure_command modetest; then
+            log_fail "$TESTNAME FAIL - failed to recover required command modetest, install the mapped libdrm-tests package"
+            printf '%s\n' "$TESTNAME FAIL" >"$RES_FILE"
+            exit 0
+        fi
+
+        hash -r 2>/dev/null || true
+    else
+        log_skip "$TESTNAME SKIP - required command modetest is absent from the image"
+        printf '%s\n' "$TESTNAME SKIP" >"$RES_FILE"
+        exit 0
+    fi
+fi
+
 log_info "-------------------------------------------------------------------"
 log_info "------------------- Starting $TESTNAME Testcase -------------------"
 
@@ -390,10 +498,28 @@ if [ ! -e "$1" ]; then
 fi
 
 # --- Dependencies ------------------------------------------------------------
-if ! CHECK_DEPS_NO_EXIT=1 check_dependencies kmscube modetest; then
-    log_skip "$TESTNAME SKIP - missing dependencies: kmscube and/or modetest"
-    echo "$TESTNAME SKIP" >"$RES_FILE"
-    exit 0
+if [ "$DISTRO_GPU_HANDLING_SUPPORTED" -eq 1 ]; then
+    CHECK_DEPS_RECOVER=1
+else
+    CHECK_DEPS_RECOVER=0
+fi
+
+if [ "$OS_ID" = "centos" ]; then
+    if ! CHECK_DEPS_RECOVER="$CHECK_DEPS_RECOVER" \
+        CHECK_DEPS_NO_EXIT=1 \
+        check_dependencies kmscube; then
+        log_skip "$TESTNAME SKIP - required command kmscube is absent from the CentOS image"
+        echo "$TESTNAME SKIP" >"$RES_FILE"
+        exit 0
+    fi
+else
+    if ! CHECK_DEPS_RECOVER="$CHECK_DEPS_RECOVER" \
+        CHECK_DEPS_NO_EXIT=1 \
+        check_dependencies kmscube modetest; then
+        log_skip "$TESTNAME SKIP - missing dependencies: kmscube and/or modetest"
+        echo "$TESTNAME SKIP" >"$RES_FILE"
+        exit 0
+    fi
 fi
 
 KMSCUBE_BIN="$(command -v kmscube 2>/dev/null || true)"
@@ -484,6 +610,35 @@ else
     unset EGL_PLATFORM
 fi
 
+# Treat explicit error and failure words from kmscube as authoritative even
+# when the process exits successfully. Ignore common zero-failure summaries.
+awk '
+    {
+        line = tolower($0)
+        has_error = line ~ /(^|[^[:alnum:]_])error([^[:alnum:]_]|$)/
+        has_failure = line ~ /(^|[^[:alnum:]_])fail(ed|ure|ures)?([^[:alnum:]_]|$)/
+        zero_failure = (
+            line ~ /fail(ed|ure|ures)?[[:space:]]*[:=][[:space:]]*0([^0-9]|$)/ ||
+            line ~ /(^|[^0-9])0[[:space:]]+(tests?[[:space:]]+)?fail(ed|ure|ures)?([^[:alnum:]_]|$)/
+        )
+
+        if ((has_error || has_failure) && !zero_failure) {
+            print
+        }
+    }
+' "$LOG_FILE" >"$FAILURE_LOG"
+
+FAILURE_MARKER_COUNT="$(awk 'END { print NR + 0 }' "$FAILURE_LOG")"
+
+if [ "$FAILURE_MARKER_COUNT" -gt 0 ]; then
+    log_error "kmscube reported ERROR or FAIL output, matches=$FAILURE_MARKER_COUNT artifact=$FAILURE_LOG"
+
+    while IFS= read -r failure_line; do
+        [ -n "$failure_line" ] || continue
+        log_error "[kmscube-output] $failure_line"
+    done <"$FAILURE_LOG"
+fi
+
 if [ "$rc" -ne 0 ]; then
     log_fail "$TESTNAME : Execution failed (rc=$rc) - see $LOG_FILE"
     cat "$LOG_FILE"
@@ -554,6 +709,12 @@ if ! display_restore_service_from_state "$DISPLAY_MANAGER_STATE_FILE"; then
 fi
 
 # --- Verdict -----------------------------------------------------------------
+if [ "$FAILURE_MARKER_COUNT" -gt 0 ]; then
+    log_fail "$TESTNAME : FAIL (kmscube reported ERROR or FAIL output, matches=${FAILURE_MARKER_COUNT})"
+    printf '%s\n' "$TESTNAME FAIL" >"$RES_FILE"
+    exit 1
+fi
+
 if [ "$FRAMES_RENDERED" -lt "$EXPECTED_MIN" ]; then
     log_fail "$TESTNAME : FAIL (rendered ${FRAMES_RENDERED} < ${EXPECTED_MIN})"
     echo "$TESTNAME FAIL" >"$RES_FILE"

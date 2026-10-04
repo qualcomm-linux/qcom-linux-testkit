@@ -322,7 +322,7 @@ RUN_DIR="$BIN_DIR"
 RUN_BIN="$RUN_DIR/fastrpc_test"
 
 if [ ! -x "$RUN_BIN" ]; then
-    test_result_finish "SKIP" "$TESTNAME SKIP - fastrpc_test not installed (expected at: $RUN_BIN)"
+    test_result_finish "SKIP" "$TESTNAME SKIP - image-provided fastrpc_test is unavailable, expected=$RUN_BIN"
 fi
 
 # -------------------- Logging root -----------------------------
@@ -603,6 +603,26 @@ for DOMAIN in $DOMAINS_TO_TEST; do
                 echo "----- $iter_tag output begin -----"
                 cat "$iter_log"
                 echo "----- $iter_tag output end -----"
+            fi
+
+            domain_unsupported_reason=""
+            if [ -r "$iter_log" ]; then
+                domain_unsupported_reason="$(
+                    fastrpc_invocation_domain_unsupported_reason \
+                        "$iter_log" \
+                        "$DOMAIN" || true
+                )"
+            fi
+
+            if [ -n "$domain_unsupported_reason" ]; then
+                test_result_record "FAIL" "$iter_tag: runtime domain=$dom_name id=$DOMAIN is unsupported by installed fastrpc_test, reason=$domain_unsupported_reason capability_source=$CAPABILITY_SOURCE selection=$SELECTION_SOURCE required=image-package-with-matching-domain-support"
+                combo_fail=$((combo_fail + 1))
+                combo_subtests_total=$((combo_subtests_total + 1))
+                combo_subtests_fail=$((combo_subtests_fail + 1))
+                RUNTIME_FAILURE_SEEN=1
+
+                i=$((i + 1))
+                continue
             fi
 
             if [ "$rc" -ne 0 ]; then

@@ -113,7 +113,7 @@ EXTRACT_AUDIO_ASSETS="${EXTRACT_AUDIO_ASSETS:-true}"
 ENABLE_NETWORK_DOWNLOAD="${ENABLE_NETWORK_DOWNLOAD:-false}" # Default: no network operations
 AUDIO_CLIPS_BASE_DIR="${AUDIO_CLIPS_BASE_DIR:-}" # Custom path for audio clips (CI use)
 
-# Only the explicit --overlay option enables Debian AudioReach preparation.
+# Only the explicit --overlay option enables AudioReach package preparation.
 # AUDIO_OVERLAY_REQUESTED was derived above without consuming the CLI.
 AUDIO_PLAYBACK_VOLUME="${AUDIO_PLAYBACK_VOLUME:-1.0}"
 export AUDIO_OVERLAY_REQUESTED AUDIO_PLAYBACK_VOLUME
@@ -125,6 +125,7 @@ AUDIO_STARTED_PIDS=""
 AUDIO_CREATED_RUNTIME_DIR=0
 AUDIO_SYSTEMD_MANAGED=0
 AUDIO_ALSA_PLAYBACK_DEVICE=""
+AUDIO_PIPEWIRE_PLAY_COMMAND=""
 export AUDIO_BOOTSTRAP_MODE AUDIO_RUNTIME_DIR AUDIO_STARTED_PIDS AUDIO_CREATED_RUNTIME_DIR MINIMAL_RAMDISK_MODE AUDIO_SYSTEMD_MANAGED AUDIO_ALSA_PLAYBACK_DEVICE
 
 # New clip-based testing options
@@ -149,9 +150,9 @@ Usage: $0 [options]
   --backend {pipewire|pulseaudio|alsa}
   --sink {speakers|null}
   --overlay
-      On Debian, ensure the Qualcomm AudioReach package set and prepare the
-      PipeWire runtime before playback. Without this flag, use the native/base
-      audio stack. qcom-distro/Yocto remains unchanged.
+      On Debian or CentOS, ensure the Qualcomm AudioReach package set before
+      playback. Debian also prepares its PipeWire runtime. Without this flag,
+      use the native/base audio stack. qcom-distro/Yocto remains unchanged.
   --formats "wav" # Legacy matrix mode only
   --durations "short|short medium" # Legacy matrix mode only (not recommended for new tests)
   --clip-name "play_48KHz_16b_2ch" # Test specific clip(s) by name (space-separated)
@@ -428,6 +429,15 @@ done
 AUDIO_BACKEND_REQUESTED="$AUDIO_BACKEND"
 export AUDIO_BACKEND_REQUESTED
 
+# Prefer the dedicated PipeWire playback alias. Some distributions provide
+# only pw-cat, whose explicit --playback mode is the same client capability.
+if command -v pw-play >/dev/null 2>&1; then
+  AUDIO_PIPEWIRE_PLAY_COMMAND="pw-play"
+elif command -v pw-cat >/dev/null 2>&1 &&
+     pw-cat --help 2>&1 | grep -q -- '--playback'; then
+  AUDIO_PIPEWIRE_PLAY_COMMAND="pw-cat"
+fi
+
 # Prepare only the Debian user capabilities required by the selected mode.
 # Explicit base ALSA playback needs group membership but no systemd user
 # manager. Overlay and managed backends require the user session.
@@ -637,6 +647,42 @@ fi
 
 log_info "Args: backend=${AUDIO_BACKEND:-auto} sink=$SINK_CHOICE overlay=$AUDIO_OVERLAY_REQUESTED volume=$AUDIO_PLAYBACK_VOLUME loops=$LOOPS timeout=$TIMEOUT formats='$FORMATS' durations='$DURATIONS' strict=$STRICT dmesg=$DMESG_SCAN extract=$EXTRACT_AUDIO_ASSETS network_download=$ENABLE_NETWORK_DOWNLOAD clips_path=${AUDIO_CLIPS_BASE_DIR:-default} bootstrap=$AUDIO_BOOTSTRAP_MODE runtime_dir=${AUDIO_RUNTIME_DIR:-auto}"
 
+# Reject an unusable requested backend before network setup or clip download.
+# In automatic mode, continue when any supported image-provided playback
+# client is available because backend selection may fall back later.
+case "${AUDIO_BACKEND_REQUESTED:-auto}" in
+  pipewire)
+    if [ -z "$AUDIO_PIPEWIRE_PLAY_COMMAND" ]; then
+      log_skip "$TESTNAME SKIP - PipeWire playback client is absent, provision the pipewire-utils image package providing pw-play or pw-cat"
+      echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
+      exit 0
+    fi
+    ;;
+  pulseaudio)
+    if ! command -v paplay >/dev/null 2>&1; then
+      log_skip "$TESTNAME SKIP - PulseAudio playback client paplay is absent from the image"
+      echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
+      exit 0
+    fi
+    ;;
+  alsa)
+    if ! command -v aplay >/dev/null 2>&1; then
+      log_skip "$TESTNAME SKIP - ALSA playback client aplay is absent from the image"
+      echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
+      exit 0
+    fi
+    ;;
+  auto)
+    if [ -z "$AUDIO_PIPEWIRE_PLAY_COMMAND" ] &&
+       ! command -v paplay >/dev/null 2>&1 &&
+       ! command -v aplay >/dev/null 2>&1; then
+      log_skip "$TESTNAME SKIP - no image-provided playback client is available, provision pipewire-utils, pulseaudio-utils, or alsa-utils"
+      echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
+      exit 0
+    fi
+    ;;
+esac
+
 # --- Rootfs minimum size check (mirror video policy) ---
 if [ "$TOP_LEVEL_RUN" -eq 1 ]; then
   ensure_rootfs_min_size 2
@@ -675,13 +721,20 @@ if [ "$TOP_LEVEL_RUN" -eq 1 ]; then
           NET_RC="$?"
         fi
 
-        if [ "$NET_RC" -ne 0 ]; then
-          video_step "" "Bring network online (Wi-Fi credentials if provided)"
-          ensure_network_online || true
-          sleep "${NET_STABILIZE_SLEEP}"
-        else
-          sleep "${NET_STABILIZE_SLEEP}"
-        fi
+        case "$NET_RC" in
+          0)
+            log_info "Network is already reachable, skipping interface reconfiguration"
+            ;;
+          2)
+            log_warn "A valid IP address is already assigned, skipping Wi-Fi and DHCP reconfiguration"
+            log_info "The audio asset download will validate direct HTTPS reachability"
+            ;;
+          *)
+            video_step "" "Bring network online (Wi-Fi credentials if provided)"
+            ensure_network_online || true
+            sleep "${NET_STABILIZE_SLEEP}"
+            ;;
+        esac
 
         # Download and extract audio clips tarball
         log_info "Downloading audio clips from: $AUDIO_TAR_URL"
@@ -820,40 +873,49 @@ if [ "$backend_ok" -ne 1 ]; then
 fi
 
 # Dependencies per backend
+# Package preparation has already completed above. Keep these late backend
+# checks read-only so an automatically detected backend cannot trigger an
+# unrelated package transaction when its playback client is absent.
 case "$AUDIO_BACKEND" in
   pipewire)
-    if ! check_dependencies pw-play; then
+    if [ -z "$AUDIO_PIPEWIRE_PLAY_COMMAND" ]; then
       if [ -z "$AUDIO_BACKEND_REQUESTED" ] &&
-         audio_playback_probe_alsa_with_recovery && check_dependencies aplay; then
+         audio_playback_probe_alsa_with_recovery &&
+         command -v aplay >/dev/null 2>&1; then
         log_warn "$TESTNAME: PipeWire playback utility missing - falling back to ALSA"
         AUDIO_BACKEND="alsa"
         AUDIO_SYSTEMD_MANAGED=0
         export AUDIO_SYSTEMD_MANAGED
       else
-        log_skip "$TESTNAME SKIP - missing PipeWire playback utility"
+        log_skip "$TESTNAME SKIP - PipeWire playback client is absent, provision the pipewire-utils image package providing pw-play or pw-cat"
         echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
         exit 0
       fi
+    elif [ "$AUDIO_PIPEWIRE_PLAY_COMMAND" = "pw-cat" ]; then
+      log_info "Using PipeWire playback client: pw-cat --playback"
+    else
+      log_info "Using PipeWire playback client: pw-play"
     fi
     ;;
   pulseaudio)
-    if ! check_dependencies paplay; then
+    if ! command -v paplay >/dev/null 2>&1; then
       if [ -z "$AUDIO_BACKEND_REQUESTED" ] &&
-         audio_playback_probe_alsa_with_recovery && check_dependencies aplay; then
+         audio_playback_probe_alsa_with_recovery &&
+         command -v aplay >/dev/null 2>&1; then
         log_warn "$TESTNAME: PulseAudio playback utility missing - falling back to ALSA"
         AUDIO_BACKEND="alsa"
         AUDIO_SYSTEMD_MANAGED=0
         export AUDIO_SYSTEMD_MANAGED
       else
-        log_skip "$TESTNAME SKIP - missing PulseAudio playback utility"
+        log_skip "$TESTNAME SKIP - missing PulseAudio playback utility: paplay"
         echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
         exit 0
       fi
     fi
     ;;
   alsa)
-    if ! check_dependencies aplay; then
-      log_skip "$TESTNAME SKIP - missing ALSA playback utility"
+    if ! command -v aplay >/dev/null 2>&1; then
+      log_skip "$TESTNAME SKIP - missing ALSA playback utility: aplay"
       echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
       exit 0
     fi
@@ -877,7 +939,8 @@ if [ "$AUDIO_BACKEND" = "pipewire" ]; then
 
     if ! audio_run_helper_as_test_user --require-session audio_pw_ctl_ok 2>/dev/null; then
       if [ -z "$AUDIO_BACKEND_REQUESTED" ] &&
-         audio_playback_probe_alsa_with_recovery && check_dependencies aplay; then
+         audio_playback_probe_alsa_with_recovery &&
+         command -v aplay >/dev/null 2>&1; then
         log_warn "$TESTNAME: falling back to ALSA direct playback path"
         AUDIO_BACKEND="alsa"
         AUDIO_SYSTEMD_MANAGED=0
@@ -901,7 +964,8 @@ elif [ "$AUDIO_BACKEND" = "pulseaudio" ]; then
 
     if ! audio_run_helper_as_test_user --require-session audio_pa_ctl_ok 2>/dev/null; then
       if [ -z "$AUDIO_BACKEND_REQUESTED" ] &&
-         audio_playback_probe_alsa_with_recovery && check_dependencies aplay; then
+         audio_playback_probe_alsa_with_recovery &&
+         command -v aplay >/dev/null 2>&1; then
         log_warn "$TESTNAME: falling back to ALSA direct playback path"
         AUDIO_BACKEND="alsa"
         AUDIO_SYSTEMD_MANAGED=0
@@ -1128,8 +1192,13 @@ if [ "$USE_CLIP_DISCOVERY" = "true" ]; then
       start_s="$(date +%s 2>/dev/null || echo 0)"
 
       if [ "$AUDIO_BACKEND" = "pipewire" ]; then
-        log_info "[$case_name] exec: pw-play -v \"$clip_path\""
-        audio_run_with_timeout_as_test_user --require-session "$effective_timeout" pw-play -v "$clip_path" >>"$logf" 2>&1
+        if [ "$AUDIO_PIPEWIRE_PLAY_COMMAND" = "pw-cat" ]; then
+          log_info "[$case_name] exec: pw-cat --playback -v \"$clip_path\""
+          audio_run_with_timeout_as_test_user --require-session "$effective_timeout" pw-cat --playback -v "$clip_path" >>"$logf" 2>&1
+        else
+          log_info "[$case_name] exec: pw-play -v \"$clip_path\""
+          audio_run_with_timeout_as_test_user --require-session "$effective_timeout" pw-play -v "$clip_path" >>"$logf" 2>&1
+        fi
         rc=$?
       elif [ "$AUDIO_BACKEND" = "pulseaudio" ]; then
         log_info "[$case_name] exec: paplay --device=\"$SINK_NAME\" \"$clip_path\""
@@ -1265,8 +1334,13 @@ else
         start_s="$(date +%s 2>/dev/null || echo 0)"
 
         if [ "$AUDIO_BACKEND" = "pipewire" ]; then
-          log_info "[$case_name] exec: pw-play -v \"$clip\""
-          audio_run_with_timeout_as_test_user --require-session "$TIMEOUT" pw-play -v "$clip" >>"$logf" 2>&1
+          if [ "$AUDIO_PIPEWIRE_PLAY_COMMAND" = "pw-cat" ]; then
+            log_info "[$case_name] exec: pw-cat --playback -v \"$clip\""
+            audio_run_with_timeout_as_test_user --require-session "$TIMEOUT" pw-cat --playback -v "$clip" >>"$logf" 2>&1
+          else
+            log_info "[$case_name] exec: pw-play -v \"$clip\""
+            audio_run_with_timeout_as_test_user --require-session "$TIMEOUT" pw-play -v "$clip" >>"$logf" 2>&1
+          fi
           rc=$?
         elif [ "$AUDIO_BACKEND" = "pulseaudio" ]; then
           log_info "[$case_name] exec: paplay --device=\"$SINK_NAME\" \"$clip\""

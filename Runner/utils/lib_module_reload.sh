@@ -1735,7 +1735,7 @@ mrv_qcom_gpu_unsafe_reload_detected() {
 # Return values:
 #   0 - requested boot mode is active
 #   1 - state is contradictory or unavailable
-#   2 - the other valid boot mode is active, so reboot is required
+#   2 - the requested boot policy is not active, so reboot is required
 mrv_qcom_gpu_validate_boot_mode() {
     mqgvbm_expected="$1"
     mqgvbm_kgsl_module="${2:-msm_kgsl}"
@@ -1787,6 +1787,16 @@ mrv_qcom_gpu_validate_boot_mode() {
             return 0
             ;;
         msm:kgsl|kgsl:msm)
+            return 2
+            ;;
+    esac
+
+    # A newly installed GPU module can leave both drivers visible until the
+    # next boot. The msm skip_gpu setting is authoritative for that transition:
+    # it cannot be changed safely for the current boot, even when the remaining
+    # runtime evidence is contradictory and the detected mode is "unknown".
+    case "$mqgvbm_expected:$mqgvbm_skip_gpu" in
+        kgsl:N|kgsl:n|kgsl:0|msm:Y|msm:y|msm:1)
             return 2
             ;;
     esac
