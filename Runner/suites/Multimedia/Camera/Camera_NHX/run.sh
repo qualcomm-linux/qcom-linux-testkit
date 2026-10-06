@@ -60,6 +60,12 @@ SUMMARY_TXT="$OUT_DIR/${TESTNAME}_summary_${TS}.txt"
 DMESG_DIR="$LOG_DIR/dmesg_${TS}"
 CAMX_EFI_LOG="$LOG_DIR/${TESTNAME}_camx_efi_${TS}.log"
 CAMX_EFI_LIST_LOG="$LOG_DIR/${TESTNAME}_camx_efi_list_${TS}.log"
+RUNNING_DTS="$OUT_DIR/${TESTNAME}_running_${TS}.dts"
+RUNNING_DTS_WARNINGS="$LOG_DIR/${TESTNAME}_dtc_${TS}.log"
+CAMERA_DTS_MATCHES="$OUT_DIR/${TESTNAME}_runtime_camera_${TS}.log"
+SENSOR_DTS_MATCHES="$OUT_DIR/${TESTNAME}_runtime_sensors_${TS}.log"
+CAMX_DT_NODES_LOG="$OUT_DIR/${TESTNAME}_enabled_camx_nodes_${TS}.log"
+SENSOR_DT_NODES_LOG="$OUT_DIR/${TESTNAME}_enabled_sensor_nodes_${TS}.log"
 
 NHX_OUTDIR="$OUT_DIR/nhx_${TS}"
 
@@ -110,9 +116,9 @@ usage() {
 Usage: $0 [--overlay] [--fit-dtb NAME] [--json JSON_FILE] [--target TARGET] [--help]
 
 Options:
-  --overlay        Install the Camera NHX CAMX package set on supported
-                   Debian, Ubuntu, or CentOS images and ensure the CAMX FIT
-                   DTB is selected for boot.
+  --overlay        Verify the Camera NHX CAMX package set on supported Debian,
+                   Ubuntu, or CentOS images, install missing packages, and
+                   ensure the CAMX FIT DTB is selected for boot.
   --fit-dtb NAME    Select this FIT DTB compatibility name for the next boot.
                    Camera_NHX supports camx, which is the --overlay default.
                    This option requires --overlay.
@@ -216,6 +222,8 @@ fi
 if [ "$OVERLAY_REQUESTED" -eq 1 ]; then
   for required_helper in \
     pkg_provider_init \
+    pkg_detect_os_id \
+    pkg_lookup_package_set \
     pkg_ensure_optional_package_set_present \
     pkg_verify_package_set_installed; do
     if ! command -v "$required_helper" >/dev/null 2>&1; then
@@ -226,20 +234,40 @@ if [ "$OVERLAY_REQUESTED" -eq 1 ]; then
   done
 
   pkg_provider_init
+  CAMX_OVERLAY_OS_ID="$(pkg_detect_os_id 2>/dev/null || true)"
+  CAMX_APT_SOURCE="none"
+
+  if [ "$CAMX_OVERLAY_OS_ID" = "debian" ]; then
+    CAMX_APT_SOURCE="qli-staging"
+  fi
+
+  CAMX_PACKAGES="$(pkg_lookup_package_set camera-nhx 2>/dev/null || true)"
+  if [ -z "$CAMX_PACKAGES" ]; then
+    log_skip "$TESTNAME SKIP - no Camera NHX package-set mapping is available, os=${CAMX_OVERLAY_OS_ID:-unknown} action=add-a-camera-nhx-package-set-mapping-for-this-os"
+    echo "$TESTNAME SKIP" >"$RES_FILE"
+    exit 0
+  fi
+
+  log_info "Ensuring complete Camera NHX package set, os=${CAMX_OVERLAY_OS_ID:-unknown} packages=$CAMX_PACKAGES"
 
   if ! pkg_ensure_optional_package_set_present \
     camera-nhx \
-    qli-staging \
+    "$CAMX_APT_SOURCE" \
     auto \
     --overlay; then
-    log_fail "$TESTNAME FAIL - failed to ensure Camera NHX CAMX package set"
+    log_fail "$TESTNAME FAIL - --overlay package-set installation failed, os=${CAMX_OVERLAY_OS_ID:-unknown} packages=$CAMX_PACKAGES action=verify-configured-package-repositories-and-package-availability"
+    echo "$TESTNAME FAIL" >"$RES_FILE"
+    exit 0
+  fi
+
+  if ! pkg_verify_package_set_installed camera-nhx; then
+    log_fail "$TESTNAME FAIL - Camera NHX package recovery completed but the required package set is still incomplete, os=${CAMX_OVERLAY_OS_ID:-unknown} packages=$CAMX_PACKAGES"
     echo "$TESTNAME FAIL" >"$RES_FILE"
     exit 0
   fi
 
   log_pass "Camera NHX CAMX package set is ready"
 
-  CAMX_OVERLAY_OS_ID="$(pkg_detect_os_id 2>/dev/null || true)"
   case "$CAMX_OVERLAY_OS_ID" in
     debian|ubuntu|centos)
       for required_helper in \
@@ -300,14 +328,14 @@ if [ "$OVERLAY_REQUESTED" -eq 1 ]; then
       ;;
   esac
 else
-  log_info "Camera NHX overlay package installation not requested"
+  log_info "Camera NHX overlay package recovery not requested"
 fi
 
 # -----------------------------------------------------------------------------
 # Deps check
 # -----------------------------------------------------------------------------
-deps_list="date awk sed grep tee wc ls find stat rm tr head tail dmesg sort fdtdump mkfifo sha256sum md5sum cksum diff cp mkdir"
-if ! check_dependencies "$deps_list"; then
+deps_list="date awk sed grep tee wc ls find stat rm tr head tail sort mkfifo sha256sum md5sum cksum diff cp mkdir"
+if ! CHECK_DEPS_RECOVER=0 check_dependencies "$deps_list"; then
   log_skip "$TESTNAME SKIP missing one or more dependencies: $deps_list"
   echo "$TESTNAME SKIP" >"$RES_FILE"
   exit 0
@@ -340,51 +368,107 @@ log_info "NHX runner selected, path=$NHX_RUNNER source=$NHX_RUNNER_SOURCE"
 # -----------------------------------------------------------------------------
 log_info "Checking CAMX proprietary prerequisites before running NHX"
 
-log_info "DT check"
+log_info "Decoding the active runtime device tree"
 
-PATTERNS="qcom,cam-sensor qcom,cam-gmsl-sensor qcom,cam-gmsl-deserializer qcom,eeprom qcom,cci qcom,csiphy qcom,cam-tpg1031 qcom,camera qcom,cam camera_kt cam-req-mgr cam-cpas cam-jpeg cam-ife cam-icp camera0-thermal"
-found_any=0
-missing_list=""
-
-for pat in $PATTERNS; do
-  out="$(dt_confirm_node_or_compatible "$pat" 2>/dev/null || true)"
-  if [ -n "$out" ]; then
-    printf '%s\n' "$out"
-    found_any=1
-  else
-    if [ -n "$missing_list" ]; then
-      missing_list="$missing_list, $pat"
-    else
-      missing_list="$pat"
+camx_dump_runtime_dts "$RUNNING_DTS" "$RUNNING_DTS_WARNINGS"
+DTC_RC=$?
+case "$DTC_RC" in
+  0)
+    log_pass "Active runtime DT decoded to $RUNNING_DTS"
+    if [ -s "$RUNNING_DTS_WARNINGS" ]; then
+      log_warn "dtc reported non-fatal warnings, retained in $RUNNING_DTS_WARNINGS"
     fi
-  fi
-done
+    ;;
+  2)
+    : >"$RUNNING_DTS_WARNINGS"
+    : >"$CAMERA_DTS_MATCHES"
+    : >"$SENSOR_DTS_MATCHES"
+    log_warn "dtc is not available in the image, continuing with enabled runtime-node validation"
+    ;;
+  3)
+    : >"$RUNNING_DTS_WARNINGS"
+    : >"$CAMERA_DTS_MATCHES"
+    : >"$SENSOR_DTS_MATCHES"
+    log_warn "No readable runtime device-tree root is exposed under procfs or sysfs"
+    ;;
+  *)
+    : >"$CAMERA_DTS_MATCHES"
+    : >"$SENSOR_DTS_MATCHES"
+    log_warn "Active runtime DT decoding failed, continuing with enabled runtime-node validation, inspect $RUNNING_DTS_WARNINGS"
+    ;;
+esac
 
-if [ "$found_any" -ne 1 ]; then
-  log_skip "$TESTNAME SKIP missing DT patterns $missing_list"
-  echo "$TESTNAME SKIP" >"$RES_FILE"
+if [ "$DTC_RC" -eq 0 ]; then
+  camx_extract_runtime_dts_evidence \
+    "$RUNNING_DTS" \
+    "$CAMERA_DTS_MATCHES" \
+    "$SENSOR_DTS_MATCHES"
+fi
+
+RUNTIME_DT_ROOT="$(dt_runtime_root 2>/dev/null || true)"
+RUNTIME_DT_MODEL="$(dt_property_text "$RUNTIME_DT_ROOT" model 2>/dev/null || true)"
+RUNTIME_DT_COMPATIBLE="$(dt_property_text "$RUNTIME_DT_ROOT" compatible 2>/dev/null || true)"
+log_info "Runtime DT model: ${RUNTIME_DT_MODEL:-unavailable}"
+log_info "Runtime DT compatible: ${RUNTIME_DT_COMPATIBLE:-unavailable}"
+if [ "$DTC_RC" -eq 0 ]; then
+  log_info "[CAMX-CDT-FIT] efi_camx_selected=$CAMX_FIT_DTB_SELECTED active_dt=$RUNNING_DTS"
+  log_info "Runtime camera DTS matches retained in $CAMERA_DTS_MATCHES"
+  log_info "Runtime sensor DTS matches retained in $SENSOR_DTS_MATCHES"
+else
+  log_info "[CAMX-CDT-FIT] efi_camx_selected=$CAMX_FIT_DTB_SELECTED active_dt=unavailable"
+fi
+
+CAMX_DT_NODES="$(camx_list_enabled_runtime_nodes)"
+: >"$CAMX_DT_NODES_LOG"
+if [ -n "$CAMX_DT_NODES" ]; then
+  printf '%s\n' "$CAMX_DT_NODES" >"$CAMX_DT_NODES_LOG"
+fi
+if [ -z "$CAMX_DT_NODES" ]; then
+  if [ "$CAMX_FIT_DTB_SELECTED" -eq 1 ]; then
+    log_fail "$TESTNAME FAIL - VendorDtbOverlays selects camx but the active runtime DT has no enabled downstream CamX nodes, verify the CDT-selected FIT configuration and rebooted image"
+    echo "$TESTNAME FAIL" >"$RES_FILE"
+  else
+    log_skip "$TESTNAME SKIP - the active runtime DT has no enabled downstream CamX nodes, provision a CAMX-capable FIT configuration selected by CDT"
+    echo "$TESTNAME SKIP" >"$RES_FILE"
+  fi
   exit 0
 fi
 
-log_info "fdtdump camera nodes sample"
+printf '%s\n' "$CAMX_DT_NODES" | while IFS= read -r camx_node; do
+  if [ -n "$camx_node" ]; then
+    log_info "Enabled CamX DT node: $camx_node"
+  fi
+done
+log_pass "Active runtime DT exposes enabled downstream CamX nodes"
+
+SENSOR_DT_NODES="$(camx_list_enabled_sensor_nodes)"
+: >"$SENSOR_DT_NODES_LOG"
+if [ -n "$SENSOR_DT_NODES" ]; then
+  printf '%s\n' "$SENSOR_DT_NODES" >"$SENSOR_DT_NODES_LOG"
+  printf '%s\n' "$SENSOR_DT_NODES" | while IFS= read -r sensor_node; do
+    if [ -n "$sensor_node" ]; then
+      log_info "Enabled camera sensor DT node: $sensor_node"
+    fi
+  done
+else
+  log_warn "No enabled IMX, OV, AR, CamX sensor, or GMSL sensor nodes were found, NHX execution remains authoritative"
+fi
+
+log_info "Checking optional raw FDT camera evidence"
 
 FDT_MATCHES="$(camx_fdtdump_has_cam_nodes 2>/dev/null)"
 rc=$?
-if [ "$rc" -ne 0 ]; then
-  if [ "$rc" -eq 2 ]; then
-    log_skip "$TESTNAME SKIP fdtdump not available"
-  else
-    log_skip "$TESTNAME SKIP fdtdump did not show conclusive camera nodes"
-  fi
-  echo "$TESTNAME SKIP" >"$RES_FILE"
-  exit 0
+if [ "$rc" -eq 0 ]; then
+  printf '%s\n' "$FDT_MATCHES" | while IFS= read -r fdt_match; do
+    if [ -n "$fdt_match" ]; then
+      log_info "Raw FDT camera match: $fdt_match"
+    fi
+  done
+elif [ "$rc" -eq 2 ]; then
+  log_warn "Optional fdtdump command is unavailable, continuing with enabled runtime-node evidence"
+else
+  log_warn "Optional raw FDT scan did not find camera nodes, continuing with enabled runtime DT evidence"
 fi
-
-printf '%s\n' "$FDT_MATCHES" | while IFS= read -r l; do
-  if [ -n "$l" ]; then
-    log_info " $l"
-  fi
-done
 
 log_info "driver load checks"
 
