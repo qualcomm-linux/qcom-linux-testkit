@@ -131,6 +131,10 @@ AUDIO_PACKAGE_PROFILE=desktop AUDIO_PACKAGE_UPDATE=1 \
 
 When no backend is requested, the suite uses automatic selection. A physical PipeWire audio sink uses `pw-play` or `pw-cat --playback`, and a physical PulseAudio sink uses `paplay`. For the `speakers` route, a speaker endpoint takes precedence over headphones, then other physical outputs. Dummy, null, monitor, and loopback PipeWire sinks are not accepted as speaker routes.
 
+This suite does not prove a specific external connector. Use the focused
+`AudioRoutePlayback` suite when a fixture-aware job must require HDMI,
+DisplayPort/eDP, or 3.5 mm headphone routing.
+
 If automatic selection finds no physical managed speaker sink, the suite probes direct ALSA playback. It selects an ALSA card and PCM from the available device inventory, applies only mixer controls exposed by that card, and runs `aplay -D <device>`. This supports the Shikra primary-MI2S, secondary-TDM, and codec-direct route capabilities without selecting a form factor or assuming card `0`.
 
 An explicit backend request is never replaced:
