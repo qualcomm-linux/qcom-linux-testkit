@@ -307,7 +307,7 @@ audio_fetch_assets_from_url() {
 
   # Normalize nested archive layout like AudioClips/AudioClips/*.wav -> AudioClips/*.wav
   if [ -d "$clips_dir/AudioClips" ]; then
-    log_warn "Detected nested AudioClips directory after extraction.. normalizing layout"
+    log_info "Detected nested AudioClips directory after extraction, normalizing layout"
     for nested_item in "$clips_dir/AudioClips"/*; do
       [ -e "$nested_item" ] || continue
       nested_name=$(basename "$nested_item")
@@ -983,9 +983,9 @@ pw_sink_is_real_audio() {
   return 0
 }
 
-# Prefer speaker sinks before other physical outputs. Headphones are only a
-# fallback for speakers, so a listed headphone does not override a speaker.
-# Do not use a PipeWire dummy sink as a successful speakers route.
+# Prefer speaker sinks before other physical outputs. A generic physical sink
+# remains a compatibility fallback, but an explicitly named headphones sink is
+# never selected for a speakers request.
 pw_default_speakers() {
   st="$(pwctl_status_safe 2>/dev/null)" || {
     printf '%s\n' ""
@@ -1003,18 +1003,13 @@ pw_default_speakers() {
       grep -Ei 'line[._ -]*out|analog|hdmi' |
       sed -n 's/^[^0-9]*\([0-9][0-9]*\)\..*/\1/p'
   )"
-  headphone_ids="$(
-    printf '%s\n' "$block" |
-      grep -Ei 'headphone' |
-      sed -n 's/^[^0-9]*\([0-9][0-9]*\)\..*/\1/p'
-  )"
   all_ids="$(
     printf '%s\n' "$block" |
       sed -n 's/^[^0-9]*\([0-9][0-9]*\)\..*/\1/p'
   )"
   checked_ids=""
 
-  for id in $speaker_ids $output_ids $headphone_ids $all_ids; do
+  for id in $speaker_ids $output_ids $all_ids; do
     case " $checked_ids " in
       *" $id "*)
         continue
@@ -1023,8 +1018,43 @@ pw_default_speakers() {
 
     checked_ids="$checked_ids $id"
 
+    ps_label="$(
+      pwctl_inspect_safe "$id" 2>/dev/null |
+        grep -E 'node[.](description|name)[[:space:]]*=' |
+        cut -d'"' -f2 |
+        tr '\n' ' '
+    )"
+
+    if printf '%s\n' "$ps_label" | grep -Eiq 'headphone|headset|3[.]5|hsj'; then
+      continue
+    fi
+
     if pw_sink_is_real_audio "$id"; then
       printf '%s\n' "$id"
+      return 0
+    fi
+  done
+
+  printf '%s\n' ""
+}
+
+# Return the first real PipeWire sink identified as headphones at runtime.
+pw_default_headphones() {
+  pdh_status="$(pwctl_status_safe 2>/dev/null)" || {
+    printf '%s\n' ""
+    return 0
+  }
+
+  pdh_block="$(printf '%s\n' "$pdh_status" | sed -n '/Sinks:/,/Sources:/p')"
+  pdh_ids="$(
+    printf '%s\n' "$pdh_block" |
+      grep -Ei 'headphone|headset|3[.]5|hsj' |
+      sed -n 's/^[^0-9]*\([0-9][0-9]*\)\..*/\1/p'
+  )"
+
+  for pdh_id in $pdh_ids; do
+    if pw_sink_is_real_audio "$pdh_id"; then
+      printf '%s\n' "$pdh_id"
       return 0
     fi
   done
@@ -1137,8 +1167,47 @@ pw_default_mic() {
 
     checked_ids="$checked_ids $id"
 
+    pdm_label="$(
+      pwctl_inspect_safe "$id" 2>/dev/null |
+        grep -E 'node[.](description|name)[[:space:]]*=' |
+        cut -d'"' -f2 |
+        tr '\n' ' '
+    )"
+
+    if printf '%s\n' "$pdm_label" |
+        grep -Eiq 'headphone|headset|3[.]5|hsj|hsmic'; then
+      continue
+    fi
+
     if pw_source_is_real_audio "$id"; then
       printf '%s\n' "$id"
+      return 0
+    fi
+  done
+
+  printf '%s\n' ""
+}
+
+# Return the first real PipeWire source identified as a headset microphone.
+pw_default_headset_mic() {
+  pdhm_status="$(pwctl_status_safe 2>/dev/null)" || {
+    printf '%s\n' ""
+    return 0
+  }
+
+  pdhm_block="$(
+    printf '%s\n' "$pdhm_status" |
+      sed -n '/Sources:/,/Filters:/p'
+  )"
+  pdhm_ids="$(
+    printf '%s\n' "$pdhm_block" |
+      grep -Ei 'headphone|headset|3[.]5|hsj|hsmic' |
+      sed -n 's/^[^0-9]*\([0-9][0-9]*\)\..*/\1/p'
+  )"
+
+  for pdhm_id in $pdhm_ids; do
+    if pw_source_is_real_audio "$pdhm_id"; then
+      printf '%s\n' "$pdhm_id"
       return 0
     fi
   done
@@ -1180,14 +1249,115 @@ pw_source_label_safe() {
   printf '%s\n' "$pw_source_label"
 }
 # ---------- PulseAudio: sinks (playback) ----------
+# Print stable route-identification fields for one PulseAudio sink. Do not
+# include the complete Ports section because it lists inactive routes too.
+pa_sink_route_label() {
+  pasrl_name="$1"
+
+  [ -n "$pasrl_name" ] || return 1
+
+  {
+    printf '%s\n' "$pasrl_name"
+    pactl list sinks 2>/dev/null |
+      awk -v requested="$pasrl_name" '
+        $1 == "Name:" {
+          selected = ($2 == requested)
+        }
+        selected &&
+          ($1 == "Description:" ||
+           $1 == "Active" && $2 == "Port:" ||
+           $1 == "device.description" ||
+           $1 == "device.form_factor") {
+          print
+        }
+      '
+  } |
+    tr '\n' ' '
+}
+
+# Return success for a non-virtual PulseAudio playback sink. The short sink
+# inventory is authoritative for existence, while metadata only rejects known
+# virtual endpoints so older distributions with sparse properties still work.
+pa_sink_is_real_audio() {
+  pasira_name="$1"
+
+  [ -n "$pasira_name" ] || return 1
+
+  if ! pactl list short sinks 2>/dev/null |
+      awk -v requested="$pasira_name" \
+        '$2 == requested { found = 1 } END { exit !found }'; then
+    return 1
+  fi
+
+  pasira_label="$(pa_sink_route_label "$pasira_name" 2>/dev/null || true)"
+  if printf '%s\n' "$pasira_label" |
+      grep -Eiq '(^|[._ /-])(null|dummy|monitor|loopback|freewheel)($|[._ /-])'; then
+    return 1
+  fi
+
+  return 0
+}
+
 pa_default_speakers() {
-  sinks="$(pactl list short sinks 2>/dev/null)"
-  name="$(printf '%s\n' "$sinks" | awk '{print $2}' | grep -i 'speaker' | head -n1)"
-  [ -n "$name" ] || name="$(printf '%s\n' "$sinks" | awk '{print $2}' | grep -Ei 'line[._ -]*out|analog|hdmi' | head -n1)"
-  [ -n "$name" ] || name="$(printf '%s\n' "$sinks" | awk '{print $2}' | grep -i 'headphone' | head -n1)"
-  [ -n "$name" ] || name="$(pactl info 2>/dev/null | sed -n 's/^Default Sink:[[:space:]]*//p' | head -n1)"
-  [ -n "$name" ] || name="$(printf '%s\n' "$sinks" | awk '{print $2}' | head -n1)"
-  printf '%s\n' "$name"
+  pds_sinks="$(pactl list short sinks 2>/dev/null)"
+  pds_names="$(printf '%s\n' "$pds_sinks" | awk '{print $2}')"
+  pds_default="$(
+    pactl info 2>/dev/null |
+      sed -n 's/^Default Sink:[[:space:]]*//p' |
+      head -n 1
+  )"
+  pds_preferred=""
+  pds_fallback=""
+
+  for pds_name in $pds_names; do
+    if ! pa_sink_is_real_audio "$pds_name"; then
+      continue
+    fi
+
+    pds_label="$(pa_sink_route_label "$pds_name" 2>/dev/null || true)"
+    if printf '%s\n' "$pds_label" |
+        grep -Eiq 'headphone|headset|3[.]5|hsj'; then
+      continue
+    fi
+
+    if printf '%s\n' "$pds_label" |
+        grep -Eiq 'speaker|line[._ /-]*out|analog|hdmi'; then
+      pds_preferred="$pds_name"
+      break
+    fi
+
+    if [ "$pds_name" = "$pds_default" ]; then
+      pds_fallback="$pds_name"
+    elif [ -z "$pds_fallback" ]; then
+      pds_fallback="$pds_name"
+    fi
+  done
+
+  if [ -n "$pds_preferred" ]; then
+    printf '%s\n' "$pds_preferred"
+  else
+    printf '%s\n' "$pds_fallback"
+  fi
+}
+
+# Return the first PulseAudio sink identified as headphones at runtime.
+pa_default_headphones() {
+  pdh_names="$(pactl list short sinks 2>/dev/null | awk '{print $2}')"
+
+  for pdh_name in $pdh_names; do
+    if ! pa_sink_is_real_audio "$pdh_name"; then
+      continue
+    fi
+
+    pdh_label="$(pa_sink_route_label "$pdh_name" 2>/dev/null || true)"
+    if printf '%s\n' "$pdh_label" |
+        grep -Eiq 'headphone|headset|3[.]5|hsj'; then
+      printf '%s\n' "$pdh_name"
+      return 0
+    fi
+  done
+
+  printf '%s\n' ""
 }
 
 pa_default_null() {
@@ -1207,6 +1377,53 @@ pa_sink_name() {
 }
 
 # ---------- PulseAudio: sources (record) ----------
+# Print stable route-identification fields for one PulseAudio source. This
+# excludes inactive port inventory for the same reason as pa_sink_route_label.
+pa_source_route_label() {
+  pasrl_name="$1"
+
+  [ -n "$pasrl_name" ] || return 1
+
+  {
+    printf '%s\n' "$pasrl_name"
+    pactl list sources 2>/dev/null |
+      awk -v requested="$pasrl_name" '
+        $1 == "Name:" {
+          selected = ($2 == requested)
+        }
+        selected &&
+          ($1 == "Description:" ||
+           $1 == "Active" && $2 == "Port:" ||
+           $1 == "device.description" ||
+           $1 == "device.form_factor") {
+          print
+        }
+      '
+  } |
+    tr '\n' ' '
+}
+
+# Return success for a non-monitor, non-virtual PulseAudio capture source.
+pa_source_is_real_audio() {
+  pasira_name="$1"
+
+  [ -n "$pasira_name" ] || return 1
+
+  if ! pactl list short sources 2>/dev/null |
+      awk -v requested="$pasira_name" \
+        '$2 == requested { found = 1 } END { exit !found }'; then
+    return 1
+  fi
+
+  pasira_label="$(pa_source_route_label "$pasira_name" 2>/dev/null || true)"
+  if printf '%s\n' "$pasira_label" |
+      grep -Eiq '(^|[._ /-])(null|dummy|monitor|loopback|freewheel)($|[._ /-])'; then
+    return 1
+  fi
+
+  return 0
+}
+
 pa_default_source() {
   s="$(pactl get-default-source 2>/dev/null | tr -d '\r')"
   [ -n "$s" ] || s="$(pactl info 2>/dev/null | awk -F': ' '/Default Source:/{print $2}')"
@@ -1238,14 +1455,66 @@ pa_resolve_mic_fallback() {
 
 # ----------- PulseAudio Source Helpers -----------
 pa_default_mic() {
-  def="$(pactl info 2>/dev/null | sed -n 's/^Default Source:[[:space:]]*//p' | head -n1)"
-  if [ -n "$def" ]; then
-    printf '%s\n' "$def"; return 0
+  pdm_names="$(pactl list short sources 2>/dev/null | awk '{print $2}')"
+  pdm_default="$(
+    pactl info 2>/dev/null |
+      sed -n 's/^Default Source:[[:space:]]*//p' |
+      head -n 1
+  )"
+  pdm_preferred=""
+  pdm_fallback=""
+
+  for pdm_name in $pdm_names; do
+    if ! pa_source_is_real_audio "$pdm_name"; then
+      continue
+    fi
+
+    pdm_label="$(pa_source_route_label "$pdm_name" 2>/dev/null || true)"
+    if printf '%s\n' "$pdm_label" |
+        grep -Eiq 'headphone|headset|3[.]5|hsj|hsmic'; then
+      continue
+    fi
+
+    if printf '%s\n' "$pdm_label" |
+        grep -Eiq 'mic|microphone|capture|audio[._ /-]*input'; then
+      pdm_preferred="$pdm_name"
+      break
+    fi
+
+    if [ "$pdm_name" = "$pdm_default" ]; then
+      pdm_fallback="$pdm_name"
+    elif [ -z "$pdm_fallback" ]; then
+      pdm_fallback="$pdm_name"
+    fi
+  done
+
+  if [ -n "$pdm_preferred" ]; then
+    printf '%s\n' "$pdm_preferred"
+  else
+    printf '%s\n' "$pdm_fallback"
   fi
-  name="$(pactl list short sources 2>/dev/null | awk '{print $2}' | grep -i 'mic' | head -n1)"
-  [ -n "$name" ] || name="$(pactl list short sources 2>/dev/null | awk '{print $2}' | head -n1)"
-  printf '%s\n' "$name"
 }
+
+# Return the first PulseAudio source identified as a headset microphone.
+pa_default_headset_mic() {
+  pdhm_names="$(pactl list short sources 2>/dev/null | awk '{print $2}')"
+
+  for pdhm_name in $pdhm_names; do
+    if ! pa_source_is_real_audio "$pdhm_name"; then
+      continue
+    fi
+
+    pdhm_label="$(pa_source_route_label "$pdhm_name" 2>/dev/null || true)"
+    if printf '%s\n' "$pdhm_label" |
+        grep -Eiq 'headphone|headset|3[.]5|hsj|hsmic'; then
+      printf '%s\n' "$pdhm_name"
+      return 0
+    fi
+  done
+
+  printf '%s\n' ""
+}
+
 pa_default_null_source() {
   name="$(pactl list short sources 2>/dev/null | awk '{print $2}' | grep -i 'null\|dummy' | head -n1)"
   printf '%s\n' "$name"
@@ -3201,7 +3470,7 @@ audio_alsa_card_indexes() {
 # Extract the card index from an hw:CARD,DEV or plughw:CARD,DEV identifier.
 audio_alsa_device_card() {
   printf '%s\n' "$1" |
-    sed -n 's/^\(plug\)\{0,1\}hw:\([0-9][0-9]*\),.*/\2/p'
+    sed -n 's/^\(plug\)\{0,1\}hw:\([^,][^,]*\),.*/\2/p'
 }
 
 # Return success after ALSA exposes at least one hardware capture PCM.
@@ -3273,27 +3542,444 @@ audio_alsa_find_playback_card() {
   return 1
 }
 
-# Enable UCM first, then apply only mixer controls present for the detected
-# primary-MI2S, secondary-TDM, codec-direct, or legacy playback path.
+# List UCM card identifiers without returning their descriptive comments.
+audio_alsa_ucm_cards() {
+  command -v alsaucm >/dev/null 2>&1 || return 1
+
+  audio_exec_with_timeout 5s alsaucm listcards 2>/dev/null |
+    sed -n 's/^[[:space:]]*[0-9][0-9]*:[[:space:]]*//p'
+}
+
+# Run an alsaucm batch without depending on the caller's standard input.
+# audio_exec_with_timeout backgrounds commands, and dash redirects an
+# asynchronous command's unredirected stdin from /dev/null. Pass the batch as
+# a positional parameter so alsaucm still receives every command on Ubuntu.
+audio_alsa_ucm_batch() {
+  aaub_commands="$1"
+
+  [ -n "$aaub_commands" ] || return 1
+
+  # $1 is expanded by the inner shell from the positional argument below.
+  # shellcheck disable=SC2016
+  audio_exec_with_timeout 5s sh -c '
+    printf "%s\n" "$1" | alsaucm -n -b -
+  ' sh "$aaub_commands"
+}
+
+# Convert a UCM PCM value into a name safe for a separate aplay or arecord
+# process. Remove alsa-lib's private namespace only around standard hardware
+# PCMs. Reject other private names because they require the UCM manager's
+# generated alsa-lib configuration and are not standalone direct PCM routes.
+audio_alsa_direct_pcm_from_ucm_value() {
+  aadpfuv_pcm="$(
+    printf '%s\n' "$1" |
+      sed \
+        -e 's/^_ucm[0-9][0-9]*[.]plughw:/plughw:/' \
+        -e 's/^_ucm[0-9][0-9]*[.]hw:/hw:/'
+  )"
+
+  [ -n "$aadpfuv_pcm" ] || return 1
+
+  if printf '%s\n' "$aadpfuv_pcm" |
+      grep -Eq '^_ucm[0-9]+[.]'; then
+    return 1
+  fi
+
+  printf '%s\n' "$aadpfuv_pcm"
+}
+
+# Normalize public playback route aliases to the internal semantic names.
+audio_normalize_playback_route() {
+  case "$1" in
+    auto)
+      printf '%s\n' auto
+      ;;
+    speaker|speakers)
+      printf '%s\n' speakers
+      ;;
+    headphone|headphones|headset)
+      printf '%s\n' headphones
+      ;;
+    null)
+      printf '%s\n' null
+      ;;
+    *)
+      printf '%s\n' "unsupported playback route: $1" >&2
+      return 1
+      ;;
+  esac
+}
+
+# Normalize public capture route aliases to the internal semantic names.
+audio_normalize_capture_route() {
+  case "$1" in
+    auto)
+      printf '%s\n' auto
+      ;;
+    mic|microphone)
+      printf '%s\n' mic
+      ;;
+    headset-mic|headset_mic|'headset mic')
+      printf '%s\n' headset-mic
+      ;;
+    null)
+      printf '%s\n' null
+      ;;
+    *)
+      printf '%s\n' "unsupported capture route: $1" >&2
+      return 1
+      ;;
+  esac
+}
+
+# Discover one usable managed-backend playback route and print route|target.
+audio_select_managed_playback_route() {
+  asmpr_backend="$1"
+  asmpr_requested="${2:-auto}"
+
+  case "$asmpr_requested" in
+    auto)
+      asmpr_routes="speakers headphones"
+      ;;
+    speakers|headphones|null)
+      asmpr_routes="$asmpr_requested"
+      ;;
+    *)
+      printf '%s\n' \
+        "unsupported managed playback route: $asmpr_requested" >&2
+      return 1
+      ;;
+  esac
+
+  for asmpr_route in $asmpr_routes; do
+    asmpr_target=""
+    case "$asmpr_backend:$asmpr_route" in
+      pipewire:speakers)
+        asmpr_target="$(pw_default_speakers 2>/dev/null || true)"
+        ;;
+      pipewire:headphones)
+        asmpr_target="$(pw_default_headphones 2>/dev/null || true)"
+        ;;
+      pipewire:null)
+        asmpr_target="$(pw_default_null 2>/dev/null || true)"
+        ;;
+      pulseaudio:speakers)
+        asmpr_target="$(pa_default_speakers 2>/dev/null || true)"
+        ;;
+      pulseaudio:headphones)
+        asmpr_target="$(pa_default_headphones 2>/dev/null || true)"
+        ;;
+      pulseaudio:null)
+        asmpr_target="$(pa_default_null 2>/dev/null || true)"
+        ;;
+      *)
+        printf '%s\n' \
+          "unsupported managed playback backend: $asmpr_backend" >&2
+        return 1
+        ;;
+    esac
+
+    if [ -n "$asmpr_target" ]; then
+      printf '%s|%s\n' "$asmpr_route" "$asmpr_target"
+      return 0
+    fi
+
+    printf '%s\n' \
+      "[AUDIO-ROUTE] managed playback route unavailable: backend=$asmpr_backend route=$asmpr_route" >&2
+  done
+
+  return 1
+}
+
+# Discover one usable managed-backend capture route and print route|target.
+audio_select_managed_capture_route() {
+  asmcr_backend="$1"
+  asmcr_requested="${2:-auto}"
+
+  case "$asmcr_requested" in
+    auto)
+      asmcr_routes="mic headset-mic"
+      ;;
+    mic|headset-mic|null)
+      asmcr_routes="$asmcr_requested"
+      ;;
+    *)
+      printf '%s\n' \
+        "unsupported managed capture route: $asmcr_requested" >&2
+      return 1
+      ;;
+  esac
+
+  for asmcr_route in $asmcr_routes; do
+    asmcr_target=""
+    case "$asmcr_backend:$asmcr_route" in
+      pipewire:mic)
+        asmcr_target="$(pw_default_mic 2>/dev/null || true)"
+        ;;
+      pipewire:headset-mic)
+        asmcr_target="$(pw_default_headset_mic 2>/dev/null || true)"
+        ;;
+      pipewire:null)
+        asmcr_target="$(pw_default_null_source 2>/dev/null || true)"
+        ;;
+      pulseaudio:mic)
+        asmcr_target="$(pa_default_mic 2>/dev/null || true)"
+        ;;
+      pulseaudio:headset-mic)
+        asmcr_target="$(pa_default_headset_mic 2>/dev/null || true)"
+        ;;
+      pulseaudio:null)
+        asmcr_target="$(pa_default_null_source 2>/dev/null || true)"
+        ;;
+      *)
+        printf '%s\n' \
+          "unsupported managed capture backend: $asmcr_backend" >&2
+        return 1
+        ;;
+    esac
+
+    if [ -n "$asmcr_target" ]; then
+      printf '%s|%s\n' "$asmcr_route" "$asmcr_target"
+      return 0
+    fi
+
+    printf '%s\n' \
+      "[AUDIO-ROUTE] managed capture route unavailable: backend=$asmcr_backend route=$asmcr_route" >&2
+  done
+
+  return 1
+}
+
+# Select the effective ALSA playback target without changing an explicit user
+# override. Auto-discovered raw hardware PCMs use ALSA's plug layer so valid
+# WAV formats are converted to the capabilities exposed by the hardware PCM.
+audio_playback_effective_alsa_device() {
+  apead_device="$1"
+  apead_selection="${2:-auto}"
+
+  [ -n "$apead_device" ] || return 1
+
+  case "$apead_selection" in
+    auto)
+      case "$apead_device" in
+        hw:*)
+          printf '%s\n' "plughw:${apead_device#hw:}"
+          ;;
+        *)
+          printf '%s\n' "$apead_device"
+          ;;
+      esac
+      ;;
+    explicit)
+      printf '%s\n' "$apead_device"
+      ;;
+    *)
+      printf '%s\n' \
+        "unsupported ALSA playback-device selection: $apead_selection" >&2
+      return 1
+      ;;
+  esac
+}
+
+# List the HiFi devices exposed by one UCM card without changing card state.
+audio_alsa_ucm_hifi_devices() {
+  aauhd_card="$1"
+  aauhd_commands=""
+
+  [ -n "$aauhd_card" ] || return 1
+
+  case "$aauhd_card" in
+    *\"*)
+      return 1
+      ;;
+  esac
+
+  aauhd_commands="$(
+    printf 'open "%s"\nlist _devices/HiFi\n' "$aauhd_card"
+  )"
+  audio_alsa_ucm_batch "$aauhd_commands" 2>/dev/null |
+    sed -n 's/^[[:space:]]*[0-9][0-9]*:[[:space:]]*//p'
+}
+
+# Print the exact PlaybackPCM declared for one UCM HiFi device.
+audio_alsa_ucm_playback_pcm() {
+  aaupp_card="$1"
+  aaupp_device="$2"
+  aaupp_commands=""
+  aaupp_output=""
+  aaupp_pcm=""
+
+  [ -n "$aaupp_card" ] && [ -n "$aaupp_device" ] || return 1
+
+  case "$aaupp_card$aaupp_device" in
+    *\"*)
+      return 1
+      ;;
+  esac
+
+  aaupp_commands="$(
+    printf 'open "%s"\ngetval "=PlaybackPCM/%s/HiFi"\n' \
+      "$aaupp_card" "$aaupp_device"
+  )"
+  aaupp_output="$(
+    audio_alsa_ucm_batch "$aaupp_commands" 2>/dev/null
+  )" || return 1
+  aaupp_pcm="$(
+    printf '%s\n' "$aaupp_output" |
+      sed -n '/[^[:space:]]/ {
+        s/^[[:space:]]*//
+        s/[[:space:]]*$//
+        p
+        q
+      }'
+  )"
+  [ -n "$aaupp_pcm" ] || return 1
+
+  audio_alsa_direct_pcm_from_ucm_value "$aaupp_pcm"
+}
+
+# Return the UCM device-name expression for a semantic playback selection.
+audio_alsa_ucm_route_pattern() {
+  case "$1" in
+    speakers)
+      printf '%s\n' 'speaker|line[ _-]*out|internal[ _-]*speaker'
+      ;;
+    headphones)
+      printf '%s\n' 'headphone|headset|3[.]5|(^|[^[:alnum:]])hsj([^[:alnum:]]|$)'
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+# Resolve semantic route selection to PCM, UCM card, and UCM device fields.
+audio_alsa_find_ucm_playback_route() {
+  aafur_route="$1"
+  aafur_pattern="$(audio_alsa_ucm_route_pattern "$aafur_route")" || return 1
+  aafur_cards="$(audio_alsa_ucm_cards)" || return 1
+  aafur_old_ifs=$IFS
+  IFS='
+'
+
+  for aafur_card in $aafur_cards; do
+    aafur_devices="$(audio_alsa_ucm_hifi_devices "$aafur_card")"
+    for aafur_device in $aafur_devices; do
+      if ! printf '%s\n' "$aafur_device" |
+          grep -Eiq "$aafur_pattern"; then
+        continue
+      fi
+
+      aafur_pcm="$(
+        audio_alsa_ucm_playback_pcm "$aafur_card" "$aafur_device"
+      )"
+      if [ -n "$aafur_pcm" ]; then
+        IFS=$aafur_old_ifs
+        printf '%s|%s|%s\n' \
+          "$aafur_pcm" "$aafur_card" "$aafur_device"
+        return 0
+      fi
+    done
+  done
+
+  IFS=$aafur_old_ifs
+  return 1
+}
+
+# Reset UCM and enable one or two exact dynamically discovered HiFi devices.
+audio_alsa_enable_ucm_hifi_devices() {
+  aaeupr_card="$1"
+  aaeupr_device="$2"
+  aaeupr_second_device="${3:-}"
+  aaeupr_commands=""
+  aaeupr_output=""
+  aaeupr_enabled_devices=""
+
+  [ -n "$aaeupr_card" ] && [ -n "$aaeupr_device" ] || return 1
+
+  case "$aaeupr_card$aaeupr_device$aaeupr_second_device" in
+    *\"*)
+      return 1
+      ;;
+  esac
+
+  if [ -n "$aaeupr_second_device" ]; then
+    aaeupr_commands="$(
+      printf 'open "%s"\nreset\nset _verb HiFi\nset _enadev "%s"\nset _enadev "%s"\nlist1 _enadevs\n' \
+        "$aaeupr_card" "$aaeupr_device" "$aaeupr_second_device"
+    )"
+  else
+    aaeupr_commands="$(
+      printf 'open "%s"\nreset\nset _verb HiFi\nset _enadev "%s"\nlist1 _enadevs\n' \
+        "$aaeupr_card" "$aaeupr_device"
+    )"
+  fi
+
+  aaeupr_output="$(
+    audio_alsa_ucm_batch "$aaeupr_commands" 2>/dev/null
+  )" || return 1
+  aaeupr_enabled_devices="$(
+    printf '%s\n' "$aaeupr_output" |
+      sed -n 's/^[[:space:]]*[0-9][0-9]*:[[:space:]]*//p'
+  )"
+
+  if ! printf '%s\n' "$aaeupr_enabled_devices" |
+      grep -F -x "$aaeupr_device" >/dev/null 2>&1; then
+    printf '%s\n' \
+      "UCM device '$aaeupr_device' was not reported enabled on card '$aaeupr_card'" >&2
+    return 1
+  fi
+
+  if [ -n "$aaeupr_second_device" ] &&
+     ! printf '%s\n' "$aaeupr_enabled_devices" |
+       grep -F -x "$aaeupr_second_device" >/dev/null 2>&1; then
+    printf '%s\n' \
+      "UCM device '$aaeupr_second_device' was not reported enabled on card '$aaeupr_card'" >&2
+    return 1
+  fi
+
+  return 0
+}
+
+# Enable the selected UCM route when available, then retain legacy mixer
+# preparation only for images without a usable speaker UCM route.
 audio_playback_alsa_prepare() {
   ap_card="${1:-}"
+  ap_ucm_card="${2:-}"
+  ap_ucm_device="${3:-}"
   ap_profile=""
-  ap_ucm_card=""
+  ap_route_record=""
 
   if [ "${SINK_CHOICE:-speakers}" = "null" ]; then
     return 0
   fi
 
   if command -v alsaucm >/dev/null 2>&1; then
-    ap_ucm_card="$(alsaucm listcards 2>/dev/null | awk 'NR==2 {sub(/^[[:space:]]+/, "", $0); print; exit}')"
-    if [ -n "$ap_ucm_card" ]; then
-      alsaucm -n -b - <<EOF >/dev/null 2>&1
-open $ap_ucm_card
-reset
-set _verb HiFi
-set _enadev Speaker
-EOF
+    if [ -z "$ap_ucm_card" ] || [ -z "$ap_ucm_device" ]; then
+      ap_route_record="$(
+        audio_alsa_find_ucm_playback_route \
+          "${SINK_CHOICE:-speakers}" 2>/dev/null || true
+      )"
+      ap_ucm_card="$(printf '%s\n' "$ap_route_record" | cut -d'|' -f2)"
+      ap_ucm_device="$(printf '%s\n' "$ap_route_record" | cut -d'|' -f3)"
     fi
+
+    if [ -n "$ap_ucm_card" ] && [ -n "$ap_ucm_device" ]; then
+      if ! audio_alsa_enable_ucm_hifi_devices \
+          "$ap_ucm_card" "$ap_ucm_device"; then
+        printf '%s\n' \
+          "could not enable UCM device '$ap_ucm_device' on card '$ap_ucm_card'" >&2
+        return 1
+      fi
+
+      return 0
+    fi
+  fi
+
+  if [ "${SINK_CHOICE:-speakers}" = "headphones" ]; then
+    printf '%s\n' \
+      'headphones playback requires a matching UCM HiFi device' >&2
+    return 1
   fi
 
   if ! command -v amixer >/dev/null 2>&1; then
@@ -3374,7 +4060,7 @@ EOF
 
 # Prefer the PCM associated with a detected hardware route, then retain the
 # existing default, sysdefault, and first-device fallback order.
-audio_playback_pick_alsa_sink() {
+audio_playback_pick_legacy_alsa_sink() {
   ap_dev=""
   ap_card=""
   ap_profile="generic"
@@ -3430,12 +4116,86 @@ audio_playback_pick_alsa_sink() {
   return 1
 }
 
+# Resolve the selected semantic ALSA route without encoding card or PCM IDs.
+audio_playback_resolve_alsa_route() {
+  apar_route="${1:-${SINK_CHOICE:-speakers}}"
+  apar_record=""
+  apar_device=""
+
+  case "$apar_route" in
+    null)
+      printf '%s\n' 'null||'
+      return 0
+      ;;
+    speakers|headphones)
+      ;;
+    *)
+      printf '%s\n' "unsupported ALSA playback route: $apar_route" >&2
+      return 1
+      ;;
+  esac
+
+  apar_record="$(
+    audio_alsa_find_ucm_playback_route "$apar_route" 2>/dev/null || true
+  )"
+  if [ -n "$apar_record" ]; then
+    printf '%s\n' "$apar_record"
+    return 0
+  fi
+
+  if [ "$apar_route" = "headphones" ]; then
+    printf '%s\n' \
+      'no UCM HiFi headphones device with a PlaybackPCM value was discovered' >&2
+    return 1
+  fi
+
+  apar_device="$(audio_playback_pick_legacy_alsa_sink)"
+  if [ -n "$apar_device" ]; then
+    printf '%s||\n' "$apar_device"
+    return 0
+  fi
+
+  return 1
+}
+
+# Print only the PCM field for existing callers that need a playback device.
+audio_playback_pick_alsa_sink() {
+  appas_record="$(
+    audio_playback_resolve_alsa_route "${SINK_CHOICE:-speakers}"
+  )" || return 1
+
+  printf '%s\n' "$appas_record" | cut -d'|' -f1
+}
+
 # Prepare the selected card before verifying that its playback PCM can open.
+# An explicit device is opened exactly as supplied after semantic-route checks.
 audio_playback_alsa_probe() {
-  ap_probe_dev="$(audio_playback_pick_alsa_sink)"
+  ap_probe_requested_device="${1:-}"
+  ap_probe_selection="auto"
+  case "$ap_probe_requested_device" in
+    *[[:space:]]*)
+      printf '%s\n' \
+        "[ALSA-PROBE] explicit playback device contains whitespace: $ap_probe_requested_device" >&2
+      return 1
+      ;;
+  esac
+  ap_probe_route="$(
+    audio_playback_resolve_alsa_route "${SINK_CHOICE:-speakers}"
+  )" || return 1
+  ap_probe_route_dev="$(printf '%s\n' "$ap_probe_route" | cut -d'|' -f1)"
+  if [ -n "$ap_probe_requested_device" ]; then
+    ap_probe_route_dev="$ap_probe_requested_device"
+    ap_probe_selection="explicit"
+  fi
+  ap_probe_dev="$(
+    audio_playback_effective_alsa_device \
+      "$ap_probe_route_dev" "$ap_probe_selection"
+  )"
+  ap_probe_ucm_card="$(printf '%s\n' "$ap_probe_route" | cut -d'|' -f2)"
+  ap_probe_ucm_device="$(printf '%s\n' "$ap_probe_route" | cut -d'|' -f3)"
   if [ -z "$ap_probe_dev" ]; then
     printf '%s\n' \
-      '[ALSA-PROBE] no playback candidate was discovered from aplay inventory' >&2
+      "[ALSA-PROBE] no ${SINK_CHOICE:-speakers} playback route was discovered from UCM or ALSA inventory" >&2
     return 1
   fi
 
@@ -3445,9 +4205,23 @@ audio_playback_alsa_probe() {
     ap_probe_profile="$(audio_alsa_playback_profile "$ap_probe_card")"
   fi
 
+  if [ -n "$ap_probe_requested_device" ] &&
+     [ -n "$ap_probe_ucm_card" ] &&
+     [ -n "$ap_probe_card" ] &&
+     [ "$ap_probe_ucm_card" != "$ap_probe_card" ]; then
+    printf '%s\n' \
+      "[ALSA-PROBE] explicit playback device card $ap_probe_card does not match the discovered ${SINK_CHOICE:-speakers} UCM card $ap_probe_ucm_card" >&2
+    return 1
+  fi
+
   printf '%s\n' \
-    "[ALSA-PROBE] candidate=$ap_probe_dev card=${ap_probe_card:-unknown} profile=$ap_probe_profile" >&2
-  audio_playback_alsa_prepare "$ap_probe_card" >/dev/null 2>&1 || true
+    "[ALSA-PROBE] discovered_pcm=$ap_probe_route_dev effective_target=$ap_probe_dev card=${ap_probe_card:-unknown} profile=$ap_probe_profile ucm_card=${ap_probe_ucm_card:-none} ucm_device=${ap_probe_ucm_device:-none}" >&2
+  if ! audio_playback_alsa_prepare \
+      "$ap_probe_card" "$ap_probe_ucm_card" "$ap_probe_ucm_device"; then
+    printf '%s\n' \
+      "[ALSA-PROBE] route preparation failed: choice=${SINK_CHOICE:-speakers} device=$ap_probe_dev" >&2
+    return 1
+  fi
 
   printf '%s\n' \
     "[ALSA-PROBE] exec: aplay -D $ap_probe_dev -t raw -f S16_LE -r 48000 -c 2 -d 1 /dev/zero" >&2
@@ -3472,7 +4246,7 @@ audio_playback_alsa_probe() {
 # Print the successfully probed ALSA playback device for propagation from a
 # desktop Audio-user subprocess back into the root orchestrator.
 audio_playback_alsa_probe_device() {
-  if ! audio_playback_alsa_probe; then
+  if ! audio_playback_alsa_probe "${1:-}"; then
     return 1
   fi
 
@@ -3499,6 +4273,7 @@ audio_alsa_playback_inventory_available() {
 # Probe direct ALSA playback in the prepared user context. When no playback PCM
 # exists, root may start one fully provisioned offline audio DSP and retry.
 audio_playback_probe_alsa_with_recovery() {
+  appawr_requested_device="${1:-}"
   appawr_log="${AUDIO_ALSA_PLAYBACK_PROBE_LOG:-/dev/stderr}"
   if [ "$appawr_log" != "/dev/stderr" ]; then
     printf '\n%s\n' \
@@ -3508,6 +4283,7 @@ audio_playback_probe_alsa_with_recovery() {
 
   appawr_output="$(
     audio_run_helper_as_test_user audio_playback_alsa_probe_device \
+      "$appawr_requested_device" \
       2>>"$appawr_log"
   )"
   appawr_rc=$?
@@ -3518,9 +4294,14 @@ audio_playback_probe_alsa_with_recovery() {
     return 0
   fi
 
-  appawr_candidate="$(
-    audio_run_helper_as_test_user audio_playback_pick_alsa_sink 2>/dev/null || true
-  )"
+  if [ -n "$appawr_requested_device" ]; then
+    appawr_candidate="$appawr_requested_device"
+  else
+    appawr_candidate="$(
+      audio_run_helper_as_test_user \
+        audio_playback_pick_alsa_sink 2>/dev/null || true
+    )"
+  fi
   if [ -n "$appawr_candidate" ]; then
     printf '%s\n' \
       "[ALSA-PROBE] candidate remains present after failed open: $appawr_candidate" \
@@ -3559,6 +4340,7 @@ audio_playback_probe_alsa_with_recovery() {
 
   appawr_output="$(
     audio_run_helper_as_test_user audio_playback_alsa_probe_device \
+      "$appawr_requested_device" \
       2>>"$appawr_log"
   )"
   appawr_rc=$?
@@ -3572,21 +4354,188 @@ audio_playback_probe_alsa_with_recovery() {
   return 0
 }
 
-# Enable UCM first, then configure any exposed VA-DMIC or legacy capture route.
+# Probe the requested ALSA playback route, or discover speakers then headphones.
+audio_playback_probe_selected_alsa_with_recovery() {
+  appsawr_requested_device="${1:-}"
+  appsawr_requested_route="${SINK_CHOICE:-auto}"
+  appsawr_reasons=""
+
+  case "$appsawr_requested_device" in
+    *[[:space:]]*)
+      AUDIO_ALSA_PLAYBACK_REASON="explicit playback device contains whitespace: $appsawr_requested_device"
+      export AUDIO_ALSA_PLAYBACK_REASON
+      return 1
+      ;;
+  esac
+
+  case "$appsawr_requested_route" in
+    auto)
+      appsawr_routes="speakers headphones"
+      ;;
+    speakers|headphones)
+      appsawr_routes="$appsawr_requested_route"
+      ;;
+    *)
+      AUDIO_ALSA_PLAYBACK_REASON="unsupported ALSA playback route: $appsawr_requested_route"
+      export AUDIO_ALSA_PLAYBACK_REASON
+      return 1
+      ;;
+  esac
+
+  for appsawr_route in $appsawr_routes; do
+    SINK_CHOICE="$appsawr_route"
+    export SINK_CHOICE
+    printf '%s\n' \
+      "[AUDIO-ROUTE] probing ALSA playback route=$appsawr_route device=${appsawr_requested_device:-auto}" >&2
+
+    if audio_playback_probe_alsa_with_recovery \
+        "$appsawr_requested_device"; then
+      AUDIO_PLAYBACK_ROUTE_SELECTED="$appsawr_route"
+      AUDIO_ALSA_PLAYBACK_REASON=""
+      export AUDIO_PLAYBACK_ROUTE_SELECTED AUDIO_ALSA_PLAYBACK_REASON
+      return 0
+    fi
+
+    if [ -n "$appsawr_reasons" ]; then
+      appsawr_reasons="$appsawr_reasons, $appsawr_route unavailable"
+    else
+      appsawr_reasons="$appsawr_route unavailable"
+    fi
+  done
+
+  SINK_CHOICE="$appsawr_requested_route"
+  AUDIO_ALSA_PLAYBACK_REASON="$appsawr_reasons"
+  export SINK_CHOICE AUDIO_ALSA_PLAYBACK_REASON
+  return 1
+}
+
+# Print the exact CapturePCM declared for one UCM HiFi device.
+audio_alsa_ucm_capture_pcm() {
+  aaucp_card="$1"
+  aaucp_device="$2"
+  aaucp_commands=""
+  aaucp_output=""
+  aaucp_pcm=""
+
+  [ -n "$aaucp_card" ] && [ -n "$aaucp_device" ] || return 1
+
+  case "$aaucp_card$aaucp_device" in
+    *\"*)
+      return 1
+      ;;
+  esac
+
+  aaucp_commands="$(
+    printf 'open "%s"\ngetval "=CapturePCM/%s/HiFi"\n' \
+      "$aaucp_card" "$aaucp_device"
+  )"
+  aaucp_output="$(
+    audio_alsa_ucm_batch "$aaucp_commands" 2>/dev/null
+  )" || return 1
+  aaucp_pcm="$(
+    printf '%s\n' "$aaucp_output" |
+      sed -n '/[^[:space:]]/ {
+        s/^[[:space:]]*//
+        s/[[:space:]]*$//
+        p
+        q
+      }'
+  )"
+  [ -n "$aaucp_pcm" ] || return 1
+
+  audio_alsa_direct_pcm_from_ucm_value "$aaucp_pcm"
+}
+
+# Return the UCM device-name expression for a semantic capture selection.
+audio_alsa_ucm_capture_route_pattern() {
+  case "$1" in
+    mic)
+      printf '%s\n' 'mic|microphone|dmic|audio[ _-]*input|capture'
+      ;;
+    headset-mic)
+      printf '%s\n' 'headphone|headset|3[.]5|hsj|hsmic'
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+# Resolve semantic capture selection to PCM, UCM card, and UCM device fields.
+audio_alsa_find_ucm_capture_route() {
+  aafuc_route="$1"
+  aafuc_pattern="$(
+    audio_alsa_ucm_capture_route_pattern "$aafuc_route"
+  )" || return 1
+  aafuc_cards="$(audio_alsa_ucm_cards)" || return 1
+  aafuc_old_ifs=$IFS
+  IFS='
+'
+
+  for aafuc_card in $aafuc_cards; do
+    aafuc_devices="$(audio_alsa_ucm_hifi_devices "$aafuc_card")"
+    for aafuc_device in $aafuc_devices; do
+      if ! printf '%s\n' "$aafuc_device" |
+          grep -Eiq "$aafuc_pattern"; then
+        continue
+      fi
+
+      if [ "$aafuc_route" = "mic" ] &&
+         printf '%s\n' "$aafuc_device" |
+           grep -Eiq 'headphone|headset|3[.]5|hsj|hsmic'; then
+        continue
+      fi
+
+      aafuc_pcm="$(
+        audio_alsa_ucm_capture_pcm "$aafuc_card" "$aafuc_device"
+      )"
+      if [ -n "$aafuc_pcm" ]; then
+        IFS=$aafuc_old_ifs
+        printf '%s|%s|%s\n' \
+          "$aafuc_pcm" "$aafuc_card" "$aafuc_device"
+        return 0
+      fi
+    done
+  done
+
+  IFS=$aafuc_old_ifs
+  return 1
+}
+
+# Enable the selected UCM route when available, then retain legacy mixer
+# preparation only for images without a usable built-in microphone UCM route.
 audio_record_alsa_prepare_capture() {
   ar_card="${1:-}"
-  ar_ucm_card=""
+  ar_ucm_card="${2:-}"
+  ar_ucm_device="${3:-}"
+  ar_route_record=""
 
   if command -v alsaucm >/dev/null 2>&1; then
-    ar_ucm_card="$(alsaucm listcards 2>/dev/null | awk 'NR==2 {sub(/^[[:space:]]+/, "", $0); print; exit}')"
-    if [ -n "$ar_ucm_card" ]; then
-      alsaucm -n -b - <<EOF >/dev/null 2>&1
-open $ar_ucm_card
-reset
-set _verb HiFi
-set _enadev Mic
-EOF
+    if [ -z "$ar_ucm_card" ] || [ -z "$ar_ucm_device" ]; then
+      ar_route_record="$(
+        audio_alsa_find_ucm_capture_route \
+          "${SRC_CHOICE:-mic}" 2>/dev/null || true
+      )"
+      ar_ucm_card="$(printf '%s\n' "$ar_route_record" | cut -d'|' -f2)"
+      ar_ucm_device="$(printf '%s\n' "$ar_route_record" | cut -d'|' -f3)"
     fi
+
+    if [ -n "$ar_ucm_card" ] && [ -n "$ar_ucm_device" ]; then
+      if ! audio_alsa_enable_ucm_hifi_devices \
+          "$ar_ucm_card" "$ar_ucm_device"; then
+        printf '%s\n' \
+          "could not enable UCM device '$ar_ucm_device' on card '$ar_ucm_card'" >&2
+        return 1
+      fi
+
+      return 0
+    fi
+  fi
+
+  if [ "${SRC_CHOICE:-mic}" = "headset-mic" ]; then
+    printf '%s\n' \
+      'headset capture requires a matching UCM HiFi device' >&2
+    return 1
   fi
 
   if ! command -v amixer >/dev/null 2>&1; then
@@ -3625,7 +4574,7 @@ EOF
 
 # Prefer the capture PCM implied by the available VA DMA controls, falling back
 # to the first ALSA capture device for platforms with other routing schemes.
-audio_record_pick_alsa_capture() {
+audio_record_pick_legacy_alsa_capture() {
   ar_dev=""
   ar_card=""
 
@@ -3662,6 +4611,53 @@ audio_record_pick_alsa_capture() {
 
   echo ""
   return 1
+}
+
+# Resolve the selected semantic ALSA capture route without fixed card/PCM IDs.
+audio_record_resolve_alsa_route() {
+  arar_route="${1:-${SRC_CHOICE:-mic}}"
+  arar_record=""
+  arar_device=""
+
+  case "$arar_route" in
+    mic|headset-mic)
+      ;;
+    *)
+      printf '%s\n' "unsupported ALSA capture route: $arar_route" >&2
+      return 1
+      ;;
+  esac
+
+  arar_record="$(
+    audio_alsa_find_ucm_capture_route "$arar_route" 2>/dev/null || true
+  )"
+  if [ -n "$arar_record" ]; then
+    printf '%s\n' "$arar_record"
+    return 0
+  fi
+
+  if [ "$arar_route" = "headset-mic" ]; then
+    printf '%s\n' \
+      'no UCM HiFi headset capture device with a CapturePCM value was discovered' >&2
+    return 1
+  fi
+
+  arar_device="$(audio_record_pick_legacy_alsa_capture)"
+  if [ -n "$arar_device" ]; then
+    printf '%s||\n' "$arar_device"
+    return 0
+  fi
+
+  return 1
+}
+
+# Print only the PCM field for existing callers that need a capture device.
+audio_record_pick_alsa_capture() {
+  arpac_record="$(
+    audio_record_resolve_alsa_route "${SRC_CHOICE:-mic}"
+  )" || return 1
+
+  printf '%s\n' "$arpac_record" | cut -d'|' -f1
 }
 
 audio_record_alsa_capture_probe() {
@@ -3757,10 +4753,45 @@ audio_probe_alsa_capture_profile() {
   }
 
   probe_devices=""
+  probe_route_record="$(
+    audio_record_resolve_alsa_route "${SRC_CHOICE:-mic}" 2>/dev/null || true
+  )"
+  probe_ucm_card="$(
+    printf '%s\n' "$probe_route_record" | cut -d'|' -f2
+  )"
+  probe_ucm_device="$(
+    printf '%s\n' "$probe_route_record" | cut -d'|' -f3
+  )"
   if [ -n "$requested_capture_device" ]; then
+    case "$requested_capture_device" in
+      *[[:space:]]*)
+        AUDIO_ALSA_CAPTURE_REASON="explicit capture device contains whitespace: $requested_capture_device"
+        probe_cleanup
+        return 1
+        ;;
+    esac
+
+    if [ -z "$probe_route_record" ]; then
+      AUDIO_ALSA_CAPTURE_REASON="the ${SRC_CHOICE:-mic} capture route was not discovered for explicit device $requested_capture_device"
+      probe_cleanup
+      return 1
+    fi
+
+    requested_capture_card="$(
+      audio_alsa_device_card "$requested_capture_device"
+    )"
+    if [ -n "$probe_ucm_card" ] &&
+       [ -n "$requested_capture_card" ] &&
+       [ "$probe_ucm_card" != "$requested_capture_card" ]; then
+      AUDIO_ALSA_CAPTURE_REASON="explicit capture device card $requested_capture_card does not match the discovered ${SRC_CHOICE:-mic} UCM card $probe_ucm_card"
+      probe_cleanup
+      return 1
+    fi
+
     probe_devices="$requested_capture_device"
   else
-    cand="$(alsa_pick_capture 2>/dev/null || true)"
+    cand="$(printf '%s\n' "$probe_route_record" | cut -d'|' -f1)"
+
     if [ -n "$cand" ]; then
       probe_devices="$cand"
       case "$cand" in
@@ -3773,7 +4804,14 @@ audio_probe_alsa_capture_profile() {
       esac
     fi
 
-    extra_devices="$(sed -n 's/^\([0-9][0-9]*\)-\([0-9][0-9]*\):.*capture.*/hw:\1,\2/p' /proc/asound/pcm 2>/dev/null)"
+    extra_devices=""
+    if [ -z "$probe_ucm_card" ] && [ "${SRC_CHOICE:-mic}" = "mic" ]; then
+      extra_devices="$(
+        sed -n \
+          's/^\([0-9][0-9]*\)-\([0-9][0-9]*\):.*capture.*/hw:\1,\2/p' \
+          /proc/asound/pcm 2>/dev/null
+      )"
+    fi
     if [ -n "$extra_devices" ]; then
       for dev in $extra_devices; do
         seen=0
@@ -3797,7 +4835,11 @@ audio_probe_alsa_capture_profile() {
 
   if [ -z "$probe_devices" ]; then
     # shellcheck disable=SC2034
-    AUDIO_ALSA_CAPTURE_REASON="no ALSA capture device candidates found"
+    if [ "${SRC_CHOICE:-mic}" = "headset-mic" ]; then
+      AUDIO_ALSA_CAPTURE_REASON="no UCM HiFi headset capture device with a CapturePCM value was discovered"
+    else
+      AUDIO_ALSA_CAPTURE_REASON="no ALSA capture device candidates found"
+    fi
     probe_cleanup
     return 1
   fi
@@ -3805,7 +4847,12 @@ audio_probe_alsa_capture_profile() {
   for dev in $probe_devices; do
     # Mixer controls and PCM devices must come from the same ALSA card.
     probe_card="$(audio_alsa_device_card "$dev")"
-    audio_record_alsa_prepare_capture "$probe_card" >/dev/null 2>&1 || true
+    if ! audio_record_alsa_prepare_capture \
+        "$probe_card" "$probe_ucm_card" "$probe_ucm_device"; then
+      AUDIO_ALSA_CAPTURE_REASON="could not prepare the ${SRC_CHOICE:-mic} capture route for $dev"
+      probe_cleanup
+      return 1
+    fi
 
     for combo in \
       "S16_LE 48000 1" \
@@ -6115,6 +7162,80 @@ audio_find_desktop_audio_user() {
   return 1
 }
 
+# Configure Ubuntu command execution from runtime desktop-session evidence.
+# Headless Ubuntu Server stays in the current root context for direct ALSA.
+audio_configure_ubuntu_desktop_session() {
+  acud_os_id="${1:-unknown}"
+  acud_user=""
+  acud_uid=""
+  acud_home=""
+  acud_passwd_entry=""
+  acud_runtime_dir=""
+
+  AUDIO_USE_DESKTOP_SESSION=0
+  export AUDIO_USE_DESKTOP_SESSION
+
+  if [ "$acud_os_id" != "ubuntu" ] ||
+     [ "$(id -u 2>/dev/null || echo 1)" -ne 0 ]; then
+    return 0
+  fi
+
+  acud_user="$(audio_find_desktop_audio_user 2>/dev/null || true)"
+  if [ -z "$acud_user" ]; then
+    log_info "No active Ubuntu desktop Audio session was found, keeping direct system context"
+    return 0
+  fi
+
+  acud_uid="$(id -u "$acud_user" 2>/dev/null || true)"
+  if [ -z "$acud_uid" ]; then
+    log_warn "Could not resolve the active Ubuntu Audio user uid: $acud_user"
+    return 0
+  fi
+
+  acud_runtime_dir="/run/user/$acud_uid"
+  if [ ! -d "$acud_runtime_dir" ] ||
+     [ ! -S "$acud_runtime_dir/bus" ]; then
+    log_info "Ubuntu Audio runtime lacks a desktop D-Bus session, keeping direct system context: $acud_runtime_dir"
+    return 0
+  fi
+
+  if command -v getent >/dev/null 2>&1; then
+    acud_passwd_entry="$(
+      getent passwd "$acud_user" 2>/dev/null |
+        sed -n '1p'
+    )"
+  else
+    acud_passwd_entry="$(
+      awk -F: -v requested_user="$acud_user" \
+        '$1 == requested_user { print; exit }' \
+        /etc/passwd 2>/dev/null
+    )"
+  fi
+
+  acud_home="$(
+    printf '%s\n' "$acud_passwd_entry" |
+      awk -F: 'NR == 1 { print $6 }'
+  )"
+  [ -n "$acud_home" ] || acud_home="/home/$acud_user"
+
+  AUDIO_TEST_USER="$acud_user"
+  AUDIO_TEST_UID="$acud_uid"
+  AUDIO_TEST_HOME="$acud_home"
+  AUDIO_TEST_RUNTIME_DIR="$acud_runtime_dir"
+  AUDIO_TEST_DBUS_ADDRESS="unix:path=$acud_runtime_dir/bus"
+  AUDIO_USE_DESKTOP_SESSION=1
+
+  export AUDIO_TEST_USER
+  export AUDIO_TEST_UID
+  export AUDIO_TEST_HOME
+  export AUDIO_TEST_RUNTIME_DIR
+  export AUDIO_TEST_DBUS_ADDRESS
+  export AUDIO_USE_DESKTOP_SESSION
+
+  log_pass "Using active Ubuntu desktop Audio session: user=$acud_user uid=$acud_uid"
+  return 0
+}
+
 # Platform behavior:
 #   Debian and CentOS:
 #     - require the caller to be root
@@ -6788,6 +7909,60 @@ audio_record_probe_alsa_capture_profile() {
     export AUDIO_ALSA_CAPTURE_REASON
   fi
 
+  return 1
+}
+
+# Probe the requested ALSA capture route, or discover mic then headset-mic.
+audio_record_probe_selected_alsa_capture_profile() {
+  arpsacp_requested_device="${1:-}"
+  arpsacp_requested_route="${SRC_CHOICE:-auto}"
+  arpsacp_reasons=""
+
+  case "$arpsacp_requested_device" in
+    *[[:space:]]*)
+      AUDIO_ALSA_CAPTURE_REASON="explicit capture device contains whitespace: $arpsacp_requested_device"
+      export AUDIO_ALSA_CAPTURE_REASON
+      return 1
+      ;;
+  esac
+
+  case "$arpsacp_requested_route" in
+    auto)
+      arpsacp_routes="mic headset-mic"
+      ;;
+    mic|headset-mic)
+      arpsacp_routes="$arpsacp_requested_route"
+      ;;
+    *)
+      AUDIO_ALSA_CAPTURE_REASON="unsupported ALSA capture route: $arpsacp_requested_route"
+      export AUDIO_ALSA_CAPTURE_REASON
+      return 1
+      ;;
+  esac
+
+  for arpsacp_route in $arpsacp_routes; do
+    SRC_CHOICE="$arpsacp_route"
+    export SRC_CHOICE
+    printf '%s\n' \
+      "[AUDIO-ROUTE] probing ALSA capture route=$arpsacp_route device=${arpsacp_requested_device:-auto}" >&2
+
+    if audio_record_probe_alsa_capture_profile \
+        "$arpsacp_requested_device"; then
+      AUDIO_CAPTURE_ROUTE_SELECTED="$arpsacp_route"
+      export AUDIO_CAPTURE_ROUTE_SELECTED
+      return 0
+    fi
+
+    if [ -n "$arpsacp_reasons" ]; then
+      arpsacp_reasons="$arpsacp_reasons, $arpsacp_route: ${AUDIO_ALSA_CAPTURE_REASON:-unavailable}"
+    else
+      arpsacp_reasons="$arpsacp_route: ${AUDIO_ALSA_CAPTURE_REASON:-unavailable}"
+    fi
+  done
+
+  SRC_CHOICE="$arpsacp_requested_route"
+  AUDIO_ALSA_CAPTURE_REASON="$arpsacp_reasons"
+  export SRC_CHOICE AUDIO_ALSA_CAPTURE_REASON
   return 1
 }
 
@@ -7629,7 +8804,7 @@ EOF
 }
 
 # audio_validate_wav_file <file> <source-kind> <rate> <channels> <bits>
-#                         <seconds> <log-file> <scope>
+#                         <seconds> <log-file> <scope> [min-distinct-samples]
 # Validate WAV structure and basic signal integrity. Advanced signal metrics
 # remain diagnostic unless strict-signal mode is explicitly enabled.
 audio_validate_wav_file() {
@@ -7641,6 +8816,7 @@ audio_validate_wav_file() {
   avrw_expected_seconds="${6:-0}"
   avrw_log="${7:-}"
   avrw_scope="${8:-record}"
+  avrw_min_distinct="${9:-${AUDIO_RECORD_MIN_DISTINCT_SAMPLES:-4}}"
   avrw_validator="${AUDIO_WAV_VALIDATOR:-${TOOLS:-}/audio_wav_validate.py}"
 
   AUDIO_WAV_VALIDATION_SUMMARY=""
@@ -7658,7 +8834,7 @@ audio_validate_wav_file() {
       --analyze-bytes "${AUDIO_RECORD_ANALYZE_BYTES:-4194304}" \
       --min-active-samples "${AUDIO_RECORD_MIN_ACTIVE_SAMPLES:-100}" \
       --sample-threshold-lsb "${AUDIO_RECORD_SAMPLE_THRESHOLD_LSB:-${AUDIO_RECORD_SAMPLE_THRESHOLD:-8}}" \
-      --min-distinct-samples "${AUDIO_RECORD_MIN_DISTINCT_SAMPLES:-4}" \
+      --min-distinct-samples "$avrw_min_distinct" \
       --min-duration-ratio "${AUDIO_RECORD_MIN_DURATION_RATIO:-0.70}" \
       --strict-signal "${AUDIO_RECORD_STRICT_SIGNAL:-0}" \
       --min-rms-dbfs "${AUDIO_RECORD_MIN_RMS_DBFS:--60}" \
@@ -7819,7 +8995,7 @@ audio_validate_playback_wav() {
 #
 # Args:
 #   $1 file
-#   $2 source kind: mic|null
+#   $2 source kind: mic|headset-mic|null
 #   $3 expected rate, 0 disables the rate check
 #   $4 expected channels, 0 disables the channel check
 #   $5 expected recording duration

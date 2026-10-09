@@ -29,7 +29,8 @@ empty WAV files, header-only payloads, all-zero audio, materially short clips,
 or filename metadata that disagrees with the WAV header. RMS, peak, clipping,
 digital-silence runs, DC offset, large sample transitions, and silent-channel
 counts are reported as diagnostic `AUDIO_VALIDATION` metrics and do not fail the
-default policy.
+default policy. Complete RIFF chunks after the audio `data` chunk are reported
+as `post_data_chunks` metadata and are not misclassified as trailing audio.
 - Validates playback using multiple evidence sources:
   - PipeWire/PulseAudio streaming state
   - ALSA and ASoC runtime status
@@ -152,15 +153,25 @@ AUDIO_PACKAGE_PROFILE=desktop AUDIO_PACKAGE_UPDATE=1 \
 
 ## Backend and Route Selection
 
-When no backend is requested, the suite uses automatic selection. A physical PipeWire audio sink uses `pw-play` or `pw-cat --playback`, and a physical PulseAudio sink uses `paplay`. For the `speakers` route, a speaker endpoint takes precedence over headphones, then other physical outputs. Dummy, null, monitor, and loopback PipeWire sinks are not accepted as speaker routes.
+When no route is requested, `auto` discovers speakers first and then headphones on the running target. A physical PipeWire audio sink uses `pw-play` or `pw-cat --playback`, and a physical PulseAudio sink uses `paplay`. `speaker` and `speakers` explicitly select the speaker route. `headphone`, `headphones`, and `headset` explicitly select the headphones route. A generic physical output remains a compatibility fallback for automatic or explicit speaker selection, but an explicitly named headphones endpoint is never used as speakers. Dummy, null, monitor, and loopback PipeWire sinks are not accepted as physical routes. `--sink auto` also restores automatic route selection. The selected backend, request source, explicitness, requested alias, canonical route, runtime target, and UCM device are emitted to standard output in an `AUDIO_ROUTE` record.
 
-If automatic selection finds no physical managed speaker sink, the suite probes direct ALSA playback. It selects an ALSA card and PCM from the available device inventory, applies only mixer controls exposed by that card, and runs `aplay -D <device>`. This supports the Shikra primary-MI2S, secondary-TDM, and codec-direct route capabilities without selecting a form factor or assuming card `0`. When the audio remoteproc preflight proves that audio is applicable, failure of both managed-sink discovery and direct ALSA probing is reported as FAIL so the image or runtime regression remains tracked. The same absence remains SKIP only when runtime preflight found no applicable audio subsystem.
+If automatic selection finds no matching managed sink, the suite probes direct ALSA speakers and then headphones. UCM discovery enumerates every card and HiFi device, retrieves `PlaybackPCM`, enables the exact device, verifies `_enadevs`, and functionally opens the resulting PCM. An explicit semantic route is never replaced by another route. An explicit route that cannot be discovered and opened reports FAIL, while automatic discovery with no applicable physical output reports SKIP. The remaining UCM namespace, `plughw:` conversion, legacy speaker fallback, and audio-remoteproc applicability rules remain unchanged.
 
 An explicit backend request is never replaced:
 
-- `--backend pipewire` or `AUDIO_BACKEND=pipewire` runs `pw-play` or `pw-cat --playback`. A missing optional client can skip, but a ready backend with no requested physical sink fails.
+- `--backend pipewire` or `AUDIO_BACKEND=pipewire` runs `pw-play` or `pw-cat --playback`. A client absent from the image remains an optional-capability SKIP for compatibility, but a ready backend with no requested physical sink fails.
 - `--backend pulseaudio` or `AUDIO_BACKEND=pulseaudio` runs `paplay` only. A ready backend with no requested sink fails.
 - `--backend alsa` or `AUDIO_BACKEND=alsa` runs `aplay` with the discovered ALSA route.
+
+Existing Yocto/LAVA YAML definitions keep their `SINK_CHOICE=speakers` contract,
+which is treated as an explicit speaker validation. Override that parameter with
+`auto` when a job should choose speakers or headphones from runtime evidence.
+
+PulseAudio discovery rejects null, dummy, monitor, loopback, and freewheel
+endpoints before selecting a physical route. It uses the endpoint name,
+description, form factor, and active port to distinguish speakers from
+headphones while preserving a generic physical sink as the compatibility
+fallback on older distributions with sparse metadata.
 
 ## Audio Remoteproc Preflight
 
@@ -289,6 +300,12 @@ cd Runner/suites/Multimedia/Audio/AudioPlayback
 # Run with PipeWire, 3 loops, 10s timeout, speakers sink
 ./run.sh --backend pipewire --sink speakers --loops 3 --timeout 10s
 
+# Select headphones using the runtime PipeWire endpoint
+./run.sh --backend pipewire --sink headphones --loops 1
+
+# Select headphones through the dynamically discovered UCM card and PlaybackPCM
+./run.sh --backend alsa --sink headphones --loops 1
+
 # Run with PulseAudio, null sink, strict mode, verbose
 ./run.sh --backend pulseaudio --sink null --strict --verbose
 
@@ -315,7 +332,7 @@ cd Runner/suites/Multimedia/Audio/AudioPlayback
 Environment Variables:
 Variable	             Description	                                   Default
 AUDIO_BACKEND	         Selects backend: pipewire, pulseaudio, or alsa	       auto-detect
-SINK_CHOICE	             Playback sink: speakers or null	               speakers
+SINK_CHOICE	             Playback sink: auto, speakers, headphones, or null	   auto
 CLIP_NAMES               Test specific clips (e.g., "playback_config1 playback_config2")    playback_config1
 CLIP_FILTER              Filter clips by pattern (e.g., "48KHz" or "16b" or "2ch")          unset
 FORMATS	                 Audio formats: e.g. wav	                       wav
@@ -342,7 +359,7 @@ LAVA_TESTCASE_ID         Unique testcase ID written into the .res file for LAVA 
 CLI Options
 Option	                    Description
 --backend	                Select backend: pipewire, pulseaudio, or alsa
---sink	                    Playback sink: speakers or null
+--sink	                    Playback sink: auto, speaker(s), headphone(s), headset, or null
 --clip-name <names>         Test specific clips using playback_config1-playback_config10 or descriptive names (space-separated)
 --clip-filter <patterns>    Filter clips by sample rate, bit rate, or channels (space-separated patterns)
 --formats	                Audio formats (space/comma separated): e.g. wav 

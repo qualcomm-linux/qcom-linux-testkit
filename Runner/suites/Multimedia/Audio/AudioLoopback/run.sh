@@ -42,7 +42,12 @@ TESTNAME="AudioLoopback"
 RES_FILE="$SCRIPT_DIR/${TESTNAME}.res"
 
 DURATION=5
+PLAYBACK_ROUTE="auto"
+CAPTURE_ROUTE="auto"
+PLAYBACK_ROUTE_EXPLICIT=0
+CAPTURE_ROUTE_EXPLICIT=0
 PLAYBACK_DEVICE=""
+PLAYBACK_DEVICE_SELECTION="auto"
 CAPTURE_DEVICE=""
 DMESG_SCAN="${DMESG_SCAN:-1}"
 ARG_ERROR=""
@@ -54,6 +59,7 @@ CAPTURE_TARGET=""
 PLAYBACK_CLIENT=""
 CAPTURE_CLIENT=""
 MANAGED_BACKEND_FAILURE=""
+MANAGED_BACKEND_APPLICABLE_FAILURE=0
 
 # Print the audio loopback CLI and its environment-variable equivalents.
 usage() {
@@ -62,6 +68,10 @@ Usage: $0 [options]
 
 Options:
   --duration SECONDS        Reference playback duration, default: 5
+  --sink {auto|speaker|speakers|headphone|headphones|headset}
+                            Semantic playback route, default: auto
+  --source {auto|mic|microphone|headset-mic|headset_mic|"headset mic"}
+                            Semantic capture route, default: auto
   --playback-device DEVICE  Explicit ALSA playback device, default: auto
   --capture-device DEVICE   Explicit ALSA capture device, default: auto
   --dmesg-scan {0|1}        Capture audio-related kernel evidence, default: 1
@@ -70,7 +80,7 @@ Options:
 
 The test requires a real acoustic or electrical path from the selected output
 to the selected input. Automatic mode uses an active PipeWire or PulseAudio
-speaker and microphone route before falling back to direct ALSA. It generates
+requested physical routes before falling back to direct ALSA. It generates
 a deterministic local reference, starts capture, plays the reference, and
 validates the recorded WAV.
 EOF_USAGE
@@ -93,7 +103,25 @@ parse_args() {
                     ARG_ERROR="--playback-device requires a value"
                     return 1
                 fi
-                PLAYBACK_DEVICE="$2"
+                case "$2" in
+                    ""|auto)
+                        PLAYBACK_DEVICE=""
+                        PLAYBACK_DEVICE_SELECTION="auto"
+                        ;;
+                    *)
+                        PLAYBACK_DEVICE="$2"
+                        PLAYBACK_DEVICE_SELECTION="explicit"
+                        ;;
+                esac
+                shift 2
+                ;;
+            --sink)
+                if [ "$#" -lt 2 ]; then
+                    ARG_ERROR="--sink requires a value"
+                    return 1
+                fi
+                PLAYBACK_ROUTE="$2"
+                PLAYBACK_ROUTE_EXPLICIT=1
                 shift 2
                 ;;
             --capture-device)
@@ -101,7 +129,23 @@ parse_args() {
                     ARG_ERROR="--capture-device requires a value"
                     return 1
                 fi
-                CAPTURE_DEVICE="$2"
+                case "$2" in
+                    ""|auto)
+                        CAPTURE_DEVICE=""
+                        ;;
+                    *)
+                        CAPTURE_DEVICE="$2"
+                        ;;
+                esac
+                shift 2
+                ;;
+            --source)
+                if [ "$#" -lt 2 ]; then
+                    ARG_ERROR="--source requires a value"
+                    return 1
+                fi
+                CAPTURE_ROUTE="$2"
+                CAPTURE_ROUTE_EXPLICIT=1
                 shift 2
                 ;;
             --dmesg-scan)
@@ -164,6 +208,46 @@ if [ "$DURATION" -lt 2 ] || [ "$DURATION" -gt 30 ]; then
     test_result_finish
 fi
 
+PLAYBACK_ROUTE_REQUESTED="$PLAYBACK_ROUTE"
+PLAYBACK_ROUTE="$(
+    audio_normalize_playback_route "$PLAYBACK_ROUTE_REQUESTED" 2>/dev/null
+)" || {
+    test_result_record "FAIL" \
+        "$TESTNAME FAIL - invalid sink '$PLAYBACK_ROUTE_REQUESTED', expected auto, speaker, speakers, headphone, headphones, or headset"
+    test_result_finish
+}
+if [ "$PLAYBACK_ROUTE" = "null" ]; then
+    test_result_record "FAIL" \
+        "$TESTNAME FAIL - loopback requires a physical playback route, use speaker or headset"
+    test_result_finish
+fi
+if [ "$PLAYBACK_ROUTE" = "auto" ]; then
+    PLAYBACK_ROUTE_EXPLICIT=0
+fi
+
+CAPTURE_ROUTE_REQUESTED="$CAPTURE_ROUTE"
+CAPTURE_ROUTE="$(
+    audio_normalize_capture_route "$CAPTURE_ROUTE_REQUESTED" 2>/dev/null
+)" || {
+    test_result_record "FAIL" \
+        "$TESTNAME FAIL - invalid source '$CAPTURE_ROUTE_REQUESTED', expected auto, mic, microphone, or headset-mic"
+    test_result_finish
+}
+if [ "$CAPTURE_ROUTE" = "null" ]; then
+    test_result_record "FAIL" \
+        "$TESTNAME FAIL - loopback requires a physical capture route, use mic or headset-mic"
+    test_result_finish
+fi
+if [ "$CAPTURE_ROUTE" = "auto" ]; then
+    CAPTURE_ROUTE_EXPLICIT=0
+fi
+
+PLAYBACK_ROUTE_POLICY="$PLAYBACK_ROUTE"
+CAPTURE_ROUTE_POLICY="$CAPTURE_ROUTE"
+SINK_CHOICE="$PLAYBACK_ROUTE"
+SRC_CHOICE="$CAPTURE_ROUTE"
+export SINK_CHOICE SRC_CHOICE PLAYBACK_ROUTE_EXPLICIT CAPTURE_ROUTE_EXPLICIT
+
 case "$DMESG_SCAN" in
     0|1)
         ;;
@@ -221,11 +305,13 @@ else
     audio_loopback_os_id="unknown"
 fi
 
-AUDIO_USE_DESKTOP_SESSION=0
-if [ "$audio_loopback_os_id" = "ubuntu" ] &&
-   [ "$(id -u 2>/dev/null || echo 1)" -eq 0 ]; then
-    AUDIO_USE_DESKTOP_SESSION=1
+if ! command -v audio_configure_ubuntu_desktop_session >/dev/null 2>&1; then
+    test_result_record "FAIL" \
+        "$TESTNAME FAIL - required helper is unavailable: audio_configure_ubuntu_desktop_session"
+    test_result_finish
 fi
+
+audio_configure_ubuntu_desktop_session "$audio_loopback_os_id"
 export AUDIO_USE_DESKTOP_SESSION
 
 AUDIO_ALSA_PLAYBACK_PROBE_LOG="$LOGDIR/alsa_playback_probe.log"
@@ -256,7 +342,8 @@ if [ -n "$missing_commands" ]; then
     test_result_finish
 fi
 
-log_info "Starting $TESTNAME, duration=${DURATION}s playback_device=${PLAYBACK_DEVICE:-auto} capture_device=${CAPTURE_DEVICE:-auto}"
+log_info "Starting $TESTNAME, duration=${DURATION}s sink=$PLAYBACK_ROUTE source=$CAPTURE_ROUTE playback_device=${PLAYBACK_DEVICE:-auto} capture_device=${CAPTURE_DEVICE:-auto}"
+log_info "AUDIO_ROUTE_DISCOVERY scope=loopback playback_requested='$PLAYBACK_ROUTE_REQUESTED' playback_explicit=$PLAYBACK_ROUTE_EXPLICIT playback_policy=$PLAYBACK_ROUTE automatic_playback_order='speakers headphones' capture_requested='$CAPTURE_ROUTE_REQUESTED' capture_explicit=$CAPTURE_ROUTE_EXPLICIT capture_policy=$CAPTURE_ROUTE automatic_capture_order='mic headset-mic'"
 log_info "Retaining loopback artifacts in $LOGDIR"
 
 if [ -n "$PLAYBACK_DEVICE" ] || [ -n "$CAPTURE_DEVICE" ]; then
@@ -286,22 +373,46 @@ case "$AUDIO_BACKEND" in
            [ -z "$CAPTURE_CLIENT" ] ||
            ! command -v wpctl >/dev/null 2>&1; then
             MANAGED_BACKEND_FAILURE="PipeWire is active but its playback, recording, or control client is unavailable"
+            MANAGED_BACKEND_APPLICABLE_FAILURE=1
             AUDIO_BACKEND=""
         else
-            PLAYBACK_TARGET="$(
+            playback_route_record="$(
                 audio_run_helper_as_test_user \
                     --require-session \
-                    pw_default_speakers 2>/dev/null || true
+                    audio_select_managed_playback_route \
+                    pipewire "$PLAYBACK_ROUTE" 2>/dev/null || true
+            )"
+            capture_route_record="$(
+                audio_run_helper_as_test_user \
+                    --require-session \
+                    audio_select_managed_capture_route \
+                    pipewire "$CAPTURE_ROUTE" 2>/dev/null || true
+            )"
+            PLAYBACK_ROUTE="$(
+                printf '%s\n' "$playback_route_record" | cut -d'|' -f1
+            )"
+            PLAYBACK_TARGET="$(
+                printf '%s\n' "$playback_route_record" | cut -d'|' -f2-
+            )"
+            CAPTURE_ROUTE="$(
+                printf '%s\n' "$capture_route_record" | cut -d'|' -f1
             )"
             CAPTURE_TARGET="$(
-                audio_run_helper_as_test_user \
-                    --require-session \
-                    pw_default_mic 2>/dev/null || true
+                printf '%s\n' "$capture_route_record" | cut -d'|' -f2-
             )"
 
             if [ -z "$PLAYBACK_TARGET" ] || [ -z "$CAPTURE_TARGET" ]; then
-                MANAGED_BACKEND_FAILURE="PipeWire is active but a physical speaker sink or microphone source was not discovered"
+                PLAYBACK_ROUTE="$PLAYBACK_ROUTE_POLICY"
+                CAPTURE_ROUTE="$CAPTURE_ROUTE_POLICY"
+                SINK_CHOICE="$PLAYBACK_ROUTE"
+                SRC_CHOICE="$CAPTURE_ROUTE"
+                export SINK_CHOICE SRC_CHOICE
+                MANAGED_BACKEND_FAILURE="PipeWire is active but no usable requested or automatically selected playback/capture route pair was discovered"
                 AUDIO_BACKEND=""
+            else
+                SINK_CHOICE="$PLAYBACK_ROUTE"
+                SRC_CHOICE="$CAPTURE_ROUTE"
+                export SINK_CHOICE SRC_CHOICE
             fi
         fi
         ;;
@@ -311,23 +422,47 @@ case "$AUDIO_BACKEND" in
            command -v pactl >/dev/null 2>&1; then
             PLAYBACK_CLIENT="paplay"
             CAPTURE_CLIENT="parecord"
-            PLAYBACK_TARGET="$(
+            playback_route_record="$(
                 audio_run_helper_as_test_user \
                     --require-session \
-                    pa_default_speakers 2>/dev/null || true
+                    audio_select_managed_playback_route \
+                    pulseaudio "$PLAYBACK_ROUTE" 2>/dev/null || true
+            )"
+            capture_route_record="$(
+                audio_run_helper_as_test_user \
+                    --require-session \
+                    audio_select_managed_capture_route \
+                    pulseaudio "$CAPTURE_ROUTE" 2>/dev/null || true
+            )"
+            PLAYBACK_ROUTE="$(
+                printf '%s\n' "$playback_route_record" | cut -d'|' -f1
+            )"
+            PLAYBACK_TARGET="$(
+                printf '%s\n' "$playback_route_record" | cut -d'|' -f2-
+            )"
+            CAPTURE_ROUTE="$(
+                printf '%s\n' "$capture_route_record" | cut -d'|' -f1
             )"
             CAPTURE_TARGET="$(
-                audio_run_helper_as_test_user \
-                    --require-session \
-                    pa_default_mic 2>/dev/null || true
+                printf '%s\n' "$capture_route_record" | cut -d'|' -f2-
             )"
 
             if [ -z "$PLAYBACK_TARGET" ] || [ -z "$CAPTURE_TARGET" ]; then
-                MANAGED_BACKEND_FAILURE="PulseAudio is active but a speaker sink or microphone source was not discovered"
+                PLAYBACK_ROUTE="$PLAYBACK_ROUTE_POLICY"
+                CAPTURE_ROUTE="$CAPTURE_ROUTE_POLICY"
+                SINK_CHOICE="$PLAYBACK_ROUTE"
+                SRC_CHOICE="$CAPTURE_ROUTE"
+                export SINK_CHOICE SRC_CHOICE
+                MANAGED_BACKEND_FAILURE="PulseAudio is active but no usable requested or automatically selected playback/capture route pair was discovered"
                 AUDIO_BACKEND=""
+            else
+                SINK_CHOICE="$PLAYBACK_ROUTE"
+                SRC_CHOICE="$CAPTURE_ROUTE"
+                export SINK_CHOICE SRC_CHOICE
             fi
         else
             MANAGED_BACKEND_FAILURE="PulseAudio is active but paplay, parecord, or pactl is unavailable"
+            MANAGED_BACKEND_APPLICABLE_FAILURE=1
             AUDIO_BACKEND=""
         fi
         ;;
@@ -335,6 +470,7 @@ case "$AUDIO_BACKEND" in
         ;;
     *)
         MANAGED_BACKEND_FAILURE="unsupported detected audio backend '$AUDIO_BACKEND'"
+        MANAGED_BACKEND_APPLICABLE_FAILURE=1
         AUDIO_BACKEND=""
         ;;
 esac
@@ -346,20 +482,26 @@ if [ -z "$AUDIO_BACKEND" ]; then
 
     if command -v aplay >/dev/null 2>&1 &&
        command -v arecord >/dev/null 2>&1 &&
-       audio_playback_probe_alsa_with_recovery; then
+       audio_playback_probe_selected_alsa_with_recovery \
+           "$PLAYBACK_DEVICE"; then
+        PLAYBACK_ROUTE="$SINK_CHOICE"
         AUDIO_BACKEND="alsa"
     fi
 fi
 
 if [ -z "$AUDIO_BACKEND" ]; then
-    if [ -n "$MANAGED_BACKEND_FAILURE" ]; then
+    if [ "$PLAYBACK_ROUTE_EXPLICIT" -eq 1 ] ||
+       [ "$CAPTURE_ROUTE_EXPLICIT" -eq 1 ] ||
+       [ -n "$PLAYBACK_DEVICE" ] ||
+       [ -n "$CAPTURE_DEVICE" ] ||
+       [ "$MANAGED_BACKEND_APPLICABLE_FAILURE" -eq 1 ]; then
         log_file_with_label \
             "ALSA-PROBE" "$AUDIO_ALSA_PLAYBACK_PROBE_LOG" 40
         test_result_record "FAIL" \
-            "$TESTNAME FAIL - $MANAGED_BACKEND_FAILURE and no direct ALSA loopback path is usable, verify sound-card registration, topology, UCM, mixer routing, and image audio clients"
+            "$TESTNAME FAIL - requested or applicable loopback routes are unavailable, playback_requested='$PLAYBACK_ROUTE_REQUESTED' capture_requested='$CAPTURE_ROUTE_REQUESTED' playback_device='${PLAYBACK_DEVICE:-auto}' capture_device='${CAPTURE_DEVICE:-auto}' managed_reason='${MANAGED_BACKEND_FAILURE:-none}' ALSA_reason='${AUDIO_ALSA_PLAYBACK_REASON:-playback probe failed}', verify sound-card registration, topology, UCM, mixer routing, and image audio clients"
     else
         test_result_record "SKIP" \
-            "$TESTNAME SKIP - no active managed audio backend or usable direct ALSA loopback path was discovered"
+            "$TESTNAME SKIP - automatic discovery found no usable speaker/headphones and mic/headset-mic loopback route pair on managed audio or direct ALSA"
     fi
     test_result_finish
 fi
@@ -372,37 +514,117 @@ if [ "$AUDIO_BACKEND" = "alsa" ]; then
         test_result_finish
     fi
 
-    if [ -z "$PLAYBACK_DEVICE" ]; then
-        if [ -z "${AUDIO_ALSA_PLAYBACK_DEVICE:-}" ] &&
-           ! audio_playback_probe_alsa_with_recovery; then
-            if [ -n "$MANAGED_BACKEND_FAILURE" ]; then
+    if [ -z "${AUDIO_ALSA_PLAYBACK_DEVICE:-}" ] ||
+       [ -n "$PLAYBACK_DEVICE" ]; then
+        if ! audio_playback_probe_selected_alsa_with_recovery \
+            "$PLAYBACK_DEVICE"; then
+            if [ "$PLAYBACK_ROUTE_EXPLICIT" -eq 1 ] ||
+               [ -n "$PLAYBACK_DEVICE" ] ||
+               [ "$MANAGED_BACKEND_APPLICABLE_FAILURE" -eq 1 ]; then
                 log_file_with_label \
                     "ALSA-PROBE" "$AUDIO_ALSA_PLAYBACK_PROBE_LOG" 40
                 test_result_record "FAIL" \
-                    "$TESTNAME FAIL - $MANAGED_BACKEND_FAILURE and no direct ALSA playback device could be opened, verify sound-card registration, topology, UCM, mixer routing, and image audio clients"
+                    "$TESTNAME FAIL - requested playback route/device is unavailable, route='$PLAYBACK_ROUTE_REQUESTED' device='${PLAYBACK_DEVICE:-auto}' reason=${AUDIO_ALSA_PLAYBACK_REASON:-probe failed}, verify sound-card registration, topology, UCM, mixer routing, and image audio clients"
             else
                 test_result_record "SKIP" \
-                    "$TESTNAME SKIP - no managed audio backend or direct ALSA playback device is available"
+                    "$TESTNAME SKIP - automatic playback discovery found no usable speakers or headphones ALSA route"
             fi
             test_result_finish
         fi
-        PLAYBACK_DEVICE="$AUDIO_ALSA_PLAYBACK_DEVICE"
     fi
+    PLAYBACK_ROUTE="$SINK_CHOICE"
+    PLAYBACK_DEVICE="$AUDIO_ALSA_PLAYBACK_DEVICE"
 
     requested_capture_device="$CAPTURE_DEVICE"
-    if ! audio_record_probe_alsa_capture_profile "$requested_capture_device"; then
-        if [ -n "$MANAGED_BACKEND_FAILURE" ]; then
+    if ! audio_record_probe_selected_alsa_capture_profile \
+        "$requested_capture_device"; then
+        if [ "$CAPTURE_ROUTE_EXPLICIT" -eq 1 ] ||
+           [ -n "$requested_capture_device" ] ||
+           [ "$MANAGED_BACKEND_APPLICABLE_FAILURE" -eq 1 ]; then
             test_result_record "FAIL" \
-                "$TESTNAME FAIL - $MANAGED_BACKEND_FAILURE and no direct ALSA capture profile could be opened, reason=${AUDIO_ALSA_CAPTURE_REASON:-unknown}, verify the microphone route and image audio clients"
+                "$TESTNAME FAIL - requested capture route/device is unavailable, route='$CAPTURE_ROUTE_REQUESTED' device='${requested_capture_device:-auto}' reason=${AUDIO_ALSA_CAPTURE_REASON:-unknown}, verify the microphone route, UCM data, and image audio clients"
         else
             test_result_record "SKIP" \
-                "$TESTNAME SKIP - no ALSA capture profile could be opened, device=${requested_capture_device:-auto} reason=${AUDIO_ALSA_CAPTURE_REASON:-unknown}, connect a loopback fixture or pass --capture-device"
+                "$TESTNAME SKIP - automatic capture discovery found no usable mic or headset-mic ALSA route, reason=${AUDIO_ALSA_CAPTURE_REASON:-unknown}, connect a loopback fixture or pass an available explicit route/device"
         fi
         test_result_finish
     fi
+    CAPTURE_ROUTE="$SRC_CHOICE"
+
+    playback_route_record="$(
+        audio_playback_resolve_alsa_route "$PLAYBACK_ROUTE" 2>/dev/null || true
+    )"
+    playback_ucm_pcm="$(
+        printf '%s\n' "$playback_route_record" | cut -d'|' -f1
+    )"
+    playback_ucm_card="$(
+        printf '%s\n' "$playback_route_record" | cut -d'|' -f2
+    )"
+    playback_ucm_device="$(
+        printf '%s\n' "$playback_route_record" | cut -d'|' -f3
+    )"
+    capture_route_record="$(
+        audio_record_resolve_alsa_route "$CAPTURE_ROUTE" 2>/dev/null || true
+    )"
+    capture_ucm_card="$(
+        printf '%s\n' "$capture_route_record" | cut -d'|' -f2
+    )"
+    capture_ucm_device="$(
+        printf '%s\n' "$capture_route_record" | cut -d'|' -f3
+    )"
+
+    if [ -n "$playback_ucm_card" ] &&
+       [ "$playback_ucm_card" = "$capture_ucm_card" ] &&
+       [ -n "$playback_ucm_device" ] &&
+       [ -n "$capture_ucm_device" ]; then
+        if ! audio_alsa_enable_ucm_hifi_devices \
+            "$playback_ucm_card" \
+            "$playback_ucm_device" \
+            "$capture_ucm_device"; then
+            test_result_record "FAIL" \
+                "$TESTNAME FAIL - could not enable the $PLAYBACK_ROUTE and $CAPTURE_ROUTE UCM devices together on card '$playback_ucm_card'"
+            test_result_finish
+        fi
+    elif [ -n "$playback_ucm_card" ]; then
+        if ! audio_playback_alsa_prepare \
+            "$(audio_alsa_device_card "$PLAYBACK_DEVICE")" \
+            "$playback_ucm_card" "$playback_ucm_device"; then
+            test_result_record "FAIL" \
+                "$TESTNAME FAIL - could not prepare the $PLAYBACK_ROUTE ALSA playback route"
+            test_result_finish
+        fi
+
+        if ! audio_record_alsa_prepare_capture \
+            "$(audio_alsa_device_card "$AUDIO_ALSA_CAPTURE_DEVICE")" \
+            "$capture_ucm_card" "$capture_ucm_device"; then
+            test_result_record "FAIL" \
+                "$TESTNAME FAIL - could not prepare the $CAPTURE_ROUTE ALSA capture route"
+            test_result_finish
+        fi
+    else
+        if ! audio_record_alsa_prepare_capture \
+            "$(audio_alsa_device_card "$AUDIO_ALSA_CAPTURE_DEVICE")" \
+            "$capture_ucm_card" "$capture_ucm_device"; then
+            test_result_record "FAIL" \
+                "$TESTNAME FAIL - could not prepare the $CAPTURE_ROUTE ALSA capture route"
+            test_result_finish
+        fi
+
+        if ! audio_playback_alsa_prepare \
+            "$(audio_alsa_device_card "$PLAYBACK_DEVICE")" \
+            "$playback_ucm_card" "$playback_ucm_device"; then
+            test_result_record "FAIL" \
+                "$TESTNAME FAIL - could not prepare the $PLAYBACK_ROUTE ALSA playback route"
+            test_result_finish
+        fi
+    fi
 
     CAPTURE_DEVICE="$AUDIO_ALSA_CAPTURE_DEVICE"
-    PLAYBACK_TARGET="$PLAYBACK_DEVICE"
+    PLAYBACK_TARGET="$(
+        audio_playback_effective_alsa_device \
+            "$PLAYBACK_DEVICE" \
+            "$PLAYBACK_DEVICE_SELECTION"
+    )"
     CAPTURE_TARGET="$CAPTURE_DEVICE"
     PLAYBACK_CLIENT="aplay"
     CAPTURE_CLIENT="arecord"
@@ -442,7 +664,22 @@ else
 fi
 
 log_info "Using audio backend: $AUDIO_BACKEND"
-log_info "Loopback route: playback=$PLAYBACK_TARGET capture=$CAPTURE_TARGET"
+if [ "$AUDIO_BACKEND" = "alsa" ] &&
+   [ -n "${playback_ucm_card:-}" ] &&
+   [ -n "${playback_ucm_device:-}" ] &&
+   [ -n "${capture_ucm_card:-}" ] &&
+   [ -n "${capture_ucm_device:-}" ]; then
+    log_info "Loopback ALSA route: playback_choice=$PLAYBACK_ROUTE ucm_pcm='$playback_ucm_pcm' playback_target=$PLAYBACK_TARGET playback_selection=$PLAYBACK_DEVICE_SELECTION playback_ucm_card='$playback_ucm_card' playback_ucm_device='$playback_ucm_device' capture_choice=$CAPTURE_ROUTE capture_device=$CAPTURE_TARGET capture_ucm_card='$capture_ucm_card' capture_ucm_device='$capture_ucm_device'"
+elif [ "$AUDIO_BACKEND" = "alsa" ]; then
+    log_info "Loopback ALSA route: playback_target=$PLAYBACK_TARGET playback_requested_choice=$PLAYBACK_ROUTE playback_selection=$PLAYBACK_DEVICE_SELECTION capture_device=$CAPTURE_TARGET capture_requested_choice=$CAPTURE_ROUTE selection=legacy-inventory-fallback"
+else
+    log_info "Loopback route: playback=$PLAYBACK_TARGET capture=$CAPTURE_TARGET"
+fi
+CAPTURE_DEVICE_SELECTION="auto"
+if [ -n "$requested_capture_device" ]; then
+    CAPTURE_DEVICE_SELECTION="explicit"
+fi
+log_info "AUDIO_ROUTE scope=loopback backend=$AUDIO_BACKEND playback_requested='$PLAYBACK_ROUTE_REQUESTED' playback_explicit=$PLAYBACK_ROUTE_EXPLICIT playback_canonical=$PLAYBACK_ROUTE playback_target='$PLAYBACK_TARGET' playback_device_selection=$PLAYBACK_DEVICE_SELECTION capture_requested='$CAPTURE_ROUTE_REQUESTED' capture_explicit=$CAPTURE_ROUTE_EXPLICIT capture_canonical=$CAPTURE_ROUTE capture_target='$CAPTURE_TARGET' capture_device_selection=$CAPTURE_DEVICE_SELECTION"
 
 reference_wav="$LOGDIR/reference_48KHz_${DURATION}s_8b_2ch.wav"
 reference_log="$LOGDIR/reference_validation.log"
@@ -468,7 +705,8 @@ if ! audio_validate_wav_file \
     8 \
     "$DURATION" \
     "$reference_log" \
-    playback; then
+    playback \
+    2; then
     test_result_record "FAIL" \
         "$TESTNAME FAIL - generated reference failed basic-integrity validation, validation='${AUDIO_VALIDATION_SUMMARY:-unavailable}', artifact=$reference_log"
     test_result_finish

@@ -9,7 +9,8 @@ all-zero audio, materially short captures, and explicitly requested format
 mismatches. RMS, peak, clipping, digital-silence runs, DC offset, large sample
 transitions, and silent-channel counts are emitted as diagnostic
 `AUDIO_VALIDATION` metrics. These metrics do not fail the default policy unless
-strict signal validation is explicitly enabled.
+strict signal validation is explicitly enabled. Complete RIFF chunks after the
+audio `data` chunk are reported as metadata rather than as trailing audio.
 
 ## Features
 
@@ -25,7 +26,8 @@ strict signal validation is explicitly enabled.
   - Unique testcase IDs prevent LAVA testcase ID collisions
   - Enables running multiple AudioRecord configurations simultaneously in CI
 - Records audio with configurable duration and loop count
-- Automatically detects and routes to appropriate source (e.g., mic, null)
+- Automatically detects and routes to the requested source (`mic`,
+  `microphone`, `headset-mic`, or `null`)
 - Validates recording using multiple evidence sources:
   - PipeWire/PulseAudio streaming state
   - ALSA and ASoC runtime status
@@ -79,15 +81,20 @@ operations in that user's context. Yocto retains its native execution model.
 
 ## Backend and Route Selection
 
-When no backend is requested, the suite uses automatic selection. A real PipeWire audio source uses `pw-record`, and a real PulseAudio source uses `parecord`. Camera, dummy, null, monitor, and loopback PipeWire nodes are not accepted as microphone sources.
+When no route is requested, `auto` discovers a built-in microphone first and then a headset microphone on the running target. A real PipeWire audio source uses `pw-record`, and a real PulseAudio source uses `parecord`. `mic` and `microphone` explicitly select the built-in microphone route. `headset-mic`, `headset_mic`, and quoted `headset mic` explicitly select the headset microphone route. `--source auto` restores automatic selection. Camera, dummy, null, monitor, and loopback PipeWire nodes are not accepted as physical microphone sources. The selected backend, request source, explicitness, requested alias, canonical route, runtime target, and UCM device are emitted to standard output in an `AUDIO_ROUTE` record.
 
-If automatic selection finds no physical managed microphone source, the suite probes direct ALSA capture. It selects a card and PCM from the available device inventory, applies only mixer controls exposed by that card, and runs `arecord -D <device>`. This discovers the VA-DMIC capture route from its controls without selecting a form factor or assuming card `0`. When audio remoteproc preflight proves that audio is applicable, failure of both managed-source discovery and direct ALSA probing is reported as FAIL so the image or runtime regression remains tracked. The same absence remains SKIP only when runtime preflight found no applicable audio subsystem.
+If automatic selection finds no matching managed source, the suite probes direct ALSA mic and then headset-mic routes. UCM discovery retrieves `CapturePCM`, enables and verifies the exact HiFi device, and the suite functionally probes supported capture formats. An explicit semantic source is never replaced by another source. An explicit source that cannot be discovered and opened reports FAIL, while automatic discovery with no applicable physical input reports SKIP. The remaining UCM namespace, legacy microphone fallback, and audio-remoteproc applicability rules remain unchanged.
 
 An explicit backend request is never replaced:
 
 - `--backend pipewire` or `AUDIO_BACKEND=pipewire` runs `pw-record` only and fails if the requested physical microphone source is unavailable.
 - `--backend pulseaudio` or `AUDIO_BACKEND=pulseaudio` runs `parecord` only and fails if the requested source is unavailable.
 - `--backend alsa` or `AUDIO_BACKEND=alsa` runs `arecord` with the discovered ALSA route.
+
+Existing Yocto/LAVA YAML definitions keep their `SOURCE_CHOICE=mic` contract,
+which is treated as an explicit built-in microphone validation. Override that
+parameter with `auto` when a job should choose mic or headset-mic from runtime
+evidence.
 
 ## Audio Remoteproc Preflight
 
@@ -109,8 +116,15 @@ rerunning validation. Yocto remains image-provided and non-installing.
 
 Backend client checks run after recovery of the selected backend's complete
 playback and recording client package set. Package recovery failure is reported
-as FAIL. A client that remains unavailable after successful recovery produces
-a clean SKIP for the unavailable recording path.
+as FAIL. In automatic discovery, a client that remains unavailable after
+successful recovery produces a clean SKIP for the unavailable recording path.
+An explicit backend or source request instead reports FAIL because the requested
+path cannot be validated.
+
+PulseAudio discovery rejects null, dummy, monitor, loopback, and freewheel
+sources. It uses the endpoint name, description, form factor, and active port
+to distinguish a built-in microphone from a headset microphone while retaining
+a generic physical source as the compatibility fallback for older releases.
 
 For overlay builds using audioreach kernel modules, the test automatically:
 - Detects the overlay build configuration
@@ -203,6 +217,12 @@ cd Runner/suites/Multimedia/Audio/AudioRecord
 # Run with PipeWire, 3 loops, 10s timeout, mic source
 ./run.sh --backend pipewire --source mic --loops 3 --timeout 10s
 
+# Select a headset microphone from runtime PipeWire endpoint data
+./run.sh --backend pipewire --source headset-mic --loops 1
+
+# Select the headset CapturePCM dynamically from UCM
+./run.sh --backend alsa --source headset-mic --loops 1
+
 # Run with PulseAudio, null source, strict mode, verbose
 ./run.sh --backend pulseaudio --source null --strict --verbose
 
@@ -226,7 +246,7 @@ cd Runner/suites/Multimedia/Audio/AudioRecord
 Environment Variables:
 Variable	      Description	                                                  Default
 AUDIO_BACKEND	  Selects backend: pipewire, pulseaudio, or alsa	                      auto-detect
-SOURCE_CHOICE	  Recording source: mic or null                                   mic
+SOURCE_CHOICE	  Recording source: auto, mic, microphone, headset-mic, or null   auto
 CONFIG_NAMES      Test specific configs (e.g., "record_config1 record_config2")   record_config1
 CONFIG_FILTER     Filter configs by pattern (e.g., "48KHz" or "2ch")              unset
 DURATIONS	      Recording durations: short, medium, long (legacy mode only)     ""
@@ -245,7 +265,7 @@ LAVA_TESTCASE_ID  Unique testcase ID written into the .res file for LAVA        
 CLI Options:
 Option	                      Description
 --backend	                  Select backend: pipewire, pulseaudio, or alsa
---source	                  Recording source: mic or null
+--source	                  Recording source: auto, mic, microphone, headset-mic, or null
 --config-name <names>         Test specific configs using record_config1-record_config10 or descriptive names (space-separated)
 --config-filter <patterns>    Filter configs by sample rate or channels (space-separated patterns)
 --record-seconds <duration>   Number of seconds to record (e.g., 5s, 10s)

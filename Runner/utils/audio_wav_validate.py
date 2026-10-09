@@ -42,6 +42,9 @@ class WaveInfo:
     available_data_bytes: int
     usable_data_bytes: int
     file_bytes: int
+    post_data_bytes: int
+    post_data_chunks: tuple[str, ...]
+    post_data_layout_valid: bool
 
     @property
     def frames(self) -> int:
@@ -115,6 +118,34 @@ def _format_name(code: int) -> str:
     }.get(code, f"format-{code}")
 
 
+def inspect_post_data_chunks(
+    handle: BinaryIO,
+    start_offset: int,
+    file_bytes: int,
+) -> tuple[bool, tuple[str, ...]]:
+    """Return whether bytes after data are complete RIFF chunks."""
+    chunk_names: list[str] = []
+    offset = start_offset
+
+    while offset < file_bytes:
+        if offset + 8 > file_bytes:
+            return False, tuple(chunk_names)
+
+        handle.seek(offset)
+        chunk_header = _read_exact(handle, 8)
+        chunk_id = chunk_header[0:4]
+        chunk_size = struct.unpack_from("<I", chunk_header, 4)[0]
+        next_offset = offset + 8 + chunk_size + (chunk_size & 1)
+        if next_offset > file_bytes:
+            return False, tuple(chunk_names)
+
+        chunk_name = chunk_id.decode("ascii", errors="replace").strip() or "unknown"
+        chunk_names.append(chunk_name)
+        offset = next_offset
+
+    return offset == file_bytes, tuple(chunk_names)
+
+
 def parse_wave(path: str, max_header_bytes: int = 1024 * 1024) -> WaveInfo:
     file_bytes = os.path.getsize(path)
     if file_bytes < 44:
@@ -131,6 +162,9 @@ def parse_wave(path: str, max_header_bytes: int = 1024 * 1024) -> WaveInfo:
         fmt_payload: bytes | None = None
         data_offset: int | None = None
         declared_data_bytes: int | None = None
+        post_data_bytes = 0
+        post_data_chunks: tuple[str, ...] = ()
+        post_data_layout_valid = True
 
         while handle.tell() + 8 <= file_bytes:
             if handle.tell() > max_header_bytes:
@@ -172,6 +206,20 @@ def parse_wave(path: str, max_header_bytes: int = 1024 * 1024) -> WaveInfo:
             raise WavValidationError("missing-fmt-chunk")
         if data_offset is None or declared_data_bytes is None:
             raise WavValidationError("missing-data-chunk")
+
+        available_after_data_offset = max(0, file_bytes - data_offset)
+        if declared_data_bytes not in {0, 0xFFFFFFFF}:
+            data_end = data_offset + declared_data_bytes
+            post_data_bytes = max(0, file_bytes - data_end)
+            post_chunk_offset = data_end + (declared_data_bytes & 1)
+            if data_end <= file_bytes and post_chunk_offset <= file_bytes:
+                post_data_layout_valid, post_data_chunks = inspect_post_data_chunks(
+                    handle,
+                    post_chunk_offset,
+                    file_bytes,
+                )
+            elif declared_data_bytes <= available_after_data_offset:
+                post_data_layout_valid = False
 
     if len(fmt_payload) < 16:
         raise WavValidationError("truncated-fmt-chunk")
@@ -251,6 +299,9 @@ def parse_wave(path: str, max_header_bytes: int = 1024 * 1024) -> WaveInfo:
         available_data_bytes=available_data_bytes,
         usable_data_bytes=usable_data_bytes,
         file_bytes=file_bytes,
+        post_data_bytes=post_data_bytes,
+        post_data_chunks=post_data_chunks,
+        post_data_layout_valid=post_data_layout_valid,
     )
 
 
@@ -422,6 +473,17 @@ def emit(status: str, reason: str, info: WaveInfo | None, stats: SignalStats | N
                 ("available_data_bytes", info.available_data_bytes),
                 ("usable_data_bytes", info.usable_data_bytes),
                 ("duration_s", f"{info.duration_seconds:.3f}"),
+                ("post_data_bytes", info.post_data_bytes),
+                (
+                    "post_data_chunks",
+                    ",".join(info.post_data_chunks)
+                    if info.post_data_chunks
+                    else "none",
+                ),
+                (
+                    "post_data_layout",
+                    "valid" if info.post_data_layout_valid else "unrecognized",
+                ),
             ]
         )
 
@@ -472,7 +534,11 @@ def emit(status: str, reason: str, info: WaveInfo | None, stats: SignalStats | N
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--file", required=True)
-    parser.add_argument("--source-kind", choices=("mic", "null"), default="mic")
+    parser.add_argument(
+        "--source-kind",
+        choices=("mic", "headset-mic", "null"),
+        default="mic",
+    )
     parser.add_argument("--expect-rate", type=int, default=0)
     parser.add_argument("--expect-channels", type=int, default=0)
     parser.add_argument("--expect-bits", type=int, default=0)
@@ -543,7 +609,10 @@ def main() -> int:
     elif info.declared_data_bytes not in {0xFFFFFFFF, info.available_data_bytes}:
         if info.declared_data_bytes > info.available_data_bytes:
             warnings.append("declared-data-exceeds-file")
-        elif info.declared_data_bytes < info.available_data_bytes:
+        elif (
+            info.declared_data_bytes < info.available_data_bytes
+            and not info.post_data_layout_valid
+        ):
             warnings.append("trailing-bytes-after-data")
 
     if args.expected_seconds > 0.0:
