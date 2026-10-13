@@ -92,6 +92,8 @@ export AUDIO_OVERLAY_REQUESTED
 
 # ---------------- Defaults / CLI ----------------
 AUDIO_BACKEND="${AUDIO_BACKEND:-}"
+ALSA_PROFILE="${ALSA_PROFILE:-generic}" # ALSA profile (hamoa, generic)
+DEVICE="${DEVICE:-}" # Device type for ALSA profiles (handset, headset)
 SRC_CHOICE="${SRC_CHOICE:-mic}" # mic|null
 DURATIONS="" # Will be set to default only if using legacy mode
 RECORD_SECONDS="${RECORD_SECONDS:-30s}" # DEFAULT: 30s; 'auto' maps short/med/long
@@ -132,6 +134,8 @@ usage() {
   cat <<EOF
 Usage: $0 [options]
   --backend {pipewire|pulseaudio|alsa}
+  --alsa-profile {hamoa|generic}  # ALSA profile for hardware-specific mixer configuration
+  --device {handset|headset}      # Device type for ALSA profiles (required with --alsa-profile)
   --source {mic|null}
   --overlay              Prepare the Debian or CentOS Qualcomm AudioReach overlay
                          Without this flag, use the native/base stack.
@@ -254,6 +258,14 @@ while [ $# -gt 0 ]; do
       ;;
     --backend)
       AUDIO_BACKEND="$2"
+      shift 2
+      ;;
+    --alsa-profile)
+      ALSA_PROFILE="$2"
+      shift 2
+      ;;
+    --device)
+      DEVICE="$2"
       shift 2
       ;;
     --source)
@@ -556,6 +568,21 @@ fi
 
 log_info "Args: backend=${AUDIO_BACKEND:-auto} source=$SRC_CHOICE overlay=$AUDIO_OVERLAY_REQUESTED loops=$LOOPS durations='$DURATIONS' record_seconds=$RECORD_SECONDS timeout=$TIMEOUT start_grace=${AUDIO_RECORD_START_GRACE:-5} strict=$STRICT signal_strict=$AUDIO_RECORD_STRICT_SIGNAL dmesg=$DMESG_SCAN bootstrap=$AUDIO_BOOTSTRAP_MODE runtime_dir=${AUDIO_RUNTIME_DIR:-auto}"
 
+# Hardware-specific ALSA profiles require direct ALSA backend. Profiles like
+# 'hamoa' configure hardware mixer controls and route to specific ALSA
+# devices, so a non-generic profile pins the backend to alsa before normal
+# detection runs, mirroring AudioPlayback's handling of this option.
+if [ "$ALSA_PROFILE" != "generic" ] && [ -n "$ALSA_PROFILE" ]; then
+  if [ -z "$AUDIO_BACKEND" ]; then
+    AUDIO_BACKEND="alsa"
+    log_info "ALSA profile '$ALSA_PROFILE' requires direct hardware access - using backend: alsa"
+  elif [ "$AUDIO_BACKEND" != "alsa" ]; then
+    log_skip "$TESTNAME SKIP - ALSA profile '$ALSA_PROFILE' requires backend=alsa"
+    echo "$RESULT_TESTNAME SKIP" > "$RES_FILE"
+    exit 0
+  fi
+fi
+
 # Resolve backend (allow minimal-build ALSA capture fallback)
 if [ -z "$AUDIO_BACKEND" ]; then
   AUDIO_BACKEND="$(audio_run_helper_as_test_user --require-session detect_audio_backend 2>/dev/null || echo "")"
@@ -778,10 +805,43 @@ case "$AUDIO_BACKEND:$SRC_CHOICE" in
     SRC_ID=""
     ;;
   alsa:*)
-    if [ "$ALSA_CAPTURE_PROBED" -eq 1 ] && [ -n "$AUDIO_ALSA_CAPTURE_DEVICE" ]; then
-      SRC_ID="$AUDIO_ALSA_CAPTURE_DEVICE"
+    # Hardware-specific ALSA profiles (e.g., Hamoa) configure mixer controls
+    # and provide an explicit device path for the requested device, instead
+    # of discovering a source through the generic ALSA capture probe below.
+    if [ "$ALSA_PROFILE" != "generic" ] && [ -n "$DEVICE" ]; then
+      if ! CHECK_DEPS_NO_EXIT=1 check_dependencies amixer grep sed flock; then
+        log_skip "$TESTNAME SKIP - missing ALSA mixer utilities required by profile '$ALSA_PROFILE'"
+        echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
+        exit 0
+      fi
+
+      log_info "Using ALSA profile: $ALSA_PROFILE for device: $DEVICE"
+      case "$ALSA_PROFILE:$DEVICE" in
+        hamoa:handset|hamoa:headset)
+          SRC_ID="$(setup_alsa_profile_route "$ALSA_PROFILE" "$DEVICE" capture "$LOGDIR")"
+          profile_setup_rc=$?
+          ;;
+        *)
+          log_skip "$TESTNAME SKIP - unsupported ALSA profile/device: $ALSA_PROFILE/$DEVICE"
+          echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
+          exit 0
+          ;;
+      esac
+
+      if [ "$profile_setup_rc" -eq 0 ]; then
+        ALSA_CAPTURE_PROBED=1
+        log_info "ALSA profile configured successfully, device: $SRC_ID"
+      else
+        log_error "Failed to setup ALSA profile: $ALSA_PROFILE for device: $DEVICE"
+        echo "$RESULT_TESTNAME FAIL" >"$RES_FILE"
+        exit 1
+      fi
     else
-      SRC_ID="$(audio_run_helper_as_test_user alsa_pick_capture)"
+      if [ "$ALSA_CAPTURE_PROBED" -eq 1 ] && [ -n "$AUDIO_ALSA_CAPTURE_DEVICE" ]; then
+        SRC_ID="$AUDIO_ALSA_CAPTURE_DEVICE"
+      else
+        SRC_ID="$(audio_run_helper_as_test_user alsa_pick_capture)"
+      fi
     fi
     ;;
 esac
@@ -891,13 +951,22 @@ if [ "$AUDIO_BACKEND" = "alsa" ]; then
     hw:[0-9]*,[0-9]*|plughw:[0-9]*,[0-9]*)
       : ;;
     *)
+      # Auto-picked candidates use the "plughw:" prefix, not "hw:" - a raw
+      # hw: device records at the hardware's native rate only and does not
+      # go through ALSA's "plug" resampling layer, so a requested rate that
+      # differs from the native rate (e.g. an 8000Hz capture config on
+      # hardware whose native rate is 48000Hz) silently records at the
+      # native rate instead, which the WAV validator then correctly reports
+      # as a sample-rate mismatch. plughw: supports the same native rate
+      # plus correct resampling for every other requested rate, so no
+      # capability is lost by preferring it for this auto-pick fallback.
       cand="$(audio_run_as_test_user arecord -l 2>/dev/null |
-        sed -n 's/^card[[:space:]]*\([0-9][0-9]*\).*device[[:space:]]*\([0-9][0-9]*\).*/hw:\1,\2/p' |
+        sed -n 's/^card[[:space:]]*\([0-9][0-9]*\).*device[[:space:]]*\([0-9][0-9]*\).*/plughw:\1,\2/p' |
         head -n 1)"
       if [ -z "$cand" ]; then
-        cand="$(sed -n 's/^\([0-9][0-9]*\)-\([0-9][0-9]*\):.*capture.*/hw:\1,\2/p' /proc/asound/pcm 2>/dev/null | head -n 1)"
+        cand="$(sed -n 's/^\([0-9][0-9]*\)-\([0-9][0-9]*\):.*capture.*/plughw:\1,\2/p' /proc/asound/pcm 2>/dev/null | head -n 1)"
       fi
-      if [ -n "$cand" ] && printf '%s\n' "$cand" | grep -Eq '^hw:[0-9][0-9]*,[0-9][0-9]*$'; then
+      if [ -n "$cand" ] && printf '%s\n' "$cand" | grep -Eq '^plughw:[0-9][0-9]*,[0-9][0-9]*$'; then
         SRC_ID="$cand"
         log_info "ALSA auto-pick: using $SRC_ID"
       else

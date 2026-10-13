@@ -101,6 +101,8 @@ export AUDIO_TAR_URL
 
 # ------------- Defaults / CLI -------------
 AUDIO_BACKEND="${AUDIO_BACKEND:-}"
+ALSA_PROFILE="${ALSA_PROFILE:-generic}" # ALSA profile (hamoa, generic)
+DEVICE="${DEVICE:-}" # Device type for ALSA profiles (handset, headset)
 SINK_CHOICE="${SINK_CHOICE:-speakers}" # speakers|null
 FORMATS="" # Will be set to default only if using legacy mode
 DURATIONS="" # Will be set to default only if using legacy mode
@@ -149,6 +151,8 @@ usage() {
   cat <<EOF_USAGE
 Usage: $0 [options]
   --backend {pipewire|pulseaudio|alsa}
+  --alsa-profile {hamoa|generic}  # ALSA profile (when backend=alsa, default: generic)
+  --device {handset|headset}      # Device type for ALSA profiles (required with --alsa-profile)
   --sink {speakers|null}
   --overlay
       On Debian or CentOS, ensure the Qualcomm AudioReach package set before
@@ -334,6 +338,14 @@ while [ $# -gt 0 ]; do
       ;;
     --backend)
       AUDIO_BACKEND="$2"
+      shift 2
+      ;;
+    --alsa-profile)
+      ALSA_PROFILE="$2"
+      shift 2
+      ;;
+    --device)
+      DEVICE="$2"
       shift 2
       ;;
     --sink)
@@ -800,6 +812,22 @@ else
   log_info "Sub-run: skipping initial network bring-up."
 fi
 
+# Hardware-specific ALSA profiles require direct ALSA backend. Profiles like
+# 'hamoa' configure hardware mixer controls and route to specific ALSA
+# devices (e.g., plughw:0,1). PipeWire/PulseAudio add an abstraction layer
+# that would bypass that mixer configuration, so a non-generic profile pins
+# the backend to alsa before normal detection runs.
+if [ "$ALSA_PROFILE" != "generic" ] && [ -n "$ALSA_PROFILE" ]; then
+  if [ -z "$AUDIO_BACKEND" ]; then
+    AUDIO_BACKEND="alsa"
+    log_info "ALSA profile '$ALSA_PROFILE' requires direct hardware access - using backend: alsa"
+  elif [ "$AUDIO_BACKEND" != "alsa" ]; then
+    log_skip "$TESTNAME SKIP - ALSA profile '$ALSA_PROFILE' requires backend=alsa"
+    echo "$RESULT_TESTNAME SKIP" > "$RES_FILE"
+    exit 0
+  fi
+fi
+
 # Resolve backend
 if [ -z "$AUDIO_BACKEND" ]; then
   AUDIO_BACKEND="$(audio_run_helper_as_test_user --require-session detect_audio_backend 2>/dev/null || echo "")"
@@ -860,7 +888,29 @@ fi
 
 backend_ok=0
 if [ "$AUDIO_BACKEND" = "alsa" ]; then
-  if audio_playback_probe_alsa_with_recovery; then
+  # Hardware-specific ALSA profiles provide explicit device paths and mixer
+  # configurations. Validate the profile/device combination and card
+  # presence here, so an unsupported combination or missing hardware is
+  # reported as a SKIP now rather than surfacing later during mixer setup.
+  if [ "$ALSA_PROFILE" != "generic" ] && [ -n "$ALSA_PROFILE" ]; then
+    case "$ALSA_PROFILE:$DEVICE" in
+      hamoa:handset|hamoa:headset)
+        if resolve_alsa_card_index "$ALSA_PROFILE" >/dev/null 2>&1; then
+          backend_ok=1
+          log_info "Using hardware-specific ALSA profile '$ALSA_PROFILE' for device '$DEVICE' - card resolved"
+        else
+          log_skip "$TESTNAME SKIP - ALSA profile '$ALSA_PROFILE' hardware not present (card not found)"
+          echo "$RESULT_TESTNAME SKIP" > "$RES_FILE"
+          exit 0
+        fi
+        ;;
+      *)
+        log_skip "$TESTNAME SKIP - unsupported ALSA profile/device combination: '$ALSA_PROFILE'/'$DEVICE'"
+        echo "$RESULT_TESTNAME SKIP" > "$RES_FILE"
+        exit 0
+        ;;
+    esac
+  elif audio_playback_probe_alsa_with_recovery; then
     backend_ok=1
   fi
 else
@@ -1069,14 +1119,46 @@ case "$AUDIO_BACKEND:$SINK_CHOICE" in
     SINK_ID="null"
     ;;
   alsa:*)
-    if [ -n "${AUDIO_ALSA_PLAYBACK_DEVICE:-}" ]; then
-      SINK_ID="$AUDIO_ALSA_PLAYBACK_DEVICE"
-    else
-      SINK_ID="$(audio_playback_pick_alsa_sink)"
-    fi
+    # Hardware-specific ALSA profiles (e.g., Hamoa) configure mixer controls
+    # and provide an explicit device path for the requested device, instead
+    # of discovering a sink through the generic ALSA profile detection below.
+    if [ "$ALSA_PROFILE" != "generic" ] && [ -n "$DEVICE" ]; then
+      if ! CHECK_DEPS_NO_EXIT=1 check_dependencies amixer grep sed flock; then
+        log_skip "$TESTNAME SKIP - missing ALSA mixer utilities required by profile '$ALSA_PROFILE'"
+        echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
+        exit 0
+      fi
 
-    audio_playback_alsa_prepare \
-      "$(audio_alsa_device_card "$SINK_ID")" >/dev/null 2>&1 || true
+      log_info "Using ALSA profile: $ALSA_PROFILE for device: $DEVICE"
+      case "$ALSA_PROFILE:$DEVICE" in
+        hamoa:handset|hamoa:headset)
+          SINK_ID="$(setup_alsa_profile_route "$ALSA_PROFILE" "$DEVICE" playback "$LOGDIR")"
+          profile_setup_rc=$?
+          ;;
+        *)
+          log_skip "$TESTNAME SKIP - unsupported ALSA profile/device: $ALSA_PROFILE/$DEVICE"
+          echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
+          exit 0
+          ;;
+      esac
+
+      if [ "$profile_setup_rc" -eq 0 ]; then
+        log_info "ALSA profile configured successfully, device: $SINK_ID"
+      else
+        log_error "Failed to setup ALSA profile: $ALSA_PROFILE for device: $DEVICE"
+        echo "$RESULT_TESTNAME FAIL" >"$RES_FILE"
+        exit 1
+      fi
+    else
+      if [ -n "${AUDIO_ALSA_PLAYBACK_DEVICE:-}" ]; then
+        SINK_ID="$AUDIO_ALSA_PLAYBACK_DEVICE"
+      else
+        SINK_ID="$(audio_playback_pick_alsa_sink)"
+      fi
+
+      audio_playback_alsa_prepare \
+        "$(audio_alsa_device_card "$SINK_ID")" >/dev/null 2>&1 || true
+    fi
     ;;
 esac
 
@@ -1305,8 +1387,23 @@ if [ "$USE_CLIP_DISCOVERY" = "true" ]; then
         audio_run_with_timeout_as_test_user --require-session "$effective_timeout" paplay --device="$SINK_NAME" "$clip_path" >>"$logf" 2>&1
         rc=$?
       else
-        log_info "[$case_name] exec: aplay -D \"$SINK_NAME\" \"$clip_path\""
-        audio_run_with_timeout_as_test_user "$effective_timeout" aplay -D "$SINK_NAME" "$clip_path" >>"$logf" 2>&1
+        # aplay's own -d duration limit lets it finish and close the PCM
+        # device on its own schedule, instead of being killed externally by
+        # the watchdog wrapper once effective_timeout elapses. An externally
+        # killed aplay process does not get a chance to report ALSA/ASoC
+        # runtime evidence the way a self-terminating one does, so passing
+        # -d here keeps the ALSA path's PASS/FAIL evidence consistent with
+        # the PipeWire and PulseAudio paths above, which are not subject to
+        # this because their playback client is not the sole owner of the
+        # underlying device.
+        aplay_duration_secs="$(audio_parse_secs "$effective_timeout" 2>/dev/null || echo 0)"
+        if [ "$aplay_duration_secs" -gt 0 ] 2>/dev/null; then
+          log_info "[$case_name] exec: aplay -D \"$SINK_NAME\" -d $aplay_duration_secs \"$clip_path\""
+          audio_run_with_timeout_as_test_user "$effective_timeout" aplay -D "$SINK_NAME" -d "$aplay_duration_secs" "$clip_path" >>"$logf" 2>&1
+        else
+          log_info "[$case_name] exec: aplay -D \"$SINK_NAME\" \"$clip_path\""
+          audio_run_with_timeout_as_test_user "$effective_timeout" aplay -D "$SINK_NAME" "$clip_path" >>"$logf" 2>&1
+        fi
         rc=$?
       fi
 
@@ -1482,8 +1579,17 @@ else
           audio_run_with_timeout_as_test_user --require-session "$TIMEOUT" paplay --device="$SINK_NAME" "$clip" >>"$logf" 2>&1
           rc=$?
         else
-          log_info "[$case_name] exec: aplay -D \"$SINK_NAME\" \"$clip\""
-          audio_run_with_timeout_as_test_user "$TIMEOUT" aplay -D "$SINK_NAME" "$clip" >>"$logf" 2>&1
+          # Mirror the discovery-mode aplay invocation: pass -d so aplay
+          # can finish and close the PCM device on its own schedule rather
+          # than being killed externally once the watchdog elapses.
+          aplay_duration_secs="$(audio_parse_secs "$TIMEOUT" 2>/dev/null || echo 0)"
+          if [ "$aplay_duration_secs" -gt 0 ] 2>/dev/null; then
+            log_info "[$case_name] exec: aplay -D \"$SINK_NAME\" -d $aplay_duration_secs \"$clip\""
+            audio_run_with_timeout_as_test_user "$TIMEOUT" aplay -D "$SINK_NAME" -d "$aplay_duration_secs" "$clip" >>"$logf" 2>&1
+          else
+            log_info "[$case_name] exec: aplay -D \"$SINK_NAME\" \"$clip\""
+            audio_run_with_timeout_as_test_user "$TIMEOUT" aplay -D "$SINK_NAME" "$clip" >>"$logf" 2>&1
+          fi
           rc=$?
         fi
 

@@ -89,6 +89,42 @@ An explicit backend request is never replaced:
 - `--backend pulseaudio` or `AUDIO_BACKEND=pulseaudio` runs `parecord` only and fails if the requested source is unavailable.
 - `--backend alsa` or `AUDIO_BACKEND=alsa` runs `arecord` with the discovered ALSA route.
 
+## Hardware-Specific ALSA Profiles
+
+`--alsa-profile <name>` selects a declarative, hardware-specific mixer profile
+instead of automatic route discovery. This requires `--backend alsa` (set
+automatically when omitted) and `--device <name>` identifying which physical
+capture route on that hardware to configure.
+
+Currently supported:
+
+```sh
+./run.sh --backend alsa --alsa-profile hamoa --device handset \
+  --config-name record_config1 --record-seconds 5s
+./run.sh --backend alsa --alsa-profile hamoa --device headset \
+  --config-name record_config1 --record-seconds 5s
+```
+
+`ALSA_PROFILE` and `DEVICE` environment variables are equivalent to
+`--alsa-profile`/`--device`, for YAML-driven CI jobs that set environment
+variables rather than CLI flags.
+
+The ALSA card for the requested profile is resolved dynamically at runtime by
+a distinctive mixer control (never a hardcoded card index), so the correct
+card is selected regardless of registration order. When an alsaucm UCM
+configuration tree is installed for the resolved card
+(`/usr/share/alsa/ucm2/<card>/`), the suite configures the route through
+`alsaucm` first; it falls back to this repository's own
+`Runner/utils/audio_profiles/*.profile` + `amixer` mechanism when UCM is not
+usable on the running image. Both mechanisms are verified afterward by
+confirming the resulting PCM device is enumerated for the requested
+direction. An unsupported `--alsa-profile`/`--device` combination SKIPs
+cleanly rather than failing.
+
+Mixer writes to the same hardware card are serialized across concurrent test
+runs via a per-card lock, so parallel `--device handset`/`--device headset`
+invocations on the same card do not interleave their mixer writes.
+
 ## Audio Remoteproc Preflight
 
 Before backend discovery, the suite enumerates runtime remoteprocs and checks the configured firmware and topology under `/lib/firmware` or `/usr/lib/firmware`. It recognizes audio DSP identities and the Shikra modem-hosted audio path. A remoteproc named `modem` is ignored on non-Shikra targets because it is not their audio preflight dependency.

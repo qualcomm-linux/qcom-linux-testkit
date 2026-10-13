@@ -1,0 +1,35 @@
+metadata:
+  name: audio-playback-hamoa-handset
+  format: "Lava-Test Test Definition 1.0"
+  description: "Audio playback validation for Hamoa handset (4-way speaker system), direct ALSA with hardware mixer profile"
+  os:
+    - linux
+  scope:
+    - functional
+
+params:
+  CLIP_NAMES: "playback_config1"  # Test specific clips (e.g., "playback_config1 playback_config2" or "play_48KHz_8b_2ch"), default: playback_config1
+  CLIP_FILTER: ""  # Filter clips by pattern (e.g., "48KHz" or "16b" or "2ch"), default: unset
+  FORMATS: "wav"  # Audio formats: e.g. wav, default: wav
+  DURATIONS: ""  # Playback durations: short, medium, long (legacy mode only, not used in config discovery mode), default: unset
+  LOOPS: 1  # Number of playback loops, default: 1
+  TIMEOUT: 0  # Playback timeout per loop (0=automatic: clip duration plus 5s grace), default: 0
+  STRICT: 0  # Enable strict mode (fail on any error), default: 0
+  DMESG_SCAN: 1  # Scan dmesg for errors after playback, default: 1
+  VERBOSE: 0  # Enable verbose logging, default: 0
+  EXTRACT_AUDIO_ASSETS: true  # Download/extract audio assets if missing, default: true
+  ENABLE_NETWORK_DOWNLOAD: false  # Enable network download of missing audio files, default: false
+  AUDIO_CLIPS_BASE_DIR: "/home/AudioClips"  # Custom path to pre-staged audio clips (for CI), default: /home/AudioClips
+  SSID: ""  # Wi-Fi SSID for network connection, default: unset
+  PASSWORD: ""  # Wi-Fi password for network connection, default: unset
+  RES_SUFFIX: "Hamoa_Handset"  # Suffix for unique result file and log directory (generates AudioPlayback_Hamoa_Handset.res and results/AudioPlayback_Hamoa_Handset/)
+  LAVA_TESTCASE_ID: "AudioPlayback_Hamoa_Handset"  # Unique testcase ID written into the .res file for LAVA
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Multimedia/Audio/AudioPlayback/
+    - DMESG_FLAG=""; [ "${DMESG_SCAN}" = "0" ] && DMESG_FLAG="--no-dmesg"
+    - VERBOSE_FLAG=""; [ "${VERBOSE}" = "1" ] && VERBOSE_FLAG="--verbose"
+    - ./run.sh --backend alsa --alsa-profile hamoa --device handset --sink speakers --clip-name "${CLIP_NAMES}" --clip-filter "${CLIP_FILTER}" --loops "${LOOPS}" --timeout "${TIMEOUT}" --strict "${STRICT}" --audio-clips-path "${AUDIO_CLIPS_BASE_DIR}" --res-suffix "${RES_SUFFIX}" --lava-testcase-id "${LAVA_TESTCASE_ID}" --ssid "${SSID}" --password "${PASSWORD}" ${DMESG_FLAG} ${VERBOSE_FLAG} || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh AudioPlayback${RES_SUFFIX:+_${RES_SUFFIX}}.res
