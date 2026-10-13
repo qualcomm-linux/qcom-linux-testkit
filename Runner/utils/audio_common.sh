@@ -11,6 +11,14 @@ if [ -n "${TOOLS:-}" ] &&
   . "$TOOLS/lib_pkg_provider.sh"
 fi
 
+# Reuse the hardware ALSA profile helpers (e.g. Hamoa) directly.
+if [ -n "${TOOLS:-}" ] &&
+   [ -r "$TOOLS/alsa_common.sh" ] &&
+   ! command -v resolve_alsa_card_index >/dev/null 2>&1; then
+  # shellcheck disable=SC1091
+  . "$TOOLS/alsa_common.sh"
+fi
+
 # Check whether a command exists in PATH.
 # Used by bootstrap helpers before attempting backend startup.
 have_cmd() {
@@ -1738,14 +1746,19 @@ build_backend_chain() {
 }
 
 # Pick a plausible ALSA capture device.
-# Returns something like hw:0,0 if available, else "default".
+# Returns something like plughw:0,0 if available, else "default".
+# plughw: is used rather than hw: because a raw hw: device records at the
+# hardware's native rate only and does not go through ALSA's "plug"
+# resampling layer, so a caller that requests a rate different from the
+# native rate silently gets the native rate instead. plughw: supports the
+# native rate as well as correct resampling for any other requested rate.
 alsa_pick_capture() {
   command -v arecord >/dev/null 2>&1 || return 1
   # Prefer the first real capture device from `arecord -l`
   arecord -l 2>/dev/null | awk '
     /card [0-9]+: .*device [0-9]+:/ {
       if (match($0, /card ([0-9]+):/, c) && match($0, /device ([0-9]+):/, d)) {
-        printf("hw:%s,%s\n", c[1], d[1]);
+        printf("plughw:%s,%s\n", c[1], d[1]);
         exit 0;
       }
     }
@@ -3773,7 +3786,12 @@ audio_probe_alsa_capture_profile() {
       esac
     fi
 
-    extra_devices="$(sed -n 's/^\([0-9][0-9]*\)-\([0-9][0-9]*\):.*capture.*/hw:\1,\2/p' /proc/asound/pcm 2>/dev/null)"
+    # /proc/asound/pcm entries are built as plughw: candidates, not hw:, for
+    # the same reason as alsa_pick_capture() above: a raw hw: device records
+    # at the hardware's native rate only, so a probe combo that happens to
+    # match the native rate (e.g. 48000Hz) can succeed on hw: and lock in a
+    # device that silently cannot honor any other requested rate later.
+    extra_devices="$(sed -n 's/^\([0-9][0-9]*\)-\([0-9][0-9]*\):.*capture.*/plughw:\1,\2/p' /proc/asound/pcm 2>/dev/null)"
     if [ -n "$extra_devices" ]; then
       for dev in $extra_devices; do
         seen=0
@@ -3786,8 +3804,8 @@ audio_probe_alsa_capture_profile() {
         if [ "$seen" -eq 0 ]; then
           probe_devices="$probe_devices $dev"
           case "$dev" in
-            hw:*)
-              probe_devices="$probe_devices plughw:${dev#hw:}"
+            plughw:*)
+              probe_devices="$probe_devices hw:${dev#plughw:}"
               ;;
           esac
         fi
