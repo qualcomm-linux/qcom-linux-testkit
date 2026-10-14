@@ -308,11 +308,32 @@ log_info "Kernel: $(uname -a 2>/dev/null || echo N/A)"
 log_info "Date(UTC): $(date -u 2>/dev/null || echo N/A)"
 log_soc_info
 
+# -------------------- Logging root -----------------------------
+TS="$(date +%Y%m%d-%H%M%S)"
+LOG_ROOT="./logs_${TESTNAME}_${TS}"
+if ! mkdir -p "$LOG_ROOT"; then
+    test_result_finish "FAIL" "$TESTNAME FAIL - cannot create log directory: $LOG_ROOT"
+fi
+
+log_info "Evidence directory: $test_path/$LOG_ROOT"
+
 # -------------------- Binary directory resolution -----------------
 if [ -n "$BIN_DIR" ]; then
     :
 else
     BIN_DIR="/usr/bin"
+fi
+
+RUN_DIR="$BIN_DIR"
+RUN_BIN="$RUN_DIR/fastrpc_test"
+
+# Missing optional payloads must not hide expected kernel registration failures.
+# Keep package/layout handling and the installed-binary execution path unchanged.
+if [ ! -x "$RUN_BIN" ]; then
+    log_info "FastRPC test binary is unavailable at $RUN_BIN, checking expected kernel registration first"
+    if ! fastrpc_registration_preflight "$LOG_ROOT"; then
+        test_result_finish
+    fi
 fi
 
 case "$BIN_DIR" in
@@ -322,9 +343,6 @@ case "$BIN_DIR" in
         fi
         ;;
 esac
-
-RUN_DIR="$BIN_DIR"
-RUN_BIN="$RUN_DIR/fastrpc_test"
 
 if [ ! -x "$RUN_BIN" ]; then
     if [ "$RUN_DIR" = "/usr/bin" ] &&
@@ -350,15 +368,6 @@ if [ ! -x "$RUN_BIN" ]; then
         test_result_finish "SKIP" "$TESTNAME SKIP - fastrpc_test is unavailable at the requested location, expected=$RUN_BIN, provision the test binary or select its directory with --bin-dir"
     fi
 fi
-
-# -------------------- Logging root -----------------------------
-TS="$(date +%Y%m%d-%H%M%S)"
-LOG_ROOT="./logs_${TESTNAME}_${TS}"
-if ! mkdir -p "$LOG_ROOT"; then
-    test_result_finish "FAIL" "$TESTNAME FAIL - cannot create log directory: $LOG_ROOT"
-fi
-
-log_info "Evidence directory: $test_path/$LOG_ROOT"
 
 fastrpc_capture_qrtr_evidence "$LOG_ROOT"
 
@@ -432,6 +441,19 @@ fi
 
 DOMAINS_TO_TEST="$(resolve_domains_to_test)"
 
+# Expectations must not disappear when remoteproc or FastRPC registration fails.
+# Only current enabled DT declarations add expectations, not historical board data.
+# Explicit CLI/environment selection retains its scope and does not require DT.
+EXPECTED_DOMAINS=""
+if [ "$SELECTION_SOURCE" = "automatic" ]; then
+    if ! EXPECTED_DOMAINS=$(fastrpc_capture_expected_domains "$LOG_ROOT"); then
+        test_result_finish "FAIL" "$TESTNAME FAIL - cannot discover expected FastRPC DT domains, check DT access and labels, artifact=$LOG_ROOT/fastrpc_dt_scan_errors.log"
+    fi
+    for d in $EXPECTED_DOMAINS; do
+        DOMAINS_TO_TEST=$(fastrpc_append_word_unique "$DOMAINS_TO_TEST" "$d")
+    done
+fi
+
 if [ -z "$DOMAINS_TO_TEST" ] && [ "$SELECTION_SOURCE" != "automatic" ]; then
     test_result_finish "FAIL" "$TESTNAME FAIL - explicit domain selection is invalid or unavailable, source=$SELECTION_SOURCE"
 fi
@@ -444,12 +466,25 @@ fi
 RUNNABLE_DOMAINS=""
 REQUESTED_PDS="$(requested_pds)"
 for d in $DOMAINS_TO_TEST; do
+    domain_required=0
+    if [ "$SELECTION_SOURCE" != "automatic" ] || [ "$CAPABILITY_SOURCE" = "fastrpc-healthcheck" ]; then
+        domain_required=1
+    fi
+    case " $EXPECTED_DOMAINS " in
+        *" $d "*)
+            domain_required=1
+            ;;
+    esac
     fastrpc_domain_ready "$d"
     domain_ready_status=$?
 
     if [ "$domain_ready_status" -ne 0 ]; then
         if [ "$SELECTION_SOURCE" != "automatic" ]; then
             test_result_finish "FAIL" "$TESTNAME FAIL - $(domain_to_name "$d") is not ready, selection=$SELECTION_SOURCE"
+        fi
+        if [ "$domain_required" -eq 1 ]; then
+            test_result_record "FAIL" "$(domain_to_name "$d") is expected but not ready, check remoteproc firmware and FastRPC registration, capability_source=$CAPABILITY_SOURCE DT=$LOG_ROOT/fastrpc_dt_expected_domains.log"
+            continue
         fi
 
         log_info "[FASTRPC-DISCOVERY] domain=$(domain_to_name "$d") eligible=no reason=runtime-not-ready"
@@ -458,8 +493,9 @@ for d in $DOMAINS_TO_TEST; do
 
     if ! fastrpc_domain_endpoint_available "$d"; then
         label="$(domain_to_endpoint_label "$d")"
-        if [ "$SELECTION_SOURCE" != "automatic" ] || [ "$CAPABILITY_SOURCE" = "fastrpc-healthcheck" ]; then
-            test_result_finish "FAIL" "$TESTNAME FAIL - $(domain_to_name "$d") has no usable endpoint, expected=/dev/fastrpc-${label} or /dev/fastrpc-${label}-secure capability_source=$CAPABILITY_SOURCE selection=$SELECTION_SOURCE"
+        if [ "$domain_required" -eq 1 ]; then
+            test_result_record "FAIL" "$(domain_to_name "$d") has no usable endpoint, expected=/dev/fastrpc-${label} or /dev/fastrpc-${label}-secure, check FastRPC driver registration, capability_source=$CAPABILITY_SOURCE selection=$SELECTION_SOURCE"
+            continue
         fi
 
         log_info "[FASTRPC-DISCOVERY] domain=$(domain_to_name "$d") eligible=no reason=endpoint-absent expected=/dev/fastrpc-${label}[-secure]"
@@ -469,8 +505,9 @@ for d in $DOMAINS_TO_TEST; do
     domain_library="$(fastrpc_domain_system_library_path "$d" || true)"
     if [ -z "$domain_library" ]; then
         required_library="$(fastrpc_domain_field "$d" 7)"
-        if [ "$SELECTION_SOURCE" != "automatic" ] || [ "$CAPABILITY_SOURCE" = "fastrpc-healthcheck" ]; then
-            test_result_finish "FAIL" "$TESTNAME FAIL - $(domain_to_name "$d") runtime library is missing, expected=$required_library checked=$FASTRPC_LIB_SYS_DIRS_CHECKED capability_source=$CAPABILITY_SOURCE selection=$SELECTION_SOURCE"
+        if [ "$domain_required" -eq 1 ]; then
+            test_result_record "FAIL" "$(domain_to_name "$d") runtime library is missing, provision $required_library in the image, checked=$FASTRPC_LIB_SYS_DIRS_CHECKED capability_source=$CAPABILITY_SOURCE selection=$SELECTION_SOURCE"
+            continue
         fi
 
         log_info "[FASTRPC-DISCOVERY] domain=$(domain_to_name "$d") eligible=no reason=runtime-library-missing expected=$required_library checked=$FASTRPC_LIB_SYS_DIRS_CHECKED"
@@ -495,11 +532,13 @@ done
 DOMAINS_TO_TEST="$RUNNABLE_DOMAINS"
 
 if [ -z "$DOMAINS_TO_TEST" ]; then
-    test_result_finish "SKIP" "$TESTNAME SKIP - no automatically discovered domain has complete readiness, endpoint, library, and requested-PD support"
+    test_result_record "SKIP" "No selected domain has complete readiness, endpoint, library, and requested-PD support"
+    test_result_finish
 fi
 
 if ! fastrpc_validate_runtime_artifacts; then
-    test_result_finish "SKIP" "$TESTNAME SKIP - shared FastRPC test artifacts are incomplete: $FASTRPC_ARTIFACT_ERROR"
+    test_result_record "SKIP" "Shared FastRPC test artifacts are incomplete: $FASTRPC_ARTIFACT_ERROR"
+    test_result_finish
 fi
 
 log_info "Domain mode: $DOMAIN_MODE"
@@ -546,6 +585,9 @@ log_info "[FASTRPC-MATRIX] combinations=$matrix_combinations repeats=$REPEAT inv
 # -------------------- Run loop ---------------------------------
 # Nested loop over domains and PDs
 RUNTIME_FAILURE_SEEN=0
+if [ "$TEST_RESULT_FAIL_COUNT" -gt 0 ]; then
+    RUNTIME_FAILURE_SEEN=1
+fi
 
 # Track per-domain/per-PD results during execution
 # Format: "DOMAIN:PD:pass_count:fail_count:subtests_total:subtests_pass:subtests_fail:subtests_skip"
@@ -776,7 +818,7 @@ EOF
 log_info "$SUMMARY_SEP"
 _total_count=$((TEST_RESULT_PASS_COUNT + TEST_RESULT_FAIL_COUNT))
 overall_inv_line="$(printf '%-20s Total:%6d | Passed:%6d | Failed:%6d' \
-    'Overall invocations:' "$_total_count" "$TEST_RESULT_PASS_COUNT" "$TEST_RESULT_FAIL_COUNT")"
+    'Overall checks:' "$_total_count" "$TEST_RESULT_PASS_COUNT" "$TEST_RESULT_FAIL_COUNT")"
 log_info "$overall_inv_line"
 
 overall_sub_line="$(printf '%-20s Total:%6d | Passed:%6d | Failed:%6d | Skipped:%6d' \

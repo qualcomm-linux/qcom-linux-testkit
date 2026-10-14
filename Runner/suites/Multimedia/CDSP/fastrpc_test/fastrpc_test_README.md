@@ -36,6 +36,8 @@ Supported capabilities:
   `--domain`, `--domain-name`, `--pd-mode`, `--unsigned-pd`, `--verbose`)
 - Auto-discovery of system libraries and DSP skeletons for Yocto, Debian, Ubuntu, and RPM layouts
 - Runtime domain and PD discovery without SoC-name filtering
+- Automatic readiness checks for enabled FastRPC DT declarations, independent of
+  successful remoteproc registration
 
 ## Prerequisites
 
@@ -66,6 +68,8 @@ Have these on the target (or specify paths with the flags below):
 - Yocto, CentOS, and distributions without an exact package mapping remain
   image-managed and report SKIP when the binary is absent. A missing binary in
   an explicitly selected `--bin-dir` also reports SKIP without package changes.
+  These skips apply only after expected kernel registration passes the preflight
+  below. A registration failure takes precedence over a missing test payload.
 - Missing optional image assets are reported as SKIP unless the operator explicitly selected a
   domain whose required runtime library is absent.
 
@@ -116,7 +120,7 @@ Env:
 ### Quick start
 
 ```bash
-# Default: dynamically discover runnable domains and supported PD modes
+# Default: validate DT-declared domains and discover runnable domains/PD modes
 ./run.sh
 
 # With repeat and timeout:
@@ -171,6 +175,53 @@ package version. When runtime fallback discovers a domain but the installed `fas
 reports that it cannot represent that domain, the invocation is classified as FAIL so the image or
 package gap remains visible until a matching payload is provisioned. Other domains still execute.
 
+Automatic selection also reads enabled FastRPC declarations from the running DT,
+using the public `qcom,fastrpc` and `qcom,kaanapali-fastrpc` driver match entries
+and their `label` property. Newer compatibles with the kaanapali fallback are
+covered. A context-bank node or a generic DSP node alone is not an expectation.
+The FastRPC node and every ancestor must have absent, `okay`, or `ok` status.
+Disabled ancestors therefore do not create false failures.
+
+A mapped DT-declared domain is checked even if healthcheck omits it or reports it
+offline/unsupported, or remoteproc registration and the endpoint are absent.
+Missing readiness, endpoints, or required runtime libraries record FAIL while
+other healthy domains continue. Missing optional shared test assets cannot
+overwrite an already recorded readiness failure with SKIP. With no DT or no
+enabled FastRPC declarations, the existing healthcheck/runtime fallback remains
+in effect. Failed DT traversal, unreadable properties, or a missing required
+FastRPC label fail discovery. Labels outside the suite's protocol map are logged
+as untestable, not guessed or mapped to another DSP.
+
+Explicit CLI or environment selection checks only the requested domain, without
+requiring DT discovery. No SoC/board lists, distro gates, new parameters, or new
+package installation paths are introduced.
+
+When the test binary is absent, a read-only registration preflight runs before
+the missing-payload SKIP or existing package-provider handling. It checks every
+DT-expected domain, or only the explicitly selected domain, for a running
+remoteproc and a normal or secure FastRPC endpoint. Missing/offline registration,
+missing endpoints, invalid explicit selection and DT discovery failures report
+FAIL even without `fastrpc_test`. Healthy registration is logged as readiness,
+never as functional PASS. If registration is healthy or no domain is expected,
+the existing binary/package policy proceeds, including SKIP for missing optional
+payloads on image-managed systems. This preflight neither loads modules nor
+starts remoteprocs, creates endpoints, or installs packages.
+
+The installed-binary path is unchanged and still prefers `fastrpc-healthcheck`
+for execution capability, with the existing remoteproc fallback when absent.
+The missing-binary preflight checks kernel registration only, it cannot prove
+client support, PD support or functional RPC execution.
+
+Automatic mode uses only the running system's enabled FastRPC DT declarations
+and discovered runtime capabilities. If CDSP is absent from both DT and runtime,
+other discovered domains continue, or the suite reports SKIP when none apply.
+Removed or disabled DT nodes do not create historical or board-specific domain
+requirements. A domain still exposed by runtime discovery remains eligible even
+without an enabled DT declaration. Triage determines whether absent hardware was
+intentional. Enabled DT declarations with missing/offline registration still fail.
+Explicit `--domain-name cdsp` continues to check CDSP only and fails when it is
+unavailable. No mandatory-domain CI policy or new requirement option is introduced.
+
 ### LAVA integration example
 
 ```
@@ -210,10 +261,11 @@ package gap remains visible until a matching payload is provisioned. Other domai
   executed, its raw output is retained. A normalized six-column table containing domain, state,
   signed-PD support, unsigned-PD support, normalized FastRPC support, and the support reason is
   retained only when strict parsing succeeds.
-- **Offline automatic domain**: Logged and excluded from automatic selection. Other runnable
-  domains continue.
-- **Unsupported automatic domain**: Logged with the healthcheck reason and excluded. Other
-  runnable domains continue.
+- **Offline or unsupported automatic domain**: FAIL when an enabled FastRPC DT declaration
+  expects it, otherwise logged and excluded. Other runnable domains continue.
+- **DT expectation evidence**: `fastrpc_dt_expected_domains.log` records numeric ID, label,
+  full node path and compatible list as tab-separated fields. The checked traversal paths
+  and errors are retained in `fastrpc_dt_compatible_paths.log` and `fastrpc_dt_scan_errors.log`.
 - **Test payload lacks a runtime-ready domain**: A retained invocation log proving that the
   installed client cannot represent the selected numeric domain is classified as FAIL. This is
   feature probing, not a package-version check, so it behaves the same on Yocto, Debian, Ubuntu,
@@ -222,12 +274,14 @@ package gap remains visible until a matching payload is provisioned. Other domai
 - **Missing runtime artifacts**: When the capability source is `fastrpc-healthcheck`, a domain
   missing its endpoint or required runtime library fails the suite — healthcheck has declared it
   supported, so the absence indicates a broken installation. When the capability source is the
-  runtime fallback, such a domain is logged and excluded while other runnable domains continue.
-  Missing shared test libraries or DSP skeletons skip the suite before execution.
+  runtime fallback, such a domain fails if declared by enabled FastRPC DT, otherwise it is
+  logged and excluded while other runnable domains continue. Missing shared test libraries
+  or DSP skeletons skip execution but do not clear prior readiness failures.
 - **Binary resolved to /bin/fastrpc_test**: Blocked by default. Set `ALLOW_BIN_FASTRPC=1` or
   use `--bin-dir` to a non-`/bin` path.
-- **Missing binary on any distribution**: Package installation is not attempted. The suite reports
-  SKIP with the expected image-provided binary path.
+- **Missing binary**: Expected kernel registration is checked first and any failure
+  is reported before optional-payload handling. Otherwise the existing package
+  policy described under Prerequisites applies, with SKIP on image-managed paths.
 - **Session create errors with -U 1**: If unsigned PD returns `0x80000416`, confirm your image
   includes unsigned shells/policies (or use `--pd-mode signed-only`).
 - **Domain not discovered**: Check `dmesg` for remoteproc firmware load errors. The test
@@ -256,6 +310,34 @@ package gap remains visible until a matching payload is provisioned. Other domai
   `FASTRPC_SKEL_BASE`. CLI domain selection takes precedence over environment selection, which
   takes precedence over runtime discovery.
 - If `fastrpc_test` is not in the default path, use `--bin-dir` to specify its location.
+
+## Host regression checks
+
+From the repository root:
+
+```sh
+dash scripts/tests/fastrpc-domain-validation.sh
+# Focused current-DT/runtime absence policy checks:
+dash scripts/tests/fastrpc-domain-validation.sh --absence-only
+dash scripts/tests/fastrpc-startup-validation.sh dash
+```
+
+These host-only fixtures exercise DT expectations and the actual runner selection
+and result-finalization blocks. Remoteproc, endpoint, library, and invocation
+boundaries are mocked. Coverage includes missing/offline CDSP with healthy ADSP,
+healthcheck omission and unsupported reports, missing endpoints/libraries,
+disabled ancestors, explicit overrides, no-DT fallback, optional asset skips,
+compatible fallback lists, symlink roots, and malformed labels. They do not
+perform DUT operations or establish hardware/cross-distribution validation.
+The absence-only subset checks ADSP continuing without CDSP, explicit absent-CDSP
+failure, runtime CDSP without a DT declaration, and SKIP with no applicable domain.
+
+The startup harness additionally executes an unchanged copy of the full runner
+with a temporary bootstrap and mocked hardware/package boundaries. It checks
+missing-binary precedence, CLI/environment selection, absent/offline remoteprocs,
+missing endpoints, discovery errors, preservation of the installed-binary path,
+and existing provider outcomes. No package installation or real RPC invocation
+is performed by these host checks.
 
 ## License
 
