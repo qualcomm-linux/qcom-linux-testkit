@@ -50,6 +50,7 @@ fi
 
 TESTNAME="Ethernet_Suspend_Resume_Validation"
 RES_FILE="./$TESTNAME.res"
+ethv_failure_diagnostics_init "$SCRIPT_DIR/results/$TESTNAME/run-$(date '+%Y%m%d-%H%M%S')-$/failure_diagnostics"
 
 test_path="$(find_test_case_by_name "$TESTNAME")"
 
@@ -209,6 +210,7 @@ log_info "Configuration: enable=$ETH_SUSPEND_ENABLE interface=${ETH_SUSPEND_INTE
 
 if ! ethv_is_boolean "$ETH_SUSPEND_ENABLE"; then
     log_fail "$TESTNAME FAIL: ETH_SUSPEND_ENABLE must be 0 or 1"
+    ethv_failure_diagnostics "$TESTNAME failure"
     echo "$TESTNAME FAIL" >"$RES_FILE"
     exit 0
 fi
@@ -253,6 +255,7 @@ for value in \
 
     if ! ethv_is_positive_integer "$value"; then
         log_fail "$TESTNAME FAIL: timeout, duration, and ping values must be positive integers"
+        ethv_failure_diagnostics "$TESTNAME failure"
         echo "$TESTNAME FAIL" >"$RES_FILE"
         exit 0
     fi
@@ -300,6 +303,7 @@ if [ -z "$ETH_IFACE" ] || [ ! -d "/sys/class/net/$ETH_IFACE" ]; then
     exit 0
 fi
 
+ethv_failure_diagnostics_watch "$ETH_IFACE"
 ethv_prepare_interface "$ETH_IFACE" "$LINK_TIMEOUT_S" "$IP_TIMEOUT_S"
 prepare_rc=$?
 
@@ -335,6 +339,7 @@ if [ "$prepare_rc" -ne 0 ]; then
 
     case "$OVERALL_RESULT" in
         FAIL)
+            ethv_failure_diagnostics "$TESTNAME failure"
             echo "$TESTNAME FAIL" >"$RES_FILE"
             ;;
         *)
@@ -383,6 +388,7 @@ if [ "$RTCWAKE_RC" -ne 0 ]; then
         "rtcwake failed with rc=$RTCWAKE_RC"
 
     ethv_print_summary "$RESULT_TABLE" "Ethernet Suspend/Resume Summary"
+    ethv_failure_diagnostics "$TESTNAME failure"
     echo "$TESTNAME FAIL" >"$RES_FILE"
     exit 0
 fi
@@ -401,6 +407,7 @@ if [ ! -d "/sys/class/net/$ETH_IFACE" ]; then
         "interface disappeared after resume"
 
     ethv_print_summary "$RESULT_TABLE" "Ethernet Suspend/Resume Summary"
+    ethv_failure_diagnostics "$TESTNAME failure"
     echo "$TESTNAME FAIL" >"$RES_FILE"
     exit 0
 fi
@@ -528,6 +535,7 @@ case "$OVERALL_RESULT" in
         ;;
     FAIL)
         log_fail "$TESTNAME FAIL"
+        ethv_failure_diagnostics "$TESTNAME failure"
         echo "$TESTNAME FAIL" >"$RES_FILE"
         ;;
     *)

@@ -3777,10 +3777,12 @@ dt_has_remoteproc_fw() {
 }
 
 ###############################################################################
-# dt_list_compatible_nodes <compatible-pattern> [fixed|regex]
+# dt_list_compatible_nodes <compatible-pattern> [fixed|regex] [dt-root]
 # Prints one enabled device-tree node directory per line from both standard DT
 # roots. The default mode performs a fixed substring match. Returns 0 when at
-# least one node is found, 1 when none are found, and 3 for invalid arguments.
+# least one node is found, 1 when none are found, 2 on discovery failure, and
+# 3 for invalid arguments. Discovery failures are not proof of absent hardware.
+# An explicit root limits discovery to that tree, useful for offline DT fixtures.
 ###############################################################################
 dt_list_compatible_nodes() {
     dtlc_pattern="$1"
@@ -3795,7 +3797,7 @@ dt_list_compatible_nodes() {
     esac
 
     dtlc_found=0
-    if [ -r "${DT_COMPATIBLE_INDEX:-}" ]; then
+    if [ -z "${3:-}" ] && [ -r "${DT_COMPATIBLE_INDEX:-}" ]; then
         if [ "$dtlc_mode" = "regex" ]; then
             awk -F '|' -v pattern="$dtlc_pattern" '$2 ~ pattern { print $1; found=1 } END { exit !found }' "$DT_COMPATIBLE_INDEX"
         else
@@ -3804,18 +3806,32 @@ dt_list_compatible_nodes() {
         return $?
     fi
     dtlc_previous_root=""
-    for dtlc_root in /proc/device-tree /sys/firmware/devicetree/base; do
+    for dtlc_source in primary secondary; do
+        case "$dtlc_source" in
+            primary)
+                dtlc_root="${3:-/proc/device-tree}"
+                ;;
+            secondary)
+                [ -z "${3:-}" ] || continue
+                dtlc_root="/sys/firmware/devicetree/base"
+                ;;
+        esac
         [ -d "$dtlc_root" ] || continue
         dtlc_resolved_root=$(readlink -f "$dtlc_root" 2>/dev/null || true)
         [ -n "$dtlc_resolved_root" ] || dtlc_resolved_root="$dtlc_root"
         [ "$dtlc_resolved_root" = "$dtlc_previous_root" ] && continue
         dtlc_previous_root="$dtlc_resolved_root"
 
-        dtlc_matches_file=$(mktemp "${TMPDIR:-/tmp}/dt-compatible.XXXXXX") || return 1
+        dtlc_matches_file=$(mktemp "${TMPDIR:-/tmp}/dt-compatible.XXXXXX") || return 2
+        dtlc_scan_status=0
         if [ "$dtlc_mode" = "regex" ]; then
-            find "$dtlc_resolved_root" -type f -name compatible 2>/dev/null >"$dtlc_matches_file"
+            find "$dtlc_resolved_root" -type f -name compatible >"$dtlc_matches_file" || dtlc_scan_status=2
         else
-            grep -r -l -a -F "$dtlc_pattern" "$dtlc_resolved_root" 2>/dev/null >"$dtlc_matches_file" || true
+            grep -r -l -a -F "$dtlc_pattern" "$dtlc_resolved_root" >"$dtlc_matches_file" || dtlc_scan_status=$?
+        fi
+        if [ "$dtlc_scan_status" -gt 1 ]; then
+            rm -f "$dtlc_matches_file"
+            return 2
         fi
 
         while IFS= read -r dtlc_compatible_file; do
@@ -3828,13 +3844,23 @@ dt_list_compatible_nodes() {
                     ;;
             esac
             if [ "$dtlc_mode" = "regex" ]; then
-                dtlc_text=$(dt_property_text "$dtlc_node_dir" compatible 2>/dev/null || true)
-                printf '%s\n' "$dtlc_text" | grep -Eq "$dtlc_pattern" || continue
+                if ! dtlc_text=$(dt_property_text "$dtlc_node_dir" compatible); then
+                    dtlc_scan_status=2
+                    break
+                fi
+                dtlc_match_status=0
+                printf '%s\n' "$dtlc_text" | grep -Eq "$dtlc_pattern" || dtlc_match_status=$?
+                if [ "$dtlc_match_status" -gt 1 ]; then
+                    dtlc_scan_status=2
+                    break
+                fi
+                [ "$dtlc_match_status" -eq 0 ] || continue
             fi
             readlink -f "$dtlc_node_dir" 2>/dev/null || printf '%s\n' "$dtlc_node_dir"
             dtlc_found=1
         done <"$dtlc_matches_file"
         rm -f "$dtlc_matches_file"
+        [ "$dtlc_scan_status" -le 1 ] || return 2
     done
 
     [ "$dtlc_found" -eq 1 ]

@@ -50,6 +50,7 @@ fi
 
 TESTNAME="Ethernet_Capability_Validation"
 RES_FILE="./$TESTNAME.res"
+ethv_failure_diagnostics_init "$SCRIPT_DIR/results/$TESTNAME/run-$(date '+%Y%m%d-%H%M%S')-$/failure_diagnostics"
 
 test_path="$(find_test_case_by_name "$TESTNAME")"
 
@@ -142,6 +143,7 @@ if ! ethv_is_boolean "$REQUIRE_FULL_DUPLEX" \
    || ! ethv_is_uint "$MIN_LINK_SPEED_MBPS"; then
 
     log_fail "$TESTNAME FAIL: invalid configuration"
+    ethv_failure_diagnostics "$TESTNAME failure"
     echo "$TESTNAME FAIL" >"$RES_FILE"
     exit 0
 fi
@@ -165,6 +167,7 @@ if [ -z "$ETH_IFACES" ]; then
 fi
 
 for iface in $ETH_IFACES; do
+    ethv_failure_diagnostics_watch "$iface"
     driver="$(ethv_get_driver "$iface")"
     carrier="$(ethv_get_carrier "$iface")"
     speed="$(ethv_get_speed "$iface")"
@@ -236,23 +239,21 @@ for iface in $ETH_IFACES; do
             "ethtool -k failed"
     fi
 
-    if ethtool -S "$iface" >/dev/null 2>&1; then
-        stat_count="$(
-            ethtool -S "$iface" 2>/dev/null \
-                | awk -F: 'NF >= 2 {count++} END {print count + 0}'
-        )"
+    stats_prefix="$SCRIPT_DIR/results/$TESTNAME/driver-$$/$iface"
+    if ethv_capture_driver_statistics "$iface" "$stats_prefix"; then
+        stat_count="$(wc -l <"$stats_prefix.tsv" | tr -d '[:space:]')"
 
         ethv_record_result \
             "$RESULT_TABLE" \
             "$iface driver statistics" \
             "PASS" \
-            "$stat_count driver statistic(s) exposed"
+            "$stat_count driver statistic(s) exposed, artifact=$stats_prefix.tsv"
     else
         ethv_record_result \
             "$RESULT_TABLE" \
             "$iface driver statistics" \
             "SKIP" \
-            "driver does not support ethtool -S"
+            "$ETHV_DRIVER_STATS_REASON"
     fi
 
     if ethtool -a "$iface" >/dev/null 2>&1; then
@@ -423,6 +424,7 @@ case "$OVERALL_RESULT" in
         ;;
     FAIL)
         log_fail "$TESTNAME FAIL"
+        ethv_failure_diagnostics "$TESTNAME failure"
         echo "$TESTNAME FAIL" >"$RES_FILE"
         ;;
     *)

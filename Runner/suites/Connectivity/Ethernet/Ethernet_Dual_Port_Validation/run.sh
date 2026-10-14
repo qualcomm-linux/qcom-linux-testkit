@@ -50,6 +50,7 @@ fi
 
 TESTNAME="Ethernet_Dual_Port_Validation"
 RES_FILE="./$TESTNAME.res"
+ethv_failure_diagnostics_init "$SCRIPT_DIR/results/$TESTNAME/run-$(date '+%Y%m%d-%H%M%S')-$/failure_diagnostics"
 
 test_path="$(find_test_case_by_name "$TESTNAME")"
 
@@ -208,6 +209,7 @@ if ! ethv_is_positive_integer "$LINK_TIMEOUT_S" \
    || ! ethv_is_positive_integer "$PING_WAIT_S"; then
 
     log_fail "$TESTNAME FAIL: numeric configuration values must be positive integers"
+    ethv_failure_diagnostics "$TESTNAME failure"
     echo "$TESTNAME FAIL" >"$RES_FILE"
     exit 0
 fi
@@ -229,6 +231,7 @@ ETH_IFACE_LINES="$(
 
 IFACE_A="$(printf '%s\n' "$ETH_IFACE_LINES" | sed -n '1p')"
 IFACE_B="$(printf '%s\n' "$ETH_IFACE_LINES" | sed -n '2p')"
+ethv_failure_diagnostics_watch "$IFACE_A" "$IFACE_B"
 
 if [ -z "$IFACE_A" ] || [ -z "$IFACE_B" ]; then
     ethv_record_result \
@@ -250,11 +253,13 @@ if [ "$IFACE_A" = "$IFACE_B" ]; then
         "the selected interface names are identical: $IFACE_A"
 
     ethv_print_summary "$RESULT_TABLE" "Ethernet Dual-Port Summary"
+    ethv_failure_diagnostics "$TESTNAME failure"
     echo "$TESTNAME FAIL" >"$RES_FILE"
     exit 0
 fi
 
 for iface in "$IFACE_A" "$IFACE_B"; do
+    ethv_failure_diagnostics_watch "$iface"
     if [ ! -d "/sys/class/net/$iface" ]; then
         ethv_record_result \
             "$RESULT_TABLE" \
@@ -302,6 +307,7 @@ done
 
 if [ "$(ethv_result_count "$RESULT_TABLE" FAIL)" -gt 0 ]; then
     ethv_print_summary "$RESULT_TABLE" "Ethernet Dual-Port Summary"
+    ethv_failure_diagnostics "$TESTNAME failure"
     echo "$TESTNAME FAIL" >"$RES_FILE"
     exit 0
 fi
@@ -426,6 +432,7 @@ case "$OVERALL_RESULT" in
         ;;
     FAIL)
         log_fail "$TESTNAME FAIL"
+        ethv_failure_diagnostics "$TESTNAME failure"
         echo "$TESTNAME FAIL" >"$RES_FILE"
         ;;
     *)

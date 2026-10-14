@@ -50,6 +50,7 @@ fi
 
 TESTNAME="Ethernet_Statistics_Validation"
 RES_FILE="./$TESTNAME.res"
+ethv_failure_diagnostics_init "$SCRIPT_DIR/results/$TESTNAME/run-$(date '+%Y%m%d-%H%M%S')-$/failure_diagnostics"
 
 test_path="$(find_test_case_by_name "$TESTNAME")"
 
@@ -219,6 +220,7 @@ for value in \
 
     if ! ethv_is_uint "$value"; then
         log_fail "$TESTNAME FAIL: all numeric configuration values must be unsigned integers"
+        ethv_failure_diagnostics "$TESTNAME failure"
         echo "$TESTNAME FAIL" >"$RES_FILE"
         exit 0
     fi
@@ -229,6 +231,7 @@ if [ -n "$MAX_RX_DROP_DELTA" ] && [ -n "$MAX_TX_DROP_DELTA" ]; then
        || ! ethv_is_uint "$MAX_TX_DROP_DELTA"; then
 
         log_fail "$TESTNAME FAIL: drop thresholds must be unsigned integers"
+        ethv_failure_diagnostics "$TESTNAME failure"
         echo "$TESTNAME FAIL" >"$RES_FILE"
         exit 0
     fi
@@ -236,6 +239,7 @@ if [ -n "$MAX_RX_DROP_DELTA" ] && [ -n "$MAX_TX_DROP_DELTA" ]; then
     DROP_THRESHOLDS_ENABLED=1
 elif [ -n "$MAX_RX_DROP_DELTA" ] || [ -n "$MAX_TX_DROP_DELTA" ]; then
     log_fail "$TESTNAME FAIL: both RX and TX drop thresholds must be configured together"
+    ethv_failure_diagnostics "$TESTNAME failure"
     echo "$TESTNAME FAIL" >"$RES_FILE"
     exit 0
 fi
@@ -259,6 +263,7 @@ if [ -z "$ETH_IFACES" ]; then
 fi
 
 for iface in $ETH_IFACES; do
+    ethv_failure_diagnostics_watch "$iface"
     log_info "---- Statistics validation for $iface ----"
 
     ethv_prepare_interface "$iface" "$LINK_TIMEOUT_S" "$IP_TIMEOUT_S"
@@ -305,9 +310,24 @@ for iface in $ETH_IFACES; do
     rx_dropped_before="$(ethv_get_counter "$iface" rx_dropped)"
     tx_dropped_before="$(ethv_get_counter "$iface" tx_dropped)"
 
+    stats_prefix="$SCRIPT_DIR/results/$TESTNAME/driver-$$/$iface"
+    driver_stats_status=0
+    ethv_capture_driver_statistics "$iface" "${stats_prefix}_before" || driver_stats_status=$?
+    log_info "$ETHV_DRIVER_STATS_REASON"
+
     log_info "$iface baseline: rx_bytes=$rx_bytes_before tx_bytes=$tx_bytes_before rx_packets=$rx_packets_before tx_packets=$tx_packets_before rx_errors=$rx_errors_before tx_errors=$tx_errors_before rx_dropped=$rx_dropped_before tx_dropped=$tx_dropped_before"
 
-    if ! ethv_ping_interface "$iface" "$target" "$PING_COUNT" "$PING_WAIT_S"; then
+    traffic_status=0
+    ethv_ping_interface "$iface" "$target" "$PING_COUNT" "$PING_WAIT_S" || traffic_status=$?
+    if [ "$driver_stats_status" -eq 0 ]; then
+        if ethv_capture_driver_statistics "$iface" "${stats_prefix}_after" &&
+           ethv_compare_driver_statistics "${stats_prefix}_before.tsv" "${stats_prefix}_after.tsv" "${stats_prefix}_changes.tsv"; then
+            log_file_with_label "ETHERNET-DRIVER-COUNTERS-$iface" "${stats_prefix}_changes.tsv" 60
+        else
+            log_warn "Optional driver-counter comparison is unavailable: $ETHV_DRIVER_STATS_REASON"
+        fi
+    fi
+    if [ "$traffic_status" -ne 0 ]; then
         ethv_record_result \
             "$RESULT_TABLE" \
             "$iface bounded traffic" \
@@ -398,16 +418,6 @@ for iface in $ETH_IFACES; do
             "rx_dropped_delta=$rx_dropped_delta tx_dropped_delta=$tx_dropped_delta thresholds=$MAX_RX_DROP_DELTA/$MAX_TX_DROP_DELTA"
     fi
 
-    if command -v ethtool >/dev/null 2>&1; then
-        log_info "[$iface ethtool statistics snapshot]"
-        ethtool -S "$iface" 2>/dev/null \
-            | grep -iE \
-                'error|drop|miss|crc|overflow|underflow|timeout|collision|packet|byte' \
-            | tail -n 200 \
-            | while IFS= read -r line; do
-                [ -n "$line" ] && log_info "[$iface stats] $line"
-            done
-    fi
 done
 
 OVERALL_RESULT="$(ethv_compute_overall_result "$RESULT_TABLE")"
@@ -421,6 +431,7 @@ case "$OVERALL_RESULT" in
         ;;
     FAIL)
         log_fail "$TESTNAME FAIL"
+        ethv_failure_diagnostics "$TESTNAME failure"
         echo "$TESTNAME FAIL" >"$RES_FILE"
         ;;
     *)

@@ -152,7 +152,17 @@ case "$qps615_status" in
         else
             test_result_record \
                 "PASS" \
-                "QPS615 PCIe topology and firmware are healthy: bridge_functions=$QPS615_SWITCH_COUNT downstream=$QPS615_DOWNSTREAM_COUNT ethernet_devices=$QPS615_ETHERNET_DEVICE_COUNT firmware=$QPS615_FIRMWARE_PATH"
+                "QPS615 PCIe topology and firmware are healthy: switches=$QPS615_SWITCH_COUNT bridge_functions=$QPS615_BRIDGE_COUNT downstream=$QPS615_DOWNSTREAM_COUNT ethernet_devices=$QPS615_ETHERNET_DEVICE_COUNT firmware=$QPS615_FIRMWARE_PATH"
+        fi
+
+        if [ -n "$QPS615_PWRCTRL_FAILURE_REASON" ]; then
+            test_result_record \
+                "FAIL" \
+                "QPS615 PCIe power-control validation failed: $QPS615_PWRCTRL_FAILURE_REASON"
+        elif [ "$QPS615_PWRCTRL_EXPECTED_COUNT" -gt 0 ]; then
+            test_result_record \
+                "PASS" \
+                "All $QPS615_PWRCTRL_BOUND_COUNT supply-backed QPS615 DT node(s) are bound to pwrctrl-tc9563"
         fi
 
         if [ -n "$QPS615_ETHERNET_FAILURE_REASON" ]; then

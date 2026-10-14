@@ -20,7 +20,7 @@ Unused PCIe bridge ports may legitimately report zero negotiated width. They
 are identified as inactive bridge ports, while a zero-width non-bridge
 endpoint remains a failure.
 
-These checks help confirm that the PCIe root port is properly initialized and ready for use 
+These checks help confirm that the PCIe root port is properly initialized and ready for use
 
 When an enumerated Toshiba `1179:0623` switch identifies QPS615 hardware, the
 suite also validates the discovered downstream PCIe topology, TC956x Ethernet
@@ -29,6 +29,18 @@ function enumeration, and the image-provided
 diagnosis but are owned by `Ethernet_Inventory_Validation`, so an Ethernet
 driver packaging or binding failure does not incorrectly fail the generic PCIe
 contract. Systems without QPS615 continue through the existing generic checks.
+
+For enabled runtime DT nodes compatible with `pci1179,0623`, the PCIe suite
+also validates the public supply-backed `pwrctrl-tc9563` platform-driver
+contract. Nodes without supply properties remain on the legacy PCI runtime
+path, while a partial six-supply set or an unbound supply-backed node fails.
+Use `QPS615_Interface_Validation/run.sh --prepare-fit` only when a target
+requires `VendorDtbOverlays=staging` before QPS615 can appear at runtime.
+Normal QPS615 validation works on both base and overlay images without EFI
+inspection. FIT boot selection is separate from image package configuration.
+QPS615 diagnostics count outermost switch roots separately from all
+`1179:0623` bridge functions. One upstream bridge and its three downstream
+bridges report `switches=1 bridge_functions=4`.
 
 The split follows the documented startup sequence. The QPS615 switch power,
 I2C initialization, firmware, PCIe link, and bridge enumeration establish the
@@ -60,7 +72,7 @@ cd Runner
 
 ## Prerequisites
 
-1. `lspci` must be available on the target device 
+1. `lspci` must be available on the target device
 2. PCIe interface must be exposed and initialized
 3. Root access may be required depending on system configuration
 
@@ -79,6 +91,7 @@ On QPS615 systems, inspect the retained topology evidence:
 ```sh
 cat qps615_runtime/qps615_switches.log
 cat qps615_runtime/qps615_runtime.tsv
+cat qps615_runtime/qps615_dt_platform.tsv
 find /lib/firmware /usr/lib/firmware \
     -name 'TC956X_Firmware_PCIeBridge.bin*' -print 2>/dev/null
 ```

@@ -107,3 +107,12 @@ Ethernet_Basic_Validation.results.tsv
 ```
 
 The overall testcase passes when at least one detected Ethernet interface completes link, IPv4, and ping validation. It fails when interfaces are testable but none passes. It skips when no interface can be tested, for example when every port is disconnected.
+
+## Failure diagnostics
+
+Recorded failures automatically save read-only `ethtool` evidence for the
+selected interfaces and replay bounded excerpts to stdout with `[ETH-DIAG]`
+markers. No host commands, runtime package installation or new options are
+required. The original verdict and cleanup behavior remain unchanged.
+See [shared Ethernet failure diagnostics](../README_Ethernet_Diagnostics.md)
+for collected queries, artifact locations, time bounds and unavailable-tool handling.

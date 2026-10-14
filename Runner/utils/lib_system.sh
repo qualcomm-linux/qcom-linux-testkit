@@ -281,6 +281,27 @@ efi_install_restore_trap() {
     trap efi_restore_efivarfs_ro EXIT HUP INT TERM
 }
 
+# efi_ensure_mounted <log-file>
+#   Mount efivarfs only when initially absent at the existing EFIVARFS_PATH.
+#   stdout: diagnostics. return: 0 when mounted, 1 on failure. Side effects:
+#   leaves a newly created mount available after preparation completes.
+efi_ensure_mounted() {
+    eem_log="${1:-}"
+    [ -n "$eem_log" ] || return 1
+    if efi_mount_exists; then
+        return 0
+    fi
+    if [ ! -d "$EFIVARFS_PATH" ]; then
+        log_warn "EFI variable storage directory is absent at $EFIVARFS_PATH, boot with EFI runtime services enabled"
+        return 1
+    fi
+    log_info "Mounting efivarfs at $EFIVARFS_PATH, leaving it mounted after preparation"
+    if ! mount -t efivarfs none "$EFIVARFS_PATH" >>"$eem_log" 2>&1; then
+        return 1
+    fi
+    efi_mount_exists
+}
+
 # Try to temporarily remount efivarfs read-write.
 #
 # Return 0 only if efivarfs becomes read-write.
@@ -348,6 +369,8 @@ efi_variable_list_contains() {
 #   $2 - file that receives efivar list output
 # Diagnostic output is written to stderr so command-substitution callers only
 # receive the variable name.
+# Returns 0 for a unique match, 1 for absent or ambiguous names, and 2 when
+# listing cannot complete. The retained log is authoritative only for 0 or 1.
 efi_find_variable_by_name() {
     efvbn_name="$1"
     efvbn_log_file="$2"
@@ -356,17 +379,17 @@ efi_find_variable_by_name() {
 
     if [ -z "$efvbn_name" ] || [ -z "$efvbn_log_file" ]; then
         printf '%s\n' "efi_find_variable_by_name requires variable name and log file" >&2
-        return 1
+        return 2
     fi
 
     if ! command -v efivar >/dev/null 2>&1; then
         printf '%s\n' "efivar command is unavailable" >&2
-        return 1
+        return 2
     fi
 
     if ! efivar -l > "$efvbn_log_file" 2>&1; then
         printf '%s\n' "efivar could not list EFI variables" >&2
-        return 1
+        return 2
     fi
 
     efvbn_matches="$(awk -v suffix="-$efvbn_name" '
@@ -390,6 +413,9 @@ efi_find_variable_by_name() {
 #   $1 - EFI variable name in GUID-Name form
 #   $2 - expected text payload, without a trailing newline
 #   $3 - file that receives efivar print output
+# Returns 0 for a match, 1 for a different payload, and 2 for a read or
+# inspection error. Boolean callers retain their existing behavior.
+# Scratch files use the caller's writable log directory, not inherited TMPDIR.
 efi_text_variable_matches() {
     etvm_var_name="$1"
     etvm_value="$2"
@@ -400,28 +426,28 @@ efi_text_variable_matches() {
 
     if [ -z "$etvm_var_name" ] || [ -z "$etvm_value" ] || [ -z "$etvm_log_file" ]; then
         log_warn "efi_text_variable_matches requires variable name, value, and log file"
-        return 1
+        return 2
     fi
 
     if ! command -v efivar >/dev/null 2>&1; then
         log_warn "efivar command is unavailable"
-        return 1
+        return 2
     fi
 
     if ! efivar -n "$etvm_var_name" -p > "$etvm_log_file" 2>&1; then
-        return 1
+        return 2
     fi
 
-    etvm_data_file="$(mktemp "${TMPDIR:-/tmp}/efivar_payload.XXXXXX" 2>/dev/null || true)"
+    etvm_data_file="$(mktemp "$(dirname "$etvm_log_file")/efivar_payload.XXXXXX" 2>/dev/null || true)"
     if [ -z "$etvm_data_file" ]; then
-        log_warn "Could not create temporary EFI variable payload"
-        return 1
+        log_warn "Could not create EFI payload beside $etvm_log_file, check directory permissions and free space"
+        return 2
     fi
 
     if ! printf '%s' "$etvm_value" > "$etvm_data_file"; then
         log_warn "Could not write temporary EFI variable payload"
         rm -f "$etvm_data_file"
-        return 1
+        return 2
     fi
 
     etvm_expected_bytes="$(od -An -tx1 -v "$etvm_data_file" 2>/dev/null | tr '\n' ' ' | tr -s ' ' | sed 's/^ //; s/ $//')"
@@ -429,7 +455,7 @@ efi_text_variable_matches() {
 
     if [ -z "$etvm_expected_bytes" ]; then
         log_warn "Could not derive EFI variable payload bytes"
-        return 1
+        return 2
     fi
 
     etvm_expected_pattern="$(printf '%s\n' "$etvm_expected_bytes" | sed 's/ /[[:space:]][[:space:]]*/g')"
@@ -443,6 +469,7 @@ efi_text_variable_matches() {
 #   $3 - file that receives efivar write and print output
 # The caller is responsible for arranging efi_restore_efivarfs_ro during
 # cleanup when efi_try_remount_rw changes the mount state.
+# Scratch files use the caller's writable log directory, not inherited TMPDIR.
 efi_write_text_variable() {
     ewtv_var_name="$1"
     ewtv_value="$2"
@@ -464,9 +491,9 @@ efi_write_text_variable() {
         return 1
     fi
 
-    ewtv_data_file="$(mktemp "${TMPDIR:-/tmp}/efivar_payload.XXXXXX" 2>/dev/null || true)"
+    ewtv_data_file="$(mktemp "$(dirname "$ewtv_log_file")/efivar_payload.XXXXXX" 2>/dev/null || true)"
     if [ -z "$ewtv_data_file" ]; then
-        log_warn "Could not create temporary EFI variable payload"
+        log_warn "Could not create EFI payload beside $ewtv_log_file, check directory permissions and free space"
         return 1
     fi
 

@@ -50,6 +50,7 @@ fi
 
 TESTNAME="Ethernet_Inventory_Validation"
 RES_FILE="./$TESTNAME.res"
+ethv_failure_diagnostics_init "$SCRIPT_DIR/results/$TESTNAME/run-$(date '+%Y%m%d-%H%M%S')-$/failure_diagnostics"
 
 test_path="$(find_test_case_by_name "$TESTNAME")"
 
@@ -141,7 +142,21 @@ case "$qps615_status" in
                 "$RESULT_TABLE" \
                 "QPS615 PCIe topology and firmware" \
                 "PASS" \
-                "bridge_functions=$QPS615_SWITCH_COUNT downstream=$QPS615_DOWNSTREAM_COUNT firmware=$QPS615_FIRMWARE_PATH"
+                "switches=$QPS615_SWITCH_COUNT bridge_functions=$QPS615_BRIDGE_COUNT downstream=$QPS615_DOWNSTREAM_COUNT firmware=$QPS615_FIRMWARE_PATH"
+        fi
+
+        if [ -n "$QPS615_PWRCTRL_FAILURE_REASON" ]; then
+            ethv_record_result \
+                "$RESULT_TABLE" \
+                "QPS615 PCIe power-control binding" \
+                "FAIL" \
+                "$QPS615_PWRCTRL_FAILURE_REASON"
+        elif [ "$QPS615_PWRCTRL_EXPECTED_COUNT" -gt 0 ]; then
+            ethv_record_result \
+                "$RESULT_TABLE" \
+                "QPS615 PCIe power-control binding" \
+                "PASS" \
+                "$QPS615_PWRCTRL_BOUND_COUNT supply-backed DT node(s) are bound to pwrctrl-tc9563"
         fi
 
         if [ -n "$QPS615_ETHERNET_FAILURE_REASON" ]; then
@@ -212,6 +227,7 @@ else
 fi
 
 for iface in $ETH_IFACES; do
+    ethv_failure_diagnostics_watch "$iface"
     driver="$(ethv_get_driver "$iface")"
     module="$(ethv_get_driver_module "$iface")"
     device_path="$(ethv_get_device_path "$iface")"
@@ -328,6 +344,7 @@ case "$OVERALL_RESULT" in
         ;;
     FAIL)
         log_fail "$TESTNAME FAIL"
+        ethv_failure_diagnostics "$TESTNAME failure"
         echo "$TESTNAME FAIL" >"$RES_FILE"
         ;;
     *)

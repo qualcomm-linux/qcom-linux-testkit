@@ -50,6 +50,7 @@ fi
 
 TESTNAME="Ethernet_Throughput_Validation"
 RES_FILE="./$TESTNAME.res"
+ethv_failure_diagnostics_init "$SCRIPT_DIR/results/$TESTNAME/run-$(date '+%Y%m%d-%H%M%S')-$/failure_diagnostics"
 
 test_path="$(find_test_case_by_name "$TESTNAME")"
 
@@ -251,6 +252,7 @@ parse_args "$@"
 
 rm -f "$RES_FILE" "$RESULT_TABLE"
 mkdir -p "$LOG_DIR" || {
+    ethv_failure_diagnostics "$TESTNAME failure"
     echo "$TESTNAME FAIL" >"$RES_FILE"
     exit 0
 }
@@ -416,6 +418,7 @@ for value in \
 
     if ! ethv_is_positive_integer "$value"; then
         log_fail "$TESTNAME FAIL: timeout, port, duration, and stream values must be positive integers"
+        ethv_failure_diagnostics "$TESTNAME failure"
         echo "$TESTNAME FAIL" >"$RES_FILE"
         exit 0
     fi
@@ -428,6 +431,7 @@ for bool_value in \
 
     if ! ethv_is_boolean "$bool_value"; then
         log_fail "$TESTNAME FAIL: enable controls must be 0 or 1"
+        ethv_failure_diagnostics "$TESTNAME failure"
         echo "$TESTNAME FAIL" >"$RES_FILE"
         exit 0
     fi
@@ -444,6 +448,7 @@ case "$ETH_IPERF_MODE" in
     external)
         if [ -z "$ETH_IPERF_SERVER" ]; then
             log_fail "$TESTNAME FAIL: external mode requires --iperf-server or ETH_IPERF_SERVER"
+            ethv_failure_diagnostics "$TESTNAME failure"
             echo "$TESTNAME FAIL" >"$RES_FILE"
             exit 0
         fi
@@ -452,6 +457,7 @@ case "$ETH_IPERF_MODE" in
     local)
         if [ -n "$ETH_IPERF_SERVER" ]; then
             log_fail "$TESTNAME FAIL: local mode cannot be combined with an external iperf3 server"
+            ethv_failure_diagnostics "$TESTNAME failure"
             echo "$TESTNAME FAIL" >"$RES_FILE"
             exit 0
         fi
@@ -459,6 +465,7 @@ case "$ETH_IPERF_MODE" in
         ;;
     *)
         log_fail "$TESTNAME FAIL: mode must be auto, external, or local"
+        ethv_failure_diagnostics "$TESTNAME failure"
         echo "$TESTNAME FAIL" >"$RES_FILE"
         exit 0
         ;;
@@ -472,6 +479,7 @@ for threshold_value in \
 
     if ! ethv_is_nonnegative_decimal "$threshold_value"; then
         log_fail "$TESTNAME FAIL: throughput thresholds must be nonnegative decimal numbers"
+        ethv_failure_diagnostics "$TESTNAME failure"
         echo "$TESTNAME FAIL" >"$RES_FILE"
         exit 0
     fi
@@ -495,6 +503,7 @@ if [ -z "$ETH_IFACE" ] || [ ! -d "/sys/class/net/$ETH_IFACE" ]; then
     exit 0
 fi
 
+ethv_failure_diagnostics_watch "$ETH_IFACE"
 ethv_prepare_interface "$ETH_IFACE" "$LINK_TIMEOUT_S" "$IP_TIMEOUT_S"
 prepare_rc=$?
 
@@ -530,6 +539,7 @@ if [ "$prepare_rc" -ne 0 ]; then
 
     case "$OVERALL_RESULT" in
         FAIL)
+            ethv_failure_diagnostics "$TESTNAME failure"
             echo "$TESTNAME FAIL" >"$RES_FILE"
             ;;
         *)
@@ -547,6 +557,7 @@ if [ "$RESOLVED_IPERF_MODE" = "local" ]; then
 
     if ! start_local_iperf_server; then
         ethv_print_summary "$RESULT_TABLE" "Ethernet Throughput Summary"
+        ethv_failure_diagnostics "$TESTNAME failure"
         echo "$TESTNAME FAIL" >"$RES_FILE"
         exit 0
     fi
@@ -629,6 +640,7 @@ case "$OVERALL_RESULT" in
         ;;
     FAIL)
         log_fail "$TESTNAME FAIL"
+        ethv_failure_diagnostics "$TESTNAME failure"
         echo "$TESTNAME FAIL" >"$RES_FILE"
         ;;
     *)

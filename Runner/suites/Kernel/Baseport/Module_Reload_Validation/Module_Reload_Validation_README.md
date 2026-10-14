@@ -356,6 +356,39 @@ tc956x_pcie_eth
 
 This is useful on RB3Gen2-style platforms where Ethernet is provided by the TC956x PCIe Ethernet driver instead of `dwmac_qcom_eth`.
 
+The existing `basic` mode continues to unload/reload the module. For QPS615
+standalone load/readiness validation on either a base or overlay image, use:
+
+```sh
+./run.sh --module tc956x_pcie_eth --mode load_only
+```
+
+The profile name selects the workflow, not the module to insert. `load_only`
+discovers QPS615 endpoints from runtime DT/PCI topology, resolves the module
+through their `driver/module` links or running-kernel modalias database, and
+captures `modinfo`. It does not change EFI selection, install packages, force
+PCI binding, configure an IP address, or transmit traffic. Ethernet ports must
+already be configured in runtime DT or bound by the running image.
+
+An initially loaded or built-in module is left untouched. Otherwise this mode
+requires root, image-provided `modprobe` and `rmmod`, loads the discovered module,
+and waits for correlated driver/netdev readiness. It then removes only the
+target it loaded with non-forced `rmmod`. Dependency modules are preserved.
+Use a maintenance window because removal takes newly created netdevs away.
+
+Missing QPS615 hardware or unconfigured Ethernet ports produce `SKIP`. Declared
+but missing topology, ambiguous module metadata, failed load/binding, captured
+kernel errors, and restoration failures produce `FAIL`. A loaded module alone
+is never sufficient to pass. Carrier and traffic belong to the Ethernet suites.
+
+This mode performs one load/readiness check regardless of `--iterations`.
+`--timeout-load` bounds module commands and `--timeout-settle` bounds readiness
+polling. Evidence is retained in `results/Module_Reload_Validation/tc956x_pcie_eth/load_only/run-*/`,
+including before/after runtime inventories and module command logs. Kernel
+snapshot/error logs are captured after successful binding. The existing YAML
+`PROFILE=tc956x_pcie_eth` and `MODE=load_only` parameters select the same path.
+Default mode and other profiles are unchanged.
+
 ### `ath11k_pci.profile`
 
 ath11k PCI Wi-Fi reload validation.

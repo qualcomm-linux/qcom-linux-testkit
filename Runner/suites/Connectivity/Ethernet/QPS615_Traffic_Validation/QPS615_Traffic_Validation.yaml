@@ -1,0 +1,22 @@
+metadata:
+  name: qps615-traffic-validation
+  format: "Lava-Test Test Definition 1.0"
+  description: "Validate fixture-gated QPS615 Ethernet traffic, packet-counter movement, and error-counter health on dynamically correlated TC956x interfaces."
+  os:
+    - linux
+  scope:
+    - functional
+
+params:
+  QPS615_TRAFFIC_FIXTURE: "0"
+  QPS615_INTERFACES: ""
+  QPS615_PEER: ""
+  QPS615_PING_COUNT: "10"
+  QPS615_PING_WAIT: "2"
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Connectivity/Ethernet/QPS615_Traffic_Validation
+    - ./run.sh --fixture "${QPS615_TRAFFIC_FIXTURE}" --interfaces "${QPS615_INTERFACES}" --peer "${QPS615_PEER}" --ping-count "${QPS615_PING_COUNT}" --ping-wait "${QPS615_PING_WAIT}" || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh QPS615_Traffic_Validation.res || true

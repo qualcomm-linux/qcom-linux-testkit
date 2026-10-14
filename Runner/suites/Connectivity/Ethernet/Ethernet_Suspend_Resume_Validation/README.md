@@ -74,3 +74,12 @@ rtcwake.log
 dmesg/dmesg_snapshot.log
 dmesg/dmesg_errors.log
 ```
+
+## Failure diagnostics
+
+Recorded failures automatically save read-only `ethtool` evidence for the
+selected interfaces and replay bounded excerpts to stdout with `[ETH-DIAG]`
+markers. No host commands, runtime package installation or new options are
+required. The original verdict and cleanup behavior remain unchanged.
+See [shared Ethernet failure diagnostics](../README_Ethernet_Diagnostics.md)
+for collected queries, artifact locations, time bounds and unavailable-tool handling.

@@ -62,7 +62,23 @@ shared discovery helper validates every detected physical Ethernet interface.
 
 ## Result
 
+Driver statistics use the shared `lib_ethernet.sh` capture helper. It discovers
+all unsigned counters reported by `ethtool -S`, without a driver-specific field
+list. Full output and parsed values are retained under
+`results/Ethernet_Capability_Validation/driver-*/`. Missing, unsupported, or
+unusable optional driver statistics retain the existing `SKIP` policy for that
+check and log the reason. No packages are installed.
+
 ```text
 Ethernet_Capability_Validation.res
 Ethernet_Capability_Validation.results.tsv
 ```
+
+## Failure diagnostics
+
+Recorded failures automatically save read-only `ethtool` evidence for the
+selected interfaces and replay bounded excerpts to stdout with `[ETH-DIAG]`
+markers. No host commands, runtime package installation or new options are
+required. The original verdict and cleanup behavior remain unchanged.
+See [shared Ethernet failure diagnostics](../README_Ethernet_Diagnostics.md)
+for collected queries, artifact locations, time bounds and unavailable-tool handling.

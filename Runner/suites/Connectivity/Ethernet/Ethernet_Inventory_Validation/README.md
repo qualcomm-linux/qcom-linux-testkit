@@ -26,6 +26,15 @@ testcase also correlates downstream TC956x driver functions with exported
 Ethernet interfaces and verifies that `TC956X_Firmware_PCIeBridge.bin` remains
 available from a standard firmware root. Images without QPS615 retain the
 generic Ethernet inventory behavior.
+The QPS615 summary separates outermost switch roots from matching bridge
+functions, so one switch exposing four `1179:0623` functions is counted once.
+
+When an enabled runtime DT node uses `pci1179,0623`, the inventory also
+records the complete DT compatible, supply-property count, matching platform
+device, and `pwrctrl-tc9563` binding. The platform driver is required only for
+nodes that declare the public six-supply power-control contract. A partial
+supply set is malformed, while integrations with no supply properties retain
+their existing PCI runtime validation.
 
 For each expected Toshiba `1179:0220` Ethernet function, the live log and TSV
 include its PCI modalias, bound driver, exported netdevs, and availability of
@@ -98,7 +107,22 @@ On QPS615 systems, inspect the correlated PCIe, driver, and netdev evidence:
 ```sh
 cat qps615_runtime/qps615_switches.log
 cat qps615_runtime/qps615_runtime.tsv
+cat qps615_runtime/qps615_dt_platform.tsv
 ```
 
 The QPS615 files are empty or contain no switch records when the capability is
 not present. That does not change the generic Ethernet result path.
+
+Use the focused `QPS615_Interface_Validation` suite for optional EFI FIT
+selection, runtime device-tree, power-control, and detailed dynamic interface
+checks. Use
+`QPS615_Traffic_Validation` only with a confirmed external peer fixture.
+
+## Failure diagnostics
+
+Recorded failures automatically save read-only `ethtool` evidence for the
+selected interfaces and replay bounded excerpts to stdout with `[ETH-DIAG]`
+markers. No host commands, runtime package installation or new options are
+required. The original verdict and cleanup behavior remain unchanged.
+See [shared Ethernet failure diagnostics](../README_Ethernet_Diagnostics.md)
+for collected queries, artifact locations, time bounds and unavailable-tool handling.

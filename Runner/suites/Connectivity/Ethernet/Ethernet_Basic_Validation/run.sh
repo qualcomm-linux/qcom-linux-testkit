@@ -50,6 +50,7 @@ fi
 
 TESTNAME="Ethernet_Basic_Validation"
 RES_FILE="./$TESTNAME.res"
+ethv_failure_diagnostics_init "$SCRIPT_DIR/results/$TESTNAME/run-$(date '+%Y%m%d-%H%M%S')-$/failure_diagnostics"
 
 test_path="$(find_test_case_by_name "$TESTNAME")"
 
@@ -194,6 +195,7 @@ if ! ethv_is_positive_integer "$LINK_TIMEOUT_S" \
    || ! ethv_is_positive_integer "$PING_RETRIES"; then
 
     log_fail "$TESTNAME FAIL: timeout, count, and retry values must be positive integers"
+    ethv_failure_diagnostics "$TESTNAME failure"
     echo "$TESTNAME FAIL" >"$RES_FILE"
     exit 0
 fi
@@ -218,6 +220,7 @@ ANY_FAIL=0
 ANY_TESTED=0
 
 for iface in $ETH_IFACES; do
+    ethv_failure_diagnostics_watch "$iface"
     driver="$(ethv_get_driver "$iface")"
     carrier="$(ethv_get_carrier "$iface")"
     operstate="$(ethv_get_operstate "$iface")"
@@ -329,6 +332,7 @@ if [ "$ANY_PASS" -eq 1 ]; then
     echo "$TESTNAME PASS" >"$RES_FILE"
 elif [ "$ANY_TESTED" -eq 1 ] || [ "$ANY_FAIL" -eq 1 ]; then
     log_fail "$TESTNAME FAIL"
+    ethv_failure_diagnostics "$TESTNAME failure"
     echo "$TESTNAME FAIL" >"$RES_FILE"
 else
     log_skip "$TESTNAME SKIP"

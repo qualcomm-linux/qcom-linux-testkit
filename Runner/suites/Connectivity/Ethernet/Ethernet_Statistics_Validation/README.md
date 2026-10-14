@@ -67,7 +67,26 @@ Use `./run.sh` to validate every detected physical interface, or select one:
 
 ## Result
 
+Optional driver statistics are captured before and after interface-bound
+traffic, including failed ping attempts, through shared `lib_ethernet.sh`
+helpers. All runtime counter names and exact unsigned values are retained in
+`results/Ethernet_Statistics_Validation/driver-*/` as raw `.log`, parsed `.tsv`,
+and comparison `_changes.tsv` files. A bounded comparison excerpt is logged
+on stdout. Counter ordering, added/removed fields, and 64-bit values are handled
+without fixed driver counter lists. These fields remain diagnostic because
+their reset/gauge semantics are driver-specific. Existing standard packet,
+byte, error, and optional drop thresholds determine the result unchanged.
+
 ```text
 Ethernet_Statistics_Validation.res
 Ethernet_Statistics_Validation.results.tsv
 ```
+
+## Failure diagnostics
+
+Recorded failures automatically save read-only `ethtool` evidence for the
+selected interfaces and replay bounded excerpts to stdout with `[ETH-DIAG]`
+markers. No host commands, runtime package installation or new options are
+required. The original verdict and cleanup behavior remain unchanged.
+See [shared Ethernet failure diagnostics](../README_Ethernet_Diagnostics.md)
+for collected queries, artifact locations, time bounds and unavailable-tool handling.

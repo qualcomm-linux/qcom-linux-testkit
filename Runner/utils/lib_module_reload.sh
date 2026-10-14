@@ -1575,6 +1575,14 @@ mrv_run_one_profile() (
   # shellcheck disable=SC1090
   . "$profile_file"
 
+  # Optional load-only validation is owned by the profile and must preserve
+  # initially active modules. Existing reload profiles retain their old path.
+  if [ "${requested_mode:-$PROFILE_MODE_DEFAULT}" = "load_only" ] &&
+     mrv_profile_override_defined profile_load_only; then
+    profile_load_only "$RESULT_ROOT/$PROFILE_NAME/load_only/run-$$"
+    exit $?
+  fi
+
   mrv_profile_check "$requested_mode"
   check_rc=$?
   if [ "$check_rc" -eq 2 ]; then
