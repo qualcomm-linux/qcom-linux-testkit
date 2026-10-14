@@ -7,7 +7,7 @@ This test acts as a stress test for the Coresight Trace Port Debug Module (TPDM)
 ## Test Goals
 
 - Validate the stability of the TPDM drivers under repeated enable/disable cycles.
-- Ensure all TPDM sources can be successfully toggled without causing system hangs or crashes.
+- Ensure all TPDM sources can be successfully toggled with ETF/ETR sinks enabled without causing system hangs or crashes.
 - Verify that sysfs states correctly reflect the enabled/disabled status across multiple rapid transitions.
 - Ensure 100% success rate across 50 iterations for pass criteria.
 
@@ -50,18 +50,29 @@ Run the script directly via the framework:
 ## Example Output
 
 ```
-[INFO] 2026-03-23 05:42:18 - -----------------------------------------------------------------------------------------
-[INFO] 2026-03-23 05:42:18 - -------------------Starting TPDM-Enable-Disable Testcase----------------------------
-[INFO] 2026-03-23 05:42:18 - Iteration: 0 - PASS
-[INFO] 2026-03-23 05:42:19 - Iteration: 1 - PASS
-[INFO] 2026-03-23 05:42:19 - Iteration: 2 - PASS
-[INFO] 2026-03-23 05:42:20 - Iteration: 3 - PASS
-[INFO] 2026-03-23 05:42:20 - Iteration: 4 - PASS
-.....
-[INFO] 2026-03-23 05:42:38 - Iteration: 49 - PASS
-[INFO] 2026-03-23 05:42:39 - Iteration: 50 - PASS
-[PASS] 2026-03-23 05:42:39 - -------------enable/disable TPDMs Test PASS-------------
-[INFO] 2026-03-23 05:42:39 - -------------------TPDM-Enable-Disable Testcase Finished----------------------------
+[INFO] 2025-06-03 20:49:13 - -----------------------------------------------------------------------------------------
+[INFO] 2025-06-03 20:49:13 - -------------------Starting TPDM-Enable-Disable Testcase----------------------------
+[INFO] 2025-06-03 20:49:13 - Running with ETF sink
+[INFO] 2025-06-03 20:49:14 - Iteration: 0 - PASS
+[INFO] 2025-06-03 20:49:15 - Iteration: 1 - PASS
+[INFO] 2025-06-03 20:49:15 - Iteration: 2 - PASS
+[INFO] 2025-06-03 20:49:16 - Iteration: 3 - PASS
+[INFO] 2025-06-03 20:49:17 - Iteration: 4 - PASS
+
+[INFO] 2025-06-03 20:49:47 - Iteration: 49 - PASS
+[INFO] 2025-06-03 20:49:48 - Iteration: 50 - PASS
+
+[INFO] 2025-06-03 20:49:48 - Running with ETR sink
+[INFO] 2025-06-03 20:49:48 - Iteration: 0 - PASS
+[INFO] 2025-06-03 20:49:49 - Iteration: 1 - PASS
+[INFO] 2025-06-03 20:49:49 - Iteration: 2 - PASS
+[INFO] 2025-06-03 20:49:50 - Iteration: 3 - PASS
+[INFO] 2025-06-03 20:49:50 - Iteration: 4 - PASS
+
+[INFO] 2025-06-03 20:50:12 - Iteration: 49 - PASS
+[INFO] 2025-06-03 20:50:12 - Iteration: 50 - PASS
+[PASS] 2025-06-03 20:50:12 - -------------enable/disable TPDMs Test PASS-------------
+[INFO] 2025-06-03 20:50:12 - -------------------TPDM-Enable-Disable Testcase Finished----------------------------
 ```
 
 ## Return Code

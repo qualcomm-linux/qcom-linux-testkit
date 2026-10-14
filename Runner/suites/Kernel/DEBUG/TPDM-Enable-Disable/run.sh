@@ -38,8 +38,9 @@ log_info "-------------------Starting $TESTNAME Testcase------------------------
 cs_base="/sys/bus/coresight/devices"
 
 etf_path=$(find_path "tmc_etf0" "tmc_etf" "tmc_etf1" "coresight-tmc_etf" "coresight-tmc_etf0")
-if [ -z "$etf_path" ]; then
-    log_fail "TMC-ETF sink not found. Cannot proceed."
+etr_path=$(find_path "tmc_etr0" "tmc_etr" "tmc_etr1" "coresight-tmc_etr" "coresight-tmc_etr0")
+if [ -z "$etf_path" ] || [ -z "$etr_path" ]; then
+    log_fail "TMC-ETF or TMC-ETR sink not found. Cannot proceed."
     echo "$TESTNAME FAIL" > "$res_file"
     exit 0
 fi
@@ -56,55 +57,68 @@ if [ "$tpdm_count" -eq 0 ]; then
 fi
 
 fail=0
-i=0
 
-reset_devices
-
-[ -f "$etf_path/enable_sink" ] && echo 1 > "$etf_path/enable_sink" 2>/dev/null
-
-while [ "$i" -le 50 ]; do
-    iter_fail=0
-    
-    for node_path in "$cs_base"/tpdm* "$cs_base"/coresight-tpdm*; do
-        [ ! -d "$node_path" ] && continue
-        
-        node_name=$(basename "$node_path")
-        
-        if echo "$node_name" | grep -q "tpdm-turing-llm"; then
-            continue
-        fi
-        
-        if [ ! -f "$node_path/enable_source" ]; then
-            continue
-        fi
-        
-        echo 1 > "$node_path/enable_source" 2>/dev/null
-        if [ "$(cat "$node_path/enable_source" 2>/dev/null)" != "1" ]; then
-            iter_fail=1
-            log_fail "Iter $i: Failed to enable $node_name"
-            echo "$TESTNAME FAIL" > "$res_file"
-        fi
-        
-        echo 0 > "$node_path/enable_source" 2>/dev/null
-        if [ "$(cat "$node_path/enable_source" 2>/dev/null)" = "1" ]; then
-            iter_fail=1
-            log_fail "Iter $i: Failed to disable $node_name"
-            echo "$TESTNAME FAIL" > "$res_file"
-        fi
-    done
-    
-    if [ "$iter_fail" -eq 0 ]; then
-        log_info "Iteration: $i - PASS"
+for sink_path in "$etf_path" "$etr_path"; do
+    if [ "$sink_path" = "$etf_path" ]; then
+        sink_name="ETF"
     else
-        log_fail "Iteration: $i - FAIL"
-        fail=1
+        sink_name="ETR"
     fi
-    
-    i=$((i+1))
-done
 
-[ -f "$etf_path/enable_sink" ] && echo 0 > "$etf_path/enable_sink" 2>/dev/null
-reset_devices
+    log_info "Running with $sink_name sink"
+
+    reset_devices
+
+    [ -f "$sink_path/enable_sink" ] && echo 1 > "$sink_path/enable_sink" 2>/dev/null
+
+    i=0
+
+    while [ "$i" -le 50 ]; do
+        iter_fail=0
+
+        for node_path in "$cs_base"/tpdm* "$cs_base"/coresight-tpdm*; do
+            [ ! -d "$node_path" ] && continue
+
+            node_name=$(basename "$node_path")
+
+            if echo "$node_name" | grep -q "tpdm-turing-llm"; then
+                continue
+            fi
+
+            if [ ! -f "$node_path/enable_source" ]; then
+                continue
+            fi
+
+            echo 1 > "$node_path/enable_source" 2>/dev/null
+
+            if [ "$(cat "$node_path/enable_source" 2>/dev/null)" != "1" ]; then
+                iter_fail=1
+                log_fail "Iter $i: Failed to enable $node_name with $sink_name sink"
+                echo "$TESTNAME FAIL" > "$res_file"
+            fi
+
+            echo 0 > "$node_path/enable_source" 2>/dev/null
+
+            if [ "$(cat "$node_path/enable_source" 2>/dev/null)" = "1" ]; then
+                iter_fail=1
+                log_fail "Iter $i: Failed to disable $node_name with $sink_name sink"
+                echo "$TESTNAME FAIL" > "$res_file"
+            fi
+        done
+
+        if [ "$iter_fail" -eq 0 ]; then
+            log_info "Iteration: $i - PASS"
+        else
+            log_fail "Iteration: $i - FAIL"
+            fail=1
+        fi
+
+        i=$((i + 1))
+    done
+
+    [ -f "$sink_path/enable_sink" ] && echo 0 > "$sink_path/enable_sink" 2>/dev/null
+    reset_devices
+done
 
 if [ "$fail" -eq 0 ]; then
     log_pass "-------------enable/disable TPDMs Test PASS-------------"
