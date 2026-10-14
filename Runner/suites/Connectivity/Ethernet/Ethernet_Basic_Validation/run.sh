@@ -65,20 +65,18 @@ RESULT_TABLE="./$TESTNAME.results.tsv"
 LINK_TIMEOUT_S="${LINK_TIMEOUT_S:-10}"
 IP_TIMEOUT_S="${IP_TIMEOUT_S:-15}"
 ETH_INTERFACE="${ETH_INTERFACE:-}"
-PING_TARGET="${PING_TARGET:-8.8.8.8}"
+PING_TARGET="${PING_TARGET:-}"
 PING_COUNT="${PING_COUNT:-4}"
 PING_WAIT_S="${PING_WAIT_S:-2}"
 PING_RETRIES="${PING_RETRIES:-3}"
 
-# usage
-# Print supported options and the ping-target default to stdout. Returns 0.
 usage() {
     printf '%s\n' \
         "Usage: ./run.sh [options]" \
         "  --link-timeout SECONDS" \
         "  --ip-timeout SECONDS" \
         "  --interface IFACE" \
-        "  --ping-target ADDRESS (default: PING_TARGET or 8.8.8.8)" \
+        "  --ping-target ADDRESS" \
         "  --ping-count COUNT" \
         "  --ping-wait SECONDS" \
         "  --ping-retries COUNT" \
@@ -86,9 +84,6 @@ usage() {
         "CLI options override environment variables."
 }
 
-# parse_args [OPTIONS...]
-# Apply CLI overrides to suite settings. Empty ping-target values preserve the
-# environment/default target. No stdout except help, exits 2 on invalid options.
 parse_args() {
     while [ "$#" -gt 0 ]; do
         case "$1" in
@@ -121,9 +116,7 @@ parse_args() {
                 usage
                 exit 2
             }
-            if [ -n "$2" ]; then
-                PING_TARGET="$2"
-            fi
+            PING_TARGET="$2"
             shift 2
             ;;
         --ping-count)
@@ -171,7 +164,7 @@ rm -f "$RES_FILE" "$SUMMARY_FILE" "$RESULT_TABLE"
 
 log_info "--------------------------------------------------------------------------"
 log_info "------------------- Starting $TESTNAME Testcase --------------------------"
-log_info "Configuration: interface=${ETH_INTERFACE:-auto} LINK_TIMEOUT_S=$LINK_TIMEOUT_S IP_TIMEOUT_S=$IP_TIMEOUT_S PING_TARGET=$PING_TARGET PING_COUNT=$PING_COUNT PING_WAIT_S=$PING_WAIT_S PING_RETRIES=$PING_RETRIES"
+log_info "Configuration: interface=${ETH_INTERFACE:-auto} LINK_TIMEOUT_S=$LINK_TIMEOUT_S IP_TIMEOUT_S=$IP_TIMEOUT_S PING_TARGET=${PING_TARGET:-auto} PING_COUNT=$PING_COUNT PING_WAIT_S=$PING_WAIT_S PING_RETRIES=$PING_RETRIES"
 
 if ! CHECK_DEPS_NO_EXIT=1 check_dependencies \
     ip \

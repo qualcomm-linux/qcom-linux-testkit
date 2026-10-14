@@ -31,8 +31,6 @@ if [ -z "${__INIT_ENV_LOADED:-}" ]; then
     __INIT_ENV_LOADED=1
 fi
 
-# shellcheck disable=SC1090
-. "$INIT_ENV"
 # shellcheck disable=SC1091
 . "$TOOLS/functestlib.sh"
 # shellcheck disable=SC1091
@@ -109,7 +107,7 @@ Usage: $0 [--config path.json|/path/dir] [--dir DIR] [--pattern GLOB]
           [--repeat N] [--repeat-delay S] [--repeat-policy all|any]
           [--junit FILE] [--dry-run] [--verbose]
           [--stack auto|upstream|downstream|base|overlay|up|down|both]
-          [--platform lemans|monaco|kodiak]
+          [--platform pakala|shikra|glymur|talos|lemans|monaco|kodiak|hamoa|purwa]
           [--downstream-fw PATH] [--force] # optional Kodiak firmware override
           [--app /path/to/iris_v4l2_test]
           [--ssid SSID] [--password PASS]
@@ -294,6 +292,16 @@ export WGET_TRIES
 export APP_LAUNCH_SLEEP
 export INTER_TEST_SLEEP
 
+video_resolve_platform() {
+    candidate="$1"
+    normalized="$(printf '%s' "$candidate" | tr '[:upper:]' '[:lower:]')"
+    case "$normalized" in
+        ""|auto|unknown|none|unspecified) video_detect_platform ;;
+        pakala|shikra|glymur|talos|lemans|monaco|kodiak|hamoa|purwa) printf '%s\n' "$normalized" ;;
+        *) log_warn "Ignoring unsupported VIDEO_PLATFORM='$candidate'; detecting from device tree."; video_detect_platform ;;
+    esac
+}
+
 # --- EARLY dependency check (bail out fast) ---
 
 # Ensure the app is executable if a path was provided but lacks +x
@@ -475,10 +483,7 @@ fi
 
 # Validate an explicitly requested Kodiak firmware override before downloads.
 # Kodiak normally uses the firmware already provisioned by the image.
-early_plat="$VIDEO_PLATFORM"
-if [ -z "$early_plat" ]; then
-    early_plat="$(video_detect_platform)"
-fi
+early_plat="$(video_resolve_platform "$VIDEO_PLATFORM")"
 
 early_stack="$(video_normalize_stack "$VIDEO_STACK")"
 
@@ -744,10 +749,8 @@ log_info "SLEEPS: app-launch=${APP_LAUNCH_SLEEP}s, inter-test=${INTER_TEST_SLEEP
 video_warn_if_not_root
 
 # --- Ensure desired video stack (hot switch best-effort) ---
-plat="$VIDEO_PLATFORM"
-if [ -z "$plat" ]; then
-    plat=$(video_detect_platform)
-fi
+plat="$(video_resolve_platform "$VIDEO_PLATFORM")"
+[ -n "$plat" ] || plat="unknown"
 log_info "Detected platform: $plat"
 
 VIDEO_STACK="$(video_normalize_stack "$VIDEO_STACK")"

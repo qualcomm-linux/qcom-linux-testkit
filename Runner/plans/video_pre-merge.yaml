@@ -40,13 +40,19 @@ run:
           qcs9100-ride-r3|sa8775p-ride|iq-9075-evk|qcs9075-rb8|qcs9100-ride-sx) TL="lemans" ;;
           # kodiak
           qcs6490-rb3gen2|rb3gen2|qcs6490-rb3gen2-core-kit) TL="kodiak" ;;
+          # pakala (sm8750) - upstream only
+          *pakala*|*sm8750*) TL="pakala" ;;
+          # hamoa
+          hamoa|iq-x7181-evk|iq-x7181) TL="hamoa" ;;
+          # purwa
+          purwa|iq-x5121-evk|iq-x5121) TL="purwa" ;;
           # fallback to autodetect in run.sh
           *) TL="" ;;
         esac
       fi
 
       case "$TL" in
-        kodiak|lemans|monaco) PLAT="--platform $TL" ;;
+        kodiak|lemans|monaco|pakala|shikra|talos|glymur|purwa|hamoa) PLAT="--platform $TL" ;;
         *) PLAT="" ;; # autodetect
       esac
 
@@ -72,10 +78,28 @@ run:
       sh -lc "$RPATH $ARGS_BASE" || true
       "$REPO_ROOT/utils/send-to-lava.sh" "$RESFILE" || true
 
-      # Run OVERLAY (downstream)
-      # shellcheck disable=SC2086
-      sh -lc "$RPATH $ARGS_OVERLAY" || true
-      "$REPO_ROOT/utils/send-to-lava.sh" "$RESFILE" || true
+      # Detect actual platform if TL is empty (auto-detect case)
+      if [ -z "$TL" ]; then
+        # Source the lib_video.sh to get platform detection
+        if [ -f "$REPO_ROOT/utils/lib_video.sh" ]; then
+          . "$REPO_ROOT/utils/lib_video.sh"
+          TL="$(video_detect_platform)"
+          echo "INFO: Auto-detected platform: $TL"
+        fi
+      fi
+
+      # Run OVERLAY (downstream) - only for platforms that support it
+      # pakala, shikra, talos, purwa, hamoa only support upstream/base testing
+      case "$TL" in
+        pakala|shikra|talos|purwa|hamoa)
+          echo "INFO: Platform $TL does not support downstream/overlay testing - skipping overlay run"
+          ;;
+        *)
+          # shellcheck disable=SC2086
+          sh -lc "$RPATH $ARGS_OVERLAY" || true
+          "$REPO_ROOT/utils/send-to-lava.sh" "$RESFILE" || true
+          ;;
+      esac
 
       # Optional roll-up (ignored if absent)
       "$REPO_ROOT/utils/result_parse.sh" || true

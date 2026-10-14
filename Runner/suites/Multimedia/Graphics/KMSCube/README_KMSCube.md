@@ -83,20 +83,11 @@ applicable desktop systems. An explicit `--base` request on Ubuntu Desktop
 reports SKIP because the supported Ubuntu graphics configuration is the
 Qualcomm overlay.
 
-The suite detects the capabilities of the installed `kmscube` instead of
-assuming one package implementation. A build advertising `--count` runs in the
-foreground with `--count=999`, preserving the DRM/page-flip behavior of the
-Yocto implementation. Its exit status and rendered-frame summary are both
-validated. Standard builds without `--count`, including the common Debian
-package, run continuously under the managed timeout. For those builds, reaching
-the timeout is the expected controlled completion, and retained EGL plus OpenGL
-initialization output is required for PASS.
-
-`--timeout SECONDS` changes the continuous-build runtime from its 60-second
-default. Display-manager or Weston state stopped by the suite is restored before
-the final result. `-h` and `--help` print usage and exit without changing
-package, GPU, display-manager, or Weston state. Unknown arguments are reported
-as FAIL.
+KMSCube execution is bounded to 60 seconds by default. `--timeout SECONDS`
+changes that limit. A timeout is reported as FAIL, and display-manager or Weston
+state stopped by the suite is restored before exit. `-h` and `--help` print
+usage and exit without changing package, GPU, display-manager, or Weston state.
+Unknown arguments are reported as FAIL.
 
 #### Sample output:
 ```
@@ -125,15 +116,12 @@ sh-5.2#
 
 - It validates the graphics gles2 functionalities.
 - If any critical tool is missing, the script exits with an error message.
-- A non-zero finite-run exit status, insufficient rendered frames, a missing
-  finite-run frame summary, an unexpected continuous-run exit, missing EGL or
-  OpenGL initialization evidence, or a case-insensitive `ERROR`, `FAIL`,
-  `FAILED`, or `FAILURE` marker in the retained KMSCube output is classified as
-  FAIL. Common zero-failure summaries such as `Failed: 0` and `0 failed` are
-  ignored.
+- A non-zero KMSCube exit status, insufficient rendered frames, or a
+  case-insensitive `ERROR`, `FAIL`, `FAILED`, or `FAILURE` marker in the retained
+  KMSCube output is classified as FAIL. Common zero-failure summaries such as
+  `Failed: 0` and `0 failed` are ignored.
 - Output markers are retained in `KMSCube_failure_markers.log` and the complete
   command output remains in `KMSCube_run.log`.
-- Capability-probe output is retained in `KMSCube_capabilities.log`.
 
 ## CentOS Stream 10 overlay preparation
 

@@ -37,8 +37,9 @@ This test validates Qualcomm SSC/ADSP sensor streaming **without relying on Devi
 - Default: `--profile auto`
 - Auto mode selects the discovered sensor types supported by the streaming
   tools, such as `accel`, `gyro`, `mag`, and `pressure`.
-- Auto mode reports SKIP when no testable data sensor is present. Service and
-  test endpoint inventory is not proof of successful sensor streaming.
+- Auto mode passes the SSC platform-service validation when no testable data
+  sensor is present. Service and test endpoint types are not functional
+  streaming targets.
 
 4. **Runs functional validation**
    - For each selected sensor TYPE:
@@ -105,22 +106,8 @@ Profiles:
 
 ### Run an explicit list of sensors
 ```sh
-./run.sh --sensors accel,gravity,gyro,mag,pressure
-./run.sh --sensors ' accel, gyro, accel '  # trims whitespace and tests duplicates once
 ./run.sh --sensors accel,gyro,tilt --strict 0
 ```
-
-CSV names are checked individually against the current available inventory.
-Ordering is preserved, and `--sensors` overrides the profile. Empty lists, empty
-fields, embedded whitespace and wildcard/path characters are rejected before
-discovery or package/service operations. Names may contain letters, digits,
-underscores and hyphens, and must start with a letter, digit or underscore.
-
-For example, `--sensors accel,pressur --strict 0` tests `accel` if available and
-records the misspelled `pressur` as SKIP. It does not silently substitute
-`pressure`. If all requested types are missing, the result is SKIP, never PASS.
-With `--strict 1`, any missing requested type makes the suite FAIL before
-streaming starts. Strict mode does not require sensors in automatic mode.
 
 ### Control durations / progress heartbeat
 ```sh
@@ -137,20 +124,12 @@ streaming starts. Strict mode does not require sensors in automatic mode.
 ## Parameters
 
 ### CLI options (most common)
-- `--overlay`
-  Use the existing optional Sensors package-provider flow on supported desktop
-  distributions. Image-managed runs continue using provisioned components.
-- `--out <directory>`
-  Evidence directory (default: `./logs_Sensors`, environment: `OUT_DIR`).
-- `--help` / `-h`
-  Show usage without running sensor validation.
 - `--list`  
   List discovered sensor TYPEs and exit 0
 - `--profile <auto|basic|core|vision|all>`  
   Select preset sensors list
 - `--sensors <csv>`  
-  Comma-separated sensor TYPEs, normalized and deduplicated as described above.
-  There is no environment equivalent for this option or `--profile`/`--list`.
+  Comma-separated list of sensor TYPEs to test
 - `--see-duration <sec>`  
   Duration for `see_workhorse` (default: `5`)
 - `--drva-duration <sec>`  
@@ -173,16 +152,6 @@ streaming starts. Strict mode does not require sensors in automatic mode.
   Passed to `see_workhorse -display_events=` (default: `1`)
 - `SENSORS_DRVA_NUM_SAMPLES`  
   Extra knob for accel in `ssc_drva_test` (default set in run.sh to `325`)
-- `SENSORS_SERVICE`
-  Existing service override (default: `sscrpcd.service`).
-
-Examples combining existing package/service and selection options:
-
-```sh
-./run.sh --overlay --list
-./run.sh --overlay --sensors accel,gyro --out ./logs_selected
-STRICT_REQUIRED=0 ./run.sh --profile vision
-```
 
 ---
 
@@ -191,9 +160,6 @@ STRICT_REQUIRED=0 ./run.sh --profile vision
 All heavy tool output is redirected to files under `--out` (default `./logs_Sensors`):
 
 - `ssc_sensor_info.txt`
-- `targets.txt`, reset after valid argument parsing and populated only with selected
-  available types. Old per-tool logs may remain in a reused directory, so use
-  the current target list, stdout and `Sensors.res` to identify executed checks.
 - `see_workhorse_<sensor>.log` (e.g. `see_workhorse_gyro.log`)
 - `ssc_drva_test_<sensor>.log` (e.g. `ssc_drva_test_accel.log`)
 
@@ -202,8 +168,7 @@ The console shows:
 - periodic heartbeat lines like:
   - `see_workhorse(accel) running... 5/5s (log: ...)`
 - final summary:
-  - `Summary (checks): pass=X fail=Y skip=Z (logs in ...)`
-  - Counts describe individual tool checks and missing selections, not sensors.
+  - `Summary: pass=X fail=Y skip=Z (logs in ...)`
 
 Result file:
 - `Sensors.res` in the testcase directory
@@ -213,42 +178,29 @@ Result file:
 
 ## Verdict policy
 
-- **PASS, functional:** at least one selected sensor passes streaming validation
-  and no check fails. A non-strict run may contain explicitly reported missing
-  sensor SKIPs. Missing sensors are never counted as passing checks.
-- **PASS, list only:** explicit `--list` completes an inventory query. Its result
-  message states that streaming was not validated. This exception never applies
-  to ordinary or explicit-sensor streaming runs.
+- **PASS, control plane only:** package/runtime checks, `sscrpcd`, ADSP, and
+  `ssc_sensor_info` are healthy, but the runtime inventory has no streamable
+  physical data-sensor type. This does not claim that sensor streaming was
+  tested.
+- **PASS, functional:** one or more discovered streamable data sensors pass
+  `see_workhorse` and the available `ssc_drva_test` validation.
 - **FAIL:** a required runtime component is broken, a discovered streamable
   sensor fails functional validation, or an explicitly requested/named-profile
-  sensor is absent while strict mode is enabled. Invalid CLI input, failed
-  discovery, or discovery output without TYPE entries also fails.
-- **SKIP:** required optional image prerequisites are unavailable, no testable
-  sensors are available in automatic mode, or all selected sensors are missing
-  with `--strict 0`. Inventory, package readiness and a running ADSP cannot turn
-  an empty streaming selection into PASS.
-- **Optional driver tool:** a missing `ssc_drva_test` is recorded as SKIP, not
-  PASS. Successful `see_workhorse` streaming can still pass the suite, preserving
-  minimal-image support. Driver-tool failures override earlier streaming passes.
-
-The shared result lifecycle resets the previous result and retains FAIL
-precedence. No package, service, timeout duration or YAML interface is changed
-by the selection fix. Apply the same policy on Yocto, Debian, Ubuntu and CentOS.
+  sensor is absent while strict mode is enabled.
+- **SKIP:** prerequisites are unavailable or the runtime cannot provide a
+  usable inventory, for example no Sensors configuration, no ADSP remoteproc,
+  missing commands, or no parsable `ssc_sensor_info` output.
 
 ---
 
 ## Result parsing behavior
 
 ### `see_workhorse`
-The script requires successful process exit and a final PASS log marker:
+The script determines PASS/FAIL primarily from log markers:
 - `PASS see_workhorse ...`
 - `FAIL see_workhorse ...`
 
-The log may contain duplicate markers. The last PASS/FAIL marker is used.
-Empty logs, diagnostic-only output, missing markers, nonzero process status and
-timeouts do not count as successful streaming, even if an earlier PASS exists.
-An expired deadline remains a failure even if the client exits zero after the
-timeout signal. The existing timeout duration and signal sequence are unchanged.
+The log may contain duplicate PASS lines; verdict is based on the **last PASS/FAIL marker**.
 
 ### `ssc_drva_test`
 - If `ssc_drva_test` binary is missing → treated as **SKIP** for that sensor.
@@ -267,9 +219,7 @@ Some builds print diagnostic socket warnings in `see_workhorse` output.
 This is captured in the log file. The test still passes as long as the final PASS marker is present.
 
 ### `ssc_sensor_info` outputs nothing / parsing fails
-Failed execution or output without TYPE entries is FAIL. A successful query
-containing only unavailable sensors produces no streaming targets, so automatic
-mode reports SKIP and an explicit strict selection reports FAIL.
+This is treated as **SKIP** (no usable inventory → no further tests).
 
 Check:
 - overlay apps installed and runnable

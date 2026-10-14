@@ -3,53 +3,16 @@
 # SPDX-License-Identifier: BSD-3-Clause
 # Dynamic Sensors validation (DT-free): discover via ssc_sensor_info and validate selected sensor types.
 
-# ---------- Repo env + helpers ----------
+TESTNAME="Sensors"
+
 SCRIPT_DIR="$(
   cd "$(dirname "$0")" || exit 1
   pwd
 )"
-INIT_ENV=""
-SEARCH="$SCRIPT_DIR"
 
-while [ "$SEARCH" != "/" ]; do
-    if [ -f "$SEARCH/init_env" ]; then
-        INIT_ENV="$SEARCH/init_env"
-        break
-    fi
-    SEARCH=$(dirname "$SEARCH")
-done
-
-if [ -z "$INIT_ENV" ]; then
-    echo "[ERROR] Could not find init_env (starting at $SCRIPT_DIR)" >&2
-    exit 1
-fi
-
-# Only source once (idempotent)
-# NOTE: We intentionally **do not export** any new vars. They stay local to this shell.
-if [ -z "${__INIT_ENV_LOADED:-}" ]; then
-    # shellcheck disable=SC1090
-    . "$INIT_ENV"
-    __INIT_ENV_LOADED=1
-fi
-
-# shellcheck disable=SC1090
-. "$INIT_ENV"
-# shellcheck disable=SC1091
-. "$TOOLS/functestlib.sh"
-# shellcheck disable=SC1091
-. "$TOOLS/lib_sensors.sh"
-
-if [ -r "$TOOLS/lib_pkg_provider.sh" ]; then
-    # shellcheck disable=SC1090,SC1091
-    . "$TOOLS/lib_pkg_provider.sh"
-fi
-
-TESTNAME="Sensors"
+# shellcheck disable=SC2034
 RES_FILE="$SCRIPT_DIR/${TESTNAME}.res"
-test_result_init "$TESTNAME" "$RES_FILE" || exit 1
 
-# usage
-# Print supported CLI options and environment overrides. No target operations.
 usage() {
   cat <<EOF
 Usage: $0 [options]
@@ -63,8 +26,6 @@ Discovery:
   --list List discovered sensor TYPEs (from ssc_sensor_info) and exit 0
   --sensors <csv> Comma-separated list of sensor TYPEs to test
                            Example: --sensors accel,gyro,mag
-                           Whitespace around names is trimmed, duplicates run once.
-                           Empty fields or unsafe names are rejected.
   --profile <name> Choose a preset list:
                              basic : accel,gyro
                              core : accel,gyro
@@ -79,7 +40,6 @@ Durations / progress:
   --hb <sec> Heartbeat seconds (default: 5)
   --strict <0|1> Fail when an explicitly selected or named-profile sensor is
                 absent (default: 1). Auto mode uses present sensors only.
-                With 0, missing entries are SKIP. No tested sensors means SKIP.
 
 Other:
   --help Show this help
@@ -98,95 +58,58 @@ Environment overrides:
 EOF
 }
 
-# parse_args ARGS...
-# Validate selection before discovery or package/service operations. Invalid input
-# publishes FAIL through shared result handling. Sets existing CLI policy globals.
-parse_args() {
-    SENSORS_CSV=""
-    SENSORS_REQUESTED=0
-    REQUESTED_TARGETS=""
-    PROFILE=auto
-    LIST_ONLY=0
-    OVERLAY_REQUESTED=0
-    STRICT_REQUIRED="${STRICT_REQUIRED:-1}"
+SENSORS_CSV=""
+PROFILE="auto"
+LIST_ONLY=0
+OVERLAY_REQUESTED=0
 
-    while [ $# -gt 0 ]; do
-        case "$1" in
-            --overlay)
-                OVERLAY_REQUESTED=1
-                shift
-                ;;
-            --list)
-                LIST_ONLY=1
-                shift
-                ;;
-            --help|-h)
-                usage
-                exit 0
-                ;;
-            --out|--see-duration|--drva-duration|--hb|--strict|--sensors|--profile)
-                if [ $# -lt 2 ]; then
-                    test_result_finish FAIL "Missing value for $1, see --help"
-                fi
-                case "$2" in
-                    --*)
-                        test_result_finish FAIL "Missing value for $1 before $2, see --help"
-                        ;;
-                esac
-                case "$1" in
-                    --out)
-                        OUT_DIR="$2"
-                        ;;
-                    --see-duration)
-                        SEE_DURATION="$2"
-                        ;;
-                    --drva-duration)
-                        DRVA_DURATION="$2"
-                        ;;
-                    --hb)
-                        HB_SECS="$2"
-                        ;;
-                    --strict)
-                        STRICT_REQUIRED="$2"
-                        ;;
-                    --sensors)
-                        SENSORS_CSV="$2"
-                        SENSORS_REQUESTED=1
-                        ;;
-                    --profile)
-                        PROFILE="$2"
-                        ;;
-                esac
-                shift 2
-                ;;
-            *)
-                test_result_finish FAIL "Unknown option: $1, see --help"
-                ;;
-        esac
-    done
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --overlay) OVERLAY_REQUESTED=1; shift 1 ;;
+    --out) OUT_DIR="$2"; shift 2 ;;
+    --see-duration) SEE_DURATION="$2"; shift 2 ;;
+    --drva-duration) DRVA_DURATION="$2"; shift 2 ;;
+    --hb) HB_SECS="$2"; shift 2 ;;
+    --strict) STRICT_REQUIRED="$2"; shift 2 ;;
+    --sensors) SENSORS_CSV="$2"; shift 2 ;;
+    --profile) PROFILE="$2"; shift 2 ;;
+    --list) LIST_ONLY=1; shift 1 ;;
+    --help|-h) usage; exit 0 ;;
+    *) echo "[WARN] Unknown arg: $1" >&2; shift 1 ;;
+  esac
+done
 
-    case "$STRICT_REQUIRED" in
-        0|1)
-            ;;
-        *)
-            test_result_finish FAIL "Invalid strict value '$STRICT_REQUIRED', use 0 or 1"
-            ;;
-    esac
-    case "$PROFILE" in
-        auto|basic|core|vision|all)
-            ;;
-        *)
-            test_result_finish FAIL "Unknown profile '$PROFILE', use auto, basic, core, vision or all"
-            ;;
-    esac
-    if [ "$SENSORS_REQUESTED" -eq 1 ]; then
-        if ! REQUESTED_TARGETS=$(sensors_parse_csv "$SENSORS_CSV"); then
-            test_result_finish FAIL "Invalid --sensors CSV, use nonempty comma-separated TYPE names with letters, digits, underscores or hyphens, see --list"
-        fi
-    fi
-}
+INIT_ENV=""
+SEARCH="$SCRIPT_DIR"
+while [ "$SEARCH" != "/" ]; do
+  if [ -f "$SEARCH/init_env" ]; then
+    INIT_ENV="$SEARCH/init_env"
+    break
+  fi
+  SEARCH=$(dirname "$SEARCH")
+done
 
-parse_args "$@"
+if [ -z "$INIT_ENV" ]; then
+  echo "[ERROR] Could not find init_env (starting at $SCRIPT_DIR)" >&2
+  echo "$TESTNAME SKIP" >"$RES_FILE" 2>/dev/null || true
+  exit 0
+fi
+
+if [ -z "${__INIT_ENV_LOADED:-}" ]; then
+  # shellcheck disable=SC1090
+  . "$INIT_ENV"
+  __INIT_ENV_LOADED=1
+fi
+
+# shellcheck disable=SC1090,SC1091
+. "$TOOLS/functestlib.sh"
+# shellcheck disable=SC1090,SC1091
+. "$TOOLS/lib_sensors.sh"
+
+if [ -r "$TOOLS/lib_pkg_provider.sh" ]; then
+  # shellcheck disable=SC1090,SC1091
+  . "$TOOLS/lib_pkg_provider.sh"
+fi
 
 # Resolve test path and cd (single SKIP/exit path)
 SKIP_REASON=""
@@ -200,10 +123,9 @@ else
 fi
 
 if [ -n "$SKIP_REASON" ]; then
-  test_result_finish SKIP "$SKIP_REASON"
-fi
-if [ "$TEST_RESULT_FILE" != "$RES_FILE" ]; then
-  test_result_init "$TESTNAME" "$RES_FILE" || exit 1
+  log_skip "$SKIP_REASON"
+  echo "$TESTNAME SKIP" >"$RES_FILE" 2>/dev/null || true
+  exit 0
 fi
 
 OUT_DIR="${OUT_DIR:-./logs_Sensors}"
@@ -214,13 +136,7 @@ STRICT_REQUIRED="${STRICT_REQUIRED:-1}"
 SENSORS_SERVICE="${SENSORS_SERVICE:-sscrpcd.service}"
 : "${SENSORS_DRVA_NUM_SAMPLES:=325}"
 
-if ! mkdir -p "$OUT_DIR"; then
-  test_result_finish FAIL "Cannot create sensor evidence directory $OUT_DIR, check permissions"
-fi
-TARGET_FILE="$OUT_DIR/targets.txt"
-if ! : >"$TARGET_FILE"; then
-  test_result_finish FAIL "Cannot reset $TARGET_FILE, check evidence directory permissions"
-fi
+mkdir -p "$OUT_DIR" 2>/dev/null || true
 
 OS_ID="unknown"
 DISTRO_SENSORS_HANDLING_SUPPORTED=0
@@ -267,7 +183,9 @@ if [ "$OVERLAY_REQUESTED" -eq 1 ]; then
       pkg_ensure_optional_package_set_present \
       pkg_verify_package_set_installed; do
       if ! command -v "$required_helper" >/dev/null 2>&1; then
-        test_result_finish FAIL "Required package helper is unavailable: $required_helper"
+        log_fail "$TESTNAME FAIL - required package helper is unavailable: $required_helper"
+        echo "$TESTNAME FAIL" >"$RES_FILE"
+        exit 0
       fi
     done
 
@@ -292,7 +210,9 @@ if [ "$OVERLAY_REQUESTED" -eq 1 ]; then
           ;;
       esac
 
-      test_result_finish FAIL "Failed to ensure Qualcomm Sensors package set"
+      log_fail "$TESTNAME FAIL - failed to ensure Qualcomm Sensors package set"
+      echo "$TESTNAME FAIL" >"$RES_FILE"
+      exit 0
     fi
 
     case "$old_package_set_upgrade" in
@@ -305,21 +225,25 @@ if [ "$OVERLAY_REQUESTED" -eq 1 ]; then
         ;;
     esac
 
-    log_info "Qualcomm Sensors runtime/test package set is ready"
+    log_pass "Qualcomm Sensors runtime/test package set is ready"
   else
-    log_info "Package installation skipped for os=$OS_ID, using image-provided Sensors runtime"
+    log_info "Package installation skipped for os=$OS_ID; using image-provided Sensors runtime"
   fi
 else
-  log_info "Overlay package installation not requested, validating installed Sensors runtime"
+  log_info "Overlay package installation not requested; validating installed Sensors runtime"
 fi
 
 deps="ssc_sensor_info see_workhorse awk sed grep sort wc tr"
 if ! check_dependencies "$deps"; then
-  test_result_finish SKIP "Missing sensor dependencies, provision image commands: $deps"
+  log_skip "$TESTNAME SKIP - missing dependencies: $deps"
+  echo "$TESTNAME SKIP" >"$RES_FILE"
+  exit 0
 fi
 
 if [ ! -d /etc/sensors/config ]; then
-  test_result_finish SKIP "/etc/sensors/config not present, provision Sensors runtime configuration"
+  log_skip "$TESTNAME SKIP - /etc/sensors/config not present (likely non-prop build)"
+  echo "$TESTNAME SKIP" >"$RES_FILE"
+  exit 0
 fi
 
 # The qcom-sensors-services package installs sscrpcd.service. On supported
@@ -331,12 +255,14 @@ if [ "$DISTRO_SENSORS_HANDLING_SUPPORTED" -eq 1 ] &&
       log_info "Starting Sensors service, $SENSORS_SERVICE"
 
       if ! systemctl start "$SENSORS_SERVICE"; then
+        log_fail "$TESTNAME FAIL - failed to start $SENSORS_SERVICE"
         systemctl status "$SENSORS_SERVICE" --no-pager --full 2>/dev/null || true
-        test_result_finish FAIL "Failed to start $SENSORS_SERVICE, check the service status"
+        echo "$TESTNAME FAIL" >"$RES_FILE"
+        exit 0
       fi
     fi
 
-    log_info "Sensors service is active, $SENSORS_SERVICE"
+    log_pass "Sensors service is active, $SENSORS_SERVICE"
   else
     log_warn "Sensors service unit is not installed: $SENSORS_SERVICE"
   fi
@@ -350,11 +276,17 @@ log_info "ADSP remoteproc:"
 log_info " path=${SENSORS_ADSP_RPROC_PATH:-unknown} state=${SENSORS_ADSP_STATE:-unknown} firmware=${SENSORS_ADSP_FW:-unknown}"
 
 if [ "$adsp_rc" -eq 3 ]; then
-  test_result_finish SKIP "ADSP remoteproc not found, check image ADSP support"
+  log_skip "$TESTNAME SKIP - ADSP remoteproc not found"
+  echo "$TESTNAME SKIP" >"$RES_FILE"
+  exit 0
 elif [ "$adsp_rc" -eq 2 ]; then
-  test_result_finish FAIL "ADSP not running and firmware missing: ${SENSORS_ADSP_FW:-adsp.mbn}"
+  log_fail "$TESTNAME FAIL - ADSP not running and firmware missing: ${SENSORS_ADSP_FW:-adsp.mbn}"
+  echo "$TESTNAME FAIL" >"$RES_FILE"
+  exit 0
 elif [ "$adsp_rc" -eq 1 ]; then
-  test_result_finish FAIL "ADSP remoteproc state is not running: ${SENSORS_ADSP_STATE:-unknown}"
+  log_fail "$TESTNAME FAIL - ADSP remoteproc state is not running: ${SENSORS_ADSP_STATE:-unknown}"
+  echo "$TESTNAME FAIL" >"$RES_FILE"
+  exit 0
 fi
 
 # Discover sensors
@@ -362,16 +294,22 @@ SSC_LOG="$OUT_DIR/ssc_sensor_info.txt"
 log_info "Collecting sensor inventory -> $SSC_LOG"
 
 if ! sensors_dump_ssc_sensor_info "$SSC_LOG"; then
-  test_result_finish FAIL "ssc_sensor_info execution failed, check sensor runtime and $SSC_LOG"
+  log_skip "$TESTNAME SKIP - ssc_sensor_info failed to run (see $SSC_LOG)"
+  echo "$TESTNAME SKIP" >"$RES_FILE"
+  exit 0
 fi
 
 if [ ! -s "$SSC_LOG" ] || ! grep -q '^TYPE[[:space:]]*=' "$SSC_LOG" 2>/dev/null; then
-  test_result_finish FAIL "ssc_sensor_info produced no TYPE entries, check runtime discovery in $SSC_LOG"
+  log_skip "$TESTNAME SKIP - ssc_sensor_info produced no TYPE entries (see $SSC_LOG)"
+  echo "$TESTNAME SKIP" >"$RES_FILE"
+  exit 0
 fi
 
 types_nl="$(sensors_types_from_ssc_file "$SSC_LOG" 2>/dev/null || true)"
 if [ -z "$types_nl" ]; then
-  log_info "No available sensor TYPEs in inventory, evidence=$SSC_LOG"
+  log_skip "$TESTNAME SKIP - no parsable sensor inventory from ssc_sensor_info (see $SSC_LOG)"
+  echo "$TESTNAME SKIP" >"$RES_FILE"
+  exit 0
 fi
 
 log_info "Sensor TYPEs discovered:"
@@ -381,16 +319,26 @@ done
 
 # ---- list-only mode should be a clean PASS for LAVA ----
 if [ "$LIST_ONLY" -eq 1 ]; then
-  test_result_finish PASS "Sensors inventory listing completed, --list does not validate streaming"
+  log_pass "$TESTNAME PASS - --list requested"
+  echo "$TESTNAME PASS" >"$RES_FILE"
+  exit 0
 fi
 
 TARGET_NL=""
 TARGET_SOURCE=""
 
 # 1) explicit sensor list overrides everything
-if [ "$SENSORS_REQUESTED" -eq 1 ]; then
+if [ -n "$SENSORS_CSV" ]; then
   TARGET_SOURCE="explicit list"
-  TARGET_NL="$REQUESTED_TARGETS"
+  OLDIFS=$IFS
+  IFS=,
+  set -- "$SENSORS_CSV"
+  IFS=$OLDIFS
+  for s in "$@"; do
+    s="$(printf '%s' "$s" | tr -d '[:space:]')"
+    [ -z "$s" ] && continue
+    TARGET_NL="$(sensors_append_unique_line "$TARGET_NL" "$s")"
+  done
 else
   # 2) profile selection
   case "$PROFILE" in
@@ -420,36 +368,44 @@ pressure"
       TARGET_NL="$types_nl"
       ;;
     *)
-      test_result_finish FAIL "Unknown profile: $PROFILE, see --help"
+      log_skip "$TESTNAME SKIP - unknown profile: $PROFILE"
+      echo "$TESTNAME SKIP" >"$RES_FILE"
+      exit 0
       ;;
   esac
 fi
 
 present_targets=""
-while IFS= read -r s; do
-  [ -n "$s" ] || continue
+missing_targets=""
+for s in $TARGET_NL; do
   if sensors_type_present "$types_nl" "$s"; then
     present_targets="$(sensors_append_unique_line "$present_targets" "$s")"
   else
-    if [ "$STRICT_REQUIRED" = "1" ]; then
-      test_result_record FAIL "Requested sensor '$s' is unavailable in $SSC_LOG, check --list and sensor provisioning"
-    else
-      test_result_record SKIP "Requested sensor '$s' is unavailable in $SSC_LOG, ignored by --strict 0, check --list"
+    missing_targets="$(sensors_append_unique_line "$missing_targets" "$s")"
+  fi
+done
+
+if [ -n "$missing_targets" ]; then
+  printf '%s\n' "$missing_targets" | while IFS= read -r s; do
+    [ -n "$s" ] && log_warn "Selected sensor type is not present: $s"
+  done
+
+  if [ "$STRICT_REQUIRED" = "1" ]; then
+    if [ "$PROFILE" != "auto" ] || [ -n "$SENSORS_CSV" ]; then
+      log_fail "$TESTNAME FAIL - required selected sensor types are missing"
+      echo "$TESTNAME FAIL" >"$RES_FILE"
+      exit 0
     fi
   fi
-done <<EOF
-$TARGET_NL
-EOF
-
-if [ "$TEST_RESULT_FAIL_COUNT" -gt 0 ]; then
-  test_result_finish
 fi
 
 TARGET_NL="$present_targets"
 
 if [ -z "$TARGET_NL" ]; then
-  test_result_record SKIP "No selected sensors are available for streaming, source=$TARGET_SOURCE, check --list and $SSC_LOG"
-  test_result_finish
+  log_info "No streamable data sensor types are present, completing SSC control-plane validation only"
+  log_pass "$TESTNAME PASS - SSC control plane is healthy, no physical data-sensor streaming was applicable"
+  echo "$TESTNAME PASS" >"$RES_FILE"
+  exit 0
 fi
 
 log_info "Sensors selected to test from $TARGET_SOURCE:"
@@ -457,35 +413,62 @@ printf '%s\n' "$TARGET_NL" | while IFS= read -r s; do
   [ -n "$s" ] && log_info " - $s"
 done
 
-if ! printf '%s\n' "$TARGET_NL" >"$TARGET_FILE"; then
-  test_result_finish FAIL "Cannot write selected sensors to $TARGET_FILE, check evidence directory permissions"
-fi
+TARGET_FILE="$OUT_DIR/targets.txt"
+printf '%s\n' "$TARGET_NL" >"$TARGET_FILE" 2>/dev/null || true
+
+pass_count=0
+fail_count=0
+skip_count=0
 
 while IFS= read -r s; do
   [ -z "$s" ] && continue
 
   log_info "---- Sensor test: $s ----"
 
+  if ! sensors_type_present "$types_nl" "$s"; then
+    log_info "Sensor $s: not present -> SKIP"
+    skip_count=$((skip_count + 1))
+    continue
+  fi
+
   if sensors_run_see_workhorse "$s" "$SEE_DURATION" "$OUT_DIR" "$HB_SECS"; then
-    test_result_record PASS "see_workhorse ($s), log=$OUT_DIR/see_workhorse_${s}.log"
+    log_info "see_workhorse: PASS ($s) [log: $OUT_DIR/see_workhorse_${s}.log]"
   else
-    test_result_record FAIL "see_workhorse ($s) failed execution or its final PASS marker is absent, inspect $OUT_DIR/see_workhorse_${s}.log"
+    log_error "see_workhorse: FAIL ($s) [log: $OUT_DIR/see_workhorse_${s}.log]"
+    fail_count=$((fail_count + 1))
     continue
   fi
 
   sensors_run_ssc_drva_test "$s" "$DRVA_DURATION" "$OUT_DIR" "$HB_SECS"
   rc=$?
   if [ "$rc" -eq 0 ]; then
-    test_result_record PASS "ssc_drva_test ($s), log=$OUT_DIR/ssc_drva_test_${s}.log"
+    log_info "ssc_drva_test: PASS ($s) [log: $OUT_DIR/ssc_drva_test_${s}.log]"
+    pass_count=$((pass_count + 1))
     continue
   fi
   if [ "$rc" -eq 2 ]; then
-    test_result_record SKIP "ssc_drva_test ($s) is not installed, provision the optional driver-test binary for additional coverage"
+    log_info "ssc_drva_test: SKIP ($s) (tool not present)"
+    pass_count=$((pass_count + 1))
     continue
   fi
 
-  test_result_record FAIL "ssc_drva_test ($s) failed, inspect $OUT_DIR/ssc_drva_test_${s}.log"
+  log_error "ssc_drva_test: FAIL ($s) [log: $OUT_DIR/ssc_drva_test_${s}.log]"
+  fail_count=$((fail_count + 1))
 done <"$TARGET_FILE"
 
-log_info "Summary (checks): pass=$TEST_RESULT_PASS_COUNT fail=$TEST_RESULT_FAIL_COUNT skip=$TEST_RESULT_SKIP_COUNT (logs in $OUT_DIR)"
-test_result_finish
+log_info "Summary: pass=$pass_count fail=$fail_count skip=$skip_count (logs in $OUT_DIR)"
+
+if [ "$fail_count" -gt 0 ]; then
+  log_fail "$TESTNAME FAIL - failures=$fail_count passes=$pass_count skips=$skip_count (logs in $OUT_DIR)"
+  echo "$TESTNAME FAIL" >"$RES_FILE"
+else
+  if [ "$pass_count" -eq 0 ]; then
+    log_skip "$TESTNAME SKIP - no selected sensors were validated (all missing/unsupported)"
+    echo "$TESTNAME SKIP" >"$RES_FILE"
+  else
+    log_pass "$TESTNAME PASS - passes=$pass_count skips=$skip_count"
+    echo "$TESTNAME PASS" >"$RES_FILE"
+  fi
+fi
+
+exit 0

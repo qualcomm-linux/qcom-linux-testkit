@@ -15,7 +15,7 @@ Options:
   --base             Use upstream MSM/freedreno on supported desktop distros.
   --overlay          Use the Qualcomm graphics overlay on supported desktop distros.
   --auto             Preserve and validate the currently active graphics stack.
-  --timeout SECONDS  Set continuous-build runtime, default: 60.
+  --timeout SECONDS  Stop kmscube if it exceeds this duration, default: 60.
   -h, --help         Show this help text and exit without changing target state.
 EOF
 }
@@ -135,7 +135,6 @@ cd "$test_path" || exit 1
 
 LOG_FILE="./${TESTNAME}_run.log"
 FAILURE_LOG="./${TESTNAME}_failure_markers.log"
-CAPABILITY_LOG="./${TESTNAME}_capabilities.log"
 
 if [ "$PARSE_RC" -ne 0 ]; then
     rm -f "$RES_FILE"
@@ -176,7 +175,6 @@ rm -f \
     "$RES_FILE" \
     "$LOG_FILE" \
     "$FAILURE_LOG" \
-    "$CAPABILITY_LOG" \
     "$DISPLAY_MANAGER_STATE_FILE"
 
 trap '
@@ -467,31 +465,6 @@ if ! command -v run_with_managed_timeout >/dev/null 2>&1; then
     exit 0
 fi
 
-for required_helper in \
-    display_kmscube_supports_count \
-    display_kmscube_collect_failure_markers \
-    display_kmscube_parse_frame_count \
-    display_kmscube_has_initialization_evidence; do
-    if ! command -v "$required_helper" >/dev/null 2>&1; then
-        log_fail "$TESTNAME FAIL - required KMSCube helper is unavailable: $required_helper"
-        echo "$TESTNAME FAIL" >"$RES_FILE"
-        exit 0
-    fi
-done
-
-KMSCUBE_SUPPORTS_COUNT=0
-
-if display_kmscube_supports_count \
-    "$KMSCUBE_BIN" \
-    "$CAPABILITY_LOG"; then
-    KMSCUBE_SUPPORTS_COUNT=1
-    log_info "KMSCube capability, finite --count execution supported"
-else
-    log_info "KMSCube capability, continuous execution without --count"
-fi
-
-log_info "KMSCube capability output retained in $CAPABILITY_LOG"
-
 # --- GPU acceleration gating -------------------------------------------------
 if command -v display_is_cpu_renderer >/dev/null 2>&1; then
     if display_is_cpu_renderer gbm >/dev/null 2>&1; then
@@ -555,50 +528,27 @@ EGL_PLATFORM_SAVED="${EGL_PLATFORM:-}"
 export EGL_PLATFORM=gbm
 
 rc=0
-KMSCUBE_EXECUTION_MODE="continuous"
-
-if [ "$KMSCUBE_SUPPORTS_COUNT" -eq 1 ]; then
-    KMSCUBE_EXECUTION_MODE="finite-count"
-    set -- "$KMSCUBE_BIN"
-else
-    if command -v stdbuf >/dev/null 2>&1; then
-        set -- stdbuf -oL -eL "$KMSCUBE_BIN"
-        log_info "Using stdbuf so continuous KMSCube initialization output is retained"
-    else
-        set -- "$KMSCUBE_BIN"
-        log_warn "stdbuf is unavailable, continuous KMSCube output may remain buffered until exit"
-    fi
-fi
 
 if [ -n "$KMSCUBE_DRM_DEV" ]; then
-    set -- "$@" -D "$KMSCUBE_DRM_DEV"
-fi
+    log_info "Running kmscube on $KMSCUBE_DRM_DEV with --count=${FRAME_COUNT}, timeout=${KMSCUBE_TIMEOUT}s"
 
-if [ "$KMSCUBE_SUPPORTS_COUNT" -eq 1 ]; then
-    set -- "$@" --count="${FRAME_COUNT}"
-
-    if [ -n "$KMSCUBE_DRM_DEV" ]; then
-        log_info "Running finite kmscube on $KMSCUBE_DRM_DEV with --count=${FRAME_COUNT}"
-    else
-        log_info "Running finite kmscube with default DRM device selection and --count=${FRAME_COUNT}"
-    fi
-else
-    if [ -n "$KMSCUBE_DRM_DEV" ]; then
-        log_info "Running continuous kmscube on $KMSCUBE_DRM_DEV for ${KMSCUBE_TIMEOUT}s"
-    else
-        log_info "Running continuous kmscube with default DRM device selection for ${KMSCUBE_TIMEOUT}s"
-    fi
-fi
-
-if [ "$KMSCUBE_SUPPORTS_COUNT" -eq 1 ]; then
-    "$@" >"$LOG_FILE" 2>&1
-    rc=$?
-else
     run_with_managed_timeout \
         "$KMSCUBE_TIMEOUT" \
         /tmp \
         kmscube \
-        "$@" >"$LOG_FILE" 2>&1
+        "$KMSCUBE_BIN" \
+        -D "$KMSCUBE_DRM_DEV" \
+        --count="${FRAME_COUNT}" >"$LOG_FILE" 2>&1
+    rc=$?
+else
+    log_info "Running kmscube with default DRM device selection and --count=${FRAME_COUNT}, timeout=${KMSCUBE_TIMEOUT}s"
+
+    run_with_managed_timeout \
+        "$KMSCUBE_TIMEOUT" \
+        /tmp \
+        kmscube \
+        "$KMSCUBE_BIN" \
+        --count="${FRAME_COUNT}" >"$LOG_FILE" 2>&1
     rc=$?
 fi
 
@@ -608,19 +558,44 @@ else
     unset EGL_PLATFORM
 fi
 
-POSTPROCESS_FAILURE=""
+if [ "$rc" -eq 124 ]; then
+    log_fail "$TESTNAME : Execution timed out after ${KMSCUBE_TIMEOUT}s - see $LOG_FILE"
+    cat "$LOG_FILE"
+    echo "$TESTNAME FAIL" >"$RES_FILE"
 
-if FAILURE_MARKER_COUNT="$(
-    display_kmscube_collect_failure_markers \
-        "$LOG_FILE" \
-        "$FAILURE_LOG"
-)"; then
-    :
-else
-    FAILURE_MARKER_COUNT=0
-    POSTPROCESS_FAILURE="unable to parse KMSCube failure markers from $LOG_FILE"
-    log_error "$POSTPROCESS_FAILURE"
+    if [ "$weston_stopped_by_test" -eq 1 ]; then
+        log_info "Restoring Weston after timeout"
+
+        if weston_restore_runtime 15; then
+            weston_stopped_by_test=0
+        else
+            log_error "Failed to restore Weston runtime after $TESTNAME timeout"
+        fi
+    fi
+
+    display_restore_service_from_state "$DISPLAY_MANAGER_STATE_FILE" || true
+    exit 1
 fi
+
+# Treat explicit error and failure words from kmscube as authoritative even
+# when the process exits successfully. Ignore common zero-failure summaries.
+awk '
+    {
+        line = tolower($0)
+        has_error = line ~ /(^|[^[:alnum:]_])error([^[:alnum:]_]|$)/
+        has_failure = line ~ /(^|[^[:alnum:]_])fail(ed|ure|ures)?([^[:alnum:]_]|$)/
+        zero_failure = (
+            line ~ /fail(ed|ure|ures)?[[:space:]]*[:=][[:space:]]*0([^0-9]|$)/ ||
+            line ~ /(^|[^0-9])0[[:space:]]+(tests?[[:space:]]+)?fail(ed|ure|ures)?([^[:alnum:]_]|$)/
+        )
+
+        if ((has_error || has_failure) && !zero_failure) {
+            print
+        }
+    }
+' "$LOG_FILE" >"$FAILURE_LOG"
+
+FAILURE_MARKER_COUNT="$(awk 'END { print NR + 0 }' "$FAILURE_LOG")"
 
 if [ "$FAILURE_MARKER_COUNT" -gt 0 ]; then
     log_error "kmscube reported ERROR or FAIL output, matches=$FAILURE_MARKER_COUNT artifact=$FAILURE_LOG"
@@ -631,34 +606,57 @@ if [ "$FAILURE_MARKER_COUNT" -gt 0 ]; then
     done <"$FAILURE_LOG"
 fi
 
+if [ "$rc" -ne 0 ]; then
+    log_fail "$TESTNAME : Execution failed (rc=$rc) - see $LOG_FILE"
+    cat "$LOG_FILE"
+    echo "$TESTNAME FAIL" >"$RES_FILE"
+
+    if [ "$weston_stopped_by_test" -eq 1 ]; then
+        log_info "Restoring Weston after failure"
+
+        if weston_restore_runtime 15; then
+            weston_stopped_by_test=0
+        else
+            log_error "Failed to restore Weston runtime after $TESTNAME failure"
+        fi
+    fi
+
+    display_restore_service_from_state "$DISPLAY_MANAGER_STATE_FILE" || true
+    exit 1
+fi
+
 # --- Parse rendered frame count ----------------------------------------------
-if FRAMES_RENDERED="$(
-    display_kmscube_parse_frame_count "$LOG_FILE"
-)"; then
-    :
-else
-    FRAMES_RENDERED=""
-    POSTPROCESS_FAILURE="unable to parse the rendered-frame summary from $LOG_FILE"
-    log_error "$POSTPROCESS_FAILURE"
-fi
+FRAMES_RENDERED="$(
+    awk '
+        BEGIN {
+            IGNORECASE = 1
+        }
 
-KMSCUBE_INITIALIZED=0
+        /Rendered[[:space:]][0-9]+[[:space:]]+frames/ {
+            for (i = 1; i <= NF; i++) {
+                if ($i ~ /^[0-9]+$/) {
+                    n = $i
+                }
+            }
 
-if display_kmscube_has_initialization_evidence "$LOG_FILE"; then
-    KMSCUBE_INITIALIZED=1
-fi
+            last = n
+        }
+
+        END {
+            if (last != "") {
+                print last
+            }
+        }
+    ' "$LOG_FILE"
+)"
+
+[ -n "$FRAMES_RENDERED" ] || FRAMES_RENDERED=0
 
 if [ "$EXPECTED_MIN" -lt 0 ]; then
     EXPECTED_MIN=0
 fi
 
-if [ -n "$FRAMES_RENDERED" ]; then
-    log_info "kmscube reported: Rendered ${FRAMES_RENDERED} frames (requested ${FRAME_COUNT}, min acceptable ${EXPECTED_MIN})"
-elif [ "$KMSCUBE_SUPPORTS_COUNT" -eq 1 ]; then
-    log_warn "kmscube did not emit a numeric frame summary for the finite --count run"
-else
-    log_info "kmscube did not emit a numeric frame summary, continuous-build validation uses initialization evidence"
-fi
+log_info "kmscube reported: Rendered ${FRAMES_RENDERED} frames (requested ${FRAME_COUNT}, min acceptable ${EXPECTED_MIN})"
 
 restore_failed=0
 
@@ -678,48 +676,20 @@ if ! display_restore_service_from_state "$DISPLAY_MANAGER_STATE_FILE"; then
 fi
 
 # --- Verdict -----------------------------------------------------------------
-VERDICT_FAILURE="$POSTPROCESS_FAILURE"
-
-if [ -z "$VERDICT_FAILURE" ] &&
-   [ "$KMSCUBE_SUPPORTS_COUNT" -eq 1 ]; then
-    if [ "$rc" -ne 0 ]; then
-        VERDICT_FAILURE="finite --count execution failed with rc=$rc"
-    elif [ "$FAILURE_MARKER_COUNT" -gt 0 ]; then
-        VERDICT_FAILURE="kmscube reported ERROR or FAIL output, matches=$FAILURE_MARKER_COUNT"
-    elif [ -z "$FRAMES_RENDERED" ]; then
-        VERDICT_FAILURE="finite --count execution emitted no recognized rendered-frame summary"
-    elif [ -n "$FRAMES_RENDERED" ] &&
-         [ "$FRAMES_RENDERED" -lt "$EXPECTED_MIN" ]; then
-        VERDICT_FAILURE="rendered ${FRAMES_RENDERED} frames, minimum required is ${EXPECTED_MIN}"
-    fi
-elif [ -z "$VERDICT_FAILURE" ]; then
-    if [ "$rc" -eq 124 ]; then
-        log_info "Continuous KMSCube reached the expected controlled ${KMSCUBE_TIMEOUT}s timeout"
-    elif [ "$rc" -eq 0 ]; then
-        VERDICT_FAILURE="continuous KMSCube exited before the controlled ${KMSCUBE_TIMEOUT}s validation completed"
-    else
-        VERDICT_FAILURE="continuous KMSCube execution failed with rc=$rc"
-    fi
-
-    if [ -z "$VERDICT_FAILURE" ] &&
-       [ "$FAILURE_MARKER_COUNT" -gt 0 ]; then
-        VERDICT_FAILURE="kmscube reported ERROR or FAIL output, matches=$FAILURE_MARKER_COUNT"
-    fi
-
-    if [ -z "$VERDICT_FAILURE" ] &&
-       [ "$KMSCUBE_INITIALIZED" -ne 1 ]; then
-        VERDICT_FAILURE="continuous KMSCube output did not confirm EGL and OpenGL initialization"
-    fi
+if [ "$FAILURE_MARKER_COUNT" -gt 0 ]; then
+    log_fail "$TESTNAME : FAIL (kmscube reported ERROR or FAIL output, matches=${FAILURE_MARKER_COUNT})"
+    printf '%s\n' "$TESTNAME FAIL" >"$RES_FILE"
+    exit 1
 fi
 
-if [ "$restore_failed" -ne 0 ] &&
-   [ -z "$VERDICT_FAILURE" ]; then
-    VERDICT_FAILURE="display runtime restore failed after $KMSCUBE_EXECUTION_MODE execution"
+if [ "$FRAMES_RENDERED" -lt "$EXPECTED_MIN" ]; then
+    log_fail "$TESTNAME : FAIL (rendered ${FRAMES_RENDERED} < ${EXPECTED_MIN})"
+    echo "$TESTNAME FAIL" >"$RES_FILE"
+    exit 1
 fi
 
-if [ -n "$VERDICT_FAILURE" ]; then
-    log_fail "$TESTNAME : FAIL ($VERDICT_FAILURE), see $LOG_FILE"
-    cat "$LOG_FILE"
+if [ "$restore_failed" -ne 0 ]; then
+    log_fail "$TESTNAME : FAIL (rendered ${FRAMES_RENDERED}, but display runtime restore failed)"
     echo "$TESTNAME FAIL" >"$RES_FILE"
     exit 1
 fi

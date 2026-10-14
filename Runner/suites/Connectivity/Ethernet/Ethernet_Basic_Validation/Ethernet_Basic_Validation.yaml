@@ -11,7 +11,7 @@ params:
   LINK_TIMEOUT_S: "10"
   IP_TIMEOUT_S: "15"
   ETH_INTERFACE: ""
-  PING_TARGET: ""  # Empty uses the runner default of 8.8.8.8. Set an IP to override.
+  PING_TARGET: ""
   PING_COUNT: "4"
   PING_WAIT_S: "2"
   PING_RETRIES: "3"
