@@ -11,6 +11,7 @@ metadata:
  
 params:
   VIDEO_TEST_MODE: "all"
+  VIDEO_TEST_TYPE: "basic"
   VIDEO_CODECS: "h264,h265,vp9"
   VIDEO_RESOLUTIONS: "480p"
   VIDEO_DURATION: "30"
@@ -26,7 +27,7 @@ run:
     - REPO_PATH="$PWD"
     - cd Runner/suites/Multimedia/GSTreamer/Video/Video_Encode_Decode/
     - VIDEO_SHARED_ENCODE_DIR="${REPO_PATH%%/tests/*}/shared/video-encode-decode"
-    - export VIDEO_TEST_MODE VIDEO_CODECS VIDEO_RESOLUTIONS VIDEO_DURATION VIDEO_FRAMERATE
+    - export VIDEO_TEST_MODE VIDEO_TEST_TYPE VIDEO_CODECS VIDEO_RESOLUTIONS VIDEO_DURATION VIDEO_FRAMERATE
     - export VIDEO_STACK VIDEO_GST_DEBUG VIDEO_CLIP_URL VIDEO_CLIP_PATH VIDEO_SHARED_ENCODE_DIR
-    - ./run.sh --mode "${VIDEO_TEST_MODE}" --codecs "${VIDEO_CODECS}" --resolutions "${VIDEO_RESOLUTIONS}" --duration "${VIDEO_DURATION}" --framerate "${VIDEO_FRAMERATE}" --stack "${VIDEO_STACK}" --gst-debug "${VIDEO_GST_DEBUG}" --clip-url "${VIDEO_CLIP_URL}" --clip-path "${VIDEO_CLIP_PATH}" --lava-testcase-id "${LAVA_TESTCASE_ID}" || true
+    - ./run.sh --mode "${VIDEO_TEST_MODE}" --test-type "${VIDEO_TEST_TYPE}" --codecs "${VIDEO_CODECS}" --resolutions "${VIDEO_RESOLUTIONS}" --duration "${VIDEO_DURATION}" --framerate "${VIDEO_FRAMERATE}" --stack "${VIDEO_STACK}" --gst-debug "${VIDEO_GST_DEBUG}" --clip-url "${VIDEO_CLIP_URL}" --clip-path "${VIDEO_CLIP_PATH}" --lava-testcase-id "${LAVA_TESTCASE_ID}" || true
     - $REPO_PATH/Runner/utils/send-to-lava.sh Video_Encode_Decode.res
