@@ -1,0 +1,20 @@
+metadata:
+  name: dmabuf
+  format: "Lava-Test Test Definition 1.0"
+  description: "Validates DMA-BUF buffer sharing between DRM/KMS and other kernel subsystems using the IGT dmabuf test suite. Stops any active Weston compositor before running and restores it afterwards."
+  os:
+    - linux
+  scope:
+    - functional
+
+params:
+  DMABUF_PATH: "/usr/libexec/igt-gpu-tools/dmabuf"
+  IGT_TIMEOUT: "300"
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Multimedia/Display/igt-gpu-tools/dmabuf
+    - export IGT_TIMEOUT="${IGT_TIMEOUT}"
+    - ./run.sh --dmabuf-path "${DMABUF_PATH}" || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh dmabuf.res || true

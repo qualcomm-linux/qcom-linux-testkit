@@ -1,0 +1,20 @@
+metadata:
+  name: kms-sysfs-edid-timing
+  format: "Lava-Test Test Definition 1.0"
+  description: "Validates EDID timing information exposed through the DRM sysfs interface using the IGT kms_sysfs_edid_timing test suite. Stops any active Weston compositor before running and restores it afterwards."
+  os:
+    - linux
+  scope:
+    - functional
+
+params:
+  KMS_SYSFS_EDID_TIMING_PATH: "/usr/libexec/igt-gpu-tools/kms_sysfs_edid_timing"
+  IGT_TIMEOUT: "300"
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Multimedia/Display/igt-gpu-tools/kms_sysfs_edid_timing
+    - export IGT_TIMEOUT="${IGT_TIMEOUT}"
+    - ./run.sh --kms-sysfs-edid-timing-path "${KMS_SYSFS_EDID_TIMING_PATH}" || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh kms_sysfs_edid_timing.res || true

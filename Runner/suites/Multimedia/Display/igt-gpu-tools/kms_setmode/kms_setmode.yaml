@@ -1,0 +1,20 @@
+metadata:
+  name: kms-setmode
+  format: "Lava-Test Test Definition 1.0"
+  description: "Validates KMS mode-setting across all connected DRM connectors using the IGT kms_setmode test suite. Stops any active Weston compositor before running and restores it afterwards."
+  os:
+    - linux
+  scope:
+    - functional
+
+params:
+  KMS_SETMODE_PATH: "/usr/libexec/igt-gpu-tools/kms_setmode"
+  IGT_TIMEOUT: "300"
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Multimedia/Display/igt-gpu-tools/kms_setmode
+    - export IGT_TIMEOUT="${IGT_TIMEOUT}"
+    - ./run.sh --kms-setmode-path "${KMS_SETMODE_PATH}" || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh kms_setmode.res || true
