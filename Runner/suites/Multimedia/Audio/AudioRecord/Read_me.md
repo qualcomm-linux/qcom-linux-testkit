@@ -67,7 +67,7 @@ Ensure the following components are present in the target Yocto build:
 - PipeWire: `pw-record`, `wpctl`
 - PulseAudio: `parecord`, `pactl`
 - ALSA: `arecord`
-- Common tools: `pgrep`, `timeout`, `grep`, `sed`
+- Common tools: `pgrep`, `timeout`, `grep`, `sed`, `awk`, `dd`, `od`, `stat`
 - Daemon: `pipewire` or `pulseaudio` must be running
 
 On Debian, Ubuntu, and CentOS, the selected backend controls client package
@@ -253,7 +253,7 @@ DURATIONS	      Recording durations: short, medium, long (legacy mode only)     
 RECORD_SECONDS	  Number of seconds to record (e.g., 5s, 10s)                     30s
 LOOPS	          Number of recording loops	                                      1
 TIMEOUT	          Explicit timeout override (e.g., 15s, 0=automatic)              0
-AUDIO_RECORD_START_GRACE Startup headroom added to the automatic watchdog       5
+AUDIO_RECORD_START_GRACE Startup/progress headroom in seconds                  5
 STRICT	          Strict mode (0=disabled, 1=enabled, fail on any error)	      0
 DMESG_SCAN	      Scan dmesg for errors after recording	                          1
 VERBOSE	          Enable verbose logging	                                      0
@@ -272,7 +272,7 @@ Option	                      Description
 --durations	                  Recording durations: short, medium, long (legacy mode only)
 --loops	                      Number of recording loops
 --timeout <duration>          Override the automatic duration-based watchdog
---start-grace <seconds>      Recorder startup headroom, default: 5
+--start-grace <seconds>      Startup/progress headroom, default: 5
 --strict [0|1]                Enable strict mode (0=disabled, 1=enabled)
 --no-dmesg	                  Disable dmesg scan
 --res-suffix <suffix>         Suffix for unique result file and log directory (e.g., "Config01" generates AudioRecord_Config01.res and results/AudioRecord_Config01/)
@@ -284,12 +284,59 @@ Option	                      Description
 
 ### Recording watchdog and clock handling
 
-When `TIMEOUT=0`, AudioRecord uses an automatic watchdog for recorder commands.
-The watchdog duration is the requested recording duration plus
-`AUDIO_RECORD_START_GRACE`, which defaults to five seconds. The additional time
-allows PipeWire or PulseAudio to establish the stream without reducing the WAV
-duration being validated. An explicit `--timeout` value overrides the automatic
-watchdog and does not receive startup grace.
+PipeWire records directly from the discovered source using `pw-record --target`.
+The selected `wpctl` global ID is resolved in the audio-user session to
+`node.name`, or a positive `object.serial` when the name is unavailable.
+Global IDs and serials are different identifiers. `AUDIO_RECORD_TARGET` logs
+both the discovery ID and the actual recorder target. Failed inspection or
+missing target properties produce FAIL rather than recording the default input.
+It does not change the session's default microphone, restart the server after a
+capture failure, or substitute an unrelated virtual ALSA input. Source discovery
+before capture retains its existing automatic-backend policy.
+
+With `TIMEOUT=0`, PipeWire allows requested duration plus
+`AUDIO_RECORD_START_GRACE` (default five seconds) for the first WAV payload.
+Once payload arrives, a separate window of the same length permits collection
+of the requested audio duration. For a five-second capture with default grace,
+startup is bounded to ten seconds and capture to another ten seconds. A healthy
+stream stops as soon as five seconds of PCM have arrived. No payload progress
+for `max(start-grace, 3)` seconds fails the capture. Slow trickle progress cannot
+extend the capture window. These limits include file-buffering delays.
+
+An explicit `--timeout` / `TIMEOUT` replaces the total capture deadline, without
+extra startup grace or retries. Startup and idle checks still apply. It does not
+lower PipeWire's requested sample duration. Set it high enough for startup and
+the requested capture. Termination allows up to three additional seconds to
+finalize the WAV, then kills and reaps only the test-owned recorder. Forced kill,
+early recorder exit, startup failure, stall, and incomplete capture are FAIL.
+Final WAV format, duration and content validation remains mandatory. This
+monitor uses image-provided shell tools and does not require Python or systemd.
+
+ALSA and PulseAudio retain their existing capture, timeout and retry behavior.
+Their automatic watchdog remains requested duration plus startup grace.
+
+`AUDIO_CAPTURE` records the parsed WAV format, first-payload delay, byte progress
+and termination reason in the per-case recorder log. On any failed loop, a
+bounded head/tail of that log and, for PipeWire, bounded `wpctl status` and
+selected-source inspection are saved to `<case>.log.diagnostics` and replayed to
+stdout. The complete recorder log and WAV remain in the existing case directory.
+Diagnostics never restart services or alter the verdict.
+
+When the image provides `pw-link`, a read-only `pw-link -l -I` snapshot starts
+at the first PCM payload while the recorder is alive. It is stopped within two
+polling intervals or when capture ends, without extending the capture deadline.
+The snapshot is retained as `<case>.wav.links`, including in desktop-user mode,
+and replayed to stdout on failure (up to 160 lines). Missing tools, unsupported
+options, and interrupted snapshots are recorded without changing PASS/FAIL.
+No-payload captures retain a `not-started` marker. Live links help distinguish
+the requested node from the node that actually feeds the stream.
+
+For example, validate LeMans Config09 using runtime microphone discovery:
+
+```sh
+./run.sh --backend pipewire --source mic --config-name record_config9 --record-seconds 5s --loops 1
+./run.sh --backend pipewire --source mic --config-name record_config9 --record-seconds 5s --start-grace 10 --timeout 25s --loops 1
+```
 
 Watchdog deadlines and elapsed-time reporting use monotonic uptime rather than
 the system wall clock. RTC or NTP corrections during recording therefore do not

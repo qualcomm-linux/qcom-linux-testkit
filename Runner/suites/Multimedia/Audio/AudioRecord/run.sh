@@ -161,7 +161,7 @@ Usage: $0 [options]
   --runtime-dir PATH # Override XDG_RUNTIME_DIR for minimal ramdisk mode
   --loops N
   --timeout SECS         Override the automatic duration-based watchdog
-  --start-grace SECS     Recorder startup headroom, default: 5
+  --start-grace SECS     Startup/progress headroom, default: 5
   --strict [0|1]
   --no-dmesg
   --junit FILE.xml
@@ -406,7 +406,10 @@ for audio_required_helper in \
   audio_prepare_desktop_audio_environment \
   audio_run_as_test_user \
   audio_run_helper_as_test_user \
-  audio_run_with_timeout_as_test_user
+  audio_run_with_timeout_as_test_user \
+  pw_source_target_safe \
+  audio_record_with_progress \
+  audio_record_failure_diagnostics
 do
   if ! command -v "$audio_required_helper" >/dev/null 2>&1; then
     log_fail "$TESTNAME FAIL - required helper is unavailable: $audio_required_helper"
@@ -859,7 +862,7 @@ elif [ "$AUDIO_BACKEND" = "pulseaudio" ]; then
   fi
 fi
 
-# ----- Route source (set default; recorder uses default source) -----
+# ----- Discover the capture source on the selected backend -----
 SRC_ID=""
 MANAGED_ROUTE_RECORD=""
 case "$AUDIO_BACKEND" in
@@ -1067,12 +1070,21 @@ if [ "$AUDIO_BACKEND" = "alsa" ] && [ "$SRC_CHOICE" != "null" ]; then
 fi
 
 # ---- Routing log / defaults per backend ----
+PW_RECORD_TARGET=""
 if [ "$AUDIO_BACKEND" = "pipewire" ]; then
   if [ -n "$SRC_ID" ]; then
+    if ! PW_RECORD_TARGET="$(
+      audio_run_helper_as_test_user --require-session pw_source_target_safe "$SRC_ID"
+    )" || [ -z "$PW_RECORD_TARGET" ]; then
+      log_fail "$TESTNAME FAIL - cannot resolve selected PipeWire source ID '$SRC_ID' to a recorder target, verify wpctl inspect exposes Audio/Source and node.name or object.serial in the audio session"
+      echo "$RESULT_TESTNAME FAIL" >"$RES_FILE"
+      exit 1
+    fi
     SRC_LABEL="$(audio_run_helper_as_test_user --require-session pw_source_label_safe "$SRC_ID")"
-    audio_run_helper_as_test_user --require-session pw_set_default_source "$SRC_ID" >/dev/null 2>&1 || true
+    # The explicit pw-record target avoids changing the session's default input.
     [ -z "$SRC_LABEL" ] && SRC_LABEL="unknown"
     log_info "Routing to source: id/name=$SRC_ID label='$SRC_LABEL' choice=$SRC_CHOICE"
+    log_info "AUDIO_RECORD_TARGET source_id='$SRC_ID' recorder_target='$PW_RECORD_TARGET'"
   else
     SRC_LABEL="default"
     log_info "Routing to source: id/name=default label='default' choice=$SRC_CHOICE"
@@ -1153,7 +1165,11 @@ dur_s="$(duration_to_secs "$TIMEOUT" 2>/dev/null || echo 0)"
 if [ "$dur_s" -gt 0 ] 2>/dev/null; then
   log_info "Watchdog/timeout: explicit override=${TIMEOUT}"
 else
-  log_info "Watchdog/timeout: automatic per case, requested duration plus start_grace=${AUDIO_RECORD_START_GRACE}s"
+  if [ "$AUDIO_BACKEND" = "pipewire" ]; then
+    log_info "Watchdog/timeout: sample-progress capture, separate startup and capture windows of requested duration plus start_grace=${AUDIO_RECORD_START_GRACE}s"
+  else
+    log_info "Watchdog/timeout: automatic per case, requested duration plus start_grace=${AUDIO_RECORD_START_GRACE}s"
+  fi
 fi
 
 # JUnit init (optional)
@@ -1203,8 +1219,8 @@ auto_secs_for() {
 }
 
 # Validate the final capture selected by the existing backend/retry flow.
-# Size remains useful only for deciding whether compatibility fallbacks should
-# run; PASS requires a structurally valid WAV with acceptable sample content.
+# Legacy backend fallbacks use size only as a retry hint. PipeWire requires
+# sample-progress completion, and every backend must pass final WAV validation.
 audio_record_validate_final_output() {
   recording_valid=0
   validation_expected_duration="$secs"
@@ -1214,7 +1230,8 @@ audio_record_validate_final_output() {
   [ -n "$validation_requested_seconds" ] || validation_requested_seconds=0
   [ -n "$validation_timeout_seconds" ] || validation_timeout_seconds=0
 
-  if [ "$validation_timeout_seconds" -gt 0 ] 2>/dev/null &&
+  if [ "$AUDIO_BACKEND" != "pipewire" ] &&
+     [ "$validation_timeout_seconds" -gt 0 ] 2>/dev/null &&
      { [ "$validation_requested_seconds" -le 0 ] 2>/dev/null ||
        [ "$validation_timeout_seconds" -lt "$validation_requested_seconds" ] 2>/dev/null; }; then
     validation_expected_duration="$effective_timeout"
@@ -1347,84 +1364,14 @@ if [ "$USE_CONFIG_DISCOVERY" = "true" ]; then
       validation_channels="$channels"
 
       if [ "$AUDIO_BACKEND" = "pipewire" ]; then
-        log_info "[$case_name] exec: pw-record -v --rate=$rate --channels=$channels \"$record_user_out\""
-        audio_run_with_timeout_as_test_user --require-session "$effective_timeout" pw-record -v --rate="$rate" --channels="$channels" "$record_user_out" >> "$logf" 2>&1
+        log_info "[$case_name] exec: pw-record -v --rate=$rate --channels=$channels --target \"$PW_RECORD_TARGET\" \"$record_user_out\""
+        audio_run_helper_as_test_user --require-session \
+          audio_record_with_progress \
+          "$record_user_out" "$secs" "$AUDIO_RECORD_START_GRACE" "$TIMEOUT" \
+          --pipewire-links \
+          pw-record -v --rate="$rate" --channels="$channels" --target "$PW_RECORD_TARGET" "$record_user_out" >> "$logf" 2>&1
         rc=$?
         bytes="$(audio_record_capture_size)"
-
-        # Restart/bootstrap only for an unexpected pw-record failure when the
-        # PipeWire control plane is also unresponsive. Watchdog termination is
-        # expected and must proceed to WAV validation without restarting.
-        record_command_failed=0
-
-        case "$rc" in
-          0|124|137|143)
-            ;;
-          *)
-            record_command_failed=1
-            ;;
-        esac
-
-        if [ "$record_command_failed" -eq 1 ] &&
-           ! audio_run_helper_as_test_user \
-               --require-session \
-               audio_pw_ctl_ok 2>/dev/null; then
-          if [ "$SYSTEMD_AVAILABLE" -eq 1 ] && [ "${AUDIO_SYSTEMD_MANAGED:-0}" -eq 1 ]; then
-            log_warn "[$case_name] pw-record rc=$rc and wpctl not responsive - restarting and retrying once"
-            audio_record_restart_backend_best_effort "$AUDIO_BACKEND" >/dev/null 2>&1 || true
-            audio_run_helper_as_test_user --require-session audio_wait_audio_ready 20 "$AUDIO_BACKEND" >/dev/null 2>&1 || true
-          else
-            log_warn "[$case_name] pw-record rc=$rc and wpctl not responsive - attempting bootstrap and retrying once"
-            audio_record_bootstrap_backend_if_needed >/dev/null 2>&1 || true
-            audio_record_set_recovered_backend_management
-          fi
-
-          audio_record_set_capture_paths "$case_name"
-          audio_record_reset_capture_output
-          log_info "[$case_name] retry: pw-record -v --rate=$rate --channels=$channels \"$record_user_out\""
-          audio_run_with_timeout_as_test_user --require-session "$effective_timeout" pw-record -v --rate="$rate" --channels="$channels" "$record_user_out" >> "$logf" 2>&1
-          rc=$?
-          bytes="$(audio_record_capture_size)"
-        fi
-
-        # A non-trivial file skips compatibility fallbacks. Content and
-        # recorder status are validated after the backend flow completes.
-        if [ "${bytes:-0}" -gt 1024 ] 2>/dev/null; then
-          :
-        else
-          # Only if output is tiny/empty do we try a virtual PCM
-          if command -v arecord >/dev/null 2>&1; then
-            pcm="$(audio_run_helper_as_test_user alsa_pick_virtual_pcm || true)"
-            if [ -n "$pcm" ]; then
-              secs_int="$(audio_parse_secs "$secs" 2>/dev/null || echo 0)"
-              [ -z "$secs_int" ] && secs_int=0
-              audio_record_reset_capture_output
-              log_info "[$case_name] fallback: arecord -D $pcm -f S16_LE -r $rate -c $channels -d $secs_int \"$record_user_out\""
-              audio_run_with_timeout_as_test_user "$effective_timeout" \
-                arecord -D "$pcm" -f S16_LE -r "$rate" -c "$channels" -d "$secs_int" "$record_user_out" >> "$logf" 2>&1
-              rc=$?
-              bytes="$(audio_record_capture_size)"
-            fi
-          fi
-
-          # As a last resort, retry pw-record with --target (only if we have a source id)
-          retry_target=0
-          if [ "$rc" -ne 0 ]; then
-            retry_target=1
-          else
-            if [ "${bytes:-0}" -le 1024 ] 2>/dev/null; then
-              retry_target=1
-            fi
-          fi
-          if [ "$retry_target" -eq 1 ] && [ -n "$SRC_ID" ]; then
-            audio_record_reset_capture_output
-            log_info "[$case_name] exec: pw-record -v --rate=$rate --channels=$channels --target \"$SRC_ID\" \"$record_user_out\""
-            audio_run_with_timeout_as_test_user --require-session "$effective_timeout" pw-record -v --rate="$rate" --channels="$channels" --target "$SRC_ID" "$record_user_out" >> "$logf" 2>&1
-            rc=$?
-            bytes="$(audio_record_capture_size)"
-          fi
-        fi
-
       else
         if [ "$AUDIO_BACKEND" = "alsa" ]; then
           secs_int="$(audio_parse_secs "$secs" 2>/dev/null || echo 0)"
@@ -1583,6 +1530,7 @@ if [ "$USE_CONFIG_DISCOVERY" = "true" ]; then
         ok_runs=$((ok_runs + 1))
       else
         log_fail "[$case_name] loop $i FAILED (rc=$rc, ${last_elapsed}s, bytes=${bytes:-0}, validation='${AUDIO_WAV_VALIDATION_SUMMARY:-unavailable}') - see $logf"
+        audio_record_failure_diagnostics "$logf" "$AUDIO_BACKEND" "$SRC_ID"
       fi
 
       i=$((i + 1))
@@ -1665,86 +1613,14 @@ else
       validation_channels=0
 
       if [ "$AUDIO_BACKEND" = "pipewire" ]; then
-        log_info "[$case_name] exec: pw-record -v \"$record_user_out\""
-        audio_run_with_timeout_as_test_user --require-session "$effective_timeout" pw-record -v "$record_user_out" >> "$logf" 2>&1
+        log_info "[$case_name] exec: pw-record -v --target \"$PW_RECORD_TARGET\" \"$record_user_out\""
+        audio_run_helper_as_test_user --require-session \
+          audio_record_with_progress \
+          "$record_user_out" "$secs" "$AUDIO_RECORD_START_GRACE" "$TIMEOUT" \
+          --pipewire-links \
+          pw-record -v --target "$PW_RECORD_TARGET" "$record_user_out" >> "$logf" 2>&1
         rc=$?
         bytes="$(audio_record_capture_size)"
-
-        # Restart/bootstrap only for an unexpected pw-record failure when the
-        # PipeWire control plane is also unresponsive. Watchdog termination is
-        # expected and must proceed to WAV validation without restarting.
-        record_command_failed=0
-
-        case "$rc" in
-          0|124|137|143)
-            ;;
-          *)
-            record_command_failed=1
-            ;;
-        esac
-
-        if [ "$record_command_failed" -eq 1 ] &&
-           ! audio_run_helper_as_test_user \
-               --require-session \
-               audio_pw_ctl_ok 2>/dev/null; then
-          if [ "$SYSTEMD_AVAILABLE" -eq 1 ] && [ "${AUDIO_SYSTEMD_MANAGED:-0}" -eq 1 ]; then
-            log_warn "[$case_name] pw-record rc=$rc and wpctl not responsive - restarting and retrying once"
-            audio_record_restart_backend_best_effort "$AUDIO_BACKEND" >/dev/null 2>&1 || true
-            audio_run_helper_as_test_user --require-session audio_wait_audio_ready 20 "$AUDIO_BACKEND" >/dev/null 2>&1 || true
-          else
-            log_warn "[$case_name] pw-record rc=$rc and wpctl not responsive - attempting bootstrap and retrying once"
-            audio_record_bootstrap_backend_if_needed >/dev/null 2>&1 || true
-            audio_record_set_recovered_backend_management
-          fi
-
-          audio_record_set_capture_paths "$case_name"
-          audio_record_reset_capture_output
-          log_info "[$case_name] retry: pw-record -v \"$record_user_out\""
-          audio_run_with_timeout_as_test_user --require-session "$effective_timeout" pw-record -v "$record_user_out" >> "$logf" 2>&1
-          rc=$?
-          bytes="$(audio_record_capture_size)"
-        fi
-
-        # A non-trivial file skips compatibility fallbacks. Content and
-        # recorder status are validated after the backend flow completes.
-        if [ "${bytes:-0}" -gt 1024 ] 2>/dev/null; then
-          :
-        else
-          # Only if output is tiny/empty do we try a virtual PCM
-          if command -v arecord >/dev/null 2>&1; then
-            pcm="$(audio_run_helper_as_test_user alsa_pick_virtual_pcm || true)"
-            if [ -n "$pcm" ]; then
-              secs_int="$(audio_parse_secs "$secs" 2>/dev/null || echo 0)"
-              [ -z "$secs_int" ] && secs_int=0
-              audio_record_reset_capture_output
-              log_info "[$case_name] fallback: arecord -D $pcm -f S16_LE -r 48000 -c 2 -d $secs_int \"$record_user_out\""
-              audio_run_with_timeout_as_test_user "$effective_timeout" \
-                arecord -D "$pcm" -f S16_LE -r 48000 -c 2 -d "$secs_int" "$record_user_out" >> "$logf" 2>&1
-              rc=$?
-              bytes="$(audio_record_capture_size)"
-              validation_rate=48000
-              validation_channels=2
-            fi
-          fi
-
-          # As a last resort, retry pw-record with --target (only if we have a source id)
-          retry_target=0
-          if [ "$rc" -ne 0 ]; then
-            retry_target=1
-          else
-            if [ "${bytes:-0}" -le 1024 ] 2>/dev/null; then
-              retry_target=1
-            fi
-          fi
-          if [ "$retry_target" -eq 1 ] && [ -n "$SRC_ID" ]; then
-            audio_record_reset_capture_output
-            log_info "[$case_name] exec: pw-record -v --target \"$SRC_ID\" \"$record_user_out\""
-            audio_run_with_timeout_as_test_user --require-session "$effective_timeout" pw-record -v --target "$SRC_ID" "$record_user_out" >> "$logf" 2>&1
-            rc=$?
-            bytes="$(audio_record_capture_size)"
-          fi
-        fi
-
       else
         if [ "$AUDIO_BACKEND" = "alsa" ]; then
           secs_int="$(audio_parse_secs "$secs" 2>/dev/null || echo 0)"
@@ -1887,6 +1763,7 @@ else
         ok_runs=$((ok_runs + 1))
       else
         log_fail "[$case_name] loop $i FAILED (rc=$rc, ${last_elapsed}s, bytes=${bytes:-0}, validation='${AUDIO_WAV_VALIDATION_SUMMARY:-unavailable}') - see $logf"
+        audio_record_failure_diagnostics "$logf" "$AUDIO_BACKEND" "$SRC_ID"
       fi
 
       i=$((i + 1))
