@@ -1,14 +1,66 @@
 #!/bin/sh
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
-# SPDX-License-Identifier: BSD-3-Clause# Shared libcamera helpers
+# SPDX-License-Identifier: BSD-3-Clause
+# Shared libcamera helpers
 # ---------- Sensor & index helpers ----------
 
-# Return the number of sensors visible in `cam -l`
+# libcam_list_indices_from_file <cam-list-output>
+# List camera indices from retained `cam -l` output.
+libcam_list_indices_from_file() {
+    libcam_indices_file="$1"
+    if [ ! -r "$libcam_indices_file" ]; then
+        printf '%s\n' "libcamera list output is not readable: $libcam_indices_file" >&2
+        return 1
+    fi
+
+    awk '
+        /^[[:space:]]*Available cameras:/ {
+            in_list=1
+            next
+        }
+        !in_list {
+            next
+        }
+        /^[[:space:]]*\[[0-9]+\]/ {
+            index_value=$0
+            sub(/^[[:space:]]*\[/, "", index_value)
+            sub(/\].*$/, "", index_value)
+            if (!seen[index_value]++) {
+                print index_value
+            }
+            next
+        }
+        /^[[:space:]]*[0-9]+:[[:space:]]/ {
+            index_value=$0
+            sub(/^[[:space:]]*/, "", index_value)
+            sub(/:.*/, "", index_value)
+            if (!seen[index_value]++) {
+                print index_value
+            }
+        }
+    ' "$libcam_indices_file"
+}
+
+# libcam_count_sensors_from_file <cam-list-output>
+# Return the number of cameras in retained `cam -l` output.
+libcam_count_sensors_from_file() {
+    libcam_count_file="$1"
+    if [ ! -r "$libcam_count_file" ]; then
+        printf '%s\n' "libcamera list output is not readable: $libcam_count_file" >&2
+        return 1
+    fi
+
+    libcam_list_indices_from_file "$libcam_count_file" |
+        awk 'NF { count++ } END { print count + 0 }'
+}
+
+# Return the number of sensors visible in `cam -l`.
 libcam_list_sensors_count() {
     out="$(cam -l 2>&1 || true)"
     printf '%s\n' "$out" | awk '
         BEGIN { c=0; inlist=0 }
-        /^Available cameras:/ { inlist=1; next }
+        /^[[:space:]]*Available cameras:/ { inlist=1; next }
+        /^[[:space:]]*\[[0-9]+\]/ { if (inlist) c++ }
         /^[[:space:]]*[0-9]+:[[:space:]]/ { if (inlist) c++ }
         END { print c+0 }
     '
@@ -28,7 +80,12 @@ libcam_list_indices() {
 # Outputs space-separated indices to stdout.
 libcam_resolve_indices() {
     want="${1:-auto}"
-    all="$(libcam_list_indices | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g;s/^ //;s/ $//')"
+    list_file="${2:-}"
+    if [ -n "$list_file" ]; then
+        all="$(libcam_list_indices_from_file "$list_file" | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g;s/^ //;s/ $//')"
+    else
+        all="$(libcam_list_indices | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g;s/^ //;s/ $//')"
+    fi
     [ -n "$all" ] || { printf '\n'; return 1; }
 
     case "$want" in
@@ -49,6 +106,50 @@ libcam_resolve_indices() {
             printf '%s\n' "$(printf '%s' "$good" | sed 's/^ //')"
             ;;
     esac
+}
+
+# List enabled Qualcomm libcamera pipeline nodes from the runtime device tree.
+libcam_list_enabled_pipeline_nodes() {
+    dt_list_compatible_nodes \
+        '(^|[[:space:]])qcom,[^[:space:]]*camss([[:space:]]|$)' \
+        regex
+}
+
+# libcam_disable_ipa_config <config-path> <backup-path>
+# Moves one IPA config aside for a test-owned temporary workaround.
+libcam_disable_ipa_config() {
+    libcam_ipa_config="$1"
+    libcam_ipa_backup="$2"
+
+    [ -f "$libcam_ipa_config" ] || return 2
+    if [ -e "$libcam_ipa_backup" ]; then
+        log_warn "IPA config backup already exists, leaving both files unchanged: $libcam_ipa_backup"
+        return 1
+    fi
+
+    if mv "$libcam_ipa_config" "$libcam_ipa_backup"; then
+        log_info "Temporarily moved IPA config to $libcam_ipa_backup"
+        return 0
+    fi
+
+    log_warn "Failed to move IPA config $libcam_ipa_config"
+    return 1
+}
+
+# libcam_restore_ipa_config <config-path> <backup-path>
+# Restores an IPA config moved by libcam_disable_ipa_config.
+libcam_restore_ipa_config() {
+    libcam_ipa_config="$1"
+    libcam_ipa_backup="$2"
+
+    [ -f "$libcam_ipa_backup" ] || return 0
+    if mv "$libcam_ipa_backup" "$libcam_ipa_config"; then
+        log_info "Restored IPA config $libcam_ipa_config"
+        return 0
+    fi
+
+    log_warn "Failed to restore IPA config from $libcam_ipa_backup"
+    return 1
 }
 
 # Pick first camera index (helper used by older paths)
@@ -558,8 +659,78 @@ camx_opkg_list_camx() {
 }
 
 # -----------------------------------------------------------------------------
-# DT camera nodes sample using fdtdump
+# Runtime DT and camera overlay evidence
 # -----------------------------------------------------------------------------
+# camx_dump_runtime_dts <output-dts> <warnings-log>
+# Decodes the active runtime device tree from the resolved filesystem root.
+camx_dump_runtime_dts() {
+    runtime_dts_output="$1"
+    runtime_dts_warnings="$2"
+    runtime_dts_root=""
+
+    command -v dtc >/dev/null 2>&1 || return 2
+    runtime_dts_root="$(dt_runtime_root 2>/dev/null || true)"
+    [ -n "$runtime_dts_root" ] || return 3
+
+    : >"$runtime_dts_warnings"
+    if ! dtc \
+        -I fs \
+        -O dts \
+        -o "$runtime_dts_output" \
+        "$runtime_dts_root" \
+        2>"$runtime_dts_warnings"; then
+        return 1
+    fi
+
+    [ -s "$runtime_dts_output" ]
+}
+
+# camx_extract_runtime_dts_evidence <dts> <camera-log> <sensor-log>
+# Extracts line-numbered camera and sensor matches from a decoded runtime DTS.
+camx_extract_runtime_dts_evidence() {
+    runtime_dts_input="$1"
+    runtime_camera_log="$2"
+    runtime_sensor_log="$3"
+
+    [ -r "$runtime_dts_input" ] || return 1
+
+    if ! grep -nEi \
+        'camera|cam[-_@]|qcom,cam|cci(@|[-_])|csiphy' \
+        "$runtime_dts_input" >"$runtime_camera_log"; then
+        : >"$runtime_camera_log"
+    fi
+
+    if ! grep -nEi \
+        'imx[0-9]+|ov[0-9]+|ar[0-9]+|cam[_-]sensor|cam[_-]gmsl' \
+        "$runtime_dts_input" >"$runtime_sensor_log"; then
+        : >"$runtime_sensor_log"
+    fi
+}
+
+# camx_list_enabled_runtime_nodes
+# Lists enabled downstream CamX nodes from the active runtime DT.
+camx_list_enabled_runtime_nodes() {
+    {
+        dt_list_compatible_nodes \
+            '(^|[[:space:]])qcom,cam[-_][^[:space:]]+([[:space:]]|$)' \
+            regex 2>/dev/null || true
+        dt_list_compatible_nodes \
+            '(^|[[:space:]])qcom,camera[^[:space:]]*([[:space:]]|$)' \
+            regex 2>/dev/null || true
+    } | sort -u
+}
+
+# camx_list_enabled_sensor_nodes
+# Lists enabled physical or CamX sensor nodes from the active runtime DT.
+camx_list_enabled_sensor_nodes() {
+    {
+        dt_list_compatible_nodes \
+            '(^|[[:space:]])(sony,imx[^[:space:]]*|ovti,ov[^[:space:]]*|onsemi,ar[^[:space:]]*|onnn,ar[^[:space:]]*|aptina,ar[^[:space:]]*|qcom,cam[-_](sensor|gmsl[-_]sensor|gmsl[-_]deserializer))([[:space:]]|$)' \
+            regex 2>/dev/null || true
+    } | sort -u
+}
+
+# DT camera nodes sample using fdtdump.
 camx_fdtdump_has_cam_nodes() {
   command -v fdtdump >/dev/null 2>&1 || return 2
   [ -r /sys/firmware/fdt ] || return 1
@@ -840,7 +1011,7 @@ nhx_validate_dumps_and_checksums() {
   # Optional drift check: compare against previous run (same log dir)
   if [ -f "$prevsum" ]; then
     if ! diff -q "$prevsum" "$sumfile" >/dev/null 2>&1; then
-      log_warn "Dump checksums changed vs previous run ($prevsum). This may be expected; keeping as WARN."
+      log_warn "Dump checksums changed vs previous run ($prevsum). This may be expected, keeping as WARN."
     else
       log_info "Dump checksums match previous run ($prevsum)"
     fi
