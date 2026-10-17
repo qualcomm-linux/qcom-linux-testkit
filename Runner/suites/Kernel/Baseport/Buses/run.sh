@@ -426,14 +426,21 @@ if ! CHECK_DEPS_RECOVER=0 CHECK_DEPS_NO_EXIT=1 check_dependencies \
     test_result_finish "SKIP" "$TESTNAME SKIP: required base utilities are unavailable"
 fi
 
-i2c_collect_runtime_inventory "$RESULT_DIR"
+i2c_collect_runtime_inventory "$RESULT_DIR" optional-camera
 i2c_inventory_status=$?
+
+if [ "$I2C_RUNTIME_OPTIONAL_CAMERA_COUNT" -gt 0 ]; then
+    while IFS="$(printf '\t')" read -r i2c_camera_client i2c_camera_name i2c_camera_node; do
+        [ -n "$i2c_camera_client" ] || continue
+        test_result_record "SKIP" "Optional camera sensor unavailable: client=$i2c_camera_client name=$i2c_camera_name node=$i2c_camera_node, capture validation belongs to Libcamera_cam or Camera_NHX. Any captured driver probe errors still fail kernel-health validation"
+    done <"$RESULT_DIR/i2c_optional_camera_clients.tsv"
+fi
 
 case "$i2c_inventory_status" in
     0)
         test_result_record \
             "PASS" \
-            "I2C runtime is healthy: controllers=$I2C_RUNTIME_CONTROLLER_COUNT adapters=$I2C_RUNTIME_ADAPTER_COUNT clients=$I2C_RUNTIME_CLIENT_COUNT bound_clients=$I2C_RUNTIME_BOUND_CLIENT_COUNT"
+            "I2C bus and required-client runtime checks passed: controllers=$I2C_RUNTIME_CONTROLLER_COUNT adapters=$I2C_RUNTIME_ADAPTER_COUNT clients=$I2C_RUNTIME_CLIENT_COUNT bound_clients=$I2C_RUNTIME_BOUND_CLIENT_COUNT optional_camera_skipped=$I2C_RUNTIME_OPTIONAL_CAMERA_COUNT"
         ;;
     1)
         test_result_record \
@@ -717,9 +724,45 @@ if [ ! -s "$RESULT_DIR/dmesg_snapshot.log" ]; then
 elif [ "$i2c_dmesg_status" -eq 0 ] && [ "$I2C_DMESG_STRICT" -eq 1 ]; then
     test_result_record "FAIL" "I2C-related kernel errors were found in $RESULT_DIR/dmesg_errors.log"
 elif [ "$i2c_dmesg_status" -eq 0 ]; then
-    test_result_record "SKIP" "I2C kernel errors were retained as advisory evidence, set I2C_DMESG_STRICT=1 to gate them"
+    test_result_record "SKIP" "Controller scan findings are retained, explicit driver errors are gated separately regardless of I2C_DMESG_STRICT"
 else
-    test_result_record "PASS" "No non-benign I2C controller errors were found in the captured kernel log"
+    test_result_record "PASS" "Controller-only kernel scan found no non-benign errors, client binding is validated separately"
+fi
+
+if i2c_collect_client_dmesg "$RESULT_DIR"; then
+    log_info "I2C client kernel evidence: $RESULT_DIR/i2c_client_dmesg.log"
+    if [ "$i2c_inventory_status" -eq 1 ] || [ "$I2C_RUNTIME_OPTIONAL_CAMERA_COUNT" -gt 0 ]; then
+        if [ -s "$RESULT_DIR/i2c_client_dmesg.log" ]; then
+            log_file_with_label "I2C-CLIENT-DMESG" "$RESULT_DIR/i2c_client_dmesg.log" 120
+        else
+            log_warn "No matching client messages remain in the kernel snapshot, inspect i2c_clients.tsv and obtain the boot probe log"
+        fi
+    fi
+else
+    log_warn "I2C client kernel evidence is unavailable, inspect i2c_clients.tsv and dmesg_access.log"
+fi
+
+i2c_collect_driver_errors "$RESULT_DIR"
+i2c_driver_error_status=$?
+case "$i2c_driver_error_status" in
+    0)
+        log_file_with_label "I2C-DRIVER-ERROR" "$RESULT_DIR/i2c_driver_errors.log" 120
+        test_result_record "FAIL" "I2C controller or client driver errors were captured, including any probe or firmware-load failures. Resolve the reported driver, firmware or setup issue, artifact=$RESULT_DIR/i2c_driver_errors.log"
+        ;;
+    1)
+        log_info "No explicit I2C controller or client driver errors were found in the retained kernel snapshot"
+        ;;
+    2)
+        log_warn "I2C driver-error validation is unavailable without a kernel snapshot, no clean driver-health result is claimed"
+        ;;
+    *)
+        test_result_record "FAIL" "I2C driver-error evidence could not be collected, inspect inventory artifacts and output permissions in $RESULT_DIR"
+        ;;
+esac
+
+if [ "$i2c_inventory_status" -eq 1 ]; then
+    log_warn "Inspect the reported controller or client probe failure and its driver, firmware, power and wiring prerequisites"
+    log_warn "If a DT-declared peripheral is not fitted, disable its node or optional overlay in the setup configuration before rerunning, missing hardware cannot be inferred from a probe error alone"
 fi
 
 test_result_finish
