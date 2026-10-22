@@ -1,0 +1,15 @@
+metadata:
+  name: camera_nhx_setup
+  format: "Lava-Test Test Definition 1.0"
+  description: "Read-only NHX runtime readiness, not camera capture validation"
+  os:
+    - yocto
+  scope:
+    - functional
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Multimedia/Camera/Camera_NHX
+    - ./run.sh --check-setup
+    - $REPO_PATH/Runner/utils/send-to-lava.sh Camera_NHX_Setup.res

@@ -7,10 +7,8 @@ This repository contains a **POSIX shell** test harness for exercising `libcamer
 ## What this test does
 
 1. **Discovers repo context** (finds `init_env`, sources `functestlib.sh`, and the camera helpers `Runner/utils/camera/lib_camera.sh`).  
-2. **Checks DT readiness** using `dt_confirm_node_or_compatible` for:
-   - Sensor compatible(s), e.g. `sony,imx577`
-   - ISP / camera blocks, e.g. `isp`, `cam`, `camss`
-3. **Lists available cameras** with `cam -l` (warning/error lines are tolerated when camera listing succeeds).
+2. **Checks DT applicability** by discovering enabled Qualcomm CAMSS pipeline nodes in the runtime device tree. Disabled nodes from inactive overlays are ignored.
+3. **Lists available cameras** with `cam -l`, retains the complete output, and accepts both `[0] ...` and `0: ...` camera entry formats.
 4. **Captures frames** with `cam` for one or multiple indices, storing artifacts per camera under `OUT_DIR`.
 5. **Validates output**: sequence continuity, content sanity (PPM/BIN), duplicate detection, and log scanning with noise suppression.
 6. **Summarizes per‑camera PASS/FAIL**, with overall suite verdict and exit code.
@@ -19,18 +17,17 @@ This repository contains a **POSIX shell** test harness for exercising `libcamer
 
 ## Requirements
 
-- `cam` (from the `libcamera-tools` package on Debian and Ubuntu)
+- Image-provided `cam` utility from libcamera
 - Standard tools: `awk`, `sed`, `grep`, `sort`, `cut`, `tr`, `wc`, `find`, `stat`, `head`, `tail`, `dd`
 - Optional: `sha256sum` or `md5sum` (for duplicate BIN detection)
 - **BusyBox compatibility**:
   - We avoid `find -printf` and `od -A` options (not available on BusyBox).
 
-When `cam` is missing on an APT-based target, the shared package provider
-refreshes package metadata, installs `libcamera-tools`, and verifies the
-command before capture starts. Other images continue to use their configured
-provider or image-provided command and report the missing dependency cleanly.
+The test does not install packages at runtime. If `cam` or another required
+utility is absent from the image, it reports a clean SKIP with the missing
+prerequisite.
 
-> The harness tolerates noisy `cam -l` / `cam -I` output (WARN/ERROR lines). It only requires that cameras and/or stream info are ultimately reported.
+> The harness tolerates noisy `cam -l` / `cam -I` output when cameras and stream information are ultimately reported. A nonzero `cam -l` status or zero enumerated cameras is a failure when an enabled CAMSS pipeline is present.
 
 ---
 
@@ -80,49 +77,51 @@ Examples:
 
 ## Device‑tree checks
 
-The runner verifies DT node presence **before** capture:
+The runner determines applicability **before** capture by finding enabled
+Qualcomm compatibles containing `camss` in the live device tree. The shared
+device-tree helper resolves runtime root symlinks, searches both standard roots,
+and ignores nodes whose status is `disabled`, `fail`, or `failed`.
 
-- First it looks for known sensor compatibles (e.g. `sony,imx577`).  
-- If the sensor isn’t found, it looks for ISP / camera nodes (e.g. `isp`, `cam`, `camss`).  
-- Matching entries are printed cleanly (name, path, compatible).
-
-If neither sensor nor ISP/camera blocks are found, the test **SKIPs** with a message:
-```
-SKIP – No ISP/camera node/compatible found in DT
-```
-
-> On large DTs, this scan can take time. The log prints “Verifying the availability of DT nodes, this process may take some time.”
+- No enabled CAMSS pipeline: **SKIP** because the upstream libcamera path is not applicable to the active image or overlay.
+- Enabled CAMSS pipeline and `cam -l` fails: **FAIL** and retain the command output.
+- Enabled CAMSS pipeline and `cam -l` reports zero cameras: **FAIL** because the image needs matching libcamera pipeline-handler and sensor support.
 
 ---
 
 ## IPA file workaround (simple pipeline)
 
-On some builds, allocation may fail if `uncalibrated.yaml` exists for the `simple` IPA. The runner guards this by **renaming** it pre‑run:
+On some builds, allocation may fail if `uncalibrated.yaml` exists for the
+`simple` IPA. The runner temporarily moves it to a test-owned backup path:
 
 ```sh
 if [ -f /usr/share/libcamera/ipa/simple/uncalibrated.yaml ]; then
   mv /usr/share/libcamera/ipa/simple/uncalibrated.yaml \
-     /usr/share/libcamera/ipa/simple/uncalibrated.yaml.bk
+     /usr/share/libcamera/ipa/simple/uncalibrated.yaml.qcom-testkit-backup
 fi
 ```
 
-It’s restored automatically at the end (if it was present).
+The EXIT trap restores only the file moved by the current test run. If the
+backup path already exists, the test leaves both files unchanged.
 
 ---
 
 ## Output & artifacts
 
+Directly under `OUT_DIR`:
+
+- `cam-list-<ts>.log` – retained initial `cam -l` output used for applicability validation and index selection
+- `summary.txt` – per‑camera PASS/FAIL
+
 Per‑camera subfolder under `OUT_DIR`:
+
 - `cam-run-<ts>-camX.log` – raw cam output
 - `cam-info-<ts>-camX.log` – `cam -l` and `cam -I` info
 - `frame-...` files (`.bin` or `.ppm`) – captured frames
 - `.file_seq_map.txt`, `.bytesused.txt`, etc. – validation sidecar files
-- `summary.txt` – per‑camera PASS/FAIL
 
-Console prints a **per‑camera** and **overall** summary. Exit codes:
-- `0` PASS
-- `1` FAIL
-- `2` SKIP
+Console prints a **per‑camera** and **overall** summary.
+The `.res` file is the authoritative result. The runner exits `0` after
+publishing PASS, FAIL, or SKIP so LAVA can consume that result.
 
 ---
 
@@ -145,15 +144,11 @@ You can relax strictness with `--no-strict` (skips contiguous sequence enforceme
 
 ---
 
-## Environment overrides
+## Repository integration
 
-- `INIT_ENV`: If set, the runner uses it instead of walking upward to find `init_env`.
-- `LIBCAM_PATH`: If set, the runner sources this path for `lib_camera.sh` helper functions.
-- Otherwise, the runner searches typical repo locations:
-  - `Runner/utils/camera/lib_camera.sh`
-  - `Runner/utils/lib_camera.sh`
-  - `utils/camera/lib_camera.sh`
-  - `utils/lib_camera.sh`
+The runner locates `init_env` by walking upward from its own directory and
+loads `Runner/utils/camera/lib_camera.sh` through the repository `TOOLS` path.
+No environment override is required.
 
 ---
 
@@ -161,7 +156,8 @@ You can relax strictness with `--no-strict` (skips contiguous sequence enforceme
 
 - **`cam -l` prints WARN/ERROR but lists cameras**: This is tolerated. The runner parses indices from the “Available cameras” section.
 - **BusyBox `find`/`od` compatibility**: We avoid GNU-only flags; if you see issues, ensure BusyBox provides the required applets mentioned above.
-- **No DT matches**: Ensure your DT exposes sensor compatibles (e.g. `sony,imx577`) or ISP/camera nodes (`isp`, `cam`, `camss`). On dev boards, DT overlays may need to be applied.
+- **No enabled CAMSS node**: Ensure the active runtime DT selects the upstream CAMSS image or overlay. Camera nodes from disabled overlays do not make this test applicable.
+- **Enabled CAMSS but zero cameras**: Inspect `cam-list-<ts>.log` and provide a libcamera build with the matching Qualcomm pipeline handler and sensor support.
 - **Content flagged “near‑constant”**: This typically indicates all-same bytes in sampled regions. Verify the lens cap, sensor mode, or try `--args` with a smaller resolution/role to confirm live changes.
 - **IPA config missing**: See the **IPA file workaround** above.
 

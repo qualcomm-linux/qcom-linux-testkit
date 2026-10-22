@@ -1820,6 +1820,121 @@ pkg_ensure_qualcomm_rpm_repository() {
     return 0
 }
 
+# pkg_prepare_camx_rpm_repositories log_directory
+# Prepare the CentOS 10 CAMX repositories only for explicit NHX overlay use.
+# Reuse EPEL/Qualcomm setup, then preserve existing CLO definitions or create
+# missing definitions in a separate managed file. Never overwrite or enable
+# an administrator's disabled repository. Refresh metadata even when all IDs
+# exist, since the shared update marker may predate CLO configuration.
+# Return 0 when ready or not CentOS, 1 on configuration/repository failure.
+# Writes the managed repository file and package metadata, logs to stdout and
+# the supplied existing log directory. Repository queries are bounded.
+pkg_prepare_camx_rpm_repositories() {
+    pccr_logs="$1"
+    pccr_os="$(pkg_detect_os_id)"
+    [ "$pccr_os" = centos ] || return 0
+    pccr_version="$(pkg_os_release_value VERSION_ID)"
+    pccr_arch="$(uname -m)"
+    if [ "${pccr_version%%.*}" != 10 ] || [ "$pccr_arch" != aarch64 ]; then
+        pkg_log_fail "CAMX CLO repository setup supports CentOS 10 aarch64, detected version=$pccr_version architecture=$pccr_arch"
+        return 1
+    fi
+    pkg_prepare_qualcomm_rpm_overlay_repositories || return 1
+    pccr_tool="$(pkg_rpm_tool)"
+    [ -n "$pccr_tool" ] || return 1
+    pccr_repo_log="$pccr_logs/camx-enabled-repositories.log"
+    if ! run_with_managed_timeout 60 "$pccr_logs" camx-repolist \
+        "$pccr_tool" -C repolist >"$pccr_repo_log" 2>&1; then
+        cat "$pccr_repo_log"
+        pkg_log_fail "Could not inspect enabled CAMX repositories, no CLO configuration changed. Inspect $pccr_repo_log"
+        return 1
+    fi
+    case "$PKG_QCOM_RPM_REPO_FILE" in
+        */*)
+            pccr_directory=${PKG_QCOM_RPM_REPO_FILE%/*}
+            ;;
+        *)
+            pccr_directory=.
+            ;;
+    esac
+    pccr_file="$pccr_directory/qcom-testkit-camx-clo.repo"
+    pccr_missing=""
+    for pccr_id in clo-rpm-aarch64 clo-rpm-noarch; do
+        if awk '{print $1}' "$pccr_repo_log" | grep -Fxq "$pccr_id"; then
+            pkg_log_info "Preserving enabled CAMX repository $pccr_id"
+            continue
+        fi
+        for pccr_existing in "$pccr_directory"/*.repo; do
+            [ -f "$pccr_existing" ] || continue
+            if grep -Eq "^[[:space:]]*\\[$pccr_id\\][[:space:]]*([#;].*)?$" "$pccr_existing"; then
+                pkg_log_fail "CAMX repository $pccr_id is defined but not enabled or readable by DNF. Correct $pccr_existing before retrying, no existing configuration was overwritten"
+                return 1
+            fi
+        done
+        pccr_missing="$pccr_missing $pccr_id"
+    done
+    if [ -n "$pccr_missing" ]; then
+        if [ -e "$pccr_file" ] || [ -L "$pccr_file" ]; then
+            pkg_log_fail "Refusing to overwrite existing incomplete CAMX repository file $pccr_file"
+            return 1
+        fi
+        if ! pkg_can_install; then
+            pkg_log_fail "CAMX repository preparation requires root and enabled package recovery"
+            return 1
+        fi
+        pccr_temp="$(mktemp "${TMPDIR:-/tmp}/camx-clo-repositories.XXXXXX")" || return 1
+        for pccr_id in $pccr_missing; do
+            pccr_type=${pccr_id#clo-rpm-}
+            if ! printf '%s\n' \
+                "[$pccr_id]" \
+                "name=Qualcomm Linux CLO RPM Repository - CentOS Stream 10 ($pccr_type)" \
+                "baseurl=https://artifacts.codelinaro.org/artifactory/qli-rpm/centos/10/os/$pccr_type/" \
+                'enabled=1' \
+                'gpgcheck=0' \
+                'priority=10' \
+                '' >>"$pccr_temp"; then
+                rm -f "$pccr_temp"
+                return 1
+            fi
+        done
+        if ! install -m 0644 "$pccr_temp" "$pccr_file"; then
+            rm -f "$pccr_temp"
+            pkg_log_fail "Could not create CAMX CLO repository file $pccr_file"
+            return 1
+        fi
+        rm -f "$pccr_temp"
+        pkg_log_info "Created CAMX CLO repository definitions in $pccr_file"
+    fi
+    if ! run_with_managed_timeout 60 "$pccr_logs" camx-repolist \
+        "$pccr_tool" -C repolist >"$pccr_repo_log" 2>&1; then
+        cat "$pccr_repo_log"
+        pkg_log_fail "Could not verify enabled CAMX repositories, inspect $pccr_repo_log"
+        return 1
+    fi
+    for pccr_id in clo-rpm-aarch64 clo-rpm-noarch; do
+        if ! awk '{print $1}' "$pccr_repo_log" | grep -Fxq "$pccr_id"; then
+            pkg_log_fail "CAMX CLO repository is still unavailable: $pccr_id, inspect $pccr_directory"
+            return 1
+        fi
+    done
+    rm -f "$PKG_RPM_UPDATED_MARK" || return 1
+    pkg_rpm_update || return 1
+    for pccr_id in clo-rpm-aarch64 clo-rpm-noarch; do
+        pccr_list_log="$pccr_logs/camx-$pccr_id-packages.log"
+        if ! run_with_managed_timeout 120 "$pccr_logs" "camx-$pccr_id-list" \
+            "$pccr_tool" --refresh --disablerepo='*' --enablerepo="$pccr_id" \
+            --setopt="$pccr_id.skip_if_unavailable=False" \
+            repo-pkgs "$pccr_id" list >"$pccr_list_log" 2>&1; then
+            cat "$pccr_list_log"
+            pkg_log_fail "CAMX repository package listing failed: $pccr_id, inspect $pccr_list_log"
+            return 1
+        fi
+        pkg_log_info "CAMX repository package listing retained in $pccr_list_log"
+    done
+    pkg_log_pass "CAMX RPM repositories are ready, EPEL, Qualcomm and both CLO repositories verified"
+    return 0
+}
+
 # Refresh rpm metadata.
 pkg_rpm_update() {
     rpm_tool="$(pkg_rpm_tool || true)"

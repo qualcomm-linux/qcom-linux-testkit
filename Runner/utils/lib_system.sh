@@ -225,6 +225,38 @@ efi_mount_exists() {
     ' /proc/mounts 2>/dev/null
 }
 
+# efi_ensure_mounted log_file
+# Mount efivarfs on an EFI boot when absent, preserving an existing ro/rw
+# mount. A mount created for overlay preparation is intentionally left mounted.
+# Do not call from read-only setup validation. Return 0 when mounted as
+# efivarfs, 2 when EFI runtime is absent, 1 on mount/type/verification failure.
+efi_ensure_mounted() {
+    eem_log="$1"
+    if [ ! -d "$EFIVARFS_PATH" ]; then
+        log_warn "EFI runtime directory is unavailable: $EFIVARFS_PATH"
+        return 2
+    fi
+    if ! efi_mount_exists; then
+        log_info "Mounting efivarfs at $EFIVARFS_PATH for overlay preparation"
+        if ! mount -t efivarfs none "$EFIVARFS_PATH" >"$eem_log" 2>&1; then
+            system_log_file_excerpt efivarfs-mount "$eem_log" 40
+            log_fail "Could not mount efivarfs, check EFI runtime support and mount permissions"
+            return 1
+        fi
+    fi
+    if command -v partition_get_mount_fstype >/dev/null 2>&1; then
+        eem_type=$(partition_get_mount_fstype "$EFIVARFS_PATH")
+    else
+        eem_type=$(awk -v p="$EFIVARFS_PATH" '$2 == p { print $3; exit }' /proc/mounts)
+    fi
+    if [ "$eem_type" != efivarfs ]; then
+        log_fail "Expected efivarfs at $EFIVARFS_PATH, detected ${eem_type:-no mounted filesystem}"
+        return 1
+    fi
+    log_info "EFI runtime filesystem is ready at $EFIVARFS_PATH"
+    return 0
+}
+
 # Return efivarfs mount options.
 # Prefer partition_get_mount_options from functestlib.sh when available.
 efi_mount_options() {
@@ -348,6 +380,8 @@ efi_variable_list_contains() {
 #   $2 - file that receives efivar list output
 # Diagnostic output is written to stderr so command-substitution callers only
 # receive the variable name.
+# Return 0 for exactly one match, 2 for absence after a successful query,
+# or 1 for command failure, invalid arguments or ambiguous matches.
 efi_find_variable_by_name() {
     efvbn_name="$1"
     efvbn_log_file="$2"
@@ -376,6 +410,10 @@ efi_find_variable_by_name() {
     ' "$efvbn_log_file")"
     efvbn_count="$(printf '%s\n' "$efvbn_matches" | awk 'NF { count++ } END { print count + 0 }')"
 
+    if [ "$efvbn_count" -eq 0 ]; then
+        printf '%s\n' "EFI variable $efvbn_name is absent" >&2
+        return 2
+    fi
     if [ "$efvbn_count" -ne 1 ]; then
         printf '%s\n' "Expected one EFI variable named $efvbn_name, found $efvbn_count" >&2
         return 1
@@ -385,41 +423,73 @@ efi_find_variable_by_name() {
     return 0
 }
 
-# Return success when an EFI variable printout contains a text payload.
+# Compare a bounded EFI read with exact ASCII text or a complete overlay entry.
 # Args:
 #   $1 - EFI variable name in GUID-Name form
 #   $2 - expected text payload, without a trailing newline
 #   $3 - file that receives efivar print output
+#   $4 - optional exact (default) or csv-token comparison mode
+# Return 0 for a match (optional trailing NULs), 2 for a readable different
+# payload, or 1 for read/parse failure. Retain raw diagnostics, never write EFI.
+# csv-token validates a comma-separated overlay-name list and prints that list
+# on both match and mismatch. Exact mode prints no data. Diagnostics use stderr.
 efi_text_variable_matches() {
     etvm_var_name="$1"
     etvm_value="$2"
     etvm_log_file="$3"
+    etvm_mode="${4:-exact}"
     etvm_data_file=""
     etvm_expected_bytes=""
-    etvm_expected_pattern=""
+    etvm_actual_bytes=""
 
     if [ -z "$etvm_var_name" ] || [ -z "$etvm_value" ] || [ -z "$etvm_log_file" ]; then
-        log_warn "efi_text_variable_matches requires variable name, value, and log file"
+        log_warn "efi_text_variable_matches requires variable name, value, and log file" >&2
         return 1
     fi
+    case "$etvm_mode" in
+        exact)
+            ;;
+        csv-token)
+            case "$etvm_value" in
+                *,*)
+                    log_warn "Invalid requested EFI overlay name: $etvm_value" >&2
+                    return 1
+                    ;;
+            esac
+            if ! printf '%s\n' "$etvm_value" | LC_ALL=C awk '
+                NR != 1 || $0 !~ /^[!-~]+$/ { bad=1 }
+                END { exit (bad || NR != 1) }
+            '; then
+                log_warn "Invalid requested EFI overlay name: $etvm_value" >&2
+                return 1
+            fi
+            ;;
+        *)
+            log_warn "Unsupported EFI comparison mode: $etvm_mode" >&2
+            return 1
+            ;;
+    esac
 
     if ! command -v efivar >/dev/null 2>&1; then
-        log_warn "efivar command is unavailable"
+        log_warn "efivar command is unavailable" >&2
         return 1
     fi
 
-    if ! efivar -n "$etvm_var_name" -p > "$etvm_log_file" 2>&1; then
+    etvm_log_directory=$(dirname "$etvm_log_file")
+    if ! run_with_managed_timeout 15 "$etvm_log_directory" efi-text-read \
+        efivar -n "$etvm_var_name" -p > "$etvm_log_file" 2>&1; then
+        log_warn "EFI variable read failed, inspect $etvm_log_file" >&2
         return 1
     fi
 
     etvm_data_file="$(mktemp "${TMPDIR:-/tmp}/efivar_payload.XXXXXX" 2>/dev/null || true)"
     if [ -z "$etvm_data_file" ]; then
-        log_warn "Could not create temporary EFI variable payload"
+        log_warn "Could not create temporary EFI variable payload" >&2
         return 1
     fi
 
     if ! printf '%s' "$etvm_value" > "$etvm_data_file"; then
-        log_warn "Could not write temporary EFI variable payload"
+        log_warn "Could not write temporary EFI variable payload" >&2
         rm -f "$etvm_data_file"
         return 1
     fi
@@ -428,19 +498,101 @@ efi_text_variable_matches() {
     rm -f "$etvm_data_file"
 
     if [ -z "$etvm_expected_bytes" ]; then
-        log_warn "Could not derive EFI variable payload bytes"
+        log_warn "Could not derive EFI variable payload bytes" >&2
         return 1
     fi
 
-    etvm_expected_pattern="$(printf '%s\n' "$etvm_expected_bytes" | sed 's/ /[[:space:]][[:space:]]*/g')"
-    grep -Eq "$etvm_expected_pattern" "$etvm_log_file"
+    etvm_expected_bytes=$(printf '%s' "$etvm_expected_bytes" | tr -d ' ')
+    etvm_actual_bytes=$(awk '
+        {
+            sub(/\r$/, "")
+        }
+        /^[[:space:]]*Value:[[:space:]]*$/ {
+            values++
+            next
+        }
+        values && NF {
+            if (length($1) != 8 || $1 !~ /^[[:xdigit:]]+$/) {
+                bad=1
+                next
+            }
+            rows++
+            for (field=2; field<=NF; field++) {
+                if (substr($field, 1, 1) == "|") {
+                    break
+                }
+                if (length($field) != 2 || $field !~ /^[[:xdigit:]]+$/) {
+                    bad=1
+                    break
+                }
+                bytes=bytes tolower($field)
+            }
+        }
+        END {
+            if (values != 1 || !rows || bytes == "" || bad) {
+                exit 1
+            }
+            print bytes
+        }
+    ' "$etvm_log_file") || {
+        log_warn "EFI variable payload could not be parsed, inspect $etvm_log_file" >&2
+        return 1
+    }
+    if [ "$etvm_mode" = csv-token ]; then
+        etvm_list=$(printf '%s\n' "$etvm_actual_bytes" | awk '
+            {
+                digits="0123456789abcdef"
+                for (offset=1; offset<=length($0); offset+=2) {
+                    pair=substr($0, offset, 2)
+                    if (pair == "00") {
+                        padding=1
+                        continue
+                    }
+                    if (padding) {
+                        exit 1
+                    }
+                    byte=(index(digits, substr(pair, 1, 1))-1)*16 + \
+                        index(digits, substr(pair, 2, 1))-1
+                    if (byte < 33 || byte > 126) {
+                        exit 1
+                    }
+                    character=sprintf("%c", byte)
+                    value=value character
+                }
+                if (value == "" || value ~ /^,|,$|,,/) {
+                    exit 1
+                }
+                print value
+            }
+        ') || {
+            log_warn "Invalid EFI overlay list, inspect $etvm_log_file" >&2
+            return 1
+        }
+        printf '%s\n' "$etvm_list"
+        case ",$etvm_list," in
+            *,"$etvm_value",*)
+                return 0
+                ;;
+        esac
+        return 2
+    fi
+    case "$etvm_actual_bytes" in
+        "$etvm_expected_bytes"*)
+            etvm_padding=${etvm_actual_bytes#"$etvm_expected_bytes"}
+            while [ "${etvm_padding#00}" != "$etvm_padding" ]; do
+                etvm_padding=${etvm_padding#00}
+            done
+            [ -z "$etvm_padding" ] && return 0
+            ;;
+    esac
+    return 2
 }
 
 # Write a text payload to an EFI variable and verify its printed byte value.
 # Args:
 #   $1 - EFI variable name in GUID-Name form
 #   $2 - text payload, written without a trailing newline
-#   $3 - file that receives efivar write and print output
+#   $3 - write log, with separate .readback log for verification
 # The caller is responsible for arranging efi_restore_efivarfs_ro during
 # cleanup when efi_try_remount_rw changes the mount state.
 efi_write_text_variable() {
@@ -476,7 +628,9 @@ efi_write_text_variable() {
         return 1
     fi
 
-    if ! efivar -n "$ewtv_var_name" -w -f "$ewtv_data_file" > "$ewtv_log_file" 2>&1; then
+    ewtv_log_directory=$(dirname "$ewtv_log_file")
+    if ! run_with_managed_timeout 15 "$ewtv_log_directory" efi-text-write \
+        efivar -n "$ewtv_var_name" -w -f "$ewtv_data_file" > "$ewtv_log_file" 2>&1; then
         log_warn "efivar write failed for $ewtv_var_name"
         rm -f "$ewtv_data_file"
         return 1
@@ -487,7 +641,7 @@ efi_write_text_variable() {
     if ! efi_text_variable_matches \
         "$ewtv_var_name" \
         "$ewtv_value" \
-        "$ewtv_log_file"; then
+        "$ewtv_log_file.readback"; then
         log_warn "EFI variable printout does not contain the requested payload"
         return 1
     fi
