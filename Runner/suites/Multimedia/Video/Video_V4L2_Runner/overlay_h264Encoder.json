@@ -19,7 +19,7 @@
                 "FrameRate": 10,
                 "StaticControls": [
                     {"Id": "Profile",          "Vtype": "String", "Value": "BASELINE"},
-                    {"Id": "Level",            "Vtype": "String", "Value": "5.0"},
+                    {"Id": "Level",            "Vtype": "String", "Value": "4.0"},
                     {"Id": "FrameRC",          "Vtype": "Int",    "Value": 1},
                     {"Id": "BitRate",          "Vtype": "Int",    "Value": 18000000},
                     {"Id": "BitRateMode",      "Vtype": "String", "Value": "CBR"},
