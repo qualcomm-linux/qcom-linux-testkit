@@ -1,0 +1,41 @@
+metadata:
+  name: resume-check
+  format: "Lava-Test Test Definition 1.0"
+  description: "Verify that the system resumed from suspend and that no errors were reported during the cycle. Suspending the system and the wakeup source are out of scope, this test only inspects what the kernel recorded and must run after the system is back up. Run Pre_Suspend_Check before the suspend to get a baseline, without it a reboot cannot be told apart from a resume."
+  os:
+    - linux
+  scope:
+    - functional
+    - power-management
+
+params:
+  # State file written by Pre_Suspend_Check. Values found there win over the
+  # baselines below.
+  STATE_FILE: "/tmp/pre-suspend-state.txt"
+  # Only used when the state file is missing. Successful cycles recorded in
+  # /sys/power/suspend_stats/success before the suspend under test. The
+  # counters cover the whole boot, so leave this at 0 for a single suspend
+  # and pass the previous value for later ones.
+  BASELINE_SUCCESS: "0"
+  # Only used when the state file is missing. Failed cycles recorded in
+  # /sys/power/suspend_stats/fail before the suspend under test.
+  BASELINE_FAIL: "0"
+  # Extended regexp of kernel messages treated as suspend/resume failures.
+  ERROR_PATTERN: "PM: [Ss]uspend[- ].*(fail|abort)|Freezing of tasks failed|did not resume|failed to suspend|Call Trace|BUG:|WARNING:|Oops|kernel panic"
+  # Suspend-to-RAM variant used for the cycle: default, s2idle, shallow or
+  # deep. When set, it is appended to the result name (e.g. Resume_Check_deep).
+  # Leave empty for a result named Resume_Check.
+  SUSPEND_MODE: ""
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/Resume_Check
+    - |
+      ./run.sh \
+        --state-file "${STATE_FILE}" \
+        --baseline-success "${BASELINE_SUCCESS}" \
+        --baseline-fail "${BASELINE_FAIL}" \
+        --error-pattern "${ERROR_PATTERN}" \
+        --suspend-mode "${SUSPEND_MODE}" || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh Resume_Check.res || true
