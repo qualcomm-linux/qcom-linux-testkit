@@ -1234,19 +1234,12 @@ EOF
     return 2
 }
 
-# fastrpc_domain_ready DOMAIN_ID
-# Validate domain readiness from parsed healthcheck data or remoteproc fallback evidence.
-# Input: numeric domain ID and optional FASTRPC_HEALTHCHECK_TSV. Output: no stdout contract.
-# Returns: 0 when ready, 1 when unhealthy, 2 when runtime evidence is absent.
-# Side effects: emits failure diagnostics.
-fastrpc_domain_ready() {
+# fastrpc_remoteproc_domain_ready DOMAIN_ID
+# Check exact-domain kernel registration without requiring a userspace test payload.
+# Input: numeric domain ID. Output: diagnostic logging, no data on stdout.
+# Returns 0 when running, 1 when unhealthy, 2 when absent. Read-only probes.
+fastrpc_remoteproc_domain_ready() {
     domain_id="$1"
-
-    if [ -s "${FASTRPC_HEALTHCHECK_TSV:-}" ]; then
-        fastrpc_healthcheck_domain_ready "$domain_id"
-        return $?
-    fi
-
     remoteproc_record="$(fastrpc_remoteproc_domain_state "$domain_id")"
     if [ -z "$remoteproc_record" ]; then
         log_fail "[FASTRPC-CAPABILITY] domain=$(domain_to_name "$domain_id") expected=runtime-remoteproc observed=not-found"
@@ -1263,6 +1256,161 @@ EOF
     fi
 
     return 0
+}
+
+# fastrpc_domain_ready DOMAIN_ID
+# Validate execution readiness from healthcheck or remoteproc fallback evidence.
+# Input: numeric domain ID and optional FASTRPC_HEALTHCHECK_TSV. Output: diagnostics.
+# Returns 0 when ready, 1 when unhealthy, 2 when absent. Read-only probes.
+fastrpc_domain_ready() {
+    if [ -s "${FASTRPC_HEALTHCHECK_TSV:-}" ]; then
+        fastrpc_healthcheck_domain_ready "$1"
+    else
+        fastrpc_remoteproc_domain_ready "$1"
+    fi
+}
+
+# fastrpc_registration_preflight RESULT_DIR
+# Check expected kernel registration before a missing test binary can cause SKIP.
+# Uses CLI/environment selection when explicit, otherwise enabled FastRPC DT labels.
+# This is a read-only kernel inventory check, not a healthcheck/client capability
+# substitute. The normal healthcheck-based execution path remains unchanged.
+# Inputs: result directory and existing selection globals. Output: diagnostics.
+# Returns 0 when expectations are met or absent, 1 on discovery/readiness failure.
+# Records only FAIL results, never functional PASS. Writes DT evidence in RESULT_DIR.
+fastrpc_registration_preflight() {
+    frp_result_dir="$1"
+    frp_failed=0
+
+    if [ -n "${CLI_DOMAIN_NAME:-}" ] || [ -n "${CLI_DOMAIN:-}" ] ||
+       [ -n "${FASTRPC_DOMAIN_NAME:-}" ] || [ -n "${FASTRPC_DOMAIN:-}" ] ||
+       [ "${DOMAIN_MODE:-all-supported}" = "single" ]; then
+        frp_domains=$(resolve_domains_to_test)
+        if [ -z "$frp_domains" ]; then
+            test_result_record "FAIL" "Explicit FastRPC domain selection is invalid, provide a supported --domain or --domain-name even when the test binary is absent"
+            return 1
+        fi
+    else
+        if ! frp_domains=$(fastrpc_capture_expected_domains "$frp_result_dir"); then
+            test_result_record "FAIL" "Cannot discover expected FastRPC domains before checking the test payload, check DT access and labels, evidence=$frp_result_dir"
+            return 1
+        fi
+    fi
+
+    for frp_domain in $frp_domains; do
+        if ! fastrpc_remoteproc_domain_ready "$frp_domain"; then
+            test_result_record "FAIL" "$(domain_to_name "$frp_domain") is expected but not registered and running, check remoteproc firmware and driver startup, missing fastrpc_test does not waive this requirement, evidence=$frp_result_dir"
+            frp_failed=1
+        elif ! fastrpc_domain_endpoint_available "$frp_domain"; then
+            frp_label=$(domain_to_endpoint_label "$frp_domain")
+            test_result_record "FAIL" "$(domain_to_name "$frp_domain") is expected but its FastRPC endpoint is absent, check driver registration for /dev/fastrpc-${frp_label} or /dev/fastrpc-${frp_label}-secure, evidence=$frp_result_dir"
+            frp_failed=1
+        else
+            log_info "[FASTRPC-PREFLIGHT] domain=$(domain_to_name "$frp_domain") kernel_registration=ready, functional validation still requires the test payload"
+        fi
+    done
+
+    [ "$frp_failed" -eq 0 ]
+}
+
+# fastrpc_dt_node_available NODE ROOT
+# Check NODE and every ancestor up to the resolved DT ROOT using OF status rules.
+# Inputs: absolute paths. No stdout. Returns 0 when enabled, 1 when disabled,
+# or 2 on unreadable status or a path outside ROOT. Diagnostics go to stderr.
+fastrpc_dt_node_available() {
+    fdna_node="$1"
+    fdna_root="$2"
+    case "$fdna_node/" in
+        "$fdna_root/"*)
+            ;;
+        *)
+            return 2
+            ;;
+    esac
+
+    while :; do
+        if [ -e "$fdna_node/status" ]; then
+            if ! fdna_status=$(dt_property_text "$fdna_node" status); then
+                log_fail "Cannot read DT status at $fdna_node, check DT access permissions" >&2
+                return 2
+            fi
+            case "$fdna_status" in
+                okay|ok)
+                    ;;
+                *)
+                    log_info "[FASTRPC-DT] excluded=$1 ancestor=$fdna_node status=$fdna_status" >&2
+                    return 1
+                    ;;
+            esac
+        fi
+        [ "$fdna_node" = "$fdna_root" ] && return 0
+        fdna_node=${fdna_node%/*}
+    done
+}
+
+# fastrpc_capture_expected_domains RESULT_DIR
+# Capture enabled FastRPC declarations independently of successful registration.
+# Reuses DT root/property helpers. The generic compatible enumerator does not
+# check ancestors or propagate traversal errors, so retain a checked scan here.
+# Output: space-separated expected domain IDs on stdout, diagnostics on stderr. Returns 0 on a
+# complete scan (including absent DT), 1 on discovery or artifact failure.
+# Writes fastrpc_dt_{compatible_paths,expected_domains,scan_errors}.log in RESULT_DIR.
+# Expected rows are domain ID, label, node path and compatible list, tab-separated.
+fastrpc_capture_expected_domains() {
+    fced_dir="$1"
+    fced_paths="$fced_dir/fastrpc_dt_compatible_paths.log"
+    fced_table="$fced_dir/fastrpc_dt_expected_domains.log"
+    fced_errors="$fced_dir/fastrpc_dt_scan_errors.log"
+    : >"$fced_table" || return 1
+    : >"$fced_paths" || return 1
+    : >"$fced_errors" || return 1
+
+    if ! fced_root=$(dt_runtime_root); then
+        log_info "[FASTRPC-DT] Runtime DT is absent, retaining healthcheck or remoteproc discovery" >&2
+        return 0
+    fi
+    fced_root=$(readlink -f "$fced_root") || return 1
+    if ! find "$fced_root" -type f -name compatible >"$fced_paths" 2>"$fced_errors"; then
+        log_fail "Cannot enumerate runtime DT at $fced_root, check DT access, artifact=$fced_errors" >&2
+        return 1
+    fi
+
+    while IFS= read -r fced_path; do
+        fced_node=${fced_path%/*}
+        if ! fced_compat=$(dt_property_text "$fced_node" compatible); then
+            log_fail "Cannot read DT compatible at $fced_node, check DT access permissions" >&2
+            return 1
+        fi
+        # Both are public driver match entries. Newer SoC bindings include the
+        # kaanapali fallback. Context-bank compatibles must not match here.
+        case " $fced_compat " in
+            *" qcom,fastrpc "*|*" qcom,kaanapali-fastrpc "*)
+                ;;
+            *)
+                continue
+                ;;
+        esac
+        if fastrpc_dt_node_available "$fced_node" "$fced_root"; then
+            :
+        else
+            fced_status=$?
+            [ "$fced_status" -eq 1 ] && continue
+            return 1
+        fi
+        if ! fced_label=$(dt_property_text "$fced_node" label) || [ -z "$fced_label" ]; then
+            log_fail "Enabled FastRPC DT node lacks a readable label at $fced_node, fix the image DT" >&2
+            return 1
+        fi
+        fced_domain=$(name_to_domain "$fced_label")
+        if [ -z "$fced_domain" ]; then
+            log_warn "[FASTRPC-DT] label=$fced_label node=$fced_node is outside the test client's domain map, extend domain support before testing it" >&2
+            continue
+        fi
+        printf '%s\t%s\t%s\t%s\n' "$fced_domain" "$fced_label" "$fced_node" "$fced_compat" >>"$fced_table" || return 1
+        log_info "[FASTRPC-DT] expected=$(domain_to_name "$fced_domain") label=$fced_label node=$fced_node compatible=$fced_compat" >&2
+    done <"$fced_paths"
+
+    awk -F '\t' '!seen[$1]++ {printf "%s%s", separator, $1; separator=" "}' "$fced_table"
 }
 
 # discover_supported_domains
