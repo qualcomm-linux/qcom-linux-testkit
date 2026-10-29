@@ -50,6 +50,15 @@ Examples:
 ./run.sh --auto
 ```
 
+On CentOS, `./run.sh --base --allow-relaunch` verifies the Mesa RPM set
+`mesa-libEGL mesa-dri-drivers mesa-libgbm libglvnd-egl libglvnd-gles` through
+the shared package provider, with full-set recovery when needed. The mapping
+is checked before overlay package removal or KGSL boot cleanup. A missing
+mapping or failed recovery reports FAIL. Changes to overlay packages or boot
+artifacts report SKIP requiring a reboot before rerunning. Once ready, the
+existing Weston and EGL client validation proceeds. Ubuntu mode restrictions
+and Yocto image-provided execution are unchanged.
+
 ## Directory Structure
 
 ```

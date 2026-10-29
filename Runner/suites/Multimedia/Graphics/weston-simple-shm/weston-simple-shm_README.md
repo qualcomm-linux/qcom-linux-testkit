@@ -76,6 +76,15 @@ Before running the testcase, ensure that:
 
 On CentOS, the shared dependency path provides `weston`, `weston-demo`, `seatd`, and `egl-utils`. With `--allow-relaunch`, the test starts `seatd.service` when needed, launches Weston on the selected DRM device, and adopts the generated Wayland socket.
 
+CentOS defaults to base graphics. `./run.sh --base --allow-relaunch` verifies
+`mesa-libEGL mesa-dri-drivers mesa-libgbm libglvnd-egl libglvnd-gles` using
+the shared package provider and its full-set recovery. The base mapping is
+checked before overlay package removal or KGSL boot cleanup. Missing mappings
+or recovery failures report FAIL. Package removal or boot cleanup changes
+report SKIP requiring a reboot and rerun before compositor/client validation.
+`./run.sh --auto --allow-relaunch` preserves the installed graphics stack.
+Yocto continues to use image-provided components.
+
 ---
 
 ## Test Location

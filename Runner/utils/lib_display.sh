@@ -5816,6 +5816,11 @@ display_prepare_desktop_weston_runtime() {
     return 0
 }
 
+# display_prepare_desktop_graphics_stack <testname> <mode> [module] [device] [gbm_package]
+# Prepare the selected desktop graphics stack through the shared package provider.
+# Validate the base mapping before removing overlay packages or boot artifacts.
+# Return 0 when ready, 1 on preparation failure, or 2 when runtime validation
+# must be skipped, including when a reboot is required.
 display_prepare_desktop_graphics_stack() {
     dpdgs_testname="${1:-display-test}"
     dpdgs_mode="${2:-auto}"
@@ -5979,6 +5984,7 @@ display_prepare_desktop_graphics_stack() {
 
         base)
             for dpdgs_helper in \
+                pkg_lookup_package_set \
                 pkg_restore_package_set \
                 pkg_ensure_required_package_set_present \
                 mrv_qcom_gpu_cleanup_kgsl_boot_artifacts \
@@ -5989,6 +5995,12 @@ display_prepare_desktop_graphics_stack() {
                     return 1
                 fi
             done
+
+            dpdgs_base_packages="$(pkg_lookup_package_set graphics-base)" || dpdgs_base_packages=""
+            if [ -z "$dpdgs_base_packages" ]; then
+                log_fail "$dpdgs_testname FAIL - graphics-base package mapping is unavailable for os=${dpdgs_os_id:-unknown}, add the OS package set to the package map before requesting base preparation"
+                return 1
+            fi
 
             dpdgs_package_changed=0
             dpdgs_boot_changed=0

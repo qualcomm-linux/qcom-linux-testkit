@@ -23,6 +23,17 @@ Client-level validation must be handled separately:
 
 ## Behavior
 
+### CentOS base graphics preparation
+
+CentOS defaults to base graphics. Use `./run.sh --base --allow-relaunch` to
+prepare the base stack and permit Weston recovery. The shared package provider
+verifies `mesa-libEGL mesa-dri-drivers mesa-libgbm libglvnd-egl libglvnd-gles`
+and recovers the complete set when needed. It checks the mapping before overlay
+package removal or KGSL boot cleanup. Missing mappings and recovery failures
+report FAIL. Changes to overlay packages or boot artifacts report SKIP requiring
+a reboot and rerun before Weston health validation. `./run.sh --auto` preserves
+the installed graphics stack. Yocto image-provided execution is unchanged.
+
 ### Default mode
 
 ```sh
