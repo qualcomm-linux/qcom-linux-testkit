@@ -1,87 +1,70 @@
-# Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
-# SPDX-License-Identifier: BSD-3-Clause
-# 🛠️ Contributing to qcom-linux-testkit
+# Contributing to qcom-linux-testkit
 
-Thank you for considering contributing to the **qcom-linux-testkit** project! Your contributions help improve the quality and functionality of our test suite. Please follow the guidelines below to ensure a smooth contribution process.
+<!-- Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries. -->
+<!-- SPDX-License-Identifier: BSD-3-Clause -->
 
----
+Contributions can fix existing tests, add focused validation, improve shared
+helpers, or update documentation. Start from the latest upstream `main` and
+check existing suites and utilities before introducing new logic.
 
-## 📋 Contribution Checklist
+## Place the change in the current structure
 
-Before submitting a PR, please ensure the following:
+Tests live under [Runner/suites](Runner/suites), grouped by area:
+`AI_ML`, `Connectivity`, `Kernel`, `Multimedia`, `Performance`, `System`,
+and `Virtualization`. Use the relevant existing subdirectory and preserve
+case-sensitive suite names.
 
-- [ ] **Branching**: Create your feature or fix branch from the latest `main` branch.
-- [ ] **Descriptive Commits**: Write clear and concise commit messages. 
-- [ ] **ShellCheck Compliance**: Run ShellCheck on all modified shell scripts and address any warnings or errors.
-- [ ] **Functionality**: Verify that your changes do not break existing functionality.
-- [ ] **Documentation**: Update or add documentation as necessary.
-- [ ] **Testing**: Add or update tests to cover your changes, if applicable.
+A new kernel baseport suite would have this structure:
 
----
-
-## 🧪 Running ShellCheck
-
-We use [ShellCheck](https://www.shellcheck.net/) to analyze shell scripts for common mistakes and potential issues.
-
-### Installation
-
-You can install ShellCheck using your package manager:
-
-- **macOS**: `brew install shellcheck`
-- **Ubuntu/Debian**: `sudo apt-get install shellcheck`
-- **Fedora**: `sudo dnf install ShellCheck`
-- **Arch Linux**: `sudo pacman -S shellcheck`
-
-### Usage
-
-To analyze a script:
-
-```bash
-shellcheck path/to/your_script.sh
-```
-
-Address all warnings and errors before submitting your PR. If you need to disable a specific ShellCheck warning, use:
-
-```sh
-# shellcheck disable=SC1090
-```
-
----
-
-## 📂 Test Suite Structure & Pseudocode Guidelines
-
-Each test suite must follow the standard structure shown below and include a `run.sh` script that:
-
-- Sources `init_env` and `functestlib.sh`
-- Sets `TESTNAME`
-- Finds the test directory dynamically
-- Logs results using `log_pass`, `log_fail`, and outputs a `.res` file
-
-### Directory Structure
-
-```
+```text
 Runner/
-├── suites/
-│   └── Kernel/
-│       └── FunctionalArea/
-│           └── baseport/
-│               └── Foo_Validation/
-│                   ├── run.sh
-│                   └── enabled_tests.list (optional)
-├── utils/
-│   ├── init_env
-│   └── functestlib.sh
+  init_env
+  run-test.sh
+  utils/
+    functestlib.sh
+    send-to-lava.sh
+    lib_*.sh
+  suites/
+    Kernel/
+      Baseport/
+        Foo_Validation/
+          run.sh
+          Foo_Validation.yaml
+          README.md
+  plans/
 ```
 
-### Pseudo `run.sh` Template
+Every new suite needs its executable `run.sh`, a LAVA YAML definition, and a
+README. Include configuration or test assets only when needed. Generated logs,
+`.res` files, and local development fixtures do not belong in the contribution.
+
+Search [functestlib.sh](Runner/utils/functestlib.sh) and the other
+[shared utilities](Runner/utils) for result, timeout, device, module, service,
+and diagnostic helpers. Reuse or extend an existing helper before adding one.
+Keep reusable behavior in the relevant library and test orchestration in
+`run.sh`. Add unrelated checks as separate suites.
+
+## Initialize the environment and results
+
+Use the following bootstrap for new suites. It finds `Runner/init_env` without
+depending on the installation path. The second `init_env` source is intentional.
+
+This starter reports SKIP until real validation is implemented. It is not a
+complete test.
 
 ```sh
 #!/bin/sh
+# Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause
-#Source init_env and functestlib.sh
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# ---------- Repo env + helpers ----------
+SCRIPT_DIR="$(
+  cd "$(dirname "$0")" || exit 1
+  pwd
+)"
 INIT_ENV=""
 SEARCH="$SCRIPT_DIR"
+
 while [ "$SEARCH" != "/" ]; do
     if [ -f "$SEARCH/init_env" ]; then
         INIT_ENV="$SEARCH/init_env"
@@ -95,181 +78,213 @@ if [ -z "$INIT_ENV" ]; then
     exit 1
 fi
 
-# Only source if not already loaded (idempotent)
-if [ -z "$__INIT_ENV_LOADED" ]; then
+# Only source once (idempotent)
+# NOTE: We intentionally **do not export** any new vars. They stay local to this shell.
+if [ -z "${__INIT_ENV_LOADED:-}" ]; then
     # shellcheck disable=SC1090
     . "$INIT_ENV"
+    __INIT_ENV_LOADED=1
 fi
-# Always source functestlib.sh, using $TOOLS exported by init_env
-# shellcheck disable=SC1090,SC1091
+
+# shellcheck disable=SC1090
+. "$INIT_ENV"
+# shellcheck disable=SC1091
 . "$TOOLS/functestlib.sh"
 
 TESTNAME="Foo_Validation"
-test_path=$(find_test_case_by_name "$TESTNAME") || {
-    log_fail "$TESTNAME : Test directory not found."
-    echo "FAIL $TESTNAME" > "./$TESTNAME.res"
-    exit 1
-}
+RES_FILE="./$TESTNAME.res"
 
-cd "$test_path" || exit 1
-res_file="./$TESTNAME.res"
-rm -f "$res_file"
+test_result_init "$TESTNAME" "$RES_FILE" || exit 1
 
-log_info "Starting $TESTNAME"
-
-# Run test logic
-if run_some_check_or_command; then
-    log_pass "$TESTNAME: passed"
-    echo "PASS $TESTNAME" > "$res_file"
-else
-    log_fail "$TESTNAME: failed"
-    echo "FAIL $TESTNAME" > "$res_file"
-fi
+# Replace this placeholder with capability checks and functional validation.
+test_result_record SKIP "Validation has not been implemented"
+test_result_finish
 ```
 
-### `.res` File Requirements
+Source additional libraries explicitly after the bootstrap. For example,
+OS/package helpers require `lib_pkg_provider.sh` to be sourced separately.
+Keep `TESTNAME` immediately before `RES_FILE`, after helper sourcing.
 
-Each `run.sh` **must generate** a `.res` file in the same directory:
+Put command-line usage and argument handling in named functions such as
+`usage()` and `parse_args()`, then call `parse_args "$@"`. Validate arguments
+before changing DUT state. Document each option and preserve existing defaults
+unless the change deliberately updates the interface.
 
-- **File Name**: `<TESTNAME>.res`
-- **Content**:
-  - `PASS <TESTNAME>` on success
-  - `FAIL <TESTNAME>` on failure
-  - `SKIP <TESTNAME>` if not applicable
+### Result contract
 
-This is essential for CI/CD to parse test outcomes.
+Use `test_result_init`, `test_result_record`, and `test_result_finish` from
+`functestlib.sh`. Do not duplicate result writers or PASS/FAIL/SKIP counters.
 
-### Logging Conventions
+The default result filename is `<TESTNAME>.res`. Each line has the testcase
+identifier first and verdict last:
 
-Use logging functions from `functestlib.sh`:
+```text
+Foo_Validation PASS
+```
+
+Write reasons to logs, not after the verdict in the result line. Use:
+
+- **PASS** when applicable validation actually ran and met its criteria.
+- **SKIP** when the test is not applicable or a documented optional dependency,
+  asset, or external fixture is absent.
+- **FAIL** when an applicable test fails, required runtime setup is broken, or
+  execution or parsing cannot establish the expected result.
+
+Missing optional hardware must not produce PASS. Missing evidence on a selected
+or applicable device must not be hidden as SKIP. Distinguish lack of support
+from a driver, firmware, service, or configuration failure.
+
+`test_result_record` logs the message and updates counters.
+Without an explicit verdict, `test_result_finish` selects FAIL if any check
+failed, otherwise PASS if any check passed, otherwise SKIP. It writes the result
+and exits zero so the next LAVA step can publish it. Complete cleanup before
+finalization or through a suitable exit trap. Consumers must read the result
+file rather than interpret shell exit zero as PASS.
+
+## Add the LAVA definition
+
+For the example suite, add `Foo_Validation.yaml` alongside `run.sh`:
+
+```yaml
+metadata:
+  name: foo-validation
+  format: "Lava-Test Test Definition 1.0"
+  description: "Describe the capability and functional behavior being validated."
+  os:
+    - linux
+  scope:
+    - functional
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/Foo_Validation
+    - ./run.sh
+    - $REPO_PATH/Runner/utils/send-to-lava.sh Foo_Validation.res
+```
+
+Keep repository-path assignment, directory change, invocation, and result
+publication as separate steps. Add `params` only for options the script
+actually implements, with safe quoting when forwarding values. Match the
+result filename to the invocation, including any supported suffix.
+
+Grouped definitions belong in [Runner/plans](Runner/plans). Add a suite to a
+plan only when it fits that plan's device and image requirements. LAVA boot and
+deployment settings belong in the job definition. Standalone users can invoke
+`run.sh` without consuming YAML.
+
+## Preserve portability and DUT state
+
+- Use POSIX `/bin/sh`. Avoid Bash arrays, `[[ ... ]]`, process substitution,
+  here-strings, and new uses of `local`. Arithmetic expansion `$(( ... ))` is
+  POSIX and is allowed.
+- Format functions, conditionals, and argument handling across multiple lines.
+  Quote paths and expansions. Keep function documentation adjacent to the
+  function without an empty comment line between its signature and description.
+- Check behavior on Yocto, Debian, Ubuntu, and CentOS. Do not assume systemd,
+  GNU-only utility flags, Python, a package manager, or a full rootfs is present.
+  Probe required capabilities and account for BusyBox tools on minimal images.
+- Use image-provided components for new tests. Do not add runtime package
+  installation. Document dependencies and skip cleanly for optional components
+  or assets. Report broken required setup distinctly.
+- Discover devices, driver bindings, DT compatibles, routes, and available
+  services at runtime. Avoid fixed card numbers, interface names, board lists,
+  or module names when the runtime can provide the information.
+- Resolve a device-tree root symlink before traversing it with `find`.
+  Account for both `/proc/device-tree` and `/sys/firmware/devicetree/base`.
+- Use bounded waits and shared timeout helpers. Check command status as well
+  as the expected output or artifact. A successful process launch alone is not
+  functional validation.
+- Snapshot state before changes. Restore only state changed by the test,
+  including modules, services, routes, mounts, and device settings. Preserve
+  initially active resources and validate first-run and rerun behavior.
+- Keep test-owned temporary files and diagnostics under the invocation working
+  directory, using unique per-run names where needed. Do not redirect unrelated
+  system runtime sockets or firmware paths.
+- Keep helper stdout machine-readable when used in command substitution.
+  Send diagnostic messages to stderr. Use shared logging helpers for readable
+  test progress and include the actual command failure in diagnostics.
+- Use `scan_dmesg_errors` with a suite-specific output directory. Retain
+  `dmesg_snapshot.log` and `dmesg_errors.log`, and reuse those captured files.
+  Do not add direct `dmesg` invocations or pipes in a suite.
+
+Existing suites may predate these conventions. Keep changes focused, preserve
+working interfaces, and check all callers affected by shared-library changes.
+
+## Document and validate the change
+
+The suite README should describe prerequisites, supported runtime modes,
+permissions and fixtures, CLI defaults and overrides, launch examples, result
+and log locations, cleanup, and PASS/FAIL/SKIP conditions. Distinguish driver
+coverage on a ramdisk from validation that needs userspace services. Update
+examples whenever options or behavior change.
+
+Run checks on the affected files before submission. For a shell file, use the
+version and flags from the
+[ShellCheck workflow](.github/workflows/shellcheck.yml), currently 0.9.0:
+
 ```sh
-log_info "Preparing test"
-log_pass "Test completed successfully"
-log_fail "Test failed"
-log_error "Setup error"
-log_skip "Skipped due to condition"
+shellcheck --version
+shellcheck -s sh -e SC1091,SC2230,SC3043 -- Runner/suites/Kernel/Baseport/Foo_Validation/run.sh
+dash -n Runner/suites/Kernel/Baseport/Foo_Validation/run.sh
+git diff --check
+git diff --cached --check
 ```
 
----
+Replace the example path with each changed script or affected helper. Use narrow,
+explained suppressions only when necessary. Also:
 
-## 📄 Licensing
+- Parse changed YAML and verify its suite path, invocation, result filename,
+  and testcase identifier agree with the script.
+- Confirm Git records executable shell scripts as `100755` and documentation
+  and YAML as `100644`. Use targeted `chmod +x` on Linux or
+  `git update-index --chmod=+x <path>` on Windows for intended shell files.
+  Preserve existing modes on unrelated files.
+- Validate applicable runtime paths, missing dependencies, invalid arguments,
+  timeouts, cleanup, and repeat execution. For shared helpers, exercise the
+  affected consumers and distro differences. State which checks ran on hardware
+  and which used local fixtures. Do not claim untested platforms passed.
+- Keep ad hoc development fixtures outside the repository. Include permanent
+  regression tests only when agreed as part of the contribution.
+- Inspect the configured [CI workflows](.github/workflows), including Semgrep,
+  ShellCheck, executable permissions, and preflight checks. Confirm the checks
+  and DCO status for the current PR head before merging. Pending, skipped, or
+  unavailable checks are not evidence of a pass.
 
-Ensure that all new files include the appropriate license header:
+Host validation tools are separate from DUT dependencies. Documentation-only
+changes need link, example, and formatting checks, without running hardware
+tests.
+
+## Submit the contribution
+
+Fork the repository and create a branch from the latest upstream `main`.
+Assuming `origin` points to your fork and `upstream` points to
+`https://github.com/qualcomm-linux/qcom-linux-testkit.git`:
 
 ```sh
-#!/bin/sh
-# SPDX-License-Identifier: BSD-3-Clause```
-
----
-
-## 📬 Submitting a Pull Request
-
-1. **Fork** the repository and create your feature branch:
-   ```bash
-   git checkout -b feature/your-feature-name
-   ```
-
-2. **Commit** your changes with clear messages:
-   ```bash
-   git commit -m "feat: add new feature"
-   ```
-
-3. **Push** to your fork:
-   ```bash
-   git push origin feature/your-feature-name
-   ```
-
-4. **Open a Pull Request**: Navigate to the original repository and open a PR from your forked branch.
-
-Please ensure that your PR description includes:
-
-- A summary of the changes made.
-- The reason for the changes.
-- Any relevant issues or discussions.
-
----
-
-## 🤝 Code of Conduct
-
-We are committed to fostering a welcoming and respectful community. Please adhere to our [Code of Conduct](docs/CODE_OF_CONDUCT.md) in all interactions.
-
----
-
-Thank you for contributing to **qcom-linux-testkit**!
-
-
----
-
-## 🗂️ Test Organization Guidelines
-
-### Directory Placement
-
-- Kernel-level tests → `Runner/suites/Kernel/FunctionalArea/`
-- Multimedia tests → `Runner/suites/Multimedia/`
-- Shared test utilities or binaries → `Runner/common/`
-
-### Script Naming
-
-- Main test launcher must be named `run.sh`
-- Helper scripts should use lowercase with underscores, e.g. `validate_cache.sh`
-- Avoid spaces or uppercase letters in filenames
-
----
-
-## ⏱️ Test Execution & Timeout Guidelines
-
-- Tests must be self-contained and deterministic
-- Long-running tests should support intermediate logging or status messages
-- Do not rely on `/tmp` or external mounts
-- Scripts must **fail fast** on invalid setup or missing dependencies
-
----
-
-## 📄 Supported Test Artifacts
-
-Optional per-suite files:
-- `enabled_tests.list`: whitelist of subtests to run
-- `*.log`: output logs from each run; should reside in the same directory
-- `*.res`: REQUIRED file that indicates test result in CI/CD
-
-### .res File Format
-
-Valid output examples:
-```
-PASS Foo_Validation
-FAIL Foo_Validation
-SKIP Foo_Validation (missing dependency)
+git fetch upstream
+git switch -c descriptive-change upstream/main
 ```
 
-This format ensures automated tools and LAVA jobs can collect test outcomes.
+Keep commits focused. When both a shared library and suite consumers change,
+use separate coherent commits where practical so the behavior can be reviewed
+and reverted independently.
 
----
+Include the appropriate copyright and SPDX license header in new files,
+following [LICENSE](LICENSE) and neighboring files. Sign off each commit for
+the [Developer Certificate of Origin](https://developercertificate.org/):
 
-## 🧩 Shell Compatibility
+```sh
+git add Runner/suites/Kernel/Baseport/Foo_Validation
+git commit -s -m "Add Foo validation"
+git log --format=full upstream/main..HEAD
+git push -u origin descriptive-change
+```
 
-All scripts must run in POSIX `sh`. **Avoid Bash-only features**, including:
+Verify every outgoing commit has a valid `Signed-off-by` trailer, including
+after an amend or rebase. Open a pull request against `main` with a title and
+description explaining why it is needed and what it fixes or adds. Link the
+relevant issue. Use a draft while required validation remains outstanding.
 
-- `local` keyword (use plain assignment)
-- `[[ ... ]]` conditions (use `[ ... ]`)
-- Arrays
-- Bash-style arithmetic without quoting (`$(( ))`)
-- Here-strings or `<<<`
-
-Use `#!/bin/sh` in all test scripts and validate with `ShellCheck`.
-
----
-
-## 🧪 CI Integration Notes
-
-Our CI/CD pipeline expects:
-- Each test case to create a `.res` file in the same folder
-- No stdout/stderr pollution unless via `log_*` functions
-- Proper exit codes (0 for pass, 1 for fail)
-
-All logs should remain local to the suite folder, typically named `*.log`.
-
----
-
-## 🙋 Questions?
-
-If you're unsure where your test fits or how to structure it, open an issue or tag a maintainer in a draft PR. We're happy to help guide your first contribution.
+For questions about scope or placement, open a
+[GitHub issue](https://github.com/qualcomm-linux/qcom-linux-testkit/issues) or
+discuss them in a draft PR.
