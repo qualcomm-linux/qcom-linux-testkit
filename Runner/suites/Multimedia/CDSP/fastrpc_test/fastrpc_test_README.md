@@ -100,6 +100,10 @@ Options:
   --repeat <N>                     Number of repetitions (default: 1)
   --timeout <sec>                  Timeout for each run (default: 120, must be greater than zero)
   --healthcheck-timeout <sec>      Timeout for fastrpc-healthcheck (default: 15)
+  --res-suffix <suffix>            Suffix for a unique result file and evidence directory
+                                   (e.g., "adsp" writes fastrpc_test_adsp.res)
+  --lava-testcase-id <id>          Testcase id written into the .res file for LAVA
+                                   (default: fastrpc_test)
   --verbose                        Extra logging for CI debugging
   --help                           Show this help
 
@@ -157,6 +161,49 @@ FASTRPC_DOMAIN=2 FASTRPC_UNSIGNED_PD=1 ./run.sh
 
 # 8) Allow /bin explicitly (generally discouraged)
 ALLOW_BIN_FASTRPC=1 ./run.sh --bin-dir /bin
+
+# 9) One run per domain, each reporting its own result
+./run.sh --domain-name adsp --res-suffix adsp --lava-testcase-id fastrpc_test_adsp
+./run.sh --domain-name cdsp --res-suffix cdsp --lava-testcase-id fastrpc_test_cdsp
+```
+
+### Result naming
+
+`--res-suffix` and `--lava-testcase-id` control two different things, and running
+this suite more than once in a job needs both:
+
+| Option | Changes | Example |
+| --- | --- | --- |
+| `--res-suffix adsp` | the result file name and the evidence directory | `fastrpc_test_adsp.res`, `logs_fastrpc_test_adsp/run-<timestamp>.XXXXXX/` |
+| `--lava-testcase-id fastrpc_test_adsp` | the testcase id reported to LAVA | `TEST_CASE_ID=fastrpc_test_adsp` |
+
+Setting only the suffix writes a distinct file but still reports `fastrpc_test`,
+so a consumer keyed on the testcase name keeps whichever run finished last.
+Setting only the id reports a distinct name but writes back to
+`fastrpc_test.res`, so concurrent runs in one checkout overwrite each other.
+
+`RES_SUFFIX` is optional and may be empty. Empty is the default and selects the
+plain `fastrpc_test.res` and `logs_fastrpc_test/` names. `LAVA_TESTCASE_ID` must
+be non-empty; it defaults to `fastrpc_test`.
+
+A value that is supplied has to be a single token of `A-Z`, `a-z`, `0-9`, `_`,
+`.`, `:` or `-`, and an invalid one is rejected rather than sanitized: an empty
+id would lose the reported result, a newline could emit an extra one, and a
+path-like suffix would leave no result file behind.
+
+Publish the file that matches the suffix and expect the id that matches
+`--lava-testcase-id`:
+
+```yaml
+    - from: git
+      name: fastrpc_test_adsp
+      path: Runner/suites/Multimedia/CDSP/fastrpc_test/fastrpc_test.yaml
+      params:
+        DOMAIN_NAME: adsp
+        RES_SUFFIX: adsp
+        LAVA_TESTCASE_ID: fastrpc_test_adsp
+      expected:
+        - fastrpc_test_adsp
 ```
 
 Domain selection uses `CLI > environment > dynamic discovery` precedence. A non-empty
@@ -173,10 +220,23 @@ package gap remains visible until a matching payload is provisioned. Other domai
 
 ### LAVA integration example
 
+Publish only when the runner completed and wrote its own result:
+
 ```
-- $PWD/suites/Multimedia/CDSP/fastrpc_test/run.sh --bin-dir /usr/bin || true
-- $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/CDSP/fastrpc_test/fastrpc_test.res || true
+- if $PWD/suites/Multimedia/CDSP/fastrpc_test/run.sh --bin-dir /usr/bin; then $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/CDSP/fastrpc_test/fastrpc_test.res || true; fi
 ```
+
+With a suffix, publish the matching file:
+
+```
+- if $PWD/suites/Multimedia/CDSP/fastrpc_test/run.sh --bin-dir /usr/bin --domain-name adsp --res-suffix adsp --lava-testcase-id fastrpc_test_adsp; then $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/CDSP/fastrpc_test/fastrpc_test_adsp.res || true; fi
+```
+
+`test_result_finish` exits zero for PASS, FAIL and SKIP alike, so all three are
+still published. Do not publish unconditionally: an invocation that aborts
+before the result file is prepared, such as one given an invalid
+`--lava-testcase-id`, exits nonzero without clearing the previous result, and an
+unconditional publisher would report that earlier run's result as this one's.
 
 ### Sample output (trimmed)
 
@@ -232,12 +292,22 @@ package gap remains visible until a matching payload is provisioned. Other domai
   includes unsigned shells/policies (or use `--pd-mode signed-only`).
 - **Domain not discovered**: Check `dmesg` for remoteproc firmware load errors. The test
   requires the DSP remoteproc to be registered and its firmware present in DT.
-- **Per-iteration logs**: `logs_fastrpc_test_<timestamp>/<domain>_<pd>_iter<N>.out` (+ `.rc`, `.env`, `.cmd`)
-- **Kernel evidence on failure**: one shared `logs_fastrpc_test_<timestamp>/kernel/` snapshot is
+- **Evidence directory**: `logs_fastrpc_test/run-<timestamp>.XXXXXX/`, or
+  `logs_fastrpc_test_<suffix>/run-<timestamp>.XXXXXX/` when `--res-suffix` is used. The run
+  directory is unique per invocation, so two runs started in the same second keep separate
+  evidence. The startup log reports the resolved path.
+- **Console capture**: `fastrpc_test_stdout_<timestamp>.log`, or
+  `fastrpc_test_<suffix>_stdout_<timestamp>.log` when `--res-suffix` is used. `init_env` starts the
+  capture before the options are parsed, so the suffix is resolved into `RUN_STDOUT_TAG` first and
+  two suffixes no longer share one file. Set `RUN_STDOUT_TAG` or `RUN_STDOUT_FILE` to name it
+  yourself, or `RUN_STDOUT_ENABLE=0` to turn the capture off.
+- **Per-iteration logs**: `<evidence-directory>/<domain>_<pd>_iter<N>.out` (+ `.rc`, `.env`, `.cmd`)
+- **Kernel evidence on failure**: one shared `<evidence-directory>/kernel/` snapshot is
   captured through `scan_dmesg_errors` after the invocation matrix.
-- **Optional QRTR evidence**: `logs_fastrpc_test_<timestamp>/qrtr_topology.log` when QRTR and
+- **Optional QRTR evidence**: `<evidence-directory>/qrtr_topology.log` when QRTR and
   `qrtr-lookup` are available.
-- **Summary result file**: `fastrpc_test.res` (`PASS` / `FAIL` / `SKIP`)
+- **Summary result file**: `fastrpc_test.res` (`PASS` / `FAIL` / `SKIP`), or
+  `fastrpc_test_<suffix>.res` when `--res-suffix` is used
 - **Verbose mode**: adds environment, library resolution, and timing details
 
 ## Notes

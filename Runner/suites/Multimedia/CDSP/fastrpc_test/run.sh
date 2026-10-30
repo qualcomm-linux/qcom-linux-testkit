@@ -22,6 +22,49 @@ if [ -z "$INIT_ENV" ]; then
     exit 1
 fi
 
+TESTNAME="fastrpc_test"
+RESULT_TESTNAME="$TESTNAME"
+RES_SUFFIX="" # Optional suffix for unique result files (e.g., "adsp")
+
+# Pre-parse the reporting options without consuming "$@", before init_env is
+# sourced. init_env starts the stdout capture, and the result file has to be
+# known before the first result can be written, which can happen while parsing
+# the command line. parse_args below does the real parsing and rejects values
+# this loop only records.
+fastrpc_early_expect=""
+for fastrpc_early_arg in "$@"; do
+    case "$fastrpc_early_expect" in
+        res-suffix)
+            RES_SUFFIX="$fastrpc_early_arg"
+            fastrpc_early_expect=""
+            continue
+            ;;
+        lava-testcase-id)
+            RESULT_TESTNAME="$fastrpc_early_arg"
+            fastrpc_early_expect=""
+            continue
+            ;;
+    esac
+
+    case "$fastrpc_early_arg" in
+        --res-suffix)
+            fastrpc_early_expect="res-suffix"
+            ;;
+        --lava-testcase-id)
+            fastrpc_early_expect="lava-testcase-id"
+            ;;
+    esac
+done
+
+# init_env names the stdout capture after the test directory, so two
+# invocations of this suite would share one file. Tag it with the suffix
+# instead, and leave the path to init_env so nothing is created unless it
+# actually enables the capture. A caller that set either knob keeps control.
+if [ -z "${RUN_STDOUT_FILE:-}" ] && [ -z "${RUN_STDOUT_TAG:-}" ]; then
+    RUN_STDOUT_TAG="${TESTNAME}${RES_SUFFIX:+_${RES_SUFFIX}}"
+    export RUN_STDOUT_TAG
+fi
+
 # Only source once (idempotent)
 # NOTE: We intentionally **do not export** any new vars. They stay local to this shell.
 if [ -z "${__INIT_ENV_LOADED:-}" ]; then
@@ -44,10 +87,18 @@ fi
 # shellcheck disable=SC1090,SC1091
 . "$TOOLS/lib_diag.sh"
 
-TESTNAME="fastrpc_test"
-RES_FILE="$SCRIPT_DIR/${TESTNAME}.res"
+# A suffix that is not a plain token would place the result file outside the
+# suite directory or leave none behind at all, and the suite exits zero so the
+# job would see neither a result nor a failure. Reject it before any result is
+# written, while there is still no result file to report through.
+if [ -n "$RES_SUFFIX" ] && ! test_result_valid_name "$RES_SUFFIX"; then
+    log_error "$TESTNAME invalid --res-suffix: $RES_SUFFIX"
+    exit 1
+fi
+
+RES_FILE="$SCRIPT_DIR/${TESTNAME}${RES_SUFFIX:+_${RES_SUFFIX}}.res"
 RESULT_FILE="$RES_FILE"
-test_result_init "$TESTNAME" "$RESULT_FILE"
+test_result_init "$RESULT_TESTNAME" "$RESULT_FILE" || exit 1
 
 # Defaults
 REPEAT=1
@@ -90,6 +141,8 @@ Options:
   --repeat <N> Number of repetitions (default: 1)
   --timeout <sec> Timeout for each run (default: 120, must be greater than zero)
   --healthcheck-timeout <sec> Timeout for fastrpc-healthcheck (default: 15)
+  --res-suffix <suffix> Suffix for a unique result file (e.g., "adsp" writes fastrpc_test_adsp.res)
+  --lava-testcase-id <id> Testcase id written into the .res file for LAVA (default: fastrpc_test)
   --verbose Extra logging for CI debugging
   --help Show this help
 
@@ -211,6 +264,16 @@ parse_args() {
             --healthcheck-timeout)
                 require_option_value "$@" || return 1
                 HEALTHCHECK_TIMEOUT="$2"
+                shift 2
+                ;;
+            --res-suffix)
+                require_option_value "$@" || return 1
+                RES_SUFFIX="$2"
+                shift 2
+                ;;
+            --lava-testcase-id)
+                require_option_value "$@" || return 1
+                RESULT_TESTNAME="$2"
                 shift 2
                 ;;
             --verbose)
@@ -352,10 +415,12 @@ if [ ! -x "$RUN_BIN" ]; then
 fi
 
 # -------------------- Logging root -----------------------------
-TS="$(date +%Y%m%d-%H%M%S)"
-LOG_ROOT="./logs_${TESTNAME}_${TS}"
-if ! mkdir -p "$LOG_ROOT"; then
-    test_result_finish "FAIL" "$TESTNAME FAIL - cannot create log directory: $LOG_ROOT"
+# Keep the evidence of one invocation separate from another: the suffix names
+# the run and the unique directory keeps two runs started in the same second
+# from sharing artifacts.
+LOG_BASE="./logs_${TESTNAME}${RES_SUFFIX:+_${RES_SUFFIX}}"
+if ! LOG_ROOT="$(test_create_run_directory "$LOG_BASE")"; then
+    test_result_finish "FAIL" "$TESTNAME FAIL - cannot create log directory below: $LOG_BASE"
 fi
 
 log_info "Evidence directory: $test_path/$LOG_ROOT"
