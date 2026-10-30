@@ -14,6 +14,55 @@ The suite includes a **reboot-free video stack switcher** (upstream ↔ downstre
 
 ---
 
+## Shikra Platform Support
+
+**Shikra** is an upstream-only platform. The sole video driver is `qcom_iris`, which may be
+modular (visible in `lsmod`) or compiled in as a built-in (bound under
+`/sys/bus/platform/drivers/qcom_iris`). Both cases are detected automatically.
+
+| Property | Value |
+|---|---|
+| Supported stack | `upstream` only (`--stack upstream` or `--stack auto`) |
+| Downstream stack | Not supported — rejected with a clear error |
+| Video driver | `qcom_iris` (modular or built-in) |
+| Max H.264/HEVC encode Level | **4.0** (automatically applied to bundled fixtures) |
+
+### Automatic Level cap for bundled encoder fixtures
+
+On Shikra, Level 4.0 is the maximum supported H.264 and HEVC encode level.
+The runner automatically rewrites the `Level` control to `4.0` in the four
+bundled encoder configs before execution:
+
+- `base_h264Encoder.json`
+- `base_h265Encoder.json`
+- `overlay_h264Encoder.json`
+- `overlay_h265Encoder.json`
+
+User-supplied configs passed via `--config` are **not** modified by default.
+Set `VIDEO_POLICY_SCOPE=all` to apply the rewrite to every config.
+
+### Extending the policy table
+
+Additional per-platform control overrides can be injected at runtime without
+modifying any source file:
+
+```sh
+# Apply a Profile override for Shikra H.264 encode in addition to the built-in Level cap
+export VIDEO_POLICY_EXTRA="shikra|encode|h264|Profile|High"
+./run-test.sh Video_V4L2_Runner --app /path/to/iris_v4l2_test --stack upstream
+```
+
+Format: `platform|mode|codec|control|value` (one row per line, pipe-separated).
+
+### Example: run all configs on Shikra
+
+```sh
+# From the Runner/ directory on the device:
+./run-test.sh Video_V4L2_Runner --app /path/to/iris_v4l2_test --stack upstream
+```
+
+---
+
 ## What’s New (since 2025‑10‑03)
 
 - **Network stabilization delay (post-connect)**  
