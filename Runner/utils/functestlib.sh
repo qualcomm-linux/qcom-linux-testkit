@@ -3159,6 +3159,109 @@ run_with_managed_timeout() {
     return "$mt_status"
 }
 
+# managed_timeout_cancel_bounded [grace_secs]
+#
+# Bounded TERM→KILL cancellation for a run_with_managed_timeout child.
+# Safe to call from a signal trap even when the watcher has already been
+# killed by a process-group signal.
+#
+# Improvements over a plain kill+wait:
+#   - grace_secs is validated as a positive integer (default: 5)
+#   - The watcher's sleep subprocess is stopped first via MANAGED_TIMEOUT_*
+#     state so it cannot race and send SIGKILL after we have already handled
+#     the command
+#   - Both the watcher and the command use bounded poll loops after SIGTERM
+#     and after SIGKILL, because even SIGKILL can be delayed for tasks
+#     blocked in kernel I/O
+#   - All PID and file state is cleared after cleanup so repeated trap
+#     invocations cannot act on stale values
+#
+# Arguments:
+#   grace_secs  positive integer seconds to wait after SIGTERM before
+#               escalating to SIGKILL (default: 5)
+managed_timeout_cancel_bounded() {
+    mtcb_grace="${1:-5}"
+    case "$mtcb_grace" in
+        ''|*[!0-9]*|0) mtcb_grace=5 ;;
+    esac
+
+    mtcb_cmd_pid="${MANAGED_TIMEOUT_CMD_PID:-}"
+    mtcb_watcher_pid="${MANAGED_TIMEOUT_WATCHER_PID:-}"
+    mtcb_sleep_pid="${MANAGED_TIMEOUT_WATCHER_SLEEP_PID:-}"
+    mtcb_sleep_pid_file="${MANAGED_TIMEOUT_SLEEP_PID_FILE:-}"
+    mtcb_marker_file="${MANAGED_TIMEOUT_MARKER_FILE:-}"
+    # Tracks whether any child survived past the SIGKILL deadline.
+    # Callers check this to decide whether DRM ownership is safely released.
+    mtcb_still_alive=0
+
+    # Stop the watcher's sleep subprocess first so it cannot race and send
+    # SIGKILL to the command after we have already handled it.
+    if [ -z "$mtcb_sleep_pid" ] && [ -n "$mtcb_sleep_pid_file" ] && [ -r "$mtcb_sleep_pid_file" ]; then
+        mtcb_sleep_pid="$(cat "$mtcb_sleep_pid_file" 2>/dev/null || true)"
+    fi
+    if [ -n "$mtcb_sleep_pid" ]; then
+        kill "$mtcb_sleep_pid" 2>/dev/null || true
+    fi
+
+    # Kill the watcher with a bounded wait.
+    if [ -n "$mtcb_watcher_pid" ]; then
+        kill "$mtcb_watcher_pid" 2>/dev/null || true
+        mtcb_i=0
+        while [ "$mtcb_i" -lt "$mtcb_grace" ] && kill -0 "$mtcb_watcher_pid" 2>/dev/null; do
+            sleep 1; mtcb_i=$((mtcb_i + 1))
+        done
+        kill -KILL "$mtcb_watcher_pid" 2>/dev/null || true
+        mtcb_i=0
+        while [ "$mtcb_i" -lt 3 ] && kill -0 "$mtcb_watcher_pid" 2>/dev/null; do
+            sleep 1; mtcb_i=$((mtcb_i + 1))
+        done
+        # Only reap if the process has already exited; an unconditional wait
+        # can block indefinitely when the child is stuck in kernel I/O.
+        if ! kill -0 "$mtcb_watcher_pid" 2>/dev/null; then
+            wait "$mtcb_watcher_pid" 2>/dev/null || true
+        else
+            mtcb_still_alive=1
+        fi
+    fi
+
+    # Kill the command with a bounded wait after both SIGTERM and SIGKILL.
+    if [ -n "$mtcb_cmd_pid" ]; then
+        kill "$mtcb_cmd_pid" 2>/dev/null || true
+        mtcb_i=0
+        while [ "$mtcb_i" -lt "$mtcb_grace" ] && kill -0 "$mtcb_cmd_pid" 2>/dev/null; do
+            sleep 1; mtcb_i=$((mtcb_i + 1))
+        done
+        kill -KILL "$mtcb_cmd_pid" 2>/dev/null || true
+        # Bound the wait after SIGKILL: tasks in kernel I/O can still delay exit.
+        mtcb_i=0
+        while [ "$mtcb_i" -lt 3 ] && kill -0 "$mtcb_cmd_pid" 2>/dev/null; do
+            sleep 1; mtcb_i=$((mtcb_i + 1))
+        done
+        # Only reap if the process has already exited; an unconditional wait
+        # can block indefinitely when the child is stuck in kernel I/O.
+        if kill -0 "$mtcb_cmd_pid" 2>/dev/null; then
+            mtcb_status=1
+        else
+            wait "$mtcb_cmd_pid" 2>/dev/null || true
+        fi
+    fi
+
+    # Remove temp files left by the watcher.
+    if [ -n "$mtcb_sleep_pid_file" ]; then
+        rm -f "$mtcb_sleep_pid_file" 2>/dev/null || true
+    fi
+    if [ -n "$mtcb_marker_file" ]; then
+        rm -f "$mtcb_marker_file" 2>/dev/null || true
+    fi
+
+    # Clear all state so repeated trap invocations cannot act on stale PIDs.
+    MANAGED_TIMEOUT_CMD_PID=""
+    MANAGED_TIMEOUT_WATCHER_PID=""
+    MANAGED_TIMEOUT_WATCHER_SLEEP_PID=""
+    MANAGED_TIMEOUT_SLEEP_PID_FILE=""
+    MANAGED_TIMEOUT_MARKER_FILE=""
+}
+
 # Purpose: Run a command with a timeout and capture stdout and stderr.
 # Arguments:
 #   $1 - Timeout in seconds.

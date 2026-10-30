@@ -1,0 +1,21 @@
+metadata:
+  name: kms-vblank
+  format: "Lava-Test Test Definition 1.0"
+  description: "Validates DRM vblank event delivery and timing using the IGT kms_vblank test suite. Suspend and RPM subtests are excluded by default. Stops any active Weston compositor before running and restores it afterwards."
+  os:
+    - linux
+  scope:
+    - functional
+
+params:
+  KMS_VBLANK_PATH: "/usr/libexec/igt-gpu-tools/kms_vblank"
+  RUN_SUBTEST: "*,!*suspend*,!*rpm*"
+  IGT_TIMEOUT: "300"
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Multimedia/Display/igt-gpu-tools/kms_vblank
+    - export IGT_TIMEOUT="${IGT_TIMEOUT}"
+    - ./run.sh --kms-vblank-path "${KMS_VBLANK_PATH}" --run-subtest "${RUN_SUBTEST}" || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh kms_vblank.res || true
