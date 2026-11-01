@@ -199,7 +199,7 @@ rt_stream_run_json() {
   tee -a "$outfile" <"$fifo" &
   RT_CUR_TEE_PID=$!
 
-  "$@" >"$fifo" 2>&1 &
+  rt_exec_command "$@" >"$fifo" 2>&1 &
   RT_CUR_BIN_PID=$!
 
   wait "$RT_CUR_BIN_PID"
@@ -217,104 +217,213 @@ rt_stream_run_json() {
   return "$rc"
 }
 
-# ---------------------------------------------------------------------------
 # rt_log_kernel_rt_status
-# Best-effort RT kernel detection based on uname.
-# ---------------------------------------------------------------------------
+# Log runtime RT flag, then kernel config if unavailable. Return 0 only when
+# enabled, without using the release name as authoritative evidence.
 rt_log_kernel_rt_status() {
-  rel=$(uname -r 2>/dev/null || echo "")
-  ver=$(uname -v 2>/dev/null || echo "")
-
-  case "$rel $ver" in
-    *-rt*|*PREEMPT_RT*)
-      log_info "Kernel appears to be RT-enabled: uname -r='$rel'"
-      return 0
-      ;;
-    *)
-      log_warn "Kernel does NOT look RT-enabled: uname -r='$rel' (results may be worse)"
-      return 1
-      ;;
-  esac
+    local rt_flag rt_config
+    rt_flag=$(cat /sys/kernel/realtime 2>/dev/null || true)
+    case "$rt_flag" in
+        1)
+            log_info "PREEMPT_RT enabled, /sys/kernel/realtime=1"
+            return 0
+            ;;
+        0)
+            log_warn "PREEMPT_RT inactive, /sys/kernel/realtime=0"
+            return 1
+            ;;
+    esac
+    rt_config=$(kernel_config_value CONFIG_PREEMPT_RT 2>/dev/null || true)
+    if [ "$rt_config" = CONFIG_PREEMPT_RT=y ]; then
+        log_info "CONFIG_PREEMPT_RT=y, runtime flag unavailable"
+        return 0
+    fi
+    log_warn "PREEMPT_RT not confirmed, config=${rt_config:-unavailable}, uname=$(uname -r)"
+    return 1
 }
 
-# ---------------------------------------------------------------------------
+# rt_validate_cpu_masks
+# Validate optional RT_CPUS/BG_CPUS against inherited allowed CPUs and ensure
+# disjoint explicit masks. No affinity mutation, return 1 for invalid selection.
+rt_validate_cpu_masks() {
+    local rt_allowed rt_online rt_mask rt_cpu
+    [ -n "${RT_CPUS:-}${BG_CPUS:-}" ] || return 0
+    command -v taskset >/dev/null 2>&1 || return 1
+    rt_allowed=$(sed -n 's/^Cpus_allowed_list:[[:space:]]*//p' /proc/self/status)
+    [ -n "$rt_allowed" ] || return 1
+    rt_online=$(read_first_line /sys/devices/system/cpu/online)
+    [ -n "$rt_online" ] || return 1
+    if [ -n "${BG_CPUS:-}" ] && [ -z "${BACKGROUND_CMD:-${PERF_RT_BG_CMD:-}}" ]; then
+        log_fail "BG_CPUS requires a background command"
+        return 1
+    fi
+    for rt_mask in "${RT_CPUS:-}" "${BG_CPUS:-}"; do
+        [ -n "$rt_mask" ] || continue
+        printf '%s\n' "$rt_mask" | grep -Eq '^[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$' || return 1
+        # Bound requested ranges by the runtime mask before any expansion.
+        awk -v allowed="$rt_allowed" -v requested="$rt_mask" 'BEGIN {
+            n=split(allowed, entries, ",")
+            for (i=1; i<=n; i++) {
+                k=split(entries[i], endpoints, "-")
+                if (endpoints[k]+0 > maximum) maximum=endpoints[k]+0
+            }
+            n=split(requested, entries, ",")
+            for (i=1; i<=n; i++) {
+                k=split(entries[i], endpoints, "-")
+                if (endpoints[1]+0 > endpoints[k]+0 || endpoints[k]+0 > maximum) exit 1
+            }
+        }' || return 1
+        taskset -c "$rt_mask" sh -c 'true' >/dev/null 2>&1 || return 1
+        for rt_cpu in $(expand_cpu_list "$rt_mask"); do
+            cpu_in_list "$rt_cpu" "$rt_allowed" || return 1
+            cpu_in_list "$rt_cpu" "$rt_online" || return 1
+        done
+    done
+    if [ -n "${RT_CPUS:-}" ] && [ -n "${BG_CPUS:-}" ]; then
+        for rt_cpu in $(expand_cpu_list "$RT_CPUS"); do
+            if cpu_in_list "$rt_cpu" "$BG_CPUS"; then
+                log_fail "RT_CPUS and BG_CPUS overlap at CPU$rt_cpu"
+                return 1
+            fi
+        done
+    fi
+    log_info "CPU selection: allowed=$rt_allowed RT=${RT_CPUS:-inherited} load=${BG_CPUS:-inherited}"
+}
+
+# rt_exec_command <command> [args...]
+# Exec the existing command directly unless RT_CPUS requests taskset. Reject
+# native affinity flags that could override the requested envelope.
+rt_exec_command() {
+    if [ -n "${RT_CPUS:-}" ]; then
+        for rt_arg in "$@"; do
+            case "${RT_CUR_TESTNAME:-}:$rt_arg" in
+                OSLat:-c*|OSLat:-C*)
+                    echo "RT_CPUS conflicts with OSLat CPU option $rt_arg" >&2
+                    return 1
+                    ;;
+            esac
+            case "$rt_arg" in
+                -a*|-S|--smp|--affinity*|--cpu-list*)
+                    echo "RT_CPUS conflicts with native affinity option $rt_arg" >&2
+                    return 1
+                    ;;
+            esac
+        done
+        exec taskset -c "$RT_CPUS" "$@"
+    fi
+    exec "$@"
+}
+
+# perf_rt_bg_check
+# Require a requested load to remain running through the measurement interval.
+# Latch failure for final reporting. No load is a no-op. Return 1 on lost load.
+perf_rt_bg_check() {
+    [ -n "${PERF_RT_BG_PID:-}" ] || return 0
+    if [ -s "$PERF_RT_BG_STATE/status" ] || ! kill -0 "$PERF_RT_BG_PID" 2>/dev/null; then
+        if [ "${PERF_RT_BG_FAILED:-0}" = 0 ]; then
+            log_fail "Background workload ended before measurement completed, exit=$(cat "$PERF_RT_BG_STATE/status" 2>/dev/null || echo unknown), log=$PERF_RT_BG_LOGFILE"
+        fi
+        PERF_RT_BG_FAILED=1
+        return 1
+    fi
+    return 0
+}
+
 # perf_rt_bg_start <name> <command>
-# Start an optional background workload.
-# ---------------------------------------------------------------------------
+# Start an optional load in a private session. Retain status/log under CWD.
+# Return 1 for invalid masks, missing setsid or failed startup. No package install.
 perf_rt_bg_start() {
-  PERF_RT_BG_NAME="${1:-rt-tests}"
-  PERF_RT_BG_CMD="${2:-}"
-
-  [ -n "$PERF_RT_BG_CMD" ] || return 0
-
-  perf_rt_bg_stop >/dev/null 2>&1 || true
-
-  if [ -n "${PERF_RT_BG_LOGFILE:-}" ]; then
-    bg_dir=$(dirname "$PERF_RT_BG_LOGFILE" 2>/dev/null || echo "")
-    if [ -n "$bg_dir" ]; then
-      mkdir -p "$bg_dir" 2>/dev/null || true
+    if [ -n "${PERF_RT_BG_PID:-}" ]; then
+        perf_rt_bg_stop || return 1
     fi
-    log_info "$PERF_RT_BG_NAME: starting background cmd (logging -> $PERF_RT_BG_LOGFILE): $PERF_RT_BG_CMD"
-    sh -c "$PERF_RT_BG_CMD" >>"$PERF_RT_BG_LOGFILE" 2>&1 &
-  else
-    log_info "$PERF_RT_BG_NAME: starting background cmd: $PERF_RT_BG_CMD"
-    sh -c "$PERF_RT_BG_CMD" >/dev/null 2>&1 &
-  fi
-
-  PERF_RT_BG_PID=$!
-
-  case "$PERF_RT_BG_PID" in
-    ''|*[!0-9]*)
-      log_warn "$PERF_RT_BG_NAME: background cmd started but PID invalid: '$PERF_RT_BG_PID'"
-      PERF_RT_BG_PID=""
-      return 0
-      ;;
-  esac
-
-  return 0
+    PERF_RT_BG_NAME=${1:-rt-tests}
+    PERF_RT_BG_CMD=${2:-}
+    PERF_RT_BG_FAILED=0
+    PERF_RT_BG_PID=""
+    if ! rt_validate_cpu_masks; then
+        log_fail "Invalid RT_CPUS/BG_CPUS or unavailable taskset"
+        PERF_RT_BG_FAILED=1
+        return 1
+    fi
+    [ -n "$PERF_RT_BG_CMD" ] || return 0
+    if ! command -v setsid >/dev/null 2>&1; then
+        log_fail "Requested background workload requires image-provided setsid for cleanup"
+        PERF_RT_BG_FAILED=1
+        return 1
+    fi
+    PERF_RT_BG_STATE=$(mktemp -d "$PWD/rt-background.XXXXXX") || return 1
+    PERF_RT_BG_LOGFILE="$PERF_RT_BG_STATE/workload.log"
+    log_info "$PERF_RT_BG_NAME: background log=$PERF_RT_BG_LOGFILE"
+    # The session keeper survives command exit so descendants remain owned.
+    # shellcheck disable=SC2016
+    setsid sh -c '
+        state=$1
+        mask=$2
+        cmd=$3
+        trap "exit 0" TERM INT HUP
+        printf "%s\n" "$$" >"$state/ready"
+        if [ -n "$mask" ]; then
+            taskset -c "$mask" sh -c "$cmd"
+        else
+            sh -c "$cmd"
+        fi
+        rc=$?
+        printf "%s\n" "$rc" >"$state/status"
+        while :; do
+            sleep 1
+        done
+    ' sh "$PERF_RT_BG_STATE" "${BG_CPUS:-}" "$PERF_RT_BG_CMD" >"$PERF_RT_BG_LOGFILE" 2>&1 &
+    PERF_RT_BG_PID=$!
+    sleep 1
+    if [ "$(cat "$PERF_RT_BG_STATE/ready" 2>/dev/null)" != "$PERF_RT_BG_PID" ]; then
+        log_fail "Background session ownership could not be confirmed"
+        PERF_RT_BG_FAILED=1
+        perf_rt_bg_stop
+        return 1
+    fi
+    if ! perf_rt_bg_check; then
+        perf_rt_bg_stop
+        return 1
+    fi
+    return 0
 }
 
-# ---------------------------------------------------------------------------
 # perf_rt_bg_stop
-# Stop an optional background workload.
-# ---------------------------------------------------------------------------
+# Latch premature completion and terminate only the owned session, including
+# descendants. Keep logs/status for the verdict and repeated calls harmless.
 perf_rt_bg_stop() {
-  [ -n "$PERF_RT_BG_PID" ] || return 0
-
-  case "$PERF_RT_BG_PID" in
-    ''|*[!0-9]*)
-      PERF_RT_BG_PID=""
-      PERF_RT_BG_CMD=""
-      PERF_RT_BG_NAME=""
-      return 0
-      ;;
-  esac
-
-  log_info "${PERF_RT_BG_NAME:-rt-tests}: stopping background cmd pid=$PERF_RT_BG_PID"
-
-  kill "$PERF_RT_BG_PID" >/dev/null 2>&1 || true
-
-  t=0
-  while [ "$t" -lt "$PERF_RT_BG_KILL_TIMEOUT" ] 2>/dev/null; do
-    if kill -0 "$PERF_RT_BG_PID" >/dev/null 2>&1; then
-      sleep 1
-      t=$((t + 1))
-      continue
+    local rt_stop_pid rt_stop_tick
+    [ -n "${PERF_RT_BG_PID:-}" ] || return 0
+    perf_rt_bg_check || true
+    rt_stop_pid=$PERF_RT_BG_PID
+    case "$rt_stop_pid" in
+        ''|*[!0-9]*|0|1)
+            PERF_RT_BG_FAILED=1
+            return 1
+            ;;
+    esac
+    kill -s TERM -- "-$rt_stop_pid" 2>/dev/null || true
+    rt_stop_tick=0
+    while bounded_timeout_pid_running "$rt_stop_pid" 1 && [ "$rt_stop_tick" -lt 3 ]; do
+        sleep 1
+        rt_stop_tick=$((rt_stop_tick + 1))
+    done
+    kill -s KILL -- "-$rt_stop_pid" 2>/dev/null || true
+    rt_stop_tick=0
+    while bounded_timeout_pid_running "$rt_stop_pid" 1 && [ "$rt_stop_tick" -lt 3 ]; do
+        sleep 1
+        rt_stop_tick=$((rt_stop_tick + 1))
+    done
+    if ! bounded_timeout_pid_running "$rt_stop_pid"; then
+        wait "$rt_stop_pid" 2>/dev/null || true
     fi
-    break
-  done
-
-  if kill -0 "$PERF_RT_BG_PID" >/dev/null 2>&1; then
-    log_warn "${PERF_RT_BG_NAME:-rt-tests}: background cmd still running; sending ${PERF_RT_BG_KILL_SIGNAL}"
-    kill -"$PERF_RT_BG_KILL_SIGNAL" "$PERF_RT_BG_PID" >/dev/null 2>&1 || true
-  fi
-
-  wait "$PERF_RT_BG_PID" >/dev/null 2>&1 || true
-
-  PERF_RT_BG_PID=""
-  PERF_RT_BG_CMD=""
-  PERF_RT_BG_NAME=""
-  return 0
+    if bounded_timeout_pid_running "$rt_stop_pid" 1; then
+        PERF_RT_BG_FAILED=1
+        log_fail "Background session PID=$rt_stop_pid remains active after bounded cleanup, log=$PERF_RT_BG_LOGFILE"
+        return 1
+    fi
+    PERF_RT_BG_PID=""
+    return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -982,8 +1091,14 @@ rt_log_common_runtime_env() {
   fi
 
   log_info "$testname: cpu_online=$(cat /sys/devices/system/cpu/online 2>/dev/null || echo n/a)"
-  rt_gov0=$(cat /sys/devices/system/cpu/cpufreq/policy0/scaling_governor 2>/dev/null || echo n/a)
-  log_info "$testname: governor0=$rt_gov0"
+  for rt_policy in /sys/devices/system/cpu/cpufreq/policy*; do
+    [ -d "$rt_policy" ] || continue
+    log_info "${rt_policy##*/}: governor=$(cat "$rt_policy/scaling_governor" 2>/dev/null || echo unavailable) min=$(cat "$rt_policy/scaling_min_freq" 2>/dev/null || echo unavailable) max=$(cat "$rt_policy/scaling_max_freq" 2>/dev/null || echo unavailable)"
+  done
+  for rt_setting in /sys/devices/system/clocksource/clocksource0/current_clocksource /proc/sys/kernel/timer_migration /sys/devices/system/cpu/cpuidle/current_driver /sys/devices/system/cpu/cpuidle/current_governor_ro; do
+    [ -r "$rt_setting" ] || continue
+    log_info "$rt_setting=$(cat "$rt_setting")"
+  done
 
   if [ -n "$rt_bin" ]; then
     log_info "$testname: BIN=$rt_bin"
@@ -1105,7 +1220,7 @@ rt_run_and_capture() {
 
   start_ts=$(rt_now_seconds)
 
-  "$@" >"$stdoutlog" 2>&1 &
+  rt_exec_command "$@" >"$stdoutlog" 2>&1 &
   run_pid=$!
   RT_CUR_BIN_PID="$run_pid"
   export RT_CUR_BIN_PID
@@ -1121,6 +1236,7 @@ rt_run_and_capture() {
   esac
 
   while kill -0 "$run_pid" 2>/dev/null; do
+    perf_rt_bg_check || true
     sleep "$heartbeat_sec"
     if kill -0 "$run_pid" 2>/dev/null; then
       now_ts=$(rt_now_seconds)
@@ -1196,6 +1312,7 @@ rt_run_json_iteration() {
 
   [ -n "$stdoutlog" ] || return 1
   [ -n "$jsonfile" ] || return 1
+  rm -f "$jsonfile" || return 1
   [ "$#" -gt 0 ] || return 1
 
   mkdir -p "$(dirname "$stdoutlog")" 2>/dev/null || true
@@ -1207,7 +1324,7 @@ rt_run_json_iteration() {
 
   start_ts=$(rt_now_seconds)
 
-  "$@" >"$stdoutlog" 2>&1 &
+  rt_exec_command "$@" >"$stdoutlog" 2>&1 &
   run_pid=$!
   RT_CUR_BIN_PID="$run_pid"
   export RT_CUR_BIN_PID
@@ -1223,6 +1340,7 @@ rt_run_json_iteration() {
   esac
 
   while kill -0 "$run_pid" 2>/dev/null; do
+    perf_rt_bg_check || true
     sleep "$heartbeat_sec"
     if kill -0 "$run_pid" 2>/dev/null; then
       now_ts=$(rt_now_seconds)
@@ -1298,6 +1416,7 @@ rt_run_streaming_iteration() {
   case "$heartbeat_sec" in ''|*[!0-9]*|0) heartbeat_sec=10 ;; esac
   [ -n "$stdoutlog" ] || return 1
   [ -n "$jsonfile" ] || return 1
+  rm -f "$jsonfile" || return 1
   [ "$#" -gt 0 ] || return 1
 
   mkdir -p "$(dirname "$stdoutlog")" 2>/dev/null || true
@@ -1321,6 +1440,7 @@ rt_run_streaming_iteration() {
 
   rt_start_heartbeat "$testname" "$heartbeat_sec"
   while kill -0 "$run_pid" 2>/dev/null; do
+    perf_rt_bg_check || true
     sleep 1
   done
 
@@ -1545,33 +1665,20 @@ rt_append_named_metric() {
 # rt_emit_pass_fail_result <testname> <res_file> <result_txt> <out_dir> <overall_fail>
 # Emit final PASS/FAIL result and update the .res file.
 # ---------------------------------------------------------------------------
-rt_emit_pass_fail_result() {
-  testname=$1
-  res_file=$2
-  result_txt=$3
-  out_dir=$4
-  overall_fail=$5
-
-  [ -n "$testname" ] || testname="RTTest"
-  [ -n "$res_file" ] || return 1
-
-  if [ "$overall_fail" -eq 0 ] 2>/dev/null; then
-    log_pass "$testname: PASS"
-    echo "$testname PASS" >"$res_file"
-  else
-    if [ -n "$out_dir" ]; then
-      log_fail "$testname: FAIL (see $result_txt and $out_dir)"
+rt_emit_pass_fail_result() (
+    test_result_init "$1" "$2" || exit 1
+    if [ "$5" -eq 0 ] && [ "${PERF_RT_BG_FAILED:-0}" -eq 0 ]; then
+        test_result_record PASS "$1 measurement and requested workload completed"
     else
-      log_fail "$testname: FAIL (see $result_txt)"
+        test_result_record FAIL "$1 measurement or requested workload failed, see $3 and $4"
     fi
-    echo "$testname FAIL" >"$res_file"
-  fi
-  return 0
-}
+    test_result_finish
+)
 
 # ---------------------------------------------------------------------------
 # rt_emit_interrupt_aware_result <testname> <res_file> <result_txt> <out_dir> <interrupted> <overall_fail>
-# Emit SKIP for user interrupt, otherwise defer to normal PASS/FAIL emission.
+# Emit SKIP for user interrupt only when no failure was recorded. Otherwise
+# preserve the measurement/background failure through normal result emission.
 # ---------------------------------------------------------------------------
 rt_emit_interrupt_aware_result() {
   testname=$1
@@ -1584,9 +1691,13 @@ rt_emit_interrupt_aware_result() {
   [ -n "$testname" ] || testname="RTTest"
   [ -n "$res_file" ] || return 1
 
-  if [ "$interrupted" -eq 1 ] 2>/dev/null; then
-    log_skip "$testname: SKIP (interrupted by user; partial results kept in $result_txt)"
-    echo "$testname SKIP" >"$res_file"
+  if [ "$interrupted" -eq 1 ] && [ "$overall_fail" -eq 0 ] && [ "${PERF_RT_BG_FAILED:-0}" -eq 0 ]; then
+    log_skip "$testname: SKIP (interrupted by user, partial results kept in $result_txt)"
+    (
+      test_result_init "$testname" "$res_file" || exit 1
+      test_result_record SKIP "$testname interrupted, partial evidence in $result_txt"
+      test_result_finish
+    )
     return 0
   fi
 
