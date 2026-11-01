@@ -11,48 +11,49 @@
 # - Always exits 0 (LAVA-friendly). Use SSDD.res for gating.
 # - Ctrl-C/user interrupt is treated as SKIP and partial results are preserved.
 
+# ---------- Repo env + helpers ----------
 SCRIPT_DIR="$(
   cd "$(dirname "$0")" || exit 1
   pwd
 )"
-
 INIT_ENV=""
 SEARCH="$SCRIPT_DIR"
+
 while [ "$SEARCH" != "/" ]; do
-  if [ -f "$SEARCH/init_env" ]; then
-    INIT_ENV="$SEARCH/init_env"
-    break
-  fi
-  SEARCH=$(dirname "$SEARCH")
+    if [ -f "$SEARCH/init_env" ]; then
+        INIT_ENV="$SEARCH/init_env"
+        break
+    fi
+    SEARCH=$(dirname "$SEARCH")
 done
 
 if [ -z "$INIT_ENV" ]; then
-  echo "[ERROR] Could not find init_env (starting at $SCRIPT_DIR)" >&2
-  exit 1
+    echo "[ERROR] Could not find init_env (starting at $SCRIPT_DIR)" >&2
+    exit 1
 fi
 
+# Only source once (idempotent)
+# NOTE: We intentionally **do not export** any new vars. They stay local to this shell.
 if [ -z "${__INIT_ENV_LOADED:-}" ]; then
-  # shellcheck disable=SC1090
-  . "$INIT_ENV"
-  __INIT_ENV_LOADED=1
+    # shellcheck disable=SC1090
+    . "$INIT_ENV"
+    __INIT_ENV_LOADED=1
 fi
 
+# shellcheck disable=SC1090
+. "$INIT_ENV"
 # shellcheck disable=SC1091
 . "$TOOLS/functestlib.sh"
 # shellcheck disable=SC1091
 . "$TOOLS/lib_rt.sh"
 
 TESTNAME="SSDD"
+RES_FILE="$SCRIPT_DIR/${TESTNAME}.res"
+test_result_init "$TESTNAME" "$RES_FILE" || exit 1
 RT_CUR_TESTNAME="$TESTNAME"
 export RT_CUR_TESTNAME
 
-test_path=$(find_test_case_by_name "$TESTNAME")
-if [ -z "$test_path" ]; then
-  test_path="$SCRIPT_DIR"
-fi
-
-RES_FILE="$test_path/${TESTNAME}.res"
-OUT_DIR="${OUT_DIR:-$test_path/logs_${TESTNAME}}"
+OUT_DIR="${OUT_DIR:-$PWD/logs_${TESTNAME}}"
 RESULT_TXT="${RESULT_TXT:-$OUT_DIR/result.txt}"
 
 BACKGROUND_CMD="${BACKGROUND_CMD:-}"
@@ -68,6 +69,8 @@ HEARTBEAT_SEC="${HEARTBEAT_SEC:-10}"
 usage() {
   cat <<EOF
 Usage: $0 [OPTIONS]
+  Environment: RT_CPUS and BG_CPUS accept runtime CPU lists.
+  Explicit masks require taskset, background commands require setsid.
   --out DIR
   --result FILE
   --iterations N
@@ -82,64 +85,78 @@ Usage: $0 [OPTIONS]
 EOF
 }
 
-while [ "$#" -gt 0 ]; do
-  case "$1" in
-    -h|--help)
-      usage
-      exit 0
-      ;;
-    --out)
-      shift
-      OUT_DIR="$1"
-      ;;
-    --result)
-      shift
-      RESULT_TXT="$1"
-      ;;
-    --iterations)
-      shift
-      ITERATIONS="$1"
-      ;;
-    --background-cmd)
-      shift
-      BACKGROUND_CMD="$1"
-      ;;
-    --binary)
-      shift
-      BINARY="$1"
-      ;;
-    --progress-every)
-      shift
-      PROGRESS_EVERY="$1"
-      ;;
-    --heartbeat-sec)
-      shift
-      HEARTBEAT_SEC="$1"
-      ;;
-    --verbose)
-      VERBOSE=1
-      ;;
-    --forks)
-      shift
-      FORKS="$1"
-      ;;
-    --ssdd-iters)
-      shift
-      SSDD_ITERS="$1"
-      ;;
-    --quiet)
-      shift
-      QUIET="$1"
-      ;;
-    *)
-      log_warn "Unknown option: $1"
-      usage
-      echo "$TESTNAME FAIL" >"$RES_FILE"
-      exit 0
-      ;;
-  esac
-  shift
-done
+# parse_args <arguments...>
+# Parse existing RT client and output options before execution.
+parse_args() {
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      --out)
+        [ "$#" -ge 2 ] || test_result_finish FAIL "Missing value for $1"
+        shift
+        OUT_DIR="$1"
+        ;;
+      --result)
+        [ "$#" -ge 2 ] || test_result_finish FAIL "Missing value for $1"
+        shift
+        RESULT_TXT="$1"
+        ;;
+      --iterations)
+        [ "$#" -ge 2 ] || test_result_finish FAIL "Missing value for $1"
+        shift
+        ITERATIONS="$1"
+        ;;
+      --background-cmd)
+        [ "$#" -ge 2 ] || test_result_finish FAIL "Missing value for $1"
+        shift
+        BACKGROUND_CMD="$1"
+        ;;
+      --binary)
+        [ "$#" -ge 2 ] || test_result_finish FAIL "Missing value for $1"
+        shift
+        BINARY="$1"
+        ;;
+      --progress-every)
+        [ "$#" -ge 2 ] || test_result_finish FAIL "Missing value for $1"
+        shift
+        PROGRESS_EVERY="$1"
+        ;;
+      --heartbeat-sec)
+        [ "$#" -ge 2 ] || test_result_finish FAIL "Missing value for $1"
+        shift
+        HEARTBEAT_SEC="$1"
+        ;;
+      --verbose)
+        VERBOSE=1
+        ;;
+      --forks)
+        [ "$#" -ge 2 ] || test_result_finish FAIL "Missing value for $1"
+        shift
+        FORKS="$1"
+        ;;
+      --ssdd-iters)
+        [ "$#" -ge 2 ] || test_result_finish FAIL "Missing value for $1"
+        shift
+        SSDD_ITERS="$1"
+        ;;
+      --quiet)
+        [ "$#" -ge 2 ] || test_result_finish FAIL "Missing value for $1"
+        shift
+        QUIET="$1"
+        ;;
+      *)
+        log_warn "Unknown option: $1"
+        usage
+        test_result_finish FAIL "$TESTNAME prerequisite or argument check failed, see preceding diagnostic"
+        ;;
+    esac
+    shift
+  done
+}
+parse_args "$@"
 
 LOG_PREFIX="$OUT_DIR/ssdd"
 TMP_ONE="$OUT_DIR/tmp_result_one.txt"
@@ -158,18 +175,15 @@ log_info "$TESTNAME: Checking for the tools required to run ssdd"
 
 if ! rt_require_common_tools uname awk sed grep tr head tail mkdir cat sh tee sleep kill date mkfifo rm sort wc; then
   log_skip "$TESTNAME: basic tools missing"
-  echo "$TESTNAME SKIP" >"$RES_FILE"
-  exit 0
+  test_result_finish SKIP "$TESTNAME prerequisite or argument check unavailable, see preceding diagnostic"
 fi
 
 if ! rt_require_json_helpers; then
-  echo "$TESTNAME SKIP" >"$RES_FILE"
-  exit 0
+  test_result_finish SKIP "$TESTNAME prerequisite or argument check unavailable, see preceding diagnostic"
 fi
 
 if ! rt_require_stream_helpers; then
-  echo "$TESTNAME SKIP" >"$RES_FILE"
-  exit 0
+  test_result_finish SKIP "$TESTNAME prerequisite or argument check unavailable, see preceding diagnostic"
 fi
 
 rt_normalize_common_params
@@ -189,8 +203,7 @@ esac
 SSDD_BIN=$(rt_resolve_binary ssdd "$BINARY" 2>/dev/null || echo "")
 if [ -z "$SSDD_BIN" ] || [ ! -x "$SSDD_BIN" ]; then
   log_skip "$TESTNAME: ssdd binary not found/executable (${SSDD_BIN:-none})"
-  echo "$TESTNAME SKIP" >"$RES_FILE"
-  exit 0
+  test_result_finish SKIP "$TESTNAME prerequisite or argument check unavailable, see preceding diagnostic"
 fi
 
 rt_log_common_runtime_env "$TESTNAME" "$SSDD_BIN"
@@ -203,7 +216,11 @@ export RT_INTERRUPTED
 trap 'rt_handle_int; rt_cleanup_pipes; rt_stop_heartbeat; perf_rt_bg_stop >/dev/null 2>&1 || true' INT TERM
 trap 'rt_cleanup_pipes; rt_stop_heartbeat; perf_rt_bg_stop >/dev/null 2>&1 || true' EXIT
 
-perf_rt_bg_start "$TESTNAME" "$BACKGROUND_CMD"
+if ! perf_rt_bg_start "$TESTNAME" "$BACKGROUND_CMD"; then
+  test_result_init "$TESTNAME" "$RES_FILE" || exit 1
+  test_result_record FAIL "Requested RT CPU selection or background workload could not start"
+  test_result_finish
+fi
 
 overall_fail=0
 

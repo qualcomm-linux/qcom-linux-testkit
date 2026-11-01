@@ -227,3 +227,10 @@ run:
 
 - The `.res` file is always created for LAVA.
 - The script is intended to be POSIX `sh` compatible and CI-friendly.
+
+
+See [shared runtime validation](../README.md) for background workload health,
+cleanup, RT_CPUS/BG_CPUS selection and retained diagnostics.
+
+The LAVA `.res` file remains next to `run.sh`. Default workload logs,
+background evidence and temporary files use the invocation CWD.

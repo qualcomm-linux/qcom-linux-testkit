@@ -155,3 +155,10 @@ Key steps:
 - If the kernel is not PREEMPT_RT-enabled, results may be worse. The wrapper logs a warning via `rt_log_kernel_rt_status`.
 - If `rt-migrate-test` is missing or not executable, the test is marked **SKIP**.
 - If any iteration fails or parsing detects a `fail` verdict line, overall result becomes **FAIL** (written to `RTMigrateTest.res`).
+
+
+See [shared runtime validation](../README.md) for background workload health,
+cleanup, RT_CPUS/BG_CPUS selection and retained diagnostics.
+
+The LAVA `.res` file remains next to `run.sh`. Default workload logs,
+background evidence and temporary files use the invocation CWD.

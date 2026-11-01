@@ -9,6 +9,8 @@ metadata:
     - preempt-rt
 
 params:
+  RT_CPUS: ""
+  BG_CPUS: ""
   INTERVAL: "1000"
   THREADS: "1"
   DURATION: "30s"
@@ -28,6 +30,6 @@ run:
   steps:
     - 'REPO_PATH="$PWD"'
     - 'cd Runner/suites/Kernel/RT-tests/Cyclictest'
-    - './run.sh --out "${OUT_DIR}" --interval "${INTERVAL}" --threads "${THREADS}" --duration "${DURATION}" --iterations "${ITERATIONS}" --background-cmd "${BACKGROUND_CMD}" --binary "${BINARY}" --progress-every "${PROGRESS_EVERY}" --heartbeat-sec "${HEARTBEAT_SEC}" $( [ "${VERBOSE}" = "1" ] && echo "--verbose" ) || true'
+    - 'RT_CPUS="${RT_CPUS}" BG_CPUS="${BG_CPUS}" ./run.sh --out "${OUT_DIR}" --interval "${INTERVAL}" --threads "${THREADS}" --duration "${DURATION}" --iterations "${ITERATIONS}" --background-cmd "${BACKGROUND_CMD}" --binary "${BINARY}" --progress-every "${PROGRESS_EVERY}" --heartbeat-sec "${HEARTBEAT_SEC}" $( [ "${VERBOSE}" = "1" ] && echo "--verbose" ) || true'
     - 'if [ -f CyclicTest.res ]; then sed "s/^CyclicTest /Cyclictest /" CyclicTest.res > Cyclictest.res; fi'
     - '$REPO_PATH/Runner/utils/send-to-lava.sh Cyclictest.res'

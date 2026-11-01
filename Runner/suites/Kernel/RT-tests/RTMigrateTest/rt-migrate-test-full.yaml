@@ -9,6 +9,8 @@ metadata:
     - preempt-rt
 
 params:
+  RT_CPUS: ""
+  BG_CPUS: ""
   DURATION: "30s"
   BACKGROUND_CMD: ""
   ITERATIONS: "1"
@@ -34,5 +36,5 @@ run:
   steps:
     - REPO_PATH=$PWD
     - cd Runner/suites/Kernel/RT-tests/RTMigrateTest
-    - ./run.sh --duration "${DURATION}" --iterations "${ITERATIONS}" --background-cmd "${BACKGROUND_CMD}" --prio "${PRIO}" --quiet "${QUIET}" --check "${CHECK}" --equal "${EQUAL}" --loops "${LOOPS}" --maxerr-us "${MAXERR_US}" --run-time-ms "${RUN_TIME_MS}" --sleep-time-ms "${SLEEP_TIME_MS}" --nr-tasks "${NR_TASKS}" --progress-every "${PROGRESS_EVERY}" --heartbeat-sec "${HEARTBEAT_SEC}" --out "${OUT_DIR}" --binary "${BINARY}" $( [ "${VERBOSE}" = "1" ] && echo "--verbose" ) || true
+    - RT_CPUS="${RT_CPUS}" BG_CPUS="${BG_CPUS}" ./run.sh --duration "${DURATION}" --iterations "${ITERATIONS}" --background-cmd "${BACKGROUND_CMD}" --prio "${PRIO}" --quiet "${QUIET}" --check "${CHECK}" --equal "${EQUAL}" --loops "${LOOPS}" --maxerr-us "${MAXERR_US}" --run-time-ms "${RUN_TIME_MS}" --sleep-time-ms "${SLEEP_TIME_MS}" --nr-tasks "${NR_TASKS}" --progress-every "${PROGRESS_EVERY}" --heartbeat-sec "${HEARTBEAT_SEC}" --out "${OUT_DIR}" --binary "${BINARY}" $( [ "${VERBOSE}" = "1" ] && echo "--verbose" ) || true
     - $REPO_PATH/Runner/utils/send-to-lava.sh RTMigrateTest.res
