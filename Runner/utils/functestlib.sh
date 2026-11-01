@@ -3099,6 +3099,8 @@ run_with_timeout() {
 #   COMMAND...   - command and arguments to execute.
 #
 # Optional caller-provided hook:
+#   MANAGED_TIMEOUT_USE_SESSION=1 requires setsid and terminates the owned
+#   session on timeout/completion. Default 0 preserves existing callers.
 #   MANAGED_TIMEOUT_PRE_EXEC_HOOK - function/command invoked in the child command
 #                                   and watcher before they do work.
 #
@@ -3117,6 +3119,11 @@ run_with_managed_timeout() {
     mt_label="$3"
     shift 3
     mt_command_display="$*"
+    mt_use_session=${MANAGED_TIMEOUT_USE_SESSION:-0}
+    if [ "$mt_use_session" = 1 ] && ! command -v setsid >/dev/null 2>&1; then
+        echo "setsid is required for managed session cleanup" >&2
+        return 125
+    fi
     mt_pre_exec_hook="${MANAGED_TIMEOUT_PRE_EXEC_HOOK:-}"
 
     mt_run_pre_exec_hook() {
@@ -3145,6 +3152,9 @@ run_with_managed_timeout() {
 
     (
         mt_run_pre_exec_hook
+        if [ "$mt_use_session" = 1 ]; then
+            exec setsid "$@"
+        fi
         exec "$@"
     ) &
     mt_cmd_pid=$!
@@ -3171,14 +3181,53 @@ run_with_managed_timeout() {
         if [ "$mt_sleep_rc" -eq 0 ]; then
             printf 'timeout after %ss: %s\n' "$mt_timeout_secs" "$mt_command_display" >"$mt_timeout_marker_file" 2>/dev/null || true
             echo "[TIMEOUT] command exceeded ${mt_timeout_secs}s: $mt_command_display" >&2
-            kill "$mt_cmd_pid" >/dev/null 2>&1 || true
-            sleep 2
-            kill -KILL "$mt_cmd_pid" >/dev/null 2>&1 || true
+            if [ "$mt_use_session" = 1 ]; then
+                kill -s TERM -- "-$mt_cmd_pid" >/dev/null 2>&1 || true
+                sleep 2
+                kill -s KILL -- "-$mt_cmd_pid" >/dev/null 2>&1 || true
+            else
+                kill "$mt_cmd_pid" >/dev/null 2>&1 || true
+                sleep 2
+                kill -KILL "$mt_cmd_pid" >/dev/null 2>&1 || true
+            fi
         fi
     ) &
     mt_watcher_pid=$!
     # shellcheck disable=SC2034  # Exposed for caller cleanup traps while command is running.
     MANAGED_TIMEOUT_WATCHER_PID="$mt_watcher_pid"
+
+    if [ "$mt_use_session" = 1 ]; then
+        mt_status=0
+        while bounded_timeout_pid_running "$mt_cmd_pid"; do
+            if [ -r "$mt_timeout_marker_file" ]; then
+                mt_status=124
+                break
+            fi
+            if ! bounded_timeout_pid_running "$mt_watcher_pid"; then
+                echo "[ERROR] timeout watcher exited before the owned command" >&2
+                mt_status=125
+                break
+            fi
+            sleep 1
+        done
+        if ! bounded_timeout_pid_running "$mt_cmd_pid"; then
+            wait "$mt_cmd_pid" 2>/dev/null
+            mt_command_status=$?
+            if [ "$mt_status" -eq 0 ]; then
+                mt_status=$mt_command_status
+            fi
+        fi
+        if [ -r "$mt_timeout_marker_file" ]; then
+            mt_status=124
+        fi
+        if ! managed_timeout_cancel_bounded 2; then
+            echo "[ERROR] owned command session remains active after cleanup" >&2
+            if [ "$mt_status" -eq 0 ]; then
+                mt_status=125
+            fi
+        fi
+        return "$mt_status"
+    fi
 
     wait "$mt_cmd_pid" 2>/dev/null
     mt_status=$?
@@ -3231,6 +3280,8 @@ run_with_managed_timeout() {
 #     blocked in kernel I/O
 #   - All PID and file state is cleared after cleanup so repeated trap
 #     invocations cannot act on stale values
+#   - MANAGED_TIMEOUT_USE_SESSION=1 cancels the private command group and
+#     retains its leader PID while any active group member survives
 #
 # Arguments:
 #   grace_secs  positive integer seconds to wait after SIGTERM before
@@ -3246,6 +3297,11 @@ managed_timeout_cancel_bounded() {
     mtcb_sleep_pid="${MANAGED_TIMEOUT_WATCHER_SLEEP_PID:-}"
     mtcb_sleep_pid_file="${MANAGED_TIMEOUT_SLEEP_PID_FILE:-}"
     mtcb_marker_file="${MANAGED_TIMEOUT_MARKER_FILE:-}"
+    mtcb_use_session="${MANAGED_TIMEOUT_USE_SESSION:-0}"
+    mtcb_cmd_target="$mtcb_cmd_pid"
+    if [ "$mtcb_use_session" = 1 ] && [ -n "$mtcb_cmd_pid" ]; then
+        mtcb_cmd_target="-$mtcb_cmd_pid"
+    fi
 
     # Stop the watcher's sleep subprocess first so it cannot race and send
     # SIGKILL to the command after we have already handled it.
@@ -3277,20 +3333,22 @@ managed_timeout_cancel_bounded() {
 
     # Kill the command with a bounded wait after both SIGTERM and SIGKILL.
     if [ -n "$mtcb_cmd_pid" ]; then
-        kill "$mtcb_cmd_pid" 2>/dev/null || true
+        kill -s TERM -- "$mtcb_cmd_target" 2>/dev/null || true
         mtcb_i=0
-        while [ "$mtcb_i" -lt "$mtcb_grace" ] && kill -0 "$mtcb_cmd_pid" 2>/dev/null; do
-            sleep 1; mtcb_i=$((mtcb_i + 1))
+        while [ "$mtcb_i" -lt "$mtcb_grace" ] && bounded_timeout_pid_running "$mtcb_cmd_pid" "$mtcb_use_session"; do
+            sleep 1
+            mtcb_i=$((mtcb_i + 1))
         done
-        kill -KILL "$mtcb_cmd_pid" 2>/dev/null || true
+        kill -s KILL -- "$mtcb_cmd_target" 2>/dev/null || true
         # Bound the wait after SIGKILL: tasks in kernel I/O can still delay exit.
         mtcb_i=0
-        while [ "$mtcb_i" -lt 3 ] && kill -0 "$mtcb_cmd_pid" 2>/dev/null; do
-            sleep 1; mtcb_i=$((mtcb_i + 1))
+        while [ "$mtcb_i" -lt 3 ] && bounded_timeout_pid_running "$mtcb_cmd_pid" "$mtcb_use_session"; do
+            sleep 1
+            mtcb_i=$((mtcb_i + 1))
         done
         # Only reap if the process has already exited; an unconditional wait
         # can block indefinitely when the child is stuck in kernel I/O.
-        if ! kill -0 "$mtcb_cmd_pid" 2>/dev/null; then
+        if ! bounded_timeout_pid_running "$mtcb_cmd_pid"; then
             wait "$mtcb_cmd_pid" 2>/dev/null || true
         fi
     fi
@@ -3313,7 +3371,7 @@ managed_timeout_cancel_bounded() {
     # (e.g. the EXIT trap running after a signal trap) detects it and does not
     # treat DRM ownership as released.
     mtcb_rc=0
-    if [ -n "$mtcb_cmd_pid" ] && kill -0 "$mtcb_cmd_pid" 2>/dev/null; then
+    if [ -n "$mtcb_cmd_pid" ] && bounded_timeout_pid_running "$mtcb_cmd_pid" "$mtcb_use_session"; then
         mtcb_rc=1
     else
         MANAGED_TIMEOUT_CMD_PID=""
@@ -3327,9 +3385,46 @@ managed_timeout_cancel_bounded() {
     return "$mtcb_rc"
 }
 
-# bounded_timeout_pid_running PID
-# Check an owned child, treating an exited Linux zombie as ready to reap.
+# bounded_timeout_pid_running PID [group]
+# Check an owned child, or its private process group when group=1.
+# Exited Linux zombies are ready to reap and do not retain active ownership.
 bounded_timeout_pid_running() {
+    if [ "${2:-0}" = 1 ]; then
+        local btp_stat btp_line btp_tail btp_state btp_group btp_group_found=0
+        case "$1" in
+            ''|*[!0-9]*|0|1)
+                return 1
+                ;;
+        esac
+        kill -s 0 -- "-$1" 2>/dev/null || return 1
+        for btp_stat in /proc/[0-9]*/stat; do
+            [ -r "$btp_stat" ] || continue
+            IFS= read -r btp_line <"$btp_stat" || continue
+            # comm can contain spaces and parentheses, parse after its last ).
+            btp_tail=${btp_line##*) }
+            btp_state=${btp_tail%% *}
+            btp_tail=${btp_tail#* }
+            btp_tail=${btp_tail#* }
+            btp_group=${btp_tail%% *}
+            if [ "$btp_group" = "$1" ]; then
+                btp_group_found=1
+                case "$btp_state" in
+                    Z|X)
+                        continue
+                        ;;
+                    *)
+                        return 0
+                        ;;
+                esac
+            fi
+        done
+        if [ "$btp_group_found" = 0 ]; then
+            # A signallable group with unreadable procfs is still owned.
+            kill -s 0 -- "-$1" 2>/dev/null
+            return $?
+        fi
+        return 1
+    fi
     kill -0 "$1" 2>/dev/null || return 1
     if [ -r "/proc/$1/status" ]; then
         while read -r btp_key btp_value; do
