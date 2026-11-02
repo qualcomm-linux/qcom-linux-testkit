@@ -814,7 +814,7 @@ VIDEO_PACKAGE_MANAGED_STACK=0
 VIDEO_PACKAGE_RECOVERY_APPLICABLE=0
 video_package_set_ready_before=0
 
-if [ "$VIDEO_STACK" = "downstream" ]; then
+if [ "$VIDEO_STACK" = "downstream" ] && video_platform_has_stack_policy "$plat"; then
     case "$VIDEO_OS_ID" in
         debian|ubuntu|centos)
             VIDEO_PACKAGE_RECOVERY_APPLICABLE=1
@@ -926,7 +926,11 @@ fi
 rm -f "$stack_tmp" 2>/dev/null || true
 
 if [ -z "$post_stack" ] || [ "$post_stack" = "unknown" ]; then
-    log_warn "Could not fully switch to requested stack=$VIDEO_STACK (platform=$plat). Blacklist updated; reboot may be required."
+    if video_platform_has_stack_policy "$plat"; then
+        log_warn "Could not establish requested stack=$VIDEO_STACK (platform=$plat), check module and probe diagnostics"
+    else
+        log_warn "Could not identify a registered codec for platform=$plat, no board-specific stack switch was attempted"
+    fi
     post_stack="$(video_stack_status "$plat")"
 fi
 
@@ -961,29 +965,10 @@ video_step "" "Refresh V4L device nodes (udev trigger + prune stale)"
 video_clean_and_refresh_v4l || true
 
 # --- Hard gate: if requested stack not in effect, abort immediately (platform-aware)
-# When VIDEO_STACK=auto the case statement below would not match, bypassing the
-# gate and turning a failed probe into SKIP instead of FAIL. Resolve the
-# effective stack using the same three-step selection order as video_ensure_stack():
-#   1. Persistent blacklist preference (video_auto_preference_from_blacklist)
-#   2. Current active stack          (video_stack_status)
-#   3. Upstream as final default
-# This correctly handles downstream setups on LeMans/Monaco/Kodiak (no blacklist,
-# iris_vpu already active → current stack is downstream → gate validates downstream)
-# and Shikra failed-probe (blacklist gives upstream → gate validates upstream → FAIL).
-gate_stack="$(video_normalize_stack "$VIDEO_STACK")"
-if [ "$gate_stack" = "auto" ]; then
-    gate_pref="$(video_auto_preference_from_blacklist "$plat")"
-    if [ "$gate_pref" != "unknown" ]; then
-        gate_stack="$gate_pref"
-    else
-        gate_cur="$(video_normalize_stack "$(video_stack_status "$plat")")"
-        if [ "$gate_cur" != "unknown" ] && [ "$gate_cur" != "auto" ]; then
-            gate_stack="$gate_cur"
-        else
-            gate_stack="upstream"
-        fi
-    fi
-fi
+# Use the preparation resolver so unknown board identity is not mistaken for
+# missing upstream modules. Runtime discovery must still prove codec readiness.
+gate_stack="$(video_resolve_stack "$VIDEO_STACK" "$plat")"
+log_info "[STACK] requested=$VIDEO_STACK resolved=$gate_stack platform=$plat"
 
 case "$gate_stack" in
   upstream|up|base)
@@ -996,7 +981,7 @@ case "$gate_stack" in
                 msg="venus_core/dec/enc not all present"
                 ;;
             *)
-                msg="required upstream modules not present for platform $plat"
+                msg="no registered upstream codec with a recognized bound driver for platform $plat"
                 ;;
         esac
         log_fail "[STACK] Upstream requested but $msg; aborting."
@@ -1014,13 +999,18 @@ case "$gate_stack" in
                 msg="iris_vpu missing or venus_core still loaded"
                 ;;
             *)
-                msg="required downstream modules not present for platform $plat"
+                msg="no registered downstream codec with a recognized bound driver for platform $plat"
                 ;;
         esac
         log_fail "[STACK] Downstream requested but $msg; aborting."
         printf '%s\n' "$TESTNAME FAIL" >"$RES_FILE"
         exit 1
     fi
+    ;;
+  *)
+    log_fail "[STACK] Cannot validate requested stack=$VIDEO_STACK, runtime selection=$gate_stack platform=$plat"
+    printf '%s\n' "$TESTNAME FAIL" >"$RES_FILE"
+    exit 1
     ;;
 esac
 
@@ -1070,7 +1060,7 @@ case "$plat" in
         fi
         ;;
     *)
-        log_warn "Unknown platform; skipping strict module validation"
+        log_info "Platform has no board-specific module policy, registered runtime codec validation was used"
         ;;
 esac
 
