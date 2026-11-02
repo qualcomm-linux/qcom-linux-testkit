@@ -14,6 +14,38 @@ log_error() { log "ERROR" "$@"; }
 log_skip()  { log "SKIP"  "$@"; }
 log_warn()  { log "WARN"  "$@"; }
 
+# test_result_valid_name <value>
+# Check that a testcase id or result file-name fragment is a single safe token.
+# The value ends up both in a file name and in a LAVA signal line, so a path
+# separator, whitespace or a newline has to be rejected rather than sanitized:
+# an empty id loses the reported result, a newline can emit an extra one, and a
+# path-like value leaves no result file behind.
+# Inputs: the value to check. Output: no stdout contract.
+# Returns: 0 for a valid token, 1 otherwise. Side effects: none.
+test_result_valid_name() {
+    case "$1" in
+        ""|*[!A-Za-z0-9_.:-]*)
+            return 1
+            ;;
+    esac
+
+    return 0
+}
+
+# test_create_run_directory <base-directory>
+# Create a unique run directory below the base and print its absolute path.
+# A timestamp alone is only second-resolution, so two invocations started in
+# the same second would otherwise share one directory and overwrite each
+# other's evidence.
+# Inputs: the base directory. Output: the absolute run directory on stdout.
+# Returns: 0 on success, 1 when the directory cannot be created.
+test_create_run_directory() {
+    mkdir -p "$1" || return 1
+    tcrd_base="$(CDPATH='' cd "$1" && pwd -P)" || return 1
+    tcrd_run="$(mktemp -d "$tcrd_base/run-$(date -u +%Y%m%d-%H%M%S).XXXXXX")" || return 1
+    printf '%s\n' "$tcrd_run"
+}
+
 # test_result_init <test-name> <result-file>
 # Initializes shared testcase result state and removes any stale result file.
 test_result_init() {
@@ -25,6 +57,11 @@ test_result_init() {
 
     if [ -z "$TEST_RESULT_NAME" ] || [ -z "$TEST_RESULT_FILE" ]; then
         log_error "test_result_init requires a test name and result file"
+        return 3
+    fi
+
+    if ! test_result_valid_name "$TEST_RESULT_NAME"; then
+        log_error "test_result_init rejected the testcase name: $TEST_RESULT_NAME"
         return 3
     fi
 
