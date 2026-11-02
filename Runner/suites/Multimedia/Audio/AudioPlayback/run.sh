@@ -1,6 +1,11 @@
 #!/bin/sh
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause
+
+# Keep test-owned artifacts under the invocation directory, not inherited TMPDIR.
+AUDIO_WORK_DIR="$(pwd -P)" || exit 1
+TMPDIR="$AUDIO_WORK_DIR"
+export TMPDIR
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # ---- Source init_env & tools ----
@@ -101,6 +106,8 @@ export AUDIO_TAR_URL
 
 # ------------- Defaults / CLI -------------
 AUDIO_BACKEND="${AUDIO_BACKEND:-}"
+EXPECTED_DT_COMPATIBLE=""
+DT_FIT_IMAGE=""
 if [ "${SINK_CHOICE+x}" = x ]; then
   AUDIO_PLAYBACK_ROUTE_EXPLICIT=1
   AUDIO_PLAYBACK_ROUTE_SOURCE="environment"
@@ -156,11 +163,15 @@ usage() {
   cat <<EOF_USAGE
 Usage: $0 [options]
   --backend {pipewire|pulseaudio|alsa}
+  --expected-dt-compatible TEXT  Require this exact active DT compatible
+  --fit-image PATH               Verify EFI selection using the supplied boot FIT
   --sink {auto|speaker|speakers|headphone|headphones|headset|null}
   --overlay
       On Debian or CentOS, ensure the Qualcomm AudioReach package set before
       playback. Both prepare the regular-user PipeWire runtime. Without this flag,
-      use the native/base audio stack. qcom-distro/Yocto remains unchanged.
+      detect the image runtime from AudioReach modules, otherwise use base audio.
+      Yocto uses image-provided components.
+      Overlay selects PipeWire only and checks runtime audio-device access.
       Ubuntu reports SKIP because AudioReach is not enabled there.
   --formats "wav" # Legacy matrix mode only
   --durations "short|short medium" # Legacy matrix mode only (not recommended for new tests)
@@ -270,14 +281,23 @@ fi
 
 # Resolve root-owned result and log paths before privileged preparation.
 if [ -n "$RES_SUFFIX" ]; then
-  RES_FILE="$SCRIPT_DIR/${TESTNAME}_${RES_SUFFIX}.res"
-  LOGDIR="$SCRIPT_DIR/results/${TESTNAME}_${RES_SUFFIX}"
+  RES_FILE="$AUDIO_WORK_DIR/${TESTNAME}_${RES_SUFFIX}.res"
+  LOGDIR="$AUDIO_WORK_DIR/results/${TESTNAME}_${RES_SUFFIX}"
   log_info "Using unique result file: $RES_FILE"
   log_info "Using unique log directory: $LOGDIR"
 else
-  RES_FILE="$SCRIPT_DIR/${TESTNAME}.res"
-  LOGDIR="$SCRIPT_DIR/results/${TESTNAME}"
+  RES_FILE="$AUDIO_WORK_DIR/${TESTNAME}.res"
+  LOGDIR="$AUDIO_WORK_DIR/results/${TESTNAME}"
 fi
+
+if ! LOGDIR="$(audio_create_run_directory "$LOGDIR")"; then
+  log_fail "$TESTNAME FAIL - cannot create artifacts under CWD=$AUDIO_WORK_DIR"
+  echo "$RESULT_TESTNAME FAIL" >"$RES_FILE"
+  exit 1
+fi
+log_info "Run artifacts: $LOGDIR"
+TMPDIR="$LOGDIR"
+export TMPDIR
 
 # Package and udev preparation remain privileged and run exactly once. The
 # complete runner remains the root orchestrator on Debian and CentOS.
@@ -336,6 +356,21 @@ fi
 parse_args() {
   while [ "$#" -gt 0 ]; do
     case "$1" in
+    --expected-dt-compatible|--fit-image)
+      if [ "$#" -lt 2 ] || [ -z "$2" ]; then
+        log_fail "$TESTNAME FAIL - $1 requires a value"
+        return 1
+      fi
+      case "$1" in
+        --expected-dt-compatible)
+          EXPECTED_DT_COMPATIBLE="$2"
+          ;;
+        --fit-image)
+          DT_FIT_IMAGE="$2"
+          ;;
+      esac
+      shift 2
+      ;;
     --overlay)
       AUDIO_OVERLAY_REQUESTED=1
       export AUDIO_OVERLAY_REQUESTED
@@ -451,171 +486,36 @@ parse_args() {
   done
 }
 
-parse_args "$@"
-
-SINK_REQUESTED="$SINK_CHOICE"
-SINK_CHOICE="$(
-  audio_normalize_playback_route "$SINK_REQUESTED" 2>/dev/null
-)" || {
-  log_fail "$TESTNAME FAIL - invalid sink '$SINK_REQUESTED', expected auto, speaker, speakers, headphone, headphones, headset, or null"
-  echo "$RESULT_TESTNAME FAIL" >"$RES_FILE"
-  exit 1
-}
-if [ "$SINK_CHOICE" = "auto" ]; then
-  AUDIO_PLAYBACK_ROUTE_EXPLICIT=0
-fi
-export SINK_CHOICE AUDIO_PLAYBACK_ROUTE_EXPLICIT AUDIO_PLAYBACK_ROUTE_SOURCE
-
-# Preserve an explicit backend request. Automatic fallback is only appropriate
-# when backend selection was left in auto mode.
-AUDIO_BACKEND_REQUESTED="$AUDIO_BACKEND"
-export AUDIO_BACKEND_REQUESTED
-
-# Prefer the dedicated PipeWire playback alias. Some distributions provide
-# only pw-cat, whose explicit --playback mode is the same client capability.
-if command -v pw-play >/dev/null 2>&1; then
-  AUDIO_PIPEWIRE_PLAY_COMMAND="pw-play"
-elif command -v pw-cat >/dev/null 2>&1 &&
-     pw-cat --help 2>&1 | grep -q -- '--playback'; then
-  AUDIO_PIPEWIRE_PLAY_COMMAND="pw-cat"
+if ! parse_args "$@"; then
+  test_result_init "$RESULT_TESTNAME" "$RES_FILE" || exit 1
+  test_result_record FAIL "$TESTNAME FAIL - invalid command line"
+  test_result_finish
 fi
 
-# Prepare only the desktop user capabilities required by the selected mode.
-# Explicit base ALSA playback needs group membership but no systemd user
-# manager. Overlay and managed backends require the user session.
-AUDIO_PLAYBACK_USER_MANAGER_REQUIRED=1
-if [ "$AUDIO_OVERLAY_REQUESTED" -eq 0 ] &&
-   [ "$AUDIO_BACKEND" = "alsa" ]; then
-  AUDIO_PLAYBACK_USER_MANAGER_REQUIRED=0
-fi
-
-if ! command -v audio_prepare_desktop_audio_environment >/dev/null 2>&1; then
-  log_fail "$TESTNAME FAIL - required helper is unavailable: audio_prepare_desktop_audio_environment"
-  echo "$RESULT_TESTNAME FAIL" >"$RES_FILE"
-  exit 1
-fi
-
-if ! audio_prepare_desktop_audio_environment \
-    "$AUDIO_PLAYBACK_USER_MANAGER_REQUIRED"; then
-  log_fail "$TESTNAME FAIL - desktop Audio environment preparation failed"
-  echo "$RESULT_TESTNAME FAIL" >"$RES_FILE"
-  exit 1
-fi
-
-AUDIO_PLAYBACK_DESKTOP_ROOT_MODE=0
-if command -v pkg_detect_os_id >/dev/null 2>&1; then
-  AUDIO_PLAYBACK_OS_ID="$(pkg_detect_os_id 2>/dev/null || echo unknown)"
-else
-  AUDIO_PLAYBACK_OS_ID="$(
-    sed -n 's/^ID=//p' /etc/os-release 2>/dev/null |
-      sed -n '1p' |
-      sed 's/^"//;s/"$//' |
-      tr '[:upper:]' '[:lower:]'
-  )"
-fi
-
-case "$AUDIO_PLAYBACK_OS_ID" in
-  debian|centos)
-    AUDIO_PLAYBACK_DESKTOP_ROOT_MODE=1
-    ;;
-esac
-
-# Desktop Ubuntu images run PipeWire and the PulseAudio compatibility server in
-# the logged-in user's session. The test itself is often launched by root, so
-# command-level backend probes and players must join that session rather than
-# querying root's empty runtime directory. Headless Ubuntu Server has no such
-# runtime evidence and retains direct root ALSA execution.
-if ! command -v audio_configure_ubuntu_desktop_session >/dev/null 2>&1; then
-  log_fail "$TESTNAME FAIL - required helper is unavailable: audio_configure_ubuntu_desktop_session"
-  echo "$RESULT_TESTNAME FAIL" >"$RES_FILE"
-  exit 1
-fi
-
-audio_configure_ubuntu_desktop_session "$AUDIO_PLAYBACK_OS_ID"
-if [ "${AUDIO_USE_DESKTOP_SESSION:-0}" -eq 1 ]; then
-  AUDIO_PLAYBACK_DESKTOP_ROOT_MODE=1
-fi
-
-export AUDIO_PLAYBACK_DESKTOP_ROOT_MODE AUDIO_USE_DESKTOP_SESSION
-
-# Auto-enable network download if WiFi credentials provided
-if [ -n "$SSID" ] && [ -n "$PASSWORD" ]; then
-  log_info "WiFi credentials provided, auto-enabling network download"
-  ENABLE_NETWORK_DOWNLOAD=true
-fi
-
-# Desktop overlay runtime preparation runs from the root orchestrator after
-# normal CLI parsing. Only its device and PipeWire probes execute as the
-# prepared regular user.
-if [ "$AUDIO_OVERLAY_REQUESTED" -eq 1 ]; then
-  if ! command -v audio_prepare_overlay_runtime >/dev/null 2>&1; then
-    log_fail "$TESTNAME FAIL - required helper is unavailable: audio_prepare_overlay_runtime"
-    echo "$RESULT_TESTNAME FAIL" >"$RES_FILE"
-    exit 1
-  fi
-
-  audio_prepare_overlay_runtime "$AUDIO_OVERLAY_REQUESTED"
-  audio_runtime_rc=$?
-
-  case "$audio_runtime_rc" in
-    0)
-      ;;
-    2)
-      log_skip "$TESTNAME SKIP - AudioReach kernel package changed, reboot required"
-      echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
-      exit 0
-      ;;
-    *)
-      log_fail "$TESTNAME FAIL - AudioReach runtime preparation failed"
-      echo "$RESULT_TESTNAME FAIL" >"$RES_FILE"
-      exit 1
-      ;;
-  esac
-elif [ "$SYSTEMD_AVAILABLE" -eq 1 ] &&
-     [ "$AUDIO_PLAYBACK_DESKTOP_ROOT_MODE" -ne 1 ]; then
-  # Preserve the existing native/Yocto validation path. Desktop base mode uses
-  # command-level user probes during backend discovery instead.
-  if ! setup_overlay_audio_environment; then
-    log_warn "Existing overlay audio environment validation failed, continuing with backend recovery flow"
-  fi
-else
-  log_info "systemd not available, skipping legacy overlay environment check"
-fi
-
-# Start an image-provisioned audio remoteproc before backend and device
-# discovery. Platforms without an applicable remoteproc continue unchanged.
-audio_prepare_audio_remoteproc
-audio_remoteproc_rc=$?
-
-case "$audio_remoteproc_rc" in
-  0)
-    ;;
-  2)
-    log_info "Audio remoteproc preflight not applicable: ${AUDIO_REMOTE_PROC_REASON:-no matching remoteproc}"
+# Resolve assets against invocation CWD before any audio service preparation.
+AUDIO_CLIPS_BASE_DIR="${AUDIO_CLIPS_BASE_DIR:-$AUDIO_WORK_DIR/AudioClips}"
+case "$AUDIO_CLIPS_BASE_DIR" in
+  /*)
     ;;
   *)
-    log_skip "$TESTNAME SKIP - audio remoteproc preflight failed: ${AUDIO_REMOTE_PROC_REASON:-unknown remoteproc error}"
-    echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
-    exit 0
+    AUDIO_CLIPS_BASE_DIR="$AUDIO_WORK_DIR/$AUDIO_CLIPS_BASE_DIR"
     ;;
 esac
+export AUDIO_CLIPS_BASE_DIR
 
-if [ "$SYSTEMD_AVAILABLE" -eq 0 ]; then
-  MINIMAL_RAMDISK_MODE=1
-  export MINIMAL_RAMDISK_MODE
-  log_info "Detected minimal ramdisk environment (systemd unavailable)"
-else
-  log_info "Detected standard userspace environment (systemd available)"
+if ! audio_validate_clip_selectors "$CLIP_NAMES"; then
+  test_result_init "$RESULT_TESTNAME" "$RES_FILE" || exit 1
+  test_result_record FAIL "$TESTNAME FAIL - malformed clip selector, see accepted syntax above"
+  test_result_finish
 fi
-
-trap 'audio_cleanup_started_daemons' EXIT HUP INT TERM
 
 # Check for conflicting parameters (discovery vs legacy mode)
 if { [ -n "$CLIP_NAMES" ] || [ -n "$CLIP_FILTER" ]; } && { [ -n "$FORMATS" ] || [ -n "$DURATIONS" ]; }; then
   log_error "Cannot mix clip discovery parameters (--clip-name, --clip-filter) with legacy matrix parameters (--formats, --durations)"
   log_error "Please use either clip discovery mode OR legacy matrix mode, not both"
-  echo "$RESULT_TESTNAME SKIP" > "$RES_FILE"
-  exit 0
+  test_result_init "$RESULT_TESTNAME" "$RES_FILE" || exit 1
+  test_result_record FAIL "$TESTNAME FAIL - conflicting clip discovery and legacy matrix options"
+  test_result_finish
 fi
 
 # Set defaults for legacy mode parameters only if using legacy mode
@@ -672,89 +572,11 @@ if [ "$LOOPS" -le 0 ] 2>/dev/null; then
   exit 1
 fi
 
-# Ensure we run from the testcase dir
-test_path="$(find_test_case_by_name "$TESTNAME" 2>/dev/null || echo "$SCRIPT_DIR")"
-if ! cd "$test_path"; then
-  log_error "cd failed: $test_path"
-  echo "$RESULT_TESTNAME FAIL" >"$RES_FILE"
-  exit 1
+
+# Preserve the existing opt-in asset-download and network policy.
+if [ -n "$SSID" ] && [ -n "$PASSWORD" ]; then
+  ENABLE_NETWORK_DOWNLOAD=true
 fi
-
-log_info "---------------- Starting $TESTNAME ----------------"
-# --- Platform details (robust logging; prefer helpers) ---
-if command -v detect_platform >/dev/null 2>&1; then
-  detect_platform >/dev/null 2>&1 || true
-  log_info "Platform Details: machine='${PLATFORM_MACHINE:-unknown}' target='${PLATFORM_TARGET:-unknown}' kernel='${PLATFORM_KERNEL:-}' arch='${PLATFORM_ARCH:-}'"
-else
-  log_info "Platform Details: unknown"
-fi
-
-# Export AUDIO_CLIPS_BASE_DIR for use by resolve_clip() in audio_common.sh
-if [ -n "$AUDIO_CLIPS_BASE_DIR" ]; then
-  export AUDIO_CLIPS_BASE_DIR
-  log_info "Using custom audio clips path: $AUDIO_CLIPS_BASE_DIR"
-fi
-
-log_info "Args: backend=${AUDIO_BACKEND:-auto} sink=$SINK_CHOICE overlay=$AUDIO_OVERLAY_REQUESTED volume=$AUDIO_PLAYBACK_VOLUME loops=$LOOPS timeout=$TIMEOUT formats='$FORMATS' durations='$DURATIONS' strict=$STRICT dmesg=$DMESG_SCAN extract=$EXTRACT_AUDIO_ASSETS network_download=$ENABLE_NETWORK_DOWNLOAD clips_path=${AUDIO_CLIPS_BASE_DIR:-default} bootstrap=$AUDIO_BOOTSTRAP_MODE runtime_dir=${AUDIO_RUNTIME_DIR:-auto}"
-log_info "AUDIO_ROUTE_DISCOVERY scope=playback requested='$SINK_REQUESTED' request_source=$AUDIO_PLAYBACK_ROUTE_SOURCE explicit=$AUDIO_PLAYBACK_ROUTE_EXPLICIT policy=$SINK_CHOICE automatic_order='speakers headphones'"
-
-if ! command -v audio_prepare_backend_client_packages >/dev/null 2>&1; then
-  log_fail "$TESTNAME FAIL - required helper is unavailable: audio_prepare_backend_client_packages"
-  echo "$RESULT_TESTNAME FAIL" >"$RES_FILE"
-  exit 1
-fi
-
-if [ -n "$AUDIO_BACKEND_REQUESTED" ] &&
-   ! audio_prepare_backend_client_packages "$AUDIO_BACKEND_REQUESTED"; then
-  log_fail "$TESTNAME FAIL - failed to prepare $AUDIO_BACKEND_REQUESTED playback and recording clients"
-  echo "$RESULT_TESTNAME FAIL" >"$RES_FILE"
-  exit 1
-fi
-
-# Refresh client discovery after package preparation.
-AUDIO_PIPEWIRE_PLAY_COMMAND=""
-if command -v pw-play >/dev/null 2>&1; then
-  AUDIO_PIPEWIRE_PLAY_COMMAND="pw-play"
-elif command -v pw-cat >/dev/null 2>&1 &&
-     pw-cat --help 2>&1 | grep -q -- '--playback'; then
-  AUDIO_PIPEWIRE_PLAY_COMMAND="pw-cat"
-fi
-
-# Reject an unusable requested backend before network setup or clip download.
-# In automatic mode, continue when any supported image-provided playback
-# client is available because backend selection may fall back later.
-case "${AUDIO_BACKEND_REQUESTED:-auto}" in
-  pipewire)
-    if [ -z "$AUDIO_PIPEWIRE_PLAY_COMMAND" ]; then
-      log_skip "$TESTNAME SKIP - PipeWire playback client is absent, provision the pipewire-utils image package providing pw-play or pw-cat"
-      echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
-      exit 0
-    fi
-    ;;
-  pulseaudio)
-    if ! command -v paplay >/dev/null 2>&1; then
-      log_skip "$TESTNAME SKIP - PulseAudio playback client paplay is absent from the image"
-      echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
-      exit 0
-    fi
-    ;;
-  alsa)
-    if ! command -v aplay >/dev/null 2>&1; then
-      log_skip "$TESTNAME SKIP - ALSA playback client aplay is absent from the image"
-      echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
-      exit 0
-    fi
-    ;;
-  auto)
-    if [ -z "$AUDIO_PIPEWIRE_PLAY_COMMAND" ] &&
-       ! command -v paplay >/dev/null 2>&1 &&
-       ! command -v aplay >/dev/null 2>&1; then
-      log_skip "$TESTNAME SKIP - no image-provided playback client is available, provision pipewire-utils, pulseaudio-utils, or alsa-utils"
-      echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
-      exit 0
-    fi
-    ;;
-esac
 
 # --- Rootfs minimum size check (mirror video policy) ---
 if [ "$TOP_LEVEL_RUN" -eq 1 ]; then
@@ -816,7 +638,7 @@ if [ "$TOP_LEVEL_RUN" -eq 1 ]; then
           log_info "Audio clips downloaded and extracted successfully"
         else
           log_error "Failed to download or extract audio clips from: $AUDIO_TAR_URL"
-          log_skip "$TESTNAME SKIP - audio clips could not be downloaded or extracted, enable Ubuntu package recovery for curl and wget with HTTPS access or pre-provision clips under ${AUDIO_CLIPS_BASE_DIR:-AudioClips}"
+          log_skip "$TESTNAME SKIP - audio asset preparation failed, see the download or extraction diagnostics above. Provide HTTPS access, curl or wget and working gzip-tar extraction, or pre-provision clips under ${AUDIO_CLIPS_BASE_DIR:-AudioClips}"
           echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
           exit 0
         fi
@@ -832,6 +654,259 @@ if [ "$TOP_LEVEL_RUN" -eq 1 ]; then
 else
   log_info "Sub-run: skipping initial network bring-up."
 fi
+
+
+if [ "$USE_CLIP_DISCOVERY" = true ]; then
+  clip_selection_rc=0
+  CLIPS_TO_TEST="$(discover_and_filter_clips "$CLIP_NAMES" "$CLIP_FILTER")" || clip_selection_rc=$?
+  if [ "$clip_selection_rc" -ne 0 ]; then
+    test_result_init "$RESULT_TESTNAME" "$RES_FILE" || exit 1
+    if [ "$clip_selection_rc" -eq 3 ]; then
+      test_result_record SKIP "$TESTNAME SKIP - requested clip assets are unavailable in $AUDIO_CLIPS_BASE_DIR, use the listed filenames/selectors or provision the matching WAV files"
+    else
+      test_result_record FAIL "$TESTNAME FAIL - clip selection or discovery failed, check selector syntax, directory access and discovery tools"
+    fi
+    test_result_finish
+  fi
+fi
+
+if ! audio_dt_fit_preflight "$LOGDIR/dt-fit-preflight" \
+    "$EXPECTED_DT_COMPATIBLE" "$DT_FIT_IMAGE"; then
+  test_result_init "$RESULT_TESTNAME" "$RES_FILE" || exit 1
+  test_result_record FAIL "$TESTNAME FAIL - DT/FIT preflight failed, inspect $LOGDIR/dt-fit-preflight"
+  test_result_finish
+fi
+
+SINK_REQUESTED="$SINK_CHOICE"
+SINK_CHOICE="$(
+  audio_normalize_playback_route "$SINK_REQUESTED" 2>/dev/null
+)" || {
+  log_fail "$TESTNAME FAIL - invalid sink '$SINK_REQUESTED', expected auto, speaker, speakers, headphone, headphones, headset, or null"
+  echo "$RESULT_TESTNAME FAIL" >"$RES_FILE"
+  exit 1
+}
+if [ "$SINK_CHOICE" = "auto" ]; then
+  AUDIO_PLAYBACK_ROUTE_EXPLICIT=0
+fi
+export SINK_CHOICE AUDIO_PLAYBACK_ROUTE_EXPLICIT AUDIO_PLAYBACK_ROUTE_SOURCE
+
+# Resolve the effective runtime independently of explicit package preparation.
+audio_detect_runtime_mode "$AUDIO_OVERLAY_REQUESTED"
+
+# Preserve an explicit backend request. Automatic fallback is only appropriate
+# when backend selection was left in auto mode.
+AUDIO_BACKEND="$(audio_backend_for_mode "$AUDIO_BACKEND" "$AUDIO_OVERLAY_ACTIVE")" || {
+  log_fail "$TESTNAME FAIL - AudioReach runtime requires --backend pipewire or automatic backend selection"
+  echo "$RESULT_TESTNAME FAIL" >"$RES_FILE"
+  exit 1
+}
+AUDIO_BACKEND_REQUESTED="$AUDIO_BACKEND"
+export AUDIO_BACKEND_REQUESTED
+
+# Prefer the dedicated PipeWire playback alias. Some distributions provide
+# only pw-cat, whose explicit --playback mode is the same client capability.
+if command -v pw-play >/dev/null 2>&1; then
+  AUDIO_PIPEWIRE_PLAY_COMMAND="pw-play"
+elif command -v pw-cat >/dev/null 2>&1 &&
+     pw-cat --help 2>&1 | grep -q -- '--playback'; then
+  AUDIO_PIPEWIRE_PLAY_COMMAND="pw-cat"
+fi
+
+# Prepare only the desktop user capabilities required by the selected mode.
+# Explicit base ALSA playback needs group membership but no systemd user
+# manager. Overlay and managed backends require the user session.
+AUDIO_PLAYBACK_USER_MANAGER_REQUIRED=1
+if [ "$AUDIO_OVERLAY_ACTIVE" -eq 0 ] &&
+   [ "$AUDIO_BACKEND" = "alsa" ]; then
+  AUDIO_PLAYBACK_USER_MANAGER_REQUIRED=0
+fi
+
+if ! command -v audio_prepare_desktop_audio_environment >/dev/null 2>&1; then
+  log_fail "$TESTNAME FAIL - required helper is unavailable: audio_prepare_desktop_audio_environment"
+  echo "$RESULT_TESTNAME FAIL" >"$RES_FILE"
+  exit 1
+fi
+
+if ! audio_prepare_desktop_audio_environment \
+    "$AUDIO_PLAYBACK_USER_MANAGER_REQUIRED"; then
+  log_fail "$TESTNAME FAIL - desktop Audio environment preparation failed"
+  echo "$RESULT_TESTNAME FAIL" >"$RES_FILE"
+  exit 1
+fi
+
+AUDIO_PLAYBACK_DESKTOP_ROOT_MODE=0
+if command -v pkg_detect_os_id >/dev/null 2>&1; then
+  AUDIO_PLAYBACK_OS_ID="$(pkg_detect_os_id 2>/dev/null || echo unknown)"
+else
+  AUDIO_PLAYBACK_OS_ID="$(
+    sed -n 's/^ID=//p' /etc/os-release 2>/dev/null |
+      sed -n '1p' |
+      sed 's/^"//;s/"$//' |
+      tr '[:upper:]' '[:lower:]'
+  )"
+fi
+
+case "$AUDIO_PLAYBACK_OS_ID" in
+  debian|centos)
+    AUDIO_PLAYBACK_DESKTOP_ROOT_MODE=1
+    ;;
+esac
+
+# Desktop Ubuntu images run PipeWire and the PulseAudio compatibility server in
+# the logged-in user's session. The test itself is often launched by root, so
+# command-level backend probes and players must join that session rather than
+# querying root's empty runtime directory. Headless Ubuntu Server has no such
+# runtime evidence and retains direct root ALSA execution.
+if ! command -v audio_configure_ubuntu_desktop_session >/dev/null 2>&1; then
+  log_fail "$TESTNAME FAIL - required helper is unavailable: audio_configure_ubuntu_desktop_session"
+  echo "$RESULT_TESTNAME FAIL" >"$RES_FILE"
+  exit 1
+fi
+
+audio_configure_ubuntu_desktop_session "$AUDIO_PLAYBACK_OS_ID"
+if [ "${AUDIO_USE_DESKTOP_SESSION:-0}" -eq 1 ]; then
+  AUDIO_PLAYBACK_DESKTOP_ROOT_MODE=1
+fi
+
+export AUDIO_PLAYBACK_DESKTOP_ROOT_MODE AUDIO_USE_DESKTOP_SESSION
+
+# Auto-enable network download if WiFi credentials provided
+if [ -n "$SSID" ] && [ -n "$PASSWORD" ]; then
+  log_info "WiFi credentials provided, auto-enabling network download"
+  ENABLE_NETWORK_DOWNLOAD=true
+fi
+
+# A requested package transition that needs reboot must not start the DSP.
+if [ "$AUDIO_OVERLAY_REQUESTED" -eq 1 ] &&
+   [ "${AUDIO_OVERLAY_REBOOT_REQUIRED:-0}" -eq 1 ]; then
+  test_result_init "$RESULT_TESTNAME" "$RES_FILE" || exit 1
+  test_result_record SKIP "$TESTNAME SKIP - AudioReach kernel package changed, reboot required"
+  test_result_finish
+fi
+
+# Start an image-provisioned audio remoteproc before backend and device
+# discovery. Platforms without an applicable remoteproc continue unchanged.
+audio_prepare_audio_remoteproc
+audio_remoteproc_rc=$?
+
+case "$audio_remoteproc_rc" in
+  0)
+    if [ "$AUDIO_OVERLAY_ACTIVE" -eq 0 ] &&
+       [ "$SINK_CHOICE" != "null" ] &&
+       { [ -z "$AUDIO_BACKEND" ] || [ "$AUDIO_BACKEND" = "alsa" ]; } &&
+       ! audio_wait_for_alsa_registration playback; then
+      log_fail "$TESTNAME FAIL - ${AUDIO_REMOTE_PROC_REASON:-audio remoteproc prepared but ALSA playback registration is incomplete}, inspect the diagnostic artifacts and inventory above"
+      echo "$RESULT_TESTNAME FAIL" >"$RES_FILE"
+      exit 1
+    fi
+    ;;
+  2)
+    log_info "Audio remoteproc preflight not applicable: ${AUDIO_REMOTE_PROC_REASON:-no matching remoteproc}"
+    ;;
+  *)
+    audio_collect_remoteproc_diagnostics "$LOGDIR/remoteproc-preflight" || true
+    log_fail "$TESTNAME FAIL - audio remoteproc preflight failed: ${AUDIO_REMOTE_PROC_REASON:-unknown remoteproc error}"
+    echo "$RESULT_TESTNAME FAIL" >"$RES_FILE"
+    exit 1
+    ;;
+esac
+
+# Install cleanup before any overlay service reset, including early failures.
+trap 'audio_cleanup_runtime' EXIT
+trap 'exit 1' HUP INT TERM
+
+# Shared readiness checks clients before service preparation for both explicit
+# and runtime-detected overlays. Package opt-in remains separate.
+if [ "$AUDIO_OVERLAY_ACTIVE" -eq 1 ] &&
+   ! audio_validate_overlay_readiness playback "$SINK_CHOICE"; then
+  audio_discovery_finish playback "AudioReach overlay readiness failed after DSP preparation"
+fi
+
+if [ "$SYSTEMD_AVAILABLE" -eq 0 ]; then
+  MINIMAL_RAMDISK_MODE=1
+  export MINIMAL_RAMDISK_MODE
+  log_info "Detected minimal ramdisk environment (systemd unavailable)"
+else
+  log_info "Detected standard userspace environment (systemd available)"
+fi
+
+# Ensure we run from the testcase dir
+AUDIO_CLIPS_BASE_DIR="${AUDIO_CLIPS_BASE_DIR:-$AUDIO_WORK_DIR/AudioClips}"
+export AUDIO_CLIPS_BASE_DIR
+test_path="$(find_test_case_by_name "$TESTNAME" 2>/dev/null || echo "$SCRIPT_DIR")"
+if ! cd "$test_path"; then
+  log_error "cd failed: $test_path"
+  echo "$RESULT_TESTNAME FAIL" >"$RES_FILE"
+  exit 1
+fi
+
+log_info "---------------- Starting $TESTNAME ----------------"
+# --- Platform details (robust logging; prefer helpers) ---
+if command -v detect_platform >/dev/null 2>&1; then
+  detect_platform >/dev/null 2>&1 || true
+  log_info "Platform Details: machine='${PLATFORM_MACHINE:-unknown}' target='${PLATFORM_TARGET:-unknown}' kernel='${PLATFORM_KERNEL:-}' arch='${PLATFORM_ARCH:-}'"
+else
+  log_info "Platform Details: unknown"
+fi
+
+# Export AUDIO_CLIPS_BASE_DIR for use by resolve_clip() in audio_common.sh
+if [ -n "$AUDIO_CLIPS_BASE_DIR" ]; then
+  export AUDIO_CLIPS_BASE_DIR
+  log_info "Using custom audio clips path: $AUDIO_CLIPS_BASE_DIR"
+fi
+
+log_info "Args: backend=${AUDIO_BACKEND:-auto} sink=$SINK_CHOICE overlay=$AUDIO_OVERLAY_ACTIVE overlay_requested=$AUDIO_OVERLAY_REQUESTED volume=$AUDIO_PLAYBACK_VOLUME loops=$LOOPS timeout=$TIMEOUT formats='$FORMATS' durations='$DURATIONS' strict=$STRICT dmesg=$DMESG_SCAN extract=$EXTRACT_AUDIO_ASSETS network_download=$ENABLE_NETWORK_DOWNLOAD clips_path=${AUDIO_CLIPS_BASE_DIR:-default} bootstrap=$AUDIO_BOOTSTRAP_MODE runtime_dir=${AUDIO_RUNTIME_DIR:-auto}"
+log_info "AUDIO_ROUTE_DISCOVERY scope=playback requested='$SINK_REQUESTED' request_source=$AUDIO_PLAYBACK_ROUTE_SOURCE explicit=$AUDIO_PLAYBACK_ROUTE_EXPLICIT policy=$SINK_CHOICE automatic_order='speakers headphones'"
+
+if ! command -v audio_prepare_backend_client_packages >/dev/null 2>&1; then
+  log_fail "$TESTNAME FAIL - required helper is unavailable: audio_prepare_backend_client_packages"
+  echo "$RESULT_TESTNAME FAIL" >"$RES_FILE"
+  exit 1
+fi
+
+if [ -n "$AUDIO_BACKEND_REQUESTED" ] &&
+   ! audio_prepare_backend_client_packages "$AUDIO_BACKEND_REQUESTED"; then
+  log_fail "$TESTNAME FAIL - failed to prepare $AUDIO_BACKEND_REQUESTED playback and recording clients"
+  echo "$RESULT_TESTNAME FAIL" >"$RES_FILE"
+  exit 1
+fi
+
+# Refresh client discovery after package preparation.
+AUDIO_PIPEWIRE_PLAY_COMMAND=""
+if command -v pw-play >/dev/null 2>&1; then
+  AUDIO_PIPEWIRE_PLAY_COMMAND="pw-play"
+elif command -v pw-cat >/dev/null 2>&1 &&
+     pw-cat --help 2>&1 | grep -q -- '--playback'; then
+  AUDIO_PIPEWIRE_PLAY_COMMAND="pw-cat"
+fi
+
+# Reject an unusable requested backend before network setup or clip download.
+# In automatic mode, continue when any supported image-provided playback
+# client is available because backend selection may fall back later.
+case "${AUDIO_BACKEND_REQUESTED:-auto}" in
+  pipewire)
+    if [ -z "$AUDIO_PIPEWIRE_PLAY_COMMAND" ]; then
+      audio_discovery_finish playback "PipeWire playback client is absent, provision the pipewire-utils image package providing pw-play or pw-cat" optional-client
+    fi
+    ;;
+  pulseaudio)
+    if ! command -v paplay >/dev/null 2>&1; then
+      audio_discovery_finish playback "PulseAudio playback client paplay is absent from the image" optional-client
+    fi
+    ;;
+  alsa)
+    if ! command -v aplay >/dev/null 2>&1; then
+      audio_discovery_finish playback "ALSA playback client aplay is absent from the image" optional-client
+    fi
+    ;;
+  auto)
+    if [ -z "$AUDIO_PIPEWIRE_PLAY_COMMAND" ] &&
+       ! command -v paplay >/dev/null 2>&1 &&
+       ! command -v aplay >/dev/null 2>&1; then
+      audio_discovery_finish playback "no image-provided playback client is available, provision pipewire-utils, pulseaudio-utils, or alsa-utils" optional-client
+    fi
+    ;;
+esac
 
 # Resolve backend
 if [ -z "$AUDIO_BACKEND" ]; then
@@ -868,9 +943,7 @@ if [ -z "$AUDIO_BACKEND" ]; then
           exit 1
         fi
 
-        log_skip "$TESTNAME SKIP - automatic playback discovery found no running managed backend or usable ALSA speakers/headphones route"
-        echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
-        exit 0
+        audio_discovery_finish playback "automatic playback discovery found no running managed backend or usable ALSA speakers/headphones route"
       fi
     fi
   else
@@ -881,9 +954,7 @@ if [ -z "$AUDIO_BACKEND" ]; then
       exit 1
     fi
 
-    log_skip "$TESTNAME SKIP - automatic playback discovery found no running managed backend or usable ALSA speakers/headphones route"
-    echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
-    exit 0
+    audio_discovery_finish playback "automatic playback discovery found no running managed backend or usable ALSA speakers/headphones route"
   fi
 fi
 
@@ -959,7 +1030,8 @@ if [ "$backend_ok" -ne 1 ] && [ -z "$AUDIO_BACKEND_REQUESTED" ] &&
   fi
 fi
 
-if [ "$backend_ok" -ne 1 ] && [ "$AUDIO_BACKEND" != "alsa" ]; then
+if [ "$backend_ok" -ne 1 ] && [ -z "$AUDIO_BACKEND_REQUESTED" ] &&
+   [ "$AUDIO_BACKEND" != "alsa" ]; then
   if audio_playback_probe_selected_alsa_with_recovery; then
     log_warn "$TESTNAME: falling back to ALSA direct playback path"
     AUDIO_BACKEND="alsa"
@@ -978,9 +1050,7 @@ if [ "$backend_ok" -ne 1 ]; then
     exit 1
   fi
 
-  log_skip "$TESTNAME SKIP - automatic playback discovery found no ready backend or usable ALSA speakers/headphones route"
-  echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
-  exit 0
+  audio_discovery_finish playback "automatic playback discovery found no ready backend or usable ALSA speakers/headphones route"
 fi
 
 # Dependencies per backend
@@ -1020,9 +1090,7 @@ case "$AUDIO_BACKEND" in
           exit 1
         fi
 
-        log_skip "$TESTNAME SKIP - PipeWire playback client is absent and automatic ALSA discovery found no usable speakers/headphones route, provision pipewire-utils providing pw-play or pw-cat"
-        echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
-        exit 0
+        audio_discovery_finish playback "PipeWire playback client is absent and automatic ALSA discovery found no usable speakers/headphones route, provision pipewire-utils providing pw-play or pw-cat"
       fi
     elif [ "$AUDIO_PIPEWIRE_PLAY_COMMAND" = "pw-cat" ]; then
       log_info "Using PipeWire playback client: pw-cat --playback"
@@ -1047,9 +1115,7 @@ case "$AUDIO_BACKEND" in
           exit 1
         fi
 
-        log_skip "$TESTNAME SKIP - paplay is absent and automatic ALSA discovery found no usable speakers/headphones route"
-        echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
-        exit 0
+        audio_discovery_finish playback "paplay is absent and automatic ALSA discovery found no usable speakers/headphones route"
       fi
     fi
     ;;
@@ -1062,15 +1128,11 @@ case "$AUDIO_BACKEND" in
         exit 1
       fi
 
-      log_skip "$TESTNAME SKIP - automatic ALSA playback discovery requires image-provided aplay"
-      echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
-      exit 0
+      audio_discovery_finish playback "automatic ALSA playback discovery requires image-provided aplay"
     fi
     ;;
   *)
-    log_skip "$TESTNAME SKIP - unsupported backend: $AUDIO_BACKEND"
-    echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
-    exit 0
+    audio_discovery_finish playback "unsupported backend: $AUDIO_BACKEND"
     ;;
 esac
 
@@ -1095,14 +1157,10 @@ if [ "$AUDIO_BACKEND" = "pipewire" ]; then
       else
         if [ "$AUDIO_PLAYBACK_ROUTE_EXPLICIT" -eq 1 ] ||
            [ -n "$AUDIO_BACKEND_REQUESTED" ]; then
-          log_fail "$TESTNAME FAIL - requested sink '$SINK_REQUESTED' cannot be validated because the PipeWire control-plane is unavailable and no matching direct ALSA route opened"
-          echo "$RESULT_TESTNAME FAIL" >"$RES_FILE"
-          exit 1
+          audio_discovery_finish playback "requested sink '$SINK_REQUESTED' cannot be validated because the PipeWire control-plane is unavailable and no matching direct ALSA route opened"
         fi
 
-        log_skip "$TESTNAME SKIP - PipeWire control-plane is unavailable and automatic ALSA discovery found no usable speakers/headphones route"
-        echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
-        exit 0
+        audio_discovery_finish playback "PipeWire control-plane is unavailable and automatic ALSA discovery found no usable speakers/headphones route"
       fi
     fi
   fi
@@ -1127,14 +1185,10 @@ elif [ "$AUDIO_BACKEND" = "pulseaudio" ]; then
       else
         if [ "$AUDIO_PLAYBACK_ROUTE_EXPLICIT" -eq 1 ] ||
            [ -n "$AUDIO_BACKEND_REQUESTED" ]; then
-          log_fail "$TESTNAME FAIL - requested sink '$SINK_REQUESTED' cannot be validated because the PulseAudio control-plane is unavailable and no matching direct ALSA route opened"
-          echo "$RESULT_TESTNAME FAIL" >"$RES_FILE"
-          exit 1
+          audio_discovery_finish playback "requested sink '$SINK_REQUESTED' cannot be validated because the PulseAudio control-plane is unavailable and no matching direct ALSA route opened"
         fi
 
-        log_skip "$TESTNAME SKIP - PulseAudio control-plane is unavailable and automatic ALSA discovery found no usable speakers/headphones route"
-        echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
-        exit 0
+        audio_discovery_finish playback "PulseAudio control-plane is unavailable and automatic ALSA discovery found no usable speakers/headphones route"
       fi
     fi
   fi
@@ -1184,7 +1238,7 @@ case "$AUDIO_BACKEND" in
       if [ -n "$SINK_ID" ] &&
          ! audio_playback_alsa_prepare \
             "$(audio_alsa_device_card "$SINK_ID")" \
-            "$ALSA_ROUTE_UCM_CARD" "$ALSA_ROUTE_UCM_DEVICE"; then
+            "$ALSA_ROUTE_UCM_CARD" "$ALSA_ROUTE_UCM_DEVICE" "$SINK_ID"; then
         log_fail "$TESTNAME FAIL - discovered ALSA $SINK_CHOICE route '$SINK_ID' but could not apply its runtime UCM or mixer configuration"
         echo "$RESULT_TESTNAME FAIL" >"$RES_FILE"
         exit 1
@@ -1217,9 +1271,7 @@ then
       exit 1
     fi
 
-    log_skip "$TESTNAME SKIP - no physical $AUDIO_BACKEND $SINK_CHOICE sink or matching direct ALSA playback path was discovered, audio remoteproc preflight was not applicable"
-    echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
-    exit 0
+    audio_discovery_finish playback "no physical $AUDIO_BACKEND $SINK_CHOICE sink or matching direct ALSA playback path was discovered, audio remoteproc preflight was not applicable"
   fi
 fi
 
@@ -1227,14 +1279,10 @@ if [ -z "$SINK_ID" ]; then
   if [ "$AUDIO_PLAYBACK_ROUTE_EXPLICIT" -eq 1 ] ||
      [ -n "$AUDIO_BACKEND_REQUESTED" ] ||
      [ "$audio_remoteproc_rc" -eq 0 ] 2>/dev/null; then
-    log_fail "$TESTNAME FAIL - requested sink '$SINK_REQUESTED' is unavailable for ready backend '$AUDIO_BACKEND', discovered_route='${SINK_CHOICE:-none}', verify the selected backend route, UCM data, and image audio configuration"
-    echo "$RESULT_TESTNAME FAIL" >"$RES_FILE"
-    exit 1
+    audio_discovery_finish playback "requested sink '$SINK_REQUESTED' is unavailable for ready backend '$AUDIO_BACKEND', discovered_route='${SINK_CHOICE:-none}', verify the selected backend route, UCM data, and image audio configuration"
   fi
 
-  log_skip "$TESTNAME SKIP - automatic playback discovery found no usable speakers or headphones route for backend '$AUDIO_BACKEND', provide --sink only when that route is physically available"
-  echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
-  exit 0
+  audio_discovery_finish playback "automatic playback discovery found no usable speakers or headphones route for backend '$AUDIO_BACKEND', provide --sink only when that route is physically available"
 fi
 
 if [ "$AUDIO_BACKEND" = "alsa" ] && [ "$SINK_CHOICE" != "null" ]; then
@@ -1254,19 +1302,15 @@ fi
 
 if [ "$AUDIO_BACKEND" = "pipewire" ]; then
   SINK_NAME="$(audio_run_helper_as_test_user --require-session pw_sink_name_safe "$SINK_ID")"
-  audio_run_helper_as_test_user --require-session pw_set_default_sink "$SINK_ID" >/dev/null 2>&1 ||
-    log_warn "Could not set PipeWire default sink id=$SINK_ID"
 
   # Apply volume to the discovered physical sink only. Null sinks remain
   # untouched because volume/mute state is irrelevant to null playback.
   if [ "$SINK_CHOICE" != "null" ]; then
-    audio_run_with_timeout_as_test_user --require-session 3s \
-      wpctl set-mute "$SINK_ID" 0 >/dev/null 2>&1 ||
-      log_warn "Could not unmute PipeWire sink id=$SINK_ID"
-
-    audio_run_with_timeout_as_test_user --require-session 3s \
-      wpctl set-volume "$SINK_ID" "$AUDIO_PLAYBACK_VOLUME" >/dev/null 2>&1 ||
-      log_warn "Could not set PipeWire sink volume id=$SINK_ID volume=$AUDIO_PLAYBACK_VOLUME"
+    if ! audio_prepare_playback_volume "$SINK_ID" "$AUDIO_PLAYBACK_VOLUME"; then
+      test_result_init "$RESULT_TESTNAME" "$RES_FILE" || exit 1
+      test_result_record FAIL "$TESTNAME FAIL - cannot safely prepare playback volume/mute state"
+      test_result_finish
+    fi
   fi
 
   if [ -z "$SINK_NAME" ]; then
@@ -1278,7 +1322,6 @@ elif [ "$AUDIO_BACKEND" = "pulseaudio" ]; then
   if [ -z "$SINK_NAME" ]; then
     SINK_NAME="$SINK_ID"
   fi
-  audio_run_helper_as_test_user --require-session pa_set_default_sink "$SINK_ID" >/dev/null 2>&1 || true
   log_info "Routing to sink: name='$SINK_NAME' choice=$SINK_CHOICE"
 else
   SINK_NAME="$SINK_ID"
@@ -1323,20 +1366,8 @@ if [ "$USE_CLIP_DISCOVERY" = "true" ]; then
   # Discover and filter clips
   clips_dir="${AUDIO_CLIPS_BASE_DIR:-AudioClips}"
 
-  # Get list of clips to test
-  if [ -n "$CLIP_NAMES" ] || [ -n "$CLIP_FILTER" ]; then
-    CLIPS_TO_TEST="$(discover_and_filter_clips "$CLIP_NAMES" "$CLIP_FILTER")" || {
-      log_skip "$TESTNAME SKIP - Invalid clip/config name(s) provided"
-      echo "$RESULT_TESTNAME SKIP" > "$RES_FILE"
-      exit 0
-    }
-  else
-    CLIPS_TO_TEST="$(discover_audio_clips)" || {
-      log_skip "$TESTNAME SKIP - No audio clips found in $clips_dir"
-      echo "$RESULT_TESTNAME SKIP" > "$RES_FILE"
-      exit 0
-    }
-  fi
+  # Reuse the complete selection validated before preparing audio services.
+  # Each selected file is checked again below before execution.
 
   # Count clips
   clip_count=0
@@ -1429,11 +1460,11 @@ if [ "$USE_CLIP_DISCOVERY" = "true" ]; then
 
       if [ "$AUDIO_BACKEND" = "pipewire" ]; then
         if [ "$AUDIO_PIPEWIRE_PLAY_COMMAND" = "pw-cat" ]; then
-          log_info "[$case_name] exec: pw-cat --playback -v \"$clip_path\""
-          audio_run_with_timeout_as_test_user --require-session "$effective_timeout" pw-cat --playback -v "$clip_path" >>"$logf" 2>&1
+          log_info "[$case_name] exec: pw-cat --playback -v --target '$SINK_ID' \"$clip_path\""
+          audio_run_with_timeout_as_test_user --require-session "$effective_timeout" pw-cat --playback -v --target "$SINK_ID" "$clip_path" >>"$logf" 2>&1
         else
-          log_info "[$case_name] exec: pw-play -v \"$clip_path\""
-          audio_run_with_timeout_as_test_user --require-session "$effective_timeout" pw-play -v "$clip_path" >>"$logf" 2>&1
+          log_info "[$case_name] exec: pw-play -v --target '$SINK_ID' \"$clip_path\""
+          audio_run_with_timeout_as_test_user --require-session "$effective_timeout" pw-play -v --target "$SINK_ID" "$clip_path" >>"$logf" 2>&1
         fi
         rc=$?
       elif [ "$AUDIO_BACKEND" = "pulseaudio" ]; then
@@ -1495,7 +1526,7 @@ if [ "$USE_CLIP_DISCOVERY" = "true" ]; then
         asoc_ev=1
       fi
 
-      log_info "[$case_name] evidence: pw_streaming=$pw_ev pa_streaming=$pa_ev alsa_running=$alsa_ev asoc_path_on=$asoc_ev pw_log=$pwlog_ev"
+      log_info "[$case_name] post-execution snapshot: pw_streaming=$pw_ev pa_streaming=$pa_ev alsa_running=$alsa_ev asoc_path_on=$asoc_ev pw_log=$pwlog_ev (inactive now does not invalidate a completed stream)"
 
       # Determine result (use clip-specific timeout thresholds)
       if [ "$rc" -eq 0 ]; then
@@ -1606,11 +1637,11 @@ else
 
         if [ "$AUDIO_BACKEND" = "pipewire" ]; then
           if [ "$AUDIO_PIPEWIRE_PLAY_COMMAND" = "pw-cat" ]; then
-            log_info "[$case_name] exec: pw-cat --playback -v \"$clip\""
-            audio_run_with_timeout_as_test_user --require-session "$TIMEOUT" pw-cat --playback -v "$clip" >>"$logf" 2>&1
+            log_info "[$case_name] exec: pw-cat --playback -v --target '$SINK_ID' \"$clip\""
+            audio_run_with_timeout_as_test_user --require-session "$TIMEOUT" pw-cat --playback -v --target "$SINK_ID" "$clip" >>"$logf" 2>&1
           else
-            log_info "[$case_name] exec: pw-play -v \"$clip\""
-            audio_run_with_timeout_as_test_user --require-session "$TIMEOUT" pw-play -v "$clip" >>"$logf" 2>&1
+            log_info "[$case_name] exec: pw-play -v --target '$SINK_ID' \"$clip\""
+            audio_run_with_timeout_as_test_user --require-session "$TIMEOUT" pw-play -v --target "$SINK_ID" "$clip" >>"$logf" 2>&1
           fi
           rc=$?
         elif [ "$AUDIO_BACKEND" = "pulseaudio" ]; then
@@ -1672,7 +1703,7 @@ else
           asoc_ev=1
         fi
 
-        log_info "[$case_name] evidence: pw_streaming=$pw_ev pa_streaming=$pa_ev alsa_running=$alsa_ev asoc_path_on=$asoc_ev pw_log=$pwlog_ev"
+        log_info "[$case_name] post-execution snapshot: pw_streaming=$pw_ev pa_streaming=$pa_ev alsa_running=$alsa_ev asoc_path_on=$asoc_ev pw_log=$pwlog_ev (inactive now does not invalidate a completed stream)"
 
         if [ "$rc" -eq 0 ]; then
           log_info "AUDIO_VALIDATION scope=playback-runtime policy=execution-evidence status=PASS case=$case_name backend=$AUDIO_BACKEND rc=0 elapsed_s=$last_elapsed"
@@ -1707,8 +1738,20 @@ else
 fi
 
 # Collect evidence once at end (not per test case)
+if ! audio_restore_playback_volume; then
+  if [ "$DMESG_SCAN" -eq 1 ]; then
+    scan_audio_dmesg "$LOGDIR"
+  fi
+  test_result_init "$RESULT_TESTNAME" "$RES_FILE" || exit 1
+  test_result_record FAIL "$TESTNAME FAIL - temporary playback volume/mute restoration failed, inspect $LOGDIR/playback-volume.initial"
+  test_result_finish
+fi
+
 if [ "$DMESG_SCAN" -eq 1 ]; then
   scan_audio_dmesg "$LOGDIR"
+  if ! audio_remoteproc_report_health "$LOGDIR"; then
+    suite_rc=1
+  fi
   dump_mixers "$LOGDIR/mixer_dump.txt"
 fi
 

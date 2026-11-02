@@ -55,6 +55,63 @@ This test validates Qualcomm SSC/ADSP sensor streaming **without relying on Devi
 
 ## Prerequisites
 
+### Debian overlay packages and reboot
+
+Provision `qcom-sensors-test-apps` and `sensinghub-sensors-daemon`, then reboot
+before sensor discovery or streaming. This is not a Glymur-specific package
+selection. The Debian mapping applies to boards using the same sensor runtime.
+APT resolves the runtime dependencies and package replacements. The test does
+not request development packages or manually purge the old sensor packages.
+
+For manual image preparation using the configured Debian repositories:
+
+```sh
+sudo apt-get update
+sudo apt-get install qcom-sensors-test-apps sensinghub-sensors-daemon
+sudo reboot
+```
+
+For the existing opt-in testkit recovery flow, run from the Sensors directory:
+
+```sh
+./run.sh --overlay --list
+# If packages were missing, the suite reports SKIP requesting a reboot.
+sudo reboot
+# After reconnecting, return to the same Sensors directory.
+./run.sh --overlay --list
+./run.sh --overlay --sensors accel,gyro --out ./logs_selected
+```
+
+Debian recovery uses the shared provider with `qli` as its default source,
+matching the current public Debian package metadata. An explicit provider
+source configuration still takes precedence and must supply both packages.
+A complete installed package set is reused without an APT transaction. Failed
+recovery reports FAIL. Without `--overlay`, Debian uses installed commands only.
+Missing commands report SKIP, per-command recovery cannot bypass the explicit
+package flow and its reboot tracking. Before recovery, the test records the kernel boot ID in
+`.sensors-overlay-boot-id` in the testcase CWD. Same-boot reruns, even without
+`--overlay` or with a different `--out`, report SKIP before discovery. Complete
+an interrupted recovery with `--overlay`, then reboot and rerun. The script
+never reboots the DUT itself. Preserve the state file and testcase directory
+until reboot. A new checkout cannot track another checkout's installation, and
+manual package changes require the operator to perform the reboot above.
+
+On desktop distributions, an active known service is reused. Otherwise the
+installed `sensors.qti.service` is preferred, with `sscrpcd.service` as the
+legacy fallback. An explicit `SENSORS_SERVICE` override wins.
+Inactive services are started and
+checked for active state before discovery. Service startup failure reports FAIL.
+
+Ubuntu and CentOS package mappings, and Yocto image-managed execution, are
+unchanged. No sensor selection, streaming verdict, or LAVA YAML interface is
+changed by the Debian packaging update.
+
+Package references:
+
+- [qcom-sensors Debian metadata](https://github.com/qualcomm-linux/pkg-qcom-sensors/blob/qli/debian/latest/debian/control)
+- [Sensing Hub Debian metadata](https://github.com/qualcomm-linux/pkg-sensinghub/blob/qli/debian/latest/debian/control)
+- [Sensing Hub daemon payload](https://github.com/qualcomm-linux/pkg-sensinghub/blob/qli/debian/latest/debian/sensinghub-sensors-daemon.install)
+
 ### Required commands (overlay apps)
 - `ssc_sensor_info`
 - `see_workhorse`
@@ -174,7 +231,8 @@ streaming starts. Strict mode does not require sensors in automatic mode.
 - `SENSORS_DRVA_NUM_SAMPLES`  
   Extra knob for accel in `ssc_drva_test` (default set in run.sh to `325`)
 - `SENSORS_SERVICE`
-  Existing service override (default: `sscrpcd.service`).
+  Explicit service override. Otherwise reuse an active known service, prefer an
+  installed `sensors.qti.service` and fall back to `sscrpcd.service`.
 
 Examples combining existing package/service and selection options:
 

@@ -36,10 +36,11 @@ fi
 # shellcheck disable=SC1091
 . "$TOOLS/functestlib.sh"
 # shellcheck disable=SC1091
-. "$TOOLS/lib_pkg_provider.sh"
+. "$TOOLS/lib_bus.sh"
 
 TESTNAME="Buses"
 RES_FILE="$SCRIPT_DIR/$TESTNAME.res"
+test_result_init "$TESTNAME" "$RES_FILE" || exit 1
 RESULT_DIR="$SCRIPT_DIR/results/$TESTNAME"
 
 I2C_LEGACY_TEST_ENABLE="${I2C_LEGACY_TEST_ENABLE:-0}"
@@ -71,7 +72,7 @@ Usage: ./run.sh [options]
 
 Options:
   --legacy-test          Run image-provided i2c-msm-test after inventory.
-  --eeprom-mode MODE     auto, off, probe, or integrity, default: auto.
+  --eeprom-mode MODE     auto, off, probe, integrity, matrix, or pm, default: auto.
   --eeprom-test          Select EEPROM integrity mode.
   --eeprom-device PATH   Select a sysfs EEPROM or NVMEM data file.
   --eeprom-offset BYTES  Start of an explicitly safe writable range.
@@ -94,7 +95,7 @@ Options:
 
 Environment:
   I2C_LEGACY_TEST_ENABLE=auto|0|1
-  I2C_EEPROM_MODE=auto|off|probe|integrity
+  I2C_EEPROM_MODE=auto|off|probe|integrity|matrix|pm
   I2C_EEPROM_DEVICE=auto|PATH
   I2C_EEPROM_OFFSET=BYTES
   I2C_EEPROM_LENGTH=BYTES
@@ -215,6 +216,7 @@ parse_args() {
                 ;;
             -h|--help)
                 usage
+                trap - EXIT
                 exit 0
                 ;;
             *)
@@ -229,49 +231,25 @@ parse_args() {
 # Restores a register value when an interrupted write left restoration pending.
 cleanup() {
     if ! i2c_tools_restore_pending_write; then
-        log_fail "I2C emergency register restoration failed"
-        return 1
+        trap - EXIT
+        test_result_finish "FAIL" "I2C emergency register restoration failed"
+    fi
+    if [ ! -s "$RES_FILE" ]; then
+        trap - EXIT
+        test_result_finish "FAIL" "Buses did not complete, inspect the preceding configuration or execution error"
     fi
 }
 
 # handle_signal
 # Restores pending state before terminating after a signal.
 handle_signal() {
-    cleanup || true
-    exit 1
+    test_result_record "FAIL" "Buses was interrupted, restoring any pending register write"
+    cleanup
+    test_result_finish
 }
 
-# i2c_select_eeprom_adapter
-# Prints the adapter number for one dynamically discovered I2C EEPROM.
-i2c_select_eeprom_adapter() {
-    isea_runner="$TOOLS/i2c_eeprom_runner.py"
-    isea_log="$RESULT_DIR/i2c_eeprom_adapter_discovery.log"
-    isea_report="$RESULT_DIR/i2c_eeprom_adapter_discovery.tsv"
-
-    command -v python3 >/dev/null 2>&1 || return 1
-    [ -f "$isea_runner" ] || return 1
-
-    run_with_timeout_log \
-        "$I2C_EEPROM_TIMEOUT" \
-        "$isea_log" \
-        python3 "$isea_runner" \
-        --mode discover \
-        --device "$I2C_EEPROM_DEVICE" \
-        --report "$isea_report"
-    isea_status=$?
-    [ "$isea_status" -eq 0 ] || return 1
-    grep -q '^I2C_EEPROM_RESULT status=PASS ' "$isea_log" || return 1
-
-    isea_adapter=$(awk -F '\t' '$1 == "adapter" { print $2; exit }' "$isea_report")
-    case "$isea_adapter" in
-        ''|*[!0-9]*)
-            return 1
-            ;;
-    esac
-    [ -c "/dev/i2c-$isea_adapter" ] || return 1
-
-    printf '%s\n' "$isea_adapter"
-}
+trap cleanup EXIT
+trap handle_signal HUP INT TERM
 
 parse_args "$@" || {
     usage >&2
@@ -288,10 +266,10 @@ case "$I2C_LEGACY_TEST_ENABLE" in
 esac
 
 case "$I2C_EEPROM_MODE" in
-    auto|off|probe|integrity)
+    auto|off|probe|integrity|matrix|pm)
         ;;
     *)
-        log_error "I2C_EEPROM_MODE must be auto, off, probe, or integrity"
+        log_error "I2C_EEPROM_MODE must be auto, off, probe, integrity, matrix, or pm"
         exit 2
         ;;
 esac
@@ -392,10 +370,6 @@ if [ -n "$I2C_WRITE_ADDRESS" ] && [ "$I2C_ALLOW_WRITE" -ne 1 ]; then
     exit 2
 fi
 
-test_result_init "$TESTNAME" "$RES_FILE" || exit 1
-trap cleanup EXIT
-trap handle_signal HUP INT TERM
-
 if ! mkdir -p "$RESULT_DIR"; then
     test_result_finish "FAIL" "$TESTNAME FAIL: cannot create result directory $RESULT_DIR"
 fi
@@ -426,14 +400,21 @@ if ! CHECK_DEPS_RECOVER=0 CHECK_DEPS_NO_EXIT=1 check_dependencies \
     test_result_finish "SKIP" "$TESTNAME SKIP: required base utilities are unavailable"
 fi
 
-i2c_collect_runtime_inventory "$RESULT_DIR"
+i2c_collect_runtime_inventory "$RESULT_DIR" optional-camera topology
 i2c_inventory_status=$?
+
+if [ "$I2C_RUNTIME_OPTIONAL_CAMERA_COUNT" -gt 0 ]; then
+    while IFS="$(printf '\t')" read -r i2c_camera_client i2c_camera_name i2c_camera_node; do
+        [ -n "$i2c_camera_client" ] || continue
+        test_result_record "SKIP" "Optional camera sensor unavailable: client=$i2c_camera_client name=$i2c_camera_name node=$i2c_camera_node, capture validation belongs to Libcamera_cam or Camera_NHX. Any captured driver probe errors still fail kernel-health validation"
+    done <"$RESULT_DIR/i2c_optional_camera_clients.tsv"
+fi
 
 case "$i2c_inventory_status" in
     0)
         test_result_record \
             "PASS" \
-            "I2C runtime is healthy: controllers=$I2C_RUNTIME_CONTROLLER_COUNT adapters=$I2C_RUNTIME_ADAPTER_COUNT clients=$I2C_RUNTIME_CLIENT_COUNT bound_clients=$I2C_RUNTIME_BOUND_CLIENT_COUNT"
+            "I2C bus and required-client runtime checks passed: controllers=$I2C_RUNTIME_CONTROLLER_COUNT adapters=$I2C_RUNTIME_ADAPTER_COUNT clients=$I2C_RUNTIME_CLIENT_COUNT bound_clients=$I2C_RUNTIME_BOUND_CLIENT_COUNT optional_camera_skipped=$I2C_RUNTIME_OPTIONAL_CAMERA_COUNT"
         ;;
     1)
         test_result_record \
@@ -462,6 +443,7 @@ else
 fi
 
 i2c_tools_explicit=0
+i2c_operations_ready=1
 if [ "$I2C_SCAN_ENABLE" -eq 1 ] ||
    [ -n "$I2C_READ_ADDRESS" ] ||
    [ -n "$I2C_WRITE_ADDRESS" ] ||
@@ -481,7 +463,7 @@ if [ "$i2c_tools_explicit" -eq 1 ] && [ "$I2C_TEST_ADAPTER" = "auto" ]; then
        [ -z "$I2C_WRITE_ADDRESS" ] &&
        { [ "$I2C_SCAN_ENABLE" -eq 1 ] ||
          [ "$I2C_LEGACY_TEST_ENABLE" = "1" ]; }; then
-        I2C_TEST_ADAPTER=$(i2c_select_eeprom_adapter)
+        I2C_TEST_ADAPTER=$(i2c_select_eeprom_adapter "$TOOLS" "$RESULT_DIR" "$I2C_EEPROM_TIMEOUT" "$I2C_EEPROM_DEVICE")
         i2c_adapter_selection_status=$?
         if [ "$i2c_adapter_selection_status" -eq 0 ]; then
             log_info "I2C scan adapter selected from the discovered EEPROM: i2c-$I2C_TEST_ADAPTER"
@@ -492,31 +474,17 @@ if [ "$i2c_tools_explicit" -eq 1 ] && [ "$I2C_TEST_ADAPTER" = "auto" ]; then
             log_info "I2C functional adapter auto-selected: i2c-$I2C_TEST_ADAPTER"
             ;;
         1)
-            test_result_finish "SKIP" "$TESTNAME SKIP: multiple I2C adapters are available and no unique functional adapter could be discovered"
+            test_result_record "SKIP" "Requested I2C operation needs --adapter, multiple adapters remain eligible"
+            i2c_operations_ready=0
             ;;
         *)
-            test_result_finish "SKIP" "$TESTNAME SKIP: no I2C character adapter is available for the explicitly requested operation"
+            test_result_record "SKIP" "Requested I2C operation has no accessible character adapter, provide CONFIG_I2C_CHARDEV and device nodes"
+            i2c_operations_ready=0
             ;;
     esac
 fi
 
-pkg_ensure_host_distro_package_set_present i2c-tools
-i2c_tools_package_status=$?
-
-case "$i2c_tools_package_status" in
-    0)
-        log_info "I2C userspace package set is ready"
-        ;;
-    1)
-        log_warn "i2c-tools package recovery failed on $(pkg_detect_os_id), checking for image-provided commands"
-        ;;
-    2)
-        log_info "I2C package recovery is not applicable, using image-provided tools"
-        ;;
-    *)
-        test_result_record "FAIL" "I2C package preparation returned unexpected status $i2c_tools_package_status"
-        ;;
-esac
+log_info "I2C diagnostics use image-provided tools only, no runtime package installation"
 
 if command -v i2cdetect >/dev/null 2>&1; then
     log_info "I2C userspace validation: listing adapters and querying adapter functionality without transferring device data"
@@ -540,7 +508,7 @@ else
     test_result_record "SKIP" "I2C userspace diagnostics are unavailable because i2c-tools are absent"
 fi
 
-if [ "$I2C_SCAN_ENABLE" -eq 1 ]; then
+if [ "$I2C_SCAN_ENABLE" -eq 1 ] && [ "$i2c_operations_ready" -eq 1 ]; then
     log_warn "I2C address scan was explicitly requested for adapter=$I2C_TEST_ADAPTER mode=$I2C_SCAN_MODE"
     i2c_tools_scan_adapter \
         "$I2C_TEST_ADAPTER" \
@@ -564,7 +532,7 @@ if [ "$I2C_SCAN_ENABLE" -eq 1 ]; then
     esac
 fi
 
-if [ -n "$I2C_READ_ADDRESS" ]; then
+if [ -n "$I2C_READ_ADDRESS" ] && [ "$i2c_operations_ready" -eq 1 ]; then
     log_warn "I2C register read was explicitly requested for adapter=$I2C_TEST_ADAPTER address=$I2C_READ_ADDRESS register=$I2C_READ_REGISTER mode=$I2C_READ_MODE"
     i2c_tools_read_register \
         "$I2C_TEST_ADAPTER" \
@@ -592,7 +560,7 @@ if [ -n "$I2C_READ_ADDRESS" ]; then
     esac
 fi
 
-if [ -n "$I2C_WRITE_ADDRESS" ]; then
+if [ -n "$I2C_WRITE_ADDRESS" ] && [ "$i2c_operations_ready" -eq 1 ]; then
     log_warn "I2C transactional register write was explicitly authorized for adapter=$I2C_TEST_ADAPTER address=$I2C_WRITE_ADDRESS register=$I2C_WRITE_REGISTER mode=$I2C_WRITE_MODE"
     i2c_tools_write_restore_register \
         "$I2C_TEST_ADAPTER" \
@@ -623,16 +591,31 @@ if [ "$I2C_EEPROM_MODE" != "off" ]; then
     eeprom_runner="$TOOLS/i2c_eeprom_runner.py"
     eeprom_log="$RESULT_DIR/i2c_eeprom.log"
     eeprom_report="$RESULT_DIR/i2c_eeprom.tsv"
+    eeprom_interpreter=python3
+    case "$I2C_EEPROM_MODE" in
+        matrix|pm)
+            eeprom_interpreter="sh"
+            ;;
+        *)
+            if ! command -v python3 >/dev/null 2>&1 &&
+               [ "$I2C_EEPROM_MODE" != integrity ]; then
+                eeprom_interpreter="sh"
+            fi
+            ;;
+    esac
+    if [ "$eeprom_interpreter" = sh ]; then
+        eeprom_runner="$TOOLS/i2c_eeprom_read.sh"
+    fi
 
-    if ! command -v python3 >/dev/null 2>&1; then
-        test_result_record "SKIP" "EEPROM validation is unavailable because python3 is absent"
+    if ! command -v "$eeprom_interpreter" >/dev/null 2>&1; then
+        test_result_record "SKIP" "EEPROM integrity validation needs image-provided python3, no shell write fallback is permitted"
     elif [ ! -f "$eeprom_runner" ]; then
         test_result_record "FAIL" "EEPROM validation runner is missing: $eeprom_runner"
     else
         eeprom_runner_mode=$I2C_EEPROM_MODE
         [ "$eeprom_runner_mode" = "auto" ] && eeprom_runner_mode=probe
 
-        set -- python3 "$eeprom_runner" \
+        set -- "$eeprom_interpreter" "$eeprom_runner" \
             --mode "$eeprom_runner_mode" \
             --device "$I2C_EEPROM_DEVICE" \
             --report "$eeprom_report"
@@ -676,7 +659,7 @@ if [ "$I2C_EEPROM_MODE" != "off" ]; then
     fi
 fi
 
-if [ "$I2C_LEGACY_TEST_ENABLE" != 0 ]; then
+if [ "$I2C_LEGACY_TEST_ENABLE" != 0 ] && [ "$i2c_operations_ready" -eq 1 ]; then
     log_info "I2C functional validation: running the optional image-provided i2c-msm-test path"
     i2c_run_legacy_test "$RESULT_DIR" "$I2C_TEST_ADAPTER" "$I2C_TEST_TIMEOUT"
     i2c_legacy_status=$?
@@ -717,9 +700,45 @@ if [ ! -s "$RESULT_DIR/dmesg_snapshot.log" ]; then
 elif [ "$i2c_dmesg_status" -eq 0 ] && [ "$I2C_DMESG_STRICT" -eq 1 ]; then
     test_result_record "FAIL" "I2C-related kernel errors were found in $RESULT_DIR/dmesg_errors.log"
 elif [ "$i2c_dmesg_status" -eq 0 ]; then
-    test_result_record "SKIP" "I2C kernel errors were retained as advisory evidence, set I2C_DMESG_STRICT=1 to gate them"
+    test_result_record "SKIP" "Controller scan findings are retained, explicit driver errors are gated separately regardless of I2C_DMESG_STRICT"
 else
-    test_result_record "PASS" "No non-benign I2C controller errors were found in the captured kernel log"
+    test_result_record "PASS" "Controller-only kernel scan found no non-benign errors, client binding is validated separately"
+fi
+
+if i2c_collect_client_dmesg "$RESULT_DIR"; then
+    log_info "I2C client kernel evidence: $RESULT_DIR/i2c_client_dmesg.log"
+    if [ "$i2c_inventory_status" -eq 1 ] || [ "$I2C_RUNTIME_OPTIONAL_CAMERA_COUNT" -gt 0 ]; then
+        if [ -s "$RESULT_DIR/i2c_client_dmesg.log" ]; then
+            log_file_with_label "I2C-CLIENT-DMESG" "$RESULT_DIR/i2c_client_dmesg.log" 120
+        else
+            log_warn "No matching client messages remain in the kernel snapshot, inspect i2c_clients.tsv and obtain the boot probe log"
+        fi
+    fi
+else
+    log_warn "I2C client kernel evidence is unavailable, inspect i2c_clients.tsv and dmesg_access.log"
+fi
+
+i2c_collect_driver_errors "$RESULT_DIR"
+i2c_driver_error_status=$?
+case "$i2c_driver_error_status" in
+    0)
+        log_file_with_label "I2C-DRIVER-ERROR" "$RESULT_DIR/i2c_driver_errors.log" 120
+        test_result_record "FAIL" "I2C controller or client driver errors were captured, including any probe or firmware-load failures. Resolve the reported driver, firmware or setup issue, artifact=$RESULT_DIR/i2c_driver_errors.log"
+        ;;
+    1)
+        log_info "No explicit I2C controller or client driver errors were found in the retained kernel snapshot"
+        ;;
+    2)
+        log_warn "I2C driver-error validation is unavailable without a kernel snapshot, no clean driver-health result is claimed"
+        ;;
+    *)
+        test_result_record "FAIL" "I2C driver-error evidence could not be collected, inspect inventory artifacts and output permissions in $RESULT_DIR"
+        ;;
+esac
+
+if [ "$i2c_inventory_status" -eq 1 ]; then
+    log_warn "Inspect the reported controller or client probe failure and its driver, firmware, power and wiring prerequisites"
+    log_warn "If a DT-declared peripheral is not fitted, disable its node or optional overlay in the setup configuration before rerunning, missing hardware cannot be inferred from a probe error alone"
 fi
 
 test_result_finish

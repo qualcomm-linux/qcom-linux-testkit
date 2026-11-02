@@ -1,0 +1,24 @@
+metadata:
+  name: audio-record-overlay
+  format: "Lava-Test Test Definition 1.0"
+  description: "Physical microphone recording using image-provided AudioReach and PipeWire. Shikra coverage includes CQS and IQS."
+  os:
+    - linux
+  scope:
+    - functional
+
+params:
+  SOURCE_CHOICE: "mic"
+  CONFIG_NAMES: "record_48KHz_1ch"
+  RECORD_SECONDS: "10s"
+  TIMEOUT: "0"
+  LOOPS: 1
+  RES_SUFFIX: "Overlay"
+  LAVA_TESTCASE_ID: "AudioRecord_Overlay"
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Multimedia/Audio/AudioRecord/
+    - ./run.sh --overlay --backend pipewire --source "${SOURCE_CHOICE}" --config-name "${CONFIG_NAMES}" --record-seconds "${RECORD_SECONDS}" --timeout "${TIMEOUT}" --loops "${LOOPS}" --res-suffix "${RES_SUFFIX}" --lava-testcase-id "${LAVA_TESTCASE_ID}" || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh AudioRecord${RES_SUFFIX:+_${RES_SUFFIX}}.res

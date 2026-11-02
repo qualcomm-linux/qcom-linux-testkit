@@ -1567,6 +1567,74 @@ wait_for_time_sync() {
     return 1
 }
 
+# ensure_tar_extractor <artifact-directory> <package-set> [gzip|tar]
+# Probe tar support, optionally gzip, without requiring an external gzip binary.
+# Recover the complete caller-selected set through the provider only if needed.
+# Artifacts remain in the caller's CWD workspace. Log diagnostics, return 0 ready
+# or 1 unavailable. Package policy and permissions remain owned by the provider.
+ensure_tar_extractor() (
+    egte_dir="$1"
+    egte_set="$2"
+    egte_mode="${3:-gzip}"
+    if [ -z "$egte_dir" ] || [ ! -d "$egte_dir" ] || [ ! -w "$egte_dir" ] ||
+       [ -z "$egte_set" ]; then
+        log_error "Archive extraction requires a writable artifact directory and a package set"
+        return 1
+    fi
+    egte_probe="$(mktemp "$egte_dir/archive-extract-probe.XXXXXX")" || return 1
+    egte_log="$egte_probe.log"
+    trap 'rm -f "$egte_probe"' EXIT
+
+    case "$egte_mode" in
+        gzip)
+            # Gzip-compressed 1024 zero bytes, two end-of-archive tar blocks.
+            printf '\037\213\010\000\000\000\000\000\002\377\143\140\030\005\243\140\024\214\124\000\000\056\257\265\357\000\004\000\000' >"$egte_probe" || return 1
+            egte_flags=-tzf
+            ;;
+        tar)
+            # Other archive formats must not gain an external gzip requirement.
+            printf '%1024s' '' | tr ' ' '\000' >"$egte_probe" || return 1
+            egte_flags=-tf
+            ;;
+        *)
+            log_error "Unsupported archive capability probe: $egte_mode"
+            return 1
+            ;;
+    esac
+    for egte_phase in initial recovered; do
+        if command -v tar >/dev/null 2>&1; then
+            if run_with_managed_timeout 10 "$egte_dir" archive-extract \
+                tar "$egte_flags" "$egte_probe" >"$egte_log" 2>&1; then
+                log_info "Archive extraction tools are ready"
+                return 0
+            fi
+        else
+            printf '%s\n' 'tar: command not found' >"$egte_log"
+        fi
+        log_warn "Archive extraction capability is unavailable, diagnostics: $egte_log"
+        log_file_with_label ARCHIVE-EXTRACT-TOOLS "$egte_log" 20
+        if [ "$egte_phase" = recovered ]; then
+            break
+        fi
+        if ! command -v pkg_ensure_host_distro_package_set_present >/dev/null 2>&1; then
+            break
+        fi
+        log_info "Checking mapped $egte_set package recovery before fetching clips"
+        egte_rc=0
+        pkg_ensure_host_distro_package_set_present "$egte_set" || egte_rc=$?
+        if [ "$egte_rc" -ne 0 ]; then
+            if [ "$egte_rc" -eq 2 ]; then
+                log_warn "This OS uses image-provided archive extraction tools"
+            else
+                log_error "Archive extraction package recovery failed or is disabled"
+            fi
+            break
+        fi
+    done
+    log_error "Clips require working $egte_mode archive extraction, provision tar and any required compression support. Diagnostics: $egte_log"
+    return 1
+)
+
 # If the tar file already exists,then function exit. Otherwise function to check the network connectivity and it will download tar from internet.
 extract_tar_from_url() {
     url="$1"
@@ -4443,11 +4511,12 @@ dt_profile_id() {
 ###############################################################################
 # dt_list_enabled_property_nodes <dt-root> <property>
 # Prints enabled DT node directories that expose the exact property name.
+# Return 0 for matches, 1 for none, 2 for discovery errors, 3 for invalid input.
+# Discovery uses no temporary files and does not depend on TMPDIR.
 ###############################################################################
 dt_list_enabled_property_nodes() {
     dtlep_root="$1"
     dtlep_property="$2"
-    dtlep_file=""
     [ -d "$dtlep_root" ] && [ -n "$dtlep_property" ] || return 3
 
     if [ -r "${DT_PROPERTY_INDEX:-}" ]; then
@@ -4455,22 +4524,20 @@ dt_list_enabled_property_nodes() {
         return $?
     fi
 
-    dtlep_file=$(mktemp "${TMPDIR:-/tmp}/dt-property.XXXXXX") || return 1
-    find "$dtlep_root" -type f -name "$dtlep_property" 2>/dev/null |
-    while IFS= read -r dtlep_property_file; do
-        dtlep_node=$(dirname "$dtlep_property_file")
-        dt_node_enabled "$dtlep_node" || continue
-        printf '%s\n' "$dtlep_node" >>"$dtlep_file"
-    done
-
-    if [ -s "$dtlep_file" ]; then
-        sort -u "$dtlep_file"
-        rm -f "$dtlep_file"
-        return 0
-    fi
-
-    rm -f "$dtlep_file"
-    return 1
+    dtlep_root=$(CDPATH='' cd "$dtlep_root" && pwd -P) || return 2
+    dtlep_files=$(find "$dtlep_root" -type f -name "$dtlep_property") || return 2
+    dtlep_nodes=$(
+        while IFS= read -r dtlep_property_file; do
+            [ -n "$dtlep_property_file" ] || continue
+            dtlep_node=${dtlep_property_file%/*}
+            dt_node_enabled "$dtlep_node" || continue
+            printf '%s\n' "$dtlep_node"
+        done <<EOF
+$dtlep_files
+EOF
+    ) || return 2
+    [ -n "$dtlep_nodes" ] || return 1
+    printf '%s\n' "$dtlep_nodes" | sort -u || return 2
 }
 
 ###############################################################################
@@ -4597,31 +4664,92 @@ dt_validate_usb_host_runtime() {
 }
 
 ###############################################################################
-# i2c_collect_runtime_inventory <result-dir>
+# i2c_client_is_camera_sensor <DT-node-directory>
+# Recognize a camera/sensor node with compatible/reg properties and a linked
+# serial-video endpoint. Uses runtime DT structure, not board, bus, address or
+# sensor-model lists. Returns 0 for this camera-sensor structure, 1 otherwise.
+# Produces no stdout and does not establish physical presence or probe health.
+i2c_client_is_camera_sensor() {
+    icics_node=$(readlink -f "$1" 2>/dev/null) || return 1
+    [ -d "$icics_node" ] || return 1
+    case "${icics_node##*/}" in
+        camera@*|sensor@*)
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    dt_node_enabled "$icics_node" || return 1
+    [ -s "$icics_node/compatible" ] && [ -s "$icics_node/reg" ] || return 1
+
+    for icics_endpoint in \
+        "$icics_node"/port/endpoint* \
+        "$icics_node"/port@*/endpoint* \
+        "$icics_node"/ports/port/endpoint* \
+        "$icics_node"/ports/port@*/endpoint*; do
+        [ -d "$icics_endpoint" ] || continue
+        [ -s "$icics_endpoint/remote-endpoint" ] || continue
+        [ -s "$icics_endpoint/data-lanes" ] || continue
+        return 0
+    done
+    return 1
+}
+
+###############################################################################
+# i2c_collect_runtime_inventory <result-dir> [required|optional-camera] [legacy|topology]
 # Correlates enabled Qualcomm I2C controllers with runtime adapters and clients.
+# Default required policy fails unbound DT clients. optional-camera records
+# structurally identified unbound camera sensors separately for caller SKIPs.
+# Outputs inventory artifacts and I2C_RUNTIME_* counters, including
+# I2C_RUNTIME_OPTIONAL_CAMERA_COUNT and i2c_optional_camera_clients.tsv.
 # Returns 0 for healthy applicable hardware, 1 for inconsistent runtime state,
 # 2 when I2C is not exposed, and 3 for invalid arguments.
+# topology additionally requires lib_bus.sh and validates per-controller and
+# DT child relationships for GENI, QUP and CCI. The default API is unchanged.
 ###############################################################################
 i2c_collect_runtime_inventory() {
     icri_result_dir="$1"
+    icri_client_policy="${2:-required}"
+    icri_topology_policy="${3:-legacy}"
     I2C_RUNTIME_CONTROLLER_COUNT=0
     I2C_RUNTIME_ADAPTER_COUNT=0
     I2C_RUNTIME_CLIENT_COUNT=0
     I2C_RUNTIME_BOUND_CLIENT_COUNT=0
     I2C_RUNTIME_WAITING_CLIENT_COUNT=0
     I2C_RUNTIME_REGISTERED_DRIVER_COUNT=0
+    I2C_RUNTIME_OPTIONAL_CAMERA_COUNT=0
     I2C_RUNTIME_FAILURE_REASON=""
     icri_controller_unbound=0
     icri_declared_client_unbound=0
     icri_seen_adapters=""
     icri_unbound_clients=""
     icri_waiting_clients=""
+    icri_controller_pattern='qcom,(geni-i2c|i2c-geni)'
+    case "$icri_topology_policy" in
+        legacy)
+            ;;
+        topology)
+            command -v i2c_validate_topology >/dev/null 2>&1 || return 3
+            icri_controller_pattern='qcom,(geni-i2c|i2c-geni|i2c-qup[^ ,]*|[^ ,]*-cci)( |$)'
+            ;;
+        *)
+            return 3
+            ;;
+    esac
 
     [ -n "$icri_result_dir" ] || return 3
+    case "$icri_client_policy" in
+        required|optional-camera)
+            ;;
+        *)
+            return 3
+            ;;
+    esac
     mkdir -p "$icri_result_dir" || return 1
     : >"$icri_result_dir/i2c_controllers.tsv"
     : >"$icri_result_dir/i2c_adapters.tsv"
     : >"$icri_result_dir/i2c_clients.tsv"
+    : >"$icri_result_dir/i2c_optional_camera_clients.tsv"
     : >"$icri_result_dir/i2c_registered_drivers.log"
 
     for icri_driver_path in /sys/bus/i2c/drivers/*; do
@@ -4635,10 +4763,13 @@ i2c_collect_runtime_inventory() {
 
     if dt_runtime_root >/dev/null 2>&1; then
         if dt_list_compatible_nodes \
-            'qcom,(geni-i2c|i2c-geni)' \
+            "$icri_controller_pattern" \
             regex >"$icri_result_dir/i2c_controller_nodes.log"; then
             while IFS= read -r icri_node; do
                 [ -n "$icri_node" ] || continue
+                if [ "$icri_topology_policy" = topology ]; then
+                    i2c_dt_path_enabled "$icri_node" || continue
+                fi
                 I2C_RUNTIME_CONTROLLER_COUNT=$((I2C_RUNTIME_CONTROLLER_COUNT + 1))
                 icri_compatible=$(dt_property_text "$icri_node" compatible 2>/dev/null || true)
                 icri_device=""
@@ -4703,6 +4834,7 @@ i2c_collect_runtime_inventory() {
         icri_client_dt_children=0
         icri_client_resources=""
         icri_client_channels=0
+        icri_client_classification=required
         if [ -n "$icri_client_modalias" ] &&
            icri_client_module_lines=$(kernel_modules_for_modalias "$icri_client_modalias" 2>/dev/null); then
             icri_client_modules=$(printf '%s\n' "$icri_client_module_lines" | tr '\n' ',' | sed 's/,$//')
@@ -4743,18 +4875,27 @@ i2c_collect_runtime_inventory() {
         if [ -n "$icri_client_driver" ]; then
             I2C_RUNTIME_BOUND_CLIENT_COUNT=$((I2C_RUNTIME_BOUND_CLIENT_COUNT + 1))
         elif [ -n "$icri_client_of_node" ]; then
-            icri_declared_client_unbound=$((icri_declared_client_unbound + 1))
-            icri_unbound_clients="$icri_unbound_clients ${icri_client##*/}(${icri_client_name:-unknown})"
-            case "$icri_client_waiting" in
-                1|Y|y|yes|true)
-                    I2C_RUNTIME_WAITING_CLIENT_COUNT=$((I2C_RUNTIME_WAITING_CLIENT_COUNT + 1))
-                    icri_waiting_clients="$icri_waiting_clients ${icri_client##*/}(${icri_client_name:-unknown})"
-                    ;;
-            esac
-            log_warn "[I2C-UNBOUND] client=${icri_client##*/} name=${icri_client_name:-unknown} dt_status=$icri_client_dt_status waiting_for_supplier=${icri_client_waiting:-unexposed} module_state=${icri_client_module_state:-unresolved} dt_children=$icri_client_dt_children runtime_channels=$icri_client_channels resources=$icri_client_resources"
+            if [ "$icri_client_policy" = "optional-camera" ] &&
+               i2c_client_is_camera_sensor "$icri_client_of_node"; then
+                icri_client_classification=optional-camera
+                I2C_RUNTIME_OPTIONAL_CAMERA_COUNT=$((I2C_RUNTIME_OPTIONAL_CAMERA_COUNT + 1))
+                printf '%s\t%s\t%s\n' \
+                    "${icri_client##*/}" "${icri_client_name:-unknown}" \
+                    "$icri_client_of_node" >>"$icri_result_dir/i2c_optional_camera_clients.tsv"
+            else
+                icri_declared_client_unbound=$((icri_declared_client_unbound + 1))
+                icri_unbound_clients="$icri_unbound_clients ${icri_client##*/}(${icri_client_name:-unknown})"
+                case "$icri_client_waiting" in
+                    1|Y|y|yes|true)
+                        I2C_RUNTIME_WAITING_CLIENT_COUNT=$((I2C_RUNTIME_WAITING_CLIENT_COUNT + 1))
+                        icri_waiting_clients="$icri_waiting_clients ${icri_client##*/}(${icri_client_name:-unknown})"
+                        ;;
+                esac
+            fi
+            log_warn "[I2C-UNBOUND] client=${icri_client##*/} name=${icri_client_name:-unknown} classification=$icri_client_classification dt_status=$icri_client_dt_status waiting_for_supplier=${icri_client_waiting:-unexposed} module_state=${icri_client_module_state:-unresolved} dt_children=$icri_client_dt_children runtime_channels=$icri_client_channels resources=$icri_client_resources"
         fi
 
-        printf '%s\tname=%s\tdriver=%s\tmodalias=%s\tmodule_candidates=%s\tmodule_state=%s\twaiting_for_supplier=%s\tdt_status=%s\tdt_children=%s\truntime_channels=%s\tresources=%s\tof_node=%s\n' \
+        printf '%s\tname=%s\tdriver=%s\tmodalias=%s\tmodule_candidates=%s\tmodule_state=%s\twaiting_for_supplier=%s\tdt_status=%s\tdt_children=%s\truntime_channels=%s\tresources=%s\tof_node=%s\tclassification=%s\n' \
             "${icri_client##*/}" \
             "${icri_client_name:-unknown}" \
             "${icri_client_driver:-unbound}" \
@@ -4766,11 +4907,12 @@ i2c_collect_runtime_inventory() {
             "$icri_client_dt_children" \
             "$icri_client_channels" \
             "$icri_client_resources" \
-            "${icri_client_of_node:-none}" >>"$icri_result_dir/i2c_clients.tsv"
+            "${icri_client_of_node:-none}" \
+            "$icri_client_classification" >>"$icri_result_dir/i2c_clients.tsv"
         log_info "[I2C-CLIENT] client=${icri_client##*/} name=${icri_client_name:-unknown} driver=${icri_client_driver:-unbound} modalias=${icri_client_modalias:-unexposed} module_candidates=${icri_client_modules:-unresolved} waiting_for_supplier=${icri_client_waiting:-unexposed} of_node=${icri_client_of_node:-none}"
     done
 
-    log_info "I2C runtime summary: controllers=$I2C_RUNTIME_CONTROLLER_COUNT adapters=$I2C_RUNTIME_ADAPTER_COUNT clients=$I2C_RUNTIME_CLIENT_COUNT bound_clients=$I2C_RUNTIME_BOUND_CLIENT_COUNT waiting_for_supplier=$I2C_RUNTIME_WAITING_CLIENT_COUNT artifact=$icri_result_dir/i2c_adapters.tsv"
+    log_info "I2C runtime summary: controllers=$I2C_RUNTIME_CONTROLLER_COUNT adapters=$I2C_RUNTIME_ADAPTER_COUNT clients=$I2C_RUNTIME_CLIENT_COUNT bound_clients=$I2C_RUNTIME_BOUND_CLIENT_COUNT optional_camera_unbound=$I2C_RUNTIME_OPTIONAL_CAMERA_COUNT waiting_for_supplier=$I2C_RUNTIME_WAITING_CLIENT_COUNT artifact=$icri_result_dir/i2c_adapters.tsv"
 
     if [ "$I2C_RUNTIME_CONTROLLER_COUNT" -eq 0 ] &&
        [ "$I2C_RUNTIME_ADAPTER_COUNT" -eq 0 ]; then
@@ -4778,7 +4920,8 @@ i2c_collect_runtime_inventory() {
     fi
 
     if [ "$I2C_RUNTIME_CONTROLLER_COUNT" -gt 0 ] &&
-       [ "$I2C_RUNTIME_ADAPTER_COUNT" -eq 0 ]; then
+       [ "$I2C_RUNTIME_ADAPTER_COUNT" -eq 0 ] &&
+       [ "$icri_topology_policy" = legacy ]; then
         I2C_RUNTIME_FAILURE_REASON="enabled Qualcomm I2C controllers expose no runtime adapters"
     elif [ "$icri_controller_unbound" -gt 0 ]; then
         I2C_RUNTIME_FAILURE_REASON="$icri_controller_unbound enabled Qualcomm I2C controller(s) have no bound platform driver"
@@ -4788,7 +4931,141 @@ i2c_collect_runtime_inventory() {
         I2C_RUNTIME_FAILURE_REASON="$icri_declared_client_unbound DT-declared I2C client(s) are unbound:${icri_unbound_clients}"
     fi
 
+    if [ "$icri_topology_policy" = topology ]; then
+        if ! i2c_validate_topology "$icri_result_dir" "$icri_client_policy"; then
+            I2C_RUNTIME_FAILURE_REASON="${I2C_RUNTIME_FAILURE_REASON:+$I2C_RUNTIME_FAILURE_REASON. }I2C controller, adapter or DT client relationships are incomplete, inspect i2c_topology.tsv"
+            return 1
+        fi
+    fi
     [ -z "$I2C_RUNTIME_FAILURE_REASON" ] || return 1
+    return 0
+}
+
+###############################################################################
+# I2C client kernel-log diagnostics.
+###############################################################################
+
+# i2c_collect_client_dmesg RESULT_DIR [clients|drivers]
+# Filter the existing dmesg_snapshot.log using identities in i2c_clients.tsv.
+# Optional drivers scope also uses i2c_controllers.tsv for controller identities.
+# Inputs: artifacts produced by i2c_collect_runtime_inventory and
+# scan_dmesg_errors in RESULT_DIR. No kernel read or hardware operation occurs.
+# Output: replaces i2c_client_dmesg.log (or i2c_driver_dmesg.log for drivers),
+# preserving matching lines verbatim.
+# Returns: 0 after filtering, including no matches, 1 for unavailable evidence
+# or an output/filter error. This diagnostic does not classify test results.
+i2c_collect_client_dmesg() {
+    iccd_result_dir="$1"
+    iccd_inventory="$iccd_result_dir/i2c_clients.tsv"
+    iccd_snapshot="$iccd_result_dir/dmesg_snapshot.log"
+    iccd_output="$iccd_result_dir/i2c_client_dmesg.log"
+    iccd_scope="${2:-clients}"
+    case "$iccd_scope" in
+        clients)
+            ;;
+        drivers)
+            iccd_output="$iccd_result_dir/i2c_driver_dmesg.log"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+
+    : >"$iccd_output" || return 1
+    [ -r "$iccd_inventory" ] || return 1
+    [ -s "$iccd_snapshot" ] || return 1
+    set -- "$iccd_inventory"
+    if [ "$iccd_scope" = drivers ]; then
+        [ -r "$iccd_result_dir/i2c_controllers.tsv" ] || return 1
+        set -- "$@" "$iccd_result_dir/i2c_controllers.tsv"
+        if [ -r "$iccd_result_dir/i2c_adapters.tsv" ]; then
+            set -- "$@" "$iccd_result_dir/i2c_adapters.tsv"
+        fi
+    fi
+
+    # Match whole whitespace-delimited identities, not regexes from sysfs.
+    # Driver/module spellings can differ only by hyphens and underscores.
+    # Client addresses also catch probe messages whose driver name differs
+    # from both the DT client name and the module name.
+    awk '
+        FILENAME != ARGV[ARGC - 1] {
+            count = split($0, fields, "\t")
+            if (fields[1] ~ /^i2c-[0-9]+$/) {
+                identities[fields[1]] = 1
+                next
+            }
+            if (fields[1] ~ /^[0-9]+-[0-9a-fA-F]+$/) {
+                identities[fields[1]] = 1
+            } else if (fields[1] !~ /^\//) {
+                next
+            }
+            for (field = 2; field <= count; field++) {
+                separator = index(fields[field], "=")
+                key = substr(fields[field], 1, separator - 1)
+                if (key != "name" && key != "driver" &&
+                    key != "module_candidates" && key != "device") {
+                    continue
+                }
+                value = substr(fields[field], separator + 1)
+                values = split(value, names, ",")
+                for (item = 1; item <= values; item++) {
+                    name = names[item]
+                    if (name == "" || name == "unbound" ||
+                        name == "unresolved" || name == "unknown") {
+                        continue
+                    }
+                    gsub(/_/, "-", name)
+                    identities[name] = 1
+                }
+            }
+            next
+        }
+        {
+            for (field = 1; field <= NF; field++) {
+                token = $field
+                sub(/:$/, "", token)
+                gsub(/_/, "-", token)
+                if (token in identities) {
+                    print
+                    break
+                }
+            }
+        }
+    ' "$@" "$iccd_snapshot" >"$iccd_output" || return 1
+    return 0
+}
+
+# i2c_collect_driver_errors RESULT_DIR
+# Collect explicit failures from all discovered I2C controller/client drivers,
+# including optional cameras and drivers that later bind successfully. Reuses
+# the retained kernel snapshot, without reading dmesg or changing hardware.
+# Output: replaces i2c_driver_dmesg.log and i2c_driver_errors.log, no stdout.
+# Returns: 0 when failures exist, 1 when clean, 2 when evidence is unavailable,
+# 3 when collection/filtering fails. Ordinary dummy-regulator and successful
+# initialization messages are retained as context but are not error evidence.
+i2c_collect_driver_errors() {
+    icde_result_dir="$1"
+    icde_errors="$icde_result_dir/i2c_driver_errors.log"
+    : >"$icde_errors" || return 3
+    [ -s "$icde_result_dir/dmesg_snapshot.log" ] || return 2
+    i2c_collect_client_dmesg "$icde_result_dir" drivers || return 3
+
+    awk '
+        {
+            message = tolower($0)
+            gsub(/(^|[^[:alnum:]_])(no|0)[[:space:]]+errors?([^[:alnum:]_]|$)/, " ", message)
+            gsub(/(^|[^[:alnum:]_])errors?[=:][[:space:]]*0([^[:alnum:]_]|$)/, " ", message)
+            gsub(/(^|[^[:alnum:]_])(timeouts?|nacks?|overruns?)[=:][[:space:]]*0([^[:alnum:]_]|$)/, " ", message)
+            if (message ~ /(^|[^[:alnum:]_])(error|errors|failed|failure|failures)([^[:alnum:]_]|$)/ ||
+                message ~ /(^|[^[:alnum:]_])(timeout|nack|overrun)([^[:alnum:]_]|$)/ ||
+                message ~ /timed out|unknown symbol|unable to (probe|read|load|initialize)/ ||
+                message ~ /bus proto err|bus arbitration lost|illegal cmd|unknown i2c err/ ||
+                message ~ /words read = .*words expected =|not enough clocks in dt|[rt]x channel not available/) {
+                print
+            }
+        }
+    ' "$icde_result_dir/i2c_driver_dmesg.log" >"$icde_errors" || return 3
+    [ -s "$icde_errors" ] || return 1
     return 0
 }
 
@@ -8964,6 +9241,61 @@ detect_platform() {
       PLATFORM_TARGET PLATFORM_MACHINE
  
     return 0
+}
+
+# -----------------------------------------------------------------------------
+# platform_runtime_identity
+#
+# Prints a lowercased, space-joined identity string built from all available
+# platform evidence (soc0 sysfs, device-tree model/compatible, and any vars
+# already exported by detect_platform). Callers treat an empty result as
+# "no match" rather than falling back to a name heuristic.
+# This is the single source of truth for board identity shared by audio,
+# video, and any other subsystem library.
+# -----------------------------------------------------------------------------
+platform_runtime_identity() {
+    pri_identity="${PLATFORM_MACHINE:-} ${PLATFORM_TARGET:-}"
+    pri_identity="$pri_identity ${PLATFORM_SOC_MACHINE:-}"
+    pri_identity="$pri_identity ${PLATFORM_DT_MODEL:-}"
+    pri_identity="$pri_identity ${PLATFORM_DT_COMPAT:-}"
+
+    for pri_dtf in \
+        /proc/device-tree/model \
+        /proc/device-tree/compatible \
+        /sys/firmware/devicetree/base/model \
+        /sys/firmware/devicetree/base/compatible
+    do
+        if [ -r "$pri_dtf" ]; then
+            pri_dtv="$(tr '\000' ' ' <"$pri_dtf" 2>/dev/null || true)"
+            pri_identity="$pri_identity $pri_dtv"
+        fi
+    done
+
+    printf '%s\n' "$pri_identity" | tr '[:upper:]' '[:lower:]'
+}
+
+# -----------------------------------------------------------------------------
+# platform_identity_matches <substr>
+#
+# Returns 0 when <substr> (case-insensitive) appears anywhere in the runtime
+# platform identity string produced by platform_runtime_identity().
+# Returns 1 when there is no match or the identity string is empty.
+# -----------------------------------------------------------------------------
+platform_identity_matches() {
+    pim_tok="$1"
+    [ -n "$pim_tok" ] || return 1
+
+    pim_identity="$(platform_runtime_identity)"
+    pim_tok_l="$(printf '%s' "$pim_tok" | tr '[:upper:]' '[:lower:]')"
+
+    case "$pim_identity" in
+        *"$pim_tok_l"*)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
 }
 
 # ---------- minimal root / FS helpers (Yocto-safe, no underscores) ----------

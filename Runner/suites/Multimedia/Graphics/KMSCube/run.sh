@@ -129,6 +129,7 @@ fi
 
 TESTNAME="KMSCube"
 RES_FILE="$SCRIPT_DIR/$TESTNAME.res"
+test_result_init "$TESTNAME" "$RES_FILE" || exit 1
 
 test_path="$(find_test_case_by_name "$TESTNAME")"
 cd "$test_path" || exit 1
@@ -169,7 +170,7 @@ GPU_OVERLAY_DEVICE="/dev/kgsl-3d0"
 GPU_OVERLAY_GBM_PACKAGE="${GPU_OVERLAY_GBM_PACKAGE:-}"
 
 DISPLAY_MANAGER_SERVICE="${DISPLAY_MANAGER_SERVICE:-display-manager.service}"
-DISPLAY_MANAGER_STATE_FILE="/tmp/qcom-testkit-${TESTNAME}-display-manager.$$.state"
+DISPLAY_MANAGER_STATE_FILE="$test_path/.${TESTNAME}-display-manager.$$.state"
 weston_stopped_by_test=0
 
 rm -f \
@@ -271,6 +272,16 @@ if [ "$OS_ID" = "ubuntu" ]; then
 fi
 
 log_info "Graphics mode, requested=$REQUESTED_GRAPHICS_MODE os=$OS_ID"
+
+# Require the test application before preparing packages, GPU boot policy or
+# display ownership. Missing image content is not a rendering failure.
+if ! CHECK_DEPS_RECOVER=0 CHECK_DEPS_NO_EXIT=1 check_dependencies kmscube; then
+    test_result_finish "SKIP" \
+        "$TESTNAME SKIP - kmscube is not executable in PATH on os=$OS_ID, provision it in the image or add its installed directory to PATH, graphics preparation and rendering were not attempted"
+fi
+
+KMSCUBE_BIN="$(command -v kmscube 2>/dev/null || true)"
+log_info "Using kmscube: $KMSCUBE_BIN"
 
 # --- Configure requested package and boot stack ------------------------------
 # Yocto/qcom-distro images keep their native image-selected graphics stack.
@@ -432,34 +443,6 @@ if [ ! -e "$1" ]; then
     echo "$TESTNAME SKIP" >"$RES_FILE"
     exit 0
 fi
-
-# --- Dependencies ------------------------------------------------------------
-if [ "$DISTRO_GPU_HANDLING_SUPPORTED" -eq 1 ]; then
-    CHECK_DEPS_RECOVER=1
-else
-    CHECK_DEPS_RECOVER=0
-fi
-
-if [ "$OS_ID" = "centos" ]; then
-    if ! CHECK_DEPS_RECOVER="$CHECK_DEPS_RECOVER" \
-        CHECK_DEPS_NO_EXIT=1 \
-        check_dependencies kmscube; then
-        log_skip "$TESTNAME SKIP - kmscube is unavailable from the configured CentOS repositories, publish or provision the kmscube package"
-        echo "$TESTNAME SKIP" >"$RES_FILE"
-        exit 0
-    fi
-else
-    if ! CHECK_DEPS_RECOVER="$CHECK_DEPS_RECOVER" \
-        CHECK_DEPS_NO_EXIT=1 \
-        check_dependencies kmscube modetest; then
-        log_skip "$TESTNAME SKIP - missing dependencies: kmscube and/or modetest"
-        echo "$TESTNAME SKIP" >"$RES_FILE"
-        exit 0
-    fi
-fi
-
-KMSCUBE_BIN="$(command -v kmscube 2>/dev/null || true)"
-log_info "Using kmscube: ${KMSCUBE_BIN:-<not found>}"
 
 if ! command -v run_with_managed_timeout >/dev/null 2>&1; then
     log_fail "$TESTNAME FAIL - required timeout helper is unavailable: run_with_managed_timeout"

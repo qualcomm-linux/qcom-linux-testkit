@@ -195,7 +195,7 @@ def select_device(
     if requested != "auto":
         selected = os.path.realpath(requested)
         if not os.path.isfile(selected):
-            raise SkipTest("requested-eeprom-device-unavailable")
+            raise ValidationFailure("requested-eeprom-device-unavailable")
         selected_path = Path(requested)
         if selected_path.name == "eeprom" and discover_i2c_client_id(selected_path):
             return requested, "i2c-eeprom-sysfs"
@@ -205,7 +205,7 @@ def select_device(
             and is_eeprom_nvmem(selected_path)
         ):
             return requested, "i2c-nvmem-sysfs"
-        raise SkipTest("requested-device-is-not-an-i2c-eeprom")
+        raise InvalidConfiguration("requested-device-is-not-an-i2c-eeprom")
 
     if not candidates:
         raise SkipTest("no-i2c-eeprom-sysfs-device")
@@ -315,7 +315,7 @@ def validate_region(args: argparse.Namespace, size: int) -> Tuple[int, int]:
 
 
 def install_signal_handlers() -> None:
-    def interrupt(signum: int, _frame: object) -> None:
+    def interrupt(signum: int, frame: object) -> None:
         raise InterruptedError(f"signal-{signum}")
 
     signal.signal(signal.SIGINT, interrupt)
@@ -332,7 +332,7 @@ def main() -> int:
 
     try:
         candidates = discover_candidates(args.sysfs_root)
-        candidate_paths = [path for path, _source in candidates]
+        candidate_paths = [path for path, source in candidates]
         base_report.update(
             {
                 "candidate_count": len(candidate_paths),
@@ -369,11 +369,11 @@ def main() -> int:
             try:
                 fd = os.open(device, os.O_RDONLY | OPEN_CLOEXEC)
             except OSError as error:
-                raise SkipTest(f"eeprom-open-unavailable-{error.errno}") from error
+                raise ValidationFailure(f"eeprom-open-failed-{error.errno}") from error
             try:
                 payload = read_exact(fd, offset, length)
             except (OSError, ValidationFailure) as error:
-                raise SkipTest("eeprom-read-unavailable") from error
+                raise ValidationFailure(f"eeprom-read-failed:{error}") from error
             finally:
                 os.close(fd)
 
@@ -391,7 +391,7 @@ def main() -> int:
         except OSError as error:
             if error.errno in (errno.EACCES, errno.EPERM, errno.EROFS):
                 raise SkipTest("selected-eeprom-is-not-writable") from error
-            raise SkipTest(f"eeprom-open-unavailable-{error.errno}") from error
+            raise ValidationFailure(f"eeprom-open-failed-{error.errno}") from error
 
         original = b""
         test_pattern = b""
@@ -402,7 +402,7 @@ def main() -> int:
             original = read_exact(fd, offset, length)
         except (OSError, ValidationFailure) as error:
             os.close(fd)
-            raise SkipTest("selected-eeprom-range-is-not-readable") from error
+            raise ValidationFailure(f"selected-eeprom-read-failed:{error}") from error
 
         try:
             test_pattern = bytes(value ^ 0xFF for value in original)

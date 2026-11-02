@@ -76,6 +76,9 @@ _runner_stdout_cleanup() {
     if [ -n "${PIPE:-}" ]; then
         rm -f "$PIPE" 2>/dev/null
     fi
+    if [ -n "${RUN_STDOUT_PIPE_DIR:-}" ]; then
+        rmdir "$RUN_STDOUT_PIPE_DIR" 2>/dev/null
+    fi
     exit "$st"
 }
 
@@ -89,15 +92,26 @@ if [ "${RUN_STDOUT_ENABLE:-1}" -eq 1 ] && [ -z "${__RUN_STDOUT_ACTIVE:-}" ]; the
     exec 3>&1 4>&2
 
     if command -v tee >/dev/null 2>&1; then
-        PIPE="$(mktemp -u "/tmp/stdout_pipe.XXXXXX")"
-        if mkfifo "$PIPE" 2>/dev/null; then
+        RUN_STDOUT_PIPE_DIR="$(mktemp -d "$(pwd -P)/.stdout-pipe.XXXXXX")"
+        PIPE="${RUN_STDOUT_PIPE_DIR:+$RUN_STDOUT_PIPE_DIR/stream}"
+        if [ -n "$PIPE" ] && mkfifo "$PIPE" 2>/dev/null; then
             ( tee -a "$RUN_STDOUT_FILE" >&3 ) < "$PIPE" &
             __TEE_PID=$!
             exec > "$PIPE" 2>&1
+            # Both ends are open, no filesystem entry is needed during the run.
+            rm -f "$PIPE"
+            rmdir "$RUN_STDOUT_PIPE_DIR"
+            PIPE=""
+            RUN_STDOUT_PIPE_DIR=""
             __RUN_STDOUT_ACTIVE=1
             trap _runner_stdout_cleanup EXIT INT TERM
         else
             # Fallback: file-only capture
+            if [ -n "$RUN_STDOUT_PIPE_DIR" ]; then
+                rmdir "$RUN_STDOUT_PIPE_DIR" 2>/dev/null
+                RUN_STDOUT_PIPE_DIR=""
+            fi
+            PIPE=""
             exec >> "$RUN_STDOUT_FILE" 2>&1
             __RUN_STDOUT_ACTIVE=1
             trap _runner_stdout_cleanup EXIT INT TERM

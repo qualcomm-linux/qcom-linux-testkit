@@ -8,6 +8,85 @@ SENSORS_ADSP_FW=""
 SENSORS_ADSP_RPROC_PATH=""
 SENSORS_ADSP_STATE=""
 
+# sensors_select_service [override]
+# Print the explicit service override, otherwise prefer an active known unit,
+# then the installed modern or legacy unit. Return 0, no service state changes.
+# Preserve the legacy default when
+# systemctl is unavailable or neither unit can be inspected.
+sensors_select_service() {
+    if [ -n "${1:-}" ]; then
+        printf '%s\n' "$1"
+        return 0
+    fi
+
+    if command -v systemctl >/dev/null 2>&1; then
+        for sss_unit in sensors.qti.service sscrpcd.service; do
+            if systemctl is-active --quiet "$sss_unit" >/dev/null 2>&1; then
+                printf '%s\n' "$sss_unit"
+                return 0
+            fi
+        done
+        if systemctl cat sensors.qti.service >/dev/null 2>&1; then
+            printf '%s\n' sensors.qti.service
+            return 0
+        fi
+    fi
+    printf '%s\n' sscrpcd.service
+}
+
+# sensors_overlay_reboot_state <check|mark>
+# Track Debian overlay preparation against the current kernel boot ID in CWD.
+# Return 0 when ready/marked, 2 when the same boot still needs a reboot, or 1
+# on unreadable/malformed state. No stdout data, never reboots or deletes state.
+sensors_overlay_reboot_state() {
+    sors_action="$1"
+    sors_file="$PWD/.sensors-overlay-boot-id"
+    sors_current=""
+    sors_previous=""
+
+    if [ "$sors_action" = check ] && [ ! -e "$sors_file" ]; then
+        return 0
+    fi
+
+    if ! IFS= read -r sors_current </proc/sys/kernel/random/boot_id ||
+       [ -z "$sors_current" ]; then
+        log_fail "Cannot read kernel boot ID for Sensors reboot tracking"
+        return 1
+    fi
+
+    case "$sors_action" in
+        mark)
+            if ! printf '%s\n' "$sors_current" >"$sors_file"; then
+                log_fail "Cannot save Sensors reboot state in $sors_file, check CWD permissions"
+                return 1
+            fi
+            ;;
+        check)
+            if ! IFS= read -r sors_previous <"$sors_file" ||
+               [ -z "$sors_previous" ]; then
+                log_fail "Cannot read Sensors reboot state in $sors_file, check the retained state file"
+                return 1
+            fi
+            case "$sors_previous" in
+                ????????-????-????-????-????????????)
+                    ;;
+                *)
+                    log_fail "Malformed Sensors boot ID in $sors_file, verify package setup and reboot state"
+                    return 1
+                    ;;
+            esac
+            if [ "$sors_previous" = "$sors_current" ]; then
+                return 2
+            fi
+            ;;
+        *)
+            log_fail "Unknown Sensors reboot-state operation: $sors_action"
+            return 1
+            ;;
+    esac
+    return 0
+}
+
 # sensors_parse_csv CSV
 # Validate comma-separated TYPE names, trim surrounding whitespace and deduplicate.
 # Output: newline-separated names on stdout only after the entire input is valid.

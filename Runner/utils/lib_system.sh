@@ -342,6 +342,35 @@ efi_variable_list_contains() {
     grep -Fxq "$var_name" "$EFI_LIST_LOG" 2>/dev/null
 }
 
+# efi_read_text_variable <name> <efivarfs-directory>
+# Read one text variable without mounting or writing efivarfs. Skip the four
+# attribute bytes from the kernel ABI, not a formatted efivar hexdump. Return
+# 2 for absent/ambiguous/unreadable or non-text data. Stdout is payload only.
+efi_read_text_variable() {
+    ertv_name="$1"
+    ertv_root="$2"
+    ertv_file=""
+    ertv_count=0
+    for ertv_candidate in "$ertv_root/$ertv_name"-*; do
+        [ -f "$ertv_candidate" ] || continue
+        ertv_file="$ertv_candidate"
+        ertv_count=$((ertv_count + 1))
+    done
+    [ "$ertv_count" -eq 1 ] && [ -r "$ertv_file" ] || return 2
+    # Bound reads and reject oversized, truncated or binary payloads rather
+    # than interpreting them as boot selectors. No UTF-16 guessing.
+    ertv_size="$(wc -c <"$ertv_file")" || return 2
+    [ "$ertv_size" -gt 4 ] && [ "$ertv_size" -le 4096 ] || return 2
+    ertv_bytes="$(dd if="$ertv_file" bs=1 skip=4 count=4092 2>/dev/null | od -An -tu1 -v)" || return 2
+    printf '%s\n' "$ertv_bytes" | awk '
+        { for (i = 1; i <= NF; i++) {
+            if ($i == 0) { ended = 1; continue }
+            if (ended || $i < 32 || $i > 126) exit 1
+        } }
+    ' || return 2
+    dd if="$ertv_file" bs=1 skip=4 count=4092 2>/dev/null | tr -d '\000'
+}
+
 # Find one EFI variable by its name suffix and print its GUID-qualified name.
 # Args:
 #   $1 - EFI variable name without the GUID, for example VendorDtbOverlays

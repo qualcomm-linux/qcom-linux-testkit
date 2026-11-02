@@ -181,20 +181,31 @@ audio_has_runnable_discovery_clips() {
   return 1
 }
 
+# audio_ensure_archive_extractor
+# Check gzip-tar support with an empty archive under the CWD scratch directory.
+# BusyBox/libarchive can pass without an external gzip binary. Recover the full
+# mapped audio-extract set only when needed, respecting shared provider policy.
+# No arguments or stdout data. Log diagnostics and return 0 ready, 1 unavailable.
+audio_ensure_archive_extractor() (
+  aae_dir="$(audio_scratch_dir)" || return 1
+  ensure_tar_extractor "$aae_dir" audio-extract gzip
+)
+
 # audio_fetch_assets_from_url <url>
 # Downloads and extracts the audio archive URL into AUDIO_CLIPS_BASE_DIR. The
 # URL must be non-empty. The function writes diagnostic logs and temporary
-# archive files, may recover the mapped Ubuntu downloader package set, and
+# archive files, may recover mapped downloader/extractor package sets, and
 # emits no machine-readable stdout. Returns 0 when runnable clips are ready and
 # 1 when download, extraction, or validation fails.
 audio_fetch_assets_from_url() {
   url="$1"
   clips_dir="${AUDIO_CLIPS_BASE_DIR:-AudioClips}"
   marker_file="${AUDIO_EXTRACT_MARKER:-$clips_dir/.audioclips_extracted}"
-  work_dir="${SCRIPT_DIR:-$(pwd)}"
+  work_dir="$(audio_scratch_dir)" || return 1
   ts="$(date +%s 2>/dev/null || echo 0)"
   archive_path="$work_dir/AudioClips.$$.${ts}.tar.gz"
   fetch_log="$work_dir/AudioClips_fetch.$$.${ts}.log"
+  extract_log="$work_dir/AudioClips_extract.$$.${ts}.log"
   fetch_attempts="${AUDIO_FETCH_RETRIES:-2}"
   fetch_retry_delay="${AUDIO_FETCH_RETRY_DELAY:-3}"
   fetch_attempt=1
@@ -220,6 +231,7 @@ audio_fetch_assets_from_url() {
     log_warn "Extraction marker present but runnable clips not found, continuing with download/re-extract path"
   fi
 
+  audio_ensure_archive_extractor || return 1
   audio_ensure_download_client || return 1
 
   while [ "$fetch_attempt" -le "$fetch_attempts" ]; do
@@ -296,12 +308,15 @@ audio_fetch_assets_from_url() {
   fi
 
   log_info "exec: tar -xzf \"$archive_path\" -C \"$clips_dir\""
-  if ! tar -xzf "$archive_path" -C "$clips_dir" >>"$fetch_log" 2>&1; then
+  if ! tar -xzf "$archive_path" -C "$clips_dir" >"$extract_log" 2>&1; then
+    cat "$extract_log" >>"$fetch_log"
     log_error "Failed to extract audio clips archive into $clips_dir"
     log_error "Fetch log preserved at: $fetch_log"
+    log_file_with_label AUDIO-EXTRACT "$extract_log" 40
     rm -f "$archive_path" >/dev/null 2>&1 || true
     return 1
   fi
+  cat "$extract_log" >>"$fetch_log"
 
   rm -f "$archive_path" >/dev/null 2>&1 || true
 
@@ -368,18 +383,75 @@ audio_ensure_clip_ready() {
 # Produces no machine-readable stdout and always returns success after the scan.
 scan_audio_dmesg() {
   sad_output_dir="$1"
-  sad_modules='snd|asoc|audio|lpass|q6|codec|xrun|underrun|overrun|pipewire|pulseaudio'
+  mkdir -p "$sad_output_dir" || return 1
+  sad_modules='snd[^:]*|asoc[^:]*|qcom[-_,](apm|apr|q6)[^:]*|q6[^:]*|apr[^:]*|gpr[^:]*|remoteproc[^:]*|audio[^:]*|lpass[^:]*|.*codec[^:]*|pipewire[^:]*|pulseaudio[^:]*'
   sad_exclusions='dummy regulator|EEXIST|probe deferred'
 
   scan_dmesg_errors \
     "$sad_output_dir" \
     "$sad_modules" \
-    "$sad_exclusions" || true
+    "$sad_exclusions" >"$sad_output_dir/kernel_capture.log" 2>&1 || true
+  audio_kernel_diagnostic_summary "$sad_output_dir"
+}
+
+# audio_kernel_diagnostic_summary <captured-output-directory>
+# Classify the shared provider snapshot without capturing it again. Diagnostics
+# never change functional PASS policy, selected DSP crashes use the separate
+# health gate. Stdout reports scope, access and counts, artifacts retain details.
+audio_kernel_diagnostic_summary() {
+  akds_out="$1"
+  : >"$akds_out/audio_kernel_errors.log"
+  : >"$akds_out/audio_kernel_warnings.log"
+  if [ "${DMESG_ACCESS_STATUS:-unavailable}" != available ] ||
+     [ ! -s "$akds_out/dmesg_snapshot.log" ]; then
+    log_warn "[AUDIO-KERNEL] Evidence unavailable, kernel health is unverified. See $akds_out/dmesg_access.log and kernel_capture.log"
+    return 0
+  fi
+  if ! awk -v since="${AUDIO_REMOTE_PROC_SINCE:-}" \
+      -v errors="$akds_out/audio_kernel_errors.log" \
+      -v warnings="$akds_out/audio_kernel_warnings.log" '
+    {
+      if (since ~ /^[0-9]+$/) {
+        if ($0 !~ /^\[[[:space:]]*[0-9]+([.][0-9]+)?\]/) next
+        stamp = $0
+        sub(/^\[[[:space:]]*/, "", stamp)
+        sub(/\].*$/, "", stamp)
+        if (stamp + 0 < since + 0) next
+      }
+      line = tolower($0)
+      if (line ~ /dummy regulator|supply [^ ]+ not found|eexist|probe deferred|binding deferred/) next
+      relevant = line ~ /(^|[[:space:]])(snd[[:alnum:]_-]*|asoc|qcom[-_,](apm|apr|q6)[[:alnum:]_-]*|q6[[:alnum:]_-]*|apr|gpr|remoteproc|lpass[[:alnum:]_-]*|[[:alnum:]_-]*codec|[rtv]x[-_]macro|va[-_]macro|wsa[[:alnum:]_-]*|soundwire|swr[[:alnum:]_-]*|pipewire|pulseaudio)([[:space:]:]|$)/
+      if (!relevant) next
+      if (line ~ /unknown symbol|probe.*fail|failed|failure|error|timed out|timeout|not found|invalid|corrupt|abort|panic|oops|unhandled|watchdog|crash/)
+        print $0 > errors
+      else if (line ~ /unknown pin|no backend dais|underrun|overrun|xrun/)
+        print $0 > warnings
+    }
+  ' "$akds_out/dmesg_snapshot.log"; then
+    log_warn "[AUDIO-KERNEL] Snapshot classification failed, kernel health is unverified. Retain $akds_out/dmesg_snapshot.log for triage"
+    return 0
+  fi
+  akds_errors="$(wc -l <"$akds_out/audio_kernel_errors.log")"
+  akds_warnings="$(wc -l <"$akds_out/audio_kernel_warnings.log")"
+  log_info "[AUDIO-KERNEL] Captured audio diagnostics: errors=$akds_errors warnings=$akds_warnings since_uptime=${AUDIO_REMOTE_PROC_SINCE:-boot}, independent of stream execution result"
+  if [ "$akds_errors" -gt 0 ] || [ "$akds_warnings" -gt 0 ]; then
+    log_warn "[AUDIO-KERNEL] Audio messages require triage even when playback/recording passes, artifacts: $akds_out/audio_kernel_errors.log and audio_kernel_warnings.log"
+    log_file_with_label AUDIO-KERNEL-ERROR "$akds_out/audio_kernel_errors.log" 40
+    log_file_with_label AUDIO-KERNEL-WARN "$akds_out/audio_kernel_warnings.log" 40
+  fi
+  return 0
 }
 
 dump_mixers() {
   audio_dump_out="$1"
   {
+    echo "---- ALSA playback and capture inventory ----"
+    audio_exec_with_timeout 5s env LC_ALL=C aplay -l 2>&1 || true
+    audio_exec_with_timeout 5s env LC_ALL=C arecord -l 2>&1 || true
+    for audio_dump_card in $(audio_alsa_card_indexes); do
+      echo "---- ALSA mixer card $audio_dump_card ----"
+      audio_exec_with_timeout 5s amixer -c "$audio_dump_card" contents 2>&1 || true
+    done
     echo "---- wpctl status ----"
     if command -v wpctl >/dev/null 2>&1; then
       audio_exec_with_timeout 2s wpctl status 2>&1 || echo "(wpctl status failed/timeout)"
@@ -638,15 +710,19 @@ audio_pipewire_systemctl() {
   return $?
 }
 
-# Prefer the invoking suite directory for test-owned scratch files. PWD covers
-# helpers re-sourced in a child shell where SCRIPT_DIR is not exported, while
-# AUDIO_RECORD_USER_CAPTURE_DIR provides the prepared desktop-user workspace.
+# Prefer the prepared CWD workspace, including desktop-user child commands.
+# Only desktop child commands use their explicitly prepared TMPDIR workspace.
+# Print a writable directory or return 1, never fall back to system temp paths.
 audio_scratch_dir() {
+  asd_user_tmp=""
+  if [ "${AUDIO_TEST_COMMAND_USER_CONTEXT:-0}" -eq 1 ]; then
+    asd_user_tmp="${TMPDIR:-}"
+  fi
   for asd_candidate in \
-    "${SCRIPT_DIR:-}" \
-    "${PWD:-}" \
     "${AUDIO_RECORD_USER_CAPTURE_DIR:-}" \
-    "${LOGDIR:-}"
+    "${LOGDIR:-}" \
+    "$asd_user_tmp" \
+    "${PWD:-}"
   do
     if [ -n "$asd_candidate" ] &&
        [ -d "$asd_candidate" ] &&
@@ -951,6 +1027,38 @@ pwctl_inspect_safe() {
   [ -n "$id" ] || return 1
   command -v wpctl >/dev/null 2>&1 || return 1
   audio_exec_with_timeout 2s wpctl inspect "$id" 2>/dev/null
+}
+
+# Resolve a discovered wpctl source ID to a pw-record target in this session.
+# Argument: global node ID. Stdout is one node.name or positive object.serial.
+# Return 1 on failed inspection, a non-source node or missing target properties.
+# Never substitute the global ID, a description or the session default.
+pw_source_target_safe() {
+  psts_id="$1"
+  if ! psts_inspect="$(pwctl_inspect_safe "$psts_id")"; then
+    printf 'Cannot inspect selected PipeWire source ID %s\n' "$psts_id" >&2
+    return 1
+  fi
+  if ! printf '%s\n' "$psts_inspect" | awk -F '"' '
+    $1 ~ /^[[:space:]*]*media[.]class[[:space:]]*=[[:space:]]*$/ { source = $2 }
+    NF == 3 && $1 ~ /^[[:space:]*]*node[.]name[[:space:]]*=[[:space:]]*$/ { name = $2 }
+    $1 ~ /^[[:space:]*]*object[.]serial[[:space:]]*=[[:space:]]*$/ { serial = $2 }
+    END {
+      if (source != "Audio/Source") {
+        exit 1
+      }
+      if (name != "" && name != "auto" && name !~ /^[0-9]+$/ && name !~ /\\/) {
+        print name
+      } else if (serial ~ /^[0-9]+$/ && serial + 0 > 0) {
+        print serial
+      } else {
+        exit 1
+      }
+    }
+  '; then
+    printf 'Selected PipeWire source ID %s has no usable node.name or object.serial\n' "$psts_id" >&2
+    return 1
+  fi
 }
 
 # ---------- PipeWire: sinks (playback) ----------
@@ -1950,6 +2058,398 @@ pw_set_default_source() {
   audio_exec_with_timeout 2s wpctl set-default "$id" >/dev/null 2>&1
 }
 
+# audio_pipewire_capture_target <route> [identity]
+# Resolve a fresh capture node using existing route policy in the stream user's
+# session. Print only its node.name or object.serial for pw-record --target.
+# With identity, print node ID|object serial|target for guarded volume writes.
+# Retain inspect evidence on stderr. Return 1 for missing/invalid route identity.
+audio_pipewire_capture_target() {
+  apct_selection="$(audio_select_managed_capture_route pipewire "$1")" || return 1
+  apct_id="${apct_selection#*|}"
+  case "$apct_id" in
+    ''|*[!0-9]*)
+      printf '%s\n' "PipeWire capture route '$1' has no valid source ID" >&2
+      return 1
+      ;;
+  esac
+  apct_inspect="$(pwctl_inspect_safe "$apct_id")" || return 1
+  printf '%s\n' "$apct_inspect" >&2
+  apct_target="$(printf '%s\n' "$apct_inspect" | awk '
+    {
+      key=$0; sub(/=.*/, "", key)
+      gsub(/^[[:space:]*]+|[[:space:]]+$/, "", key)
+      value=$0; sub(/^[^=]*=[[:space:]]*/, "", value)
+      sub(/[[:space:]]+$/, "", value)
+      sub(/^"/, "", value); sub(/"$/, "", value)
+      if (key=="media.class") media=value
+      if (key=="node.name") name=value
+      if (key=="object.serial") serial=value
+    }
+    END {
+      if (media !~ /^Audio\/Source($|\/)/) exit 1
+      if (name!="" && name!="auto" && name !~ /^[0-9]+$/) print name
+      else if (serial ~ /^[0-9]+$/ && serial+0>0) print serial
+      else exit 1
+    }
+  ')" || {
+    printf '%s\n' "PipeWire source $apct_id has no usable capture target identity" >&2
+    return 1
+  }
+  printf '%s\n' "PipeWire capture route=$1 source_id=$apct_id target=$apct_target" >&2
+  if [ "${2:-}" = identity ]; then
+    apct_serial="$(printf '%s\n' "$apct_inspect" | awk '
+      /object.serial[[:space:]]*=/ {
+        sub(/.*=[[:space:]]*"?/, "")
+        sub(/"?[[:space:]]*$/, "")
+        if ($0 ~ /^[0-9]+$/) print
+      }
+    ')"
+    case "$apct_serial" in
+      ''|0|*[!0-9]*)
+        return 1
+        ;;
+    esac
+    printf '%s|%s|%s\n' "$apct_id" "$apct_serial" "$apct_target"
+  else
+    printf '%s\n' "$apct_target"
+  fi
+}
+
+# audio_pipewire_volume_props <saved|unity>
+# Parse pw-cli enum-params Props on stdin into a canonical writable JSON object.
+# Preserve channel balance and optional soft controls in saved mode. Unity mode
+# sets only exposed capture volume controls to 1.0 and mute controls to false.
+# Return 1 for incomplete/ambiguous properties, never guess a restoration value.
+audio_pipewire_volume_props() {
+  LC_ALL=C awk -v mode="$1" '
+    /Prop: key / {
+      key=$0
+      sub(/.*:Props:/, "", key)
+      sub(/[[:space:]].*/, "", key)
+      active=(key=="volume" || key=="mute" || key=="channelVolumes" ||
+              key=="softMute" || key=="softVolumes")
+      if (active && seen[key]++) bad=1
+      next
+    }
+    active && $1=="Float" {
+      if (key=="mute" || key=="softMute") bad=1
+      if ($2 !~ /^[+]?[0-9]+([.][0-9]+)?([eE][-+]?[0-9]+)?$/) {
+        bad=1
+        next
+      }
+      number=(mode=="unity" ? 1 : $2+0)
+      values[key]=values[key] (count[key]++ ? ", " : "") sprintf("%.9g", number)
+    }
+    active && $1=="Bool" {
+      if (key!="mute" && key!="softMute") bad=1
+      if ($2!="true" && $2!="false") bad=1
+      values[key]=(mode=="unity" ? "false" : $2)
+      count[key]++
+    }
+    END {
+      if (bad || count["volume"]!=1 || count["mute"]!=1 ||
+          count["channelVolumes"]<1 || count["channelVolumes"]>64) exit 1
+      if (seen["softMute"] && count["softMute"]!=1) exit 1
+      if (seen["softVolumes"] && (count["softVolumes"]<1 ||
+          count["softVolumes"]>64)) exit 1
+      printf "{ \"volume\": %s, \"mute\": %s, \"channelVolumes\": [ %s ]", \
+        values["volume"], values["mute"], values["channelVolumes"]
+      if (seen["softMute"]) printf ", \"softMute\": %s", values["softMute"]
+      if (seen["softVolumes"]) printf ", \"softVolumes\": [ %s ]", values["softVolumes"]
+      print " }"
+    }
+  '
+}
+
+# audio_pipewire_volume_identity <id> <serial> [media-class]
+# Require the same object/class before writing or restoring properties.
+# Existing capture callers default to Audio/Source, playback uses Audio/Sink.
+# No stdout. Return 1 if the original node vanished or its ID was recycled.
+audio_pipewire_volume_identity() {
+  apvi_inspect="$(pwctl_inspect_safe "$1")" || return 1
+  printf '%s\n' "$apvi_inspect" | awk -v serial="$2" -v class="${3:-Audio/Source}" '
+    {
+      key=$0; sub(/=.*/, "", key)
+      gsub(/^[[:space:]*]+|[[:space:]]+$/, "", key)
+      value=$0; sub(/^[^=]*=[[:space:]]*/, "", value)
+      gsub(/^"|"[[:space:]]*$/, "", value)
+      if (key=="object.serial" && value==serial) matched=1
+      if (key=="media.class" && (value==class || index(value, class "/")==1)) source=1
+    }
+    END { exit !(matched && source) }
+  '
+}
+
+# audio_pipewire_volume_read <id>
+# Print canonical current volume state. Preserve command failures before parsing.
+audio_pipewire_volume_read() {
+  apvr_raw="$(audio_exec_with_timeout 3s pw-cli enum-params "$1" Props)" || return 1
+  printf '%s\n' "$apvr_raw" | audio_pipewire_volume_props saved
+}
+
+# audio_prepare_playback_volume <sink-id> [volume]
+# Snapshot sink identity and full volume/mute state in the stream user context.
+# Mark ownership before unmuting/optional gain changes. Return 1 on failure.
+# If pw-cli is absent, preserve existing state without making untracked writes.
+audio_prepare_playback_volume() {
+  [ "${AUDIO_PLAYBACK_VOLUME_PENDING:-0}" -eq 0 ] || return 1
+  if ! command -v pw-cli >/dev/null 2>&1; then
+    log_warn "pw-cli is absent, playback volume/mute state is left unchanged"
+    return 0
+  fi
+  AUDIO_PLAYBACK_VOLUME_ID="$1"
+  appv_inspect="$(audio_run_helper_as_test_user --require-session pwctl_inspect_safe "$1")" || return 1
+  AUDIO_PLAYBACK_VOLUME_SERIAL="$(printf '%s\n' "$appv_inspect" |
+    awk '/object.serial[[:space:]]*=/ {
+      sub(/^[^=]*=[[:space:]]*/, "")
+      gsub(/["[:space:]]/, "")
+      print
+      exit
+    }')"
+  case "$AUDIO_PLAYBACK_VOLUME_SERIAL" in
+    ''|*[!0-9]*)
+      return 1
+      ;;
+  esac
+  audio_run_helper_as_test_user --require-session audio_pipewire_volume_identity \
+    "$1" "$AUDIO_PLAYBACK_VOLUME_SERIAL" Audio/Sink || return 1
+  AUDIO_PLAYBACK_VOLUME_SAVED="$(audio_run_helper_as_test_user --require-session \
+    audio_pipewire_volume_read "$1")" || return 1
+  printf '%s\n' "id=$1 serial=$AUDIO_PLAYBACK_VOLUME_SERIAL" "$AUDIO_PLAYBACK_VOLUME_SAVED" \
+    >"$LOGDIR/playback-volume.initial" || return 1
+  AUDIO_PLAYBACK_VOLUME_PENDING=1
+  audio_run_with_timeout_as_test_user --require-session 3s wpctl set-mute "$1" 0 || return 1
+  if [ -n "${2:-}" ]; then
+    audio_run_with_timeout_as_test_user --require-session 3s wpctl set-volume "$1" "$2" || return 1
+  fi
+  log_info "Prepared temporary playback volume/mute state, original state retained in $LOGDIR/playback-volume.initial"
+}
+
+# audio_restore_playback_volume
+# Restore only the snapshotted sink. Reject recycled IDs and verify readback.
+# Return 1 on failure, never modify a replacement node or restart services.
+audio_restore_playback_volume() {
+  [ "${AUDIO_PLAYBACK_VOLUME_PENDING:-0}" -eq 1 ] || return 0
+  AUDIO_PLAYBACK_VOLUME_PENDING=0
+  if audio_run_helper_as_test_user --require-session audio_pipewire_volume_identity \
+      "$AUDIO_PLAYBACK_VOLUME_ID" "$AUDIO_PLAYBACK_VOLUME_SERIAL" Audio/Sink &&
+     audio_run_with_timeout_as_test_user --require-session 3s pw-cli set-param \
+      "$AUDIO_PLAYBACK_VOLUME_ID" Props "$AUDIO_PLAYBACK_VOLUME_SAVED" &&
+     arpv_current="$(audio_run_helper_as_test_user --require-session \
+      audio_pipewire_volume_read "$AUDIO_PLAYBACK_VOLUME_ID")" &&
+     [ "$arpv_current" = "$AUDIO_PLAYBACK_VOLUME_SAVED" ]; then
+    log_info "Restored temporary playback volume/mute changes on sink $AUDIO_PLAYBACK_VOLUME_ID"
+    return 0
+  fi
+  log_fail "Playback volume restoration could not be verified, no replacement node will be modified"
+  return 1
+}
+
+# audio_pipewire_volume_restore
+# EXIT handler for the isolated capture session. Restore the snapshot only when
+# this test changed volume, on the original node. Verify readback or return 4.
+audio_pipewire_volume_restore() {
+  apvs_exit=$?
+  trap - EXIT HUP INT TERM
+  if [ "$apvs_changed" -eq 1 ]; then
+    if audio_pipewire_volume_identity "$apvs_id" "$apvs_serial" &&
+       audio_exec_with_timeout 3s pw-cli set-param "$apvs_id" Props "$apvs_saved" >&2 &&
+       apvs_restored="$(audio_pipewire_volume_read "$apvs_id")" &&
+       [ "$apvs_restored" = "$apvs_saved" ]; then
+      printf '%s\n' "Capture volume restored: $apvs_saved" >&2
+    else
+      printf '%s\n' 'FAIL: capture volume restoration could not be verified, no replacement node will be modified' >&2
+      apvs_exit=4
+      apvs_prepared=0
+    fi
+  fi
+  if [ "$apvs_prepared" -eq 1 ]; then
+    printf '%s\n' 'AUDIO_CAPTURE_VOLUME_STATUS=complete' >&2
+  else
+    printf '%s\n' 'AUDIO_CAPTURE_VOLUME_STATUS=failed' >&2
+  fi
+  exit "$apvs_exit"
+}
+
+# audio_pipewire_volume_interrupt <exit-status>
+# Stop only the current recorder before EXIT restoration on catchable signals.
+audio_pipewire_volume_interrupt() {
+  trap '' HUP INT TERM
+  if [ -n "${aewt_pid:-}" ] && kill -0 "$aewt_pid" 2>/dev/null; then
+    kill -TERM "$aewt_pid" 2>/dev/null || true
+    sleep 3
+    if kill -0 "$aewt_pid" 2>/dev/null; then
+      kill -KILL "$aewt_pid" 2>/dev/null || true
+    fi
+    wait "$aewt_pid" 2>/dev/null || true
+  fi
+  exit "$1"
+}
+
+# audio_pipewire_capture_volume_session <id> <serial> <timeout> <command...>
+# Run in the stream user/session. Snapshot, normalize, verify, record, restore.
+# Stderr contains volume diagnostics, stdout contains recorder output. An absent
+# optional pw-cli preserves legacy execution with a warning and no volume writes.
+# Return recorder status, 3 for preparation failure, 4 for restoration failure.
+audio_pipewire_capture_volume_session() (
+  apvs_id="$1"
+  apvs_serial="$2"
+  apvs_timeout="$3"
+  shift 3
+  apvs_changed=0
+  apvs_prepared=0
+  apvs_raw=""
+  aewt_pid=""
+  trap 'audio_pipewire_volume_restore' EXIT
+  trap 'audio_pipewire_volume_interrupt 129' HUP
+  trap 'audio_pipewire_volume_interrupt 130' INT
+  trap 'audio_pipewire_volume_interrupt 143' TERM
+  if ! command -v pw-cli >/dev/null 2>&1; then
+    printf '%s\n' 'WARN: image-provided pw-cli is absent, capture volume normalization is unavailable, existing volume is unchanged' >&2
+    apvs_prepared=1
+    audio_exec_with_timeout "$apvs_timeout" "$@" 2>&1
+    exit $?
+  fi
+  if ! audio_pipewire_volume_identity "$apvs_id" "$apvs_serial" ||
+     ! apvs_raw="$(audio_exec_with_timeout 3s pw-cli enum-params "$apvs_id" Props)" ||
+     ! apvs_saved="$(printf '%s\n' "$apvs_raw" | audio_pipewire_volume_props saved)"; then
+    printf '%s\n' 'FAIL: selected capture source volume cannot be snapshotted, recording not started' >&2
+    printf '%s\n' "${apvs_raw:-No readable source properties}" >&2
+    exit 3
+  fi
+  printf '%s\n' "Capture source id=$apvs_id serial=$apvs_serial, volume before: $apvs_saved" >&2
+  apvs_unity="$(printf '%s\n' "$apvs_raw" | audio_pipewire_volume_props unity)" || exit 3
+  if [ "$apvs_saved" != "$apvs_unity" ]; then
+    audio_pipewire_volume_identity "$apvs_id" "$apvs_serial" || exit 3
+    apvs_changed=1
+    if ! audio_exec_with_timeout 3s pw-cli set-param "$apvs_id" Props "$apvs_unity" >&2; then
+      printf '%s\n' 'FAIL: could not normalize the selected capture source volume' >&2
+      exit 3
+    fi
+  fi
+  if ! audio_pipewire_volume_identity "$apvs_id" "$apvs_serial" ||
+     ! apvs_current="$(audio_pipewire_volume_read "$apvs_id")" ||
+     [ "$apvs_current" != "$apvs_unity" ]; then
+    printf '%s\n' 'FAIL: capture volume readback does not match unmuted unity gain' >&2
+    exit 3
+  fi
+  printf '%s\n' "Capture volume ready: $apvs_current" >&2
+  apvs_prepared=1
+  aewt_pid=""
+  audio_exec_with_timeout "$apvs_timeout" "$@" 2>&1
+  exit $?
+)
+
+# audio_create_run_directory <base-directory>
+# Create a unique retained run directory with traversal for desktop test users.
+# Print its absolute path, only its dedicated user workspace is user-writable.
+# Return nonzero when the CWD-based caller destination is not writable.
+audio_create_run_directory() {
+  mkdir -p "$1" || return 1
+  acrd_base="$(CDPATH='' cd "$1" && pwd -P)" || return 1
+  acrd_run="$(mktemp -d "$acrd_base/run-$(date -u +%Y%m%d-%H%M%S).XXXXXX")" || return 1
+  chmod 0755 "$acrd_run" || return 1
+  printf '%s\n' "$acrd_run"
+}
+
+# audio_record_pipewire_capture <timeout> <route> <output> <log> [rate channels seconds grace completion-marker]
+# Resolve and pin the route for every attempt, never change the session default.
+# With seconds supplied, use audio_record_with_progress in the volume session.
+# Otherwise preserve the existing timeout wrapper and exact recorder status.
+# Retain bounded before/after server evidence without recovery or retries.
+# Return 3 and set AUDIO_PIPEWIRE_CAPTURE_TARGET_FAILED when discovery fails,
+# so callers cannot turn a lost selected route into an unrelated ALSA fallback.
+audio_record_pipewire_capture() {
+  # Consumed by AudioRecord/run.sh, not by this library.
+  # shellcheck disable=SC2034
+  AUDIO_PIPEWIRE_CAPTURE_TARGET_FAILED=0
+  if [ "${AUDIO_PIPEWIRE_CAPTURE_VOLUME_FAILED:-0}" -eq 1 ]; then
+    AUDIO_PIPEWIRE_CAPTURE_TARGET_FAILED=1
+    log_fail 'Capture blocked after a volume setup or restoration failure, inspect the earlier volume diagnostics'
+    return 4
+  fi
+  arpc_timeout="$1"
+  arpc_route="$2"
+  arpc_output="$3"
+  arpc_log="$4"
+  arpc_rate="${5:-}"
+  arpc_channels="${6:-}"
+  arpc_seconds="${7:-}"
+  arpc_grace="${8:-5}"
+  arpc_completion="${9:-}"
+  arpc_since="$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+  audio_record_server_diagnostics "$arpc_log.server-before" || true
+  arpc_identity_mode=identity
+  if [ "$arpc_route" = null ]; then
+    arpc_identity_mode=""
+  fi
+  if ! arpc_identity="$(audio_run_helper_as_test_user --require-session \
+      audio_pipewire_capture_target "$arpc_route" "$arpc_identity_mode" 2>>"$arpc_log.route")"; then
+    # shellcheck disable=SC2034
+    AUDIO_PIPEWIRE_CAPTURE_TARGET_FAILED=1
+    log_fail "PipeWire capture route '$arpc_route' could not be resolved, inspect $arpc_log.route"
+    log_file_with_label AUDIO-RECORD-ROUTE "$arpc_log.route" 40
+    audio_record_server_diagnostics "$arpc_log.server-after" "$arpc_since" || true
+    return 3
+  fi
+  if [ "$arpc_route" = null ]; then
+    arpc_target="$arpc_identity"
+  else
+    arpc_id="${arpc_identity%%|*}"
+    arpc_identity="${arpc_identity#*|}"
+    arpc_serial="${arpc_identity%%|*}"
+    arpc_target="${arpc_identity#*|}"
+  fi
+  set -- pw-record -v --target "$arpc_target"
+  if [ -n "$arpc_rate" ]; then
+    set -- "$@" "--rate=$arpc_rate" "--channels=$arpc_channels"
+  fi
+  set -- "$@" "$arpc_output"
+  arpc_command="PipeWire capture exec: pw-record -v --target '$arpc_target' rate=${arpc_rate:-default} channels=${arpc_channels:-default} output='$arpc_output' timeout=$arpc_timeout"
+  if [ -n "$arpc_seconds" ]; then
+    arpc_command="$arpc_command requested=$arpc_seconds start_grace=$arpc_grace capture=sample-progress"
+    if [ -n "$arpc_completion" ]; then
+      set -- --until-complete "$arpc_completion" "$@"
+    fi
+    set -- audio_record_with_progress "$arpc_output" "$arpc_seconds" \
+      "$arpc_grace" "$arpc_timeout" --pipewire-links "$@"
+    # The progress helper owns the deadline and recorder PID. Run it directly
+    # so its traps stop the recorder before the volume session restores state.
+    arpc_timeout=0
+  fi
+  log_info "$arpc_command"
+  printf '%s\n' "$arpc_command" >>"$arpc_log"
+  if [ "$arpc_route" = null ]; then
+    audio_run_with_timeout_as_test_user --require-session "$arpc_timeout" \
+      "$@" >>"$arpc_log" 2>&1
+    arpc_rc=$?
+    audio_record_server_diagnostics "$arpc_log.server-after" "$arpc_since" || true
+    return "$arpc_rc"
+  fi
+  printf '%s\n' 'AUDIO_CAPTURE_VOLUME_STATUS=pending' >>"$arpc_log.volume"
+  audio_run_helper_as_test_user --require-session \
+    audio_pipewire_capture_volume_session "$arpc_id" "$arpc_serial" \
+    "$arpc_timeout" "$@" >>"$arpc_log" 2>>"$arpc_log.volume"
+  arpc_rc=$?
+  audio_record_server_diagnostics "$arpc_log.server-after" "$arpc_since" || true
+  log_file_with_label AUDIO-CAPTURE-VOLUME "$arpc_log.volume" 60
+  arpc_volume_status="$(awk -F = '/^AUDIO_CAPTURE_VOLUME_STATUS=/ { state=$2 } END { print state }' "$arpc_log.volume")"
+  case "$arpc_volume_status" in
+    complete)
+      ;;
+    *)
+      # Consumed by AudioRecord fallback policy.
+      # shellcheck disable=SC2034
+      AUDIO_PIPEWIRE_CAPTURE_TARGET_FAILED=1
+      # Consumed by AudioRecord aggregation, never hide state failures on retry.
+      # shellcheck disable=SC2034
+      AUDIO_PIPEWIRE_CAPTURE_VOLUME_FAILED=1
+      arpc_rc=4
+      ;;
+  esac
+  return "$arpc_rc"
+}
+
 # --------------------------------------------------------------------
 # File size helper (portable across different stat implementations)
 # --------------------------------------------------------------------
@@ -2004,6 +2504,705 @@ build_backend_chain() {
     add_unique "$b"
   done
   printf '%s\n' "$chain"
+}
+
+# audio_detect_runtime_mode <explicit-overlay-request>
+# Set shell-local effective mode from the CLI or loaded/built-in AudioReach
+# modules. Installed files alone are not runtime evidence. Log the source,
+# never install packages or change the explicit package-preparation request.
+audio_detect_runtime_mode() {
+  AUDIO_PLAYBACK_PROBE_FAILED=0
+  AUDIO_CAPTURE_PROBE_FAILED=0
+  AUDIO_OVERLAY_SERVICES_PENDING=0
+  AUDIO_OVERLAY_ACCESS_CHECKED=0
+  AUDIO_OVERLAY_ACTIVE="$1"
+  AUDIO_OVERLAY_MODE_SOURCE=base
+  if [ "$1" -eq 1 ]; then
+    AUDIO_OVERLAY_MODE_SOURCE=explicit
+  else
+    for adrm_module in /sys/module/audioreach*; do
+      [ -d "$adrm_module" ] || continue
+      AUDIO_OVERLAY_ACTIVE=1
+      AUDIO_OVERLAY_MODE_SOURCE="runtime-module:${adrm_module##*/}"
+      break
+    done
+    if [ "$AUDIO_OVERLAY_ACTIVE" -eq 0 ] && [ -r /proc/modules ]; then
+      adrm_module="$(awk '$1 ~ /^audioreach/ { print $1; exit }' /proc/modules)"
+      if [ -n "$adrm_module" ]; then
+        AUDIO_OVERLAY_ACTIVE=1
+        AUDIO_OVERLAY_MODE_SOURCE="runtime-module:$adrm_module"
+      fi
+    fi
+  fi
+  log_info "Audio runtime mode: overlay=$AUDIO_OVERLAY_ACTIVE source=$AUDIO_OVERLAY_MODE_SOURCE package_request=$1"
+}
+
+# audio_overlay_live_route <playback|capture|loopback> <route> [capture-route]
+# Check the live daemon/control plane and reuse the existing physical-route
+# selectors. Print route|target on success, never set defaults or play a stream.
+audio_overlay_live_route() {
+  if ! audio_backend_ready pipewire >/dev/null 2>&1; then
+    printf '%s\n' 'PipeWire daemon/control-plane check failed in the selected user session' >&2
+    return 1
+  fi
+  case "$1" in
+    playback)
+      audio_select_managed_playback_route pipewire "$2"
+      ;;
+    capture)
+      audio_select_managed_capture_route pipewire "$2"
+      ;;
+    loopback)
+      aolr_playback="$(audio_select_managed_playback_route pipewire "$2")" || return 1
+      aolr_capture="$(audio_select_managed_capture_route pipewire "$3")" || return 1
+      [ -n "$aolr_playback" ] && [ -n "$aolr_capture" ] || return 1
+      printf 'playback=%s capture=%s\n' "$aolr_playback" "$aolr_capture"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+# audio_wait_overlay_route <direction> <route> <artifact-prefix> <seconds> [capture-route]
+# Poll the existing read-only route selector, retaining each attempt and its
+# status. Return 0 with AUDIO_OVERLAY_READY_ROUTE set, or 1 after the readiness
+# budget expires. Each underlying client query is bounded separately. No service
+# or routing mutations, diagnostic stdout only, no functional PASS inference.
+audio_wait_overlay_route() {
+  awor_direction="$1"
+  awor_requested="$2"
+  awor_prefix="$3"
+  awor_limit="$4"
+  awor_capture="${5:-}"
+  AUDIO_OVERLAY_READY_ROUTE=""
+  awor_start="$(get_monotonic_seconds)"
+  : >"$awor_prefix.log" || return 1
+  log_info "Waiting for overlay PipeWire and $awor_direction route '$awor_requested', capture_route='${awor_capture:-not-applicable}', timeout=${awor_limit}s, no service reset during discovery"
+  while :; do
+    awor_rc=0
+    audio_run_helper_as_test_user --require-session \
+      audio_overlay_live_route "$awor_direction" "$awor_requested" "$awor_capture" \
+      >"$awor_prefix.target" 2>"$awor_prefix.current" || awor_rc=$?
+    awor_route="$(cat "$awor_prefix.target")" || return 1
+    awor_elapsed=$(( $(get_monotonic_seconds) - awor_start ))
+    printf 'elapsed_s=%s rc=%s direction=%s requested=%s capture_route=%s target=%s\n' \
+      "$awor_elapsed" "$awor_rc" "$awor_direction" "$awor_requested" \
+      "${awor_capture:-not-applicable}" "$awor_route" >>"$awor_prefix.log" || return 1
+    cat "$awor_prefix.current" >>"$awor_prefix.log" || return 1
+    if [ "$awor_rc" -eq 0 ] && [ -n "$awor_route" ]; then
+      AUDIO_OVERLAY_READY_ROUTE="$awor_route"
+      return 0
+    fi
+    if [ "$awor_rc" -eq 0 ]; then
+      printf '%s\n' 'Route discovery returned no target' >>"$awor_prefix.log" || return 1
+    fi
+    [ "$awor_elapsed" -lt "$awor_limit" ] || break
+    sleep 1
+  done
+  log_file_with_label AUDIO-OVERLAY-ROUTE "$awor_prefix.log" 40
+  return 1
+}
+
+# audio_overlay_units_idle <expected-unit-snapshot> <current-unit-snapshot>
+# Check an exact canonical unit set with no jobs or transitional states.
+# Return 0 if settled, 1 otherwise. Read-only, no stdout.
+audio_overlay_units_idle() {
+  awk -F '|' '
+    NR==FNR { expected[$1]=1; count++; next }
+    {
+      seen++
+      if (!($1 in expected) || found[$1]++ || $5!="0") bad=1
+      if ($2!="active" && $2!="inactive" && $2!="failed") bad=1
+    }
+    END { exit (bad || !count || seen!=count) }
+  ' "$1" "$2"
+}
+
+# audio_overlay_failure_diagnostics <artifact-directory> <journal-since>
+# Reuse bounded server/session diagnostics before incomplete-setup rollback can
+# replace crash evidence. Replay retained evidence to stdout. Diagnostic tools
+# are optional and do not change the original failure or service state.
+audio_overlay_failure_diagnostics() {
+  aofd_dir="$1"
+  audio_record_server_diagnostics "$aofd_dir/failure-server.log" "$2" readiness || true
+  audio_run_with_timeout_as_test_user --require-session 5s wpctl status \
+    >"$aofd_dir/failure-nodes.log" 2>&1 ||
+    printf 'PipeWire node inventory unavailable, rc=%s\n' "$?" >>"$aofd_dir/failure-nodes.log"
+  log_file_with_label AUDIO-OVERLAY-SERVER "$aofd_dir/failure-server.log" 180
+  log_file_with_label AUDIO-OVERLAY-NODES "$aofd_dir/failure-nodes.log" 60
+  aofd_init_rc=0
+  audio_check_overlay_initialization_errors "$aofd_dir/failure-server.log" \
+    "$aofd_dir/initialization-errors.log" || aofd_init_rc=$?
+  if [ "$aofd_init_rc" -eq 1 ]; then
+    log_file_with_label AUDIO-OVERLAY-INIT "$aofd_dir/initialization-errors.log" 20
+    aofd_summary="$(head -n 3 "$aofd_dir/initialization-errors.log" | tr '\n' ' ')"
+    AUDIO_OVERLAY_FAILURE_REASON="${AUDIO_OVERLAY_FAILURE_REASON:+$AUDIO_OVERLAY_FAILURE_REASON. }AudioReach initialization evidence: $aofd_summary Check image-provided calibration/configuration and service access, details=$aofd_dir/initialization-errors.log"
+  elif [ "$aofd_init_rc" -ne 0 ]; then
+    log_warn "Overlay initialization journal evidence is incomplete, no clean initialization result is inferred"
+  fi
+}
+
+# audio_overlay_read_units <artifact-file> [--user] <units...>
+# Capture systemd properties in one bounded query. Write canonical ID, active
+# state, substate, result and job ID as pipe-separated rows, retaining raw
+# properties (including configured timeouts) alongside them. --user queries the
+# prepared test user's manager but writes artifacts as the caller. No stdout data.
+audio_overlay_read_units() {
+  aoru_file="$1"
+  shift
+  aoru_rc=0
+  if [ "${1:-}" = "--user" ]; then
+    audio_run_with_timeout_as_test_user --require-session 5s systemctl show --all --no-pager \
+      --property=Id,ActiveState,SubState,Result,Job,TimeoutStartUSec,TimeoutStopUSec \
+      "$@" >"$aoru_file.raw" 2>&1 || aoru_rc=$?
+  else
+    audio_exec_with_timeout 5s systemctl show --all --no-pager \
+      --property=Id,ActiveState,SubState,Result,Job,TimeoutStartUSec,TimeoutStopUSec \
+      "$@" >"$aoru_file.raw" 2>&1 || aoru_rc=$?
+  fi
+  if [ "$aoru_rc" -ne 0 ]; then
+    log_fail "Overlay systemctl show failed: rc=$aoru_rc units=$*, artifact=$aoru_file.raw"
+    return 1
+  fi
+  if ! awk '
+    BEGIN { RS=""; FS="\n" }
+    {
+      id=""; state=""; substate=""; result=""; job=""; job_seen=0
+      for (i=1; i<=NF; i++) {
+        key=$i; sub(/=.*/, "", key)
+        value=$i; sub(/^[^=]*=/, "", value)
+        if (key=="Id") id=value
+        if (key=="ActiveState") state=value
+        if (key=="SubState") substate=value
+        if (key=="Result") result=value
+        if (key=="Job") { job=value; job_seen=1 }
+      }
+      sub(/[[:space:]].*$/, "", job)
+      if (job=="") job="0"
+      if (id=="" || state=="" || substate=="" || !job_seen || job !~ /^[0-9]+$/) bad=1
+      else if (!seen[id]++) print id "|" state "|" substate "|" result "|" job
+    }
+    END { if (bad || NR==0) exit 1 }
+  ' "$aoru_file.raw" >"$aoru_file"; then
+    log_fail "Overlay unit properties are incomplete, artifact=$aoru_file.raw"
+    return 1
+  fi
+  return 0
+}
+
+# audio_overlay_service_action <start|stop> <artifact-prefix> <units...>
+# Queue a nonblocking systemd transaction, then wait for every requested unit
+# to reach the target state with no pending job. Use the existing bounded
+# PIPEWIRE_SYSTEMCTL_TIMEOUT policy (default 180s), not a stop-client watchdog.
+# Refuse pre-existing jobs. On timeout report outstanding jobs without cancelling
+# unrelated work, restoration also refuses to race a still-pending transaction.
+audio_overlay_service_action() {
+  aosa_action="$1"
+  aosa_prefix="$2"
+  shift 2
+  [ "$#" -gt 0 ] || return 0
+  case "$aosa_action" in
+    start|stop)
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+  aosa_limit="${PIPEWIRE_SYSTEMCTL_TIMEOUT:-180}"
+  case "$aosa_limit" in
+    ''|0|*[!0-9]*)
+      log_fail "Invalid PIPEWIRE_SYSTEMCTL_TIMEOUT, expected positive seconds"
+      return 1
+      ;;
+  esac
+  if ! [ "$aosa_limit" -gt 0 ] 2>/dev/null; then
+    log_fail "Invalid PIPEWIRE_SYSTEMCTL_TIMEOUT, expected positive seconds"
+    return 1
+  fi
+  audio_overlay_read_units "$aosa_prefix.before" "$@" || return 1
+  for aosa_unit in "$@"; do
+    if ! awk -F '|' -v unit="$aosa_unit" '$1==unit { found=1 } END { exit !found }' "$aosa_prefix.before"; then
+      log_fail "Overlay $aosa_action has no state for requested unit $aosa_unit"
+      return 1
+    fi
+  done
+  if ! awk -F '|' '$5 != "0" { bad=1 } END { exit bad }' "$aosa_prefix.before"; then
+    log_fail "Overlay $aosa_action was not queued, units already have pending jobs"
+    log_file_with_label AUDIO-OVERLAY-JOBS "$aosa_prefix.before" 32
+    return 1
+  fi
+  aosa_start="$(get_monotonic_seconds)"
+  log_info "Overlay command: systemctl --no-block --no-ask-password $aosa_action $*, completion_timeout=${aosa_limit}s"
+  if audio_exec_with_timeout 10s systemctl --no-block --no-ask-password \
+      "$aosa_action" "$@" >"$aosa_prefix.command.log" 2>&1; then
+    aosa_rc=0
+  else
+    aosa_rc=$?
+  fi
+  log_info "Overlay command submission: action=$aosa_action rc=$aosa_rc, artifact=$aosa_prefix.command.log"
+  log_file_with_label AUDIO-OVERLAY-COMMAND "$aosa_prefix.command.log" 40
+  [ "$aosa_rc" -eq 0 ] || return 1
+  aosa_previous=""
+  aosa_next_log=0
+  while :; do
+    audio_overlay_read_units "$aosa_prefix.current" "$@" || return 1
+    aosa_elapsed=$(( $(get_monotonic_seconds) - aosa_start ))
+    aosa_current="$(cat "$aosa_prefix.current")"
+    if [ "$aosa_current" != "$aosa_previous" ] || [ "$aosa_elapsed" -ge "$aosa_next_log" ]; then
+      log_info "Overlay $aosa_action progress: elapsed_s=$aosa_elapsed, fields=unit|active|substate|result|job"
+      log_file_with_label AUDIO-OVERLAY-JOB "$aosa_prefix.current" 32
+      aosa_previous="$aosa_current"
+      aosa_next_log=$((aosa_elapsed + 10))
+    fi
+    if awk -F '|' -v action="$aosa_action" '
+      NR==FNR { initial[$1]=$2; count++; next }
+      {
+        seen++
+        if (!($1 in initial)) bad=1
+        if ($5 != "0") { pending=1; next }
+        if (action=="start") {
+          if ($2=="failed") bad=1
+          else if ($2!="active") pending=1
+        } else {
+          if ($2=="failed" && initial[$1]!="failed") bad=1
+          else if ($2!="inactive" && $2!="failed") pending=1
+        }
+      }
+      END {
+        if (bad || seen!=count) exit 3
+        if (pending) exit 1
+      }
+    ' "$aosa_prefix.before" "$aosa_prefix.current"; then
+      log_info "Overlay $aosa_action completed: elapsed_s=$aosa_elapsed, no pending unit jobs"
+      return 0
+    else
+      aosa_state_rc=$?
+      if [ "$aosa_state_rc" -eq 3 ]; then
+        log_fail "Overlay $aosa_action failed, inspect unit states/results in $aosa_prefix.current.raw"
+        return 1
+      fi
+    fi
+    if [ "$aosa_elapsed" -ge "$aosa_limit" ]; then
+      log_fail "Overlay $aosa_action completion timed out after ${aosa_elapsed}s, outstanding states/jobs are in $aosa_prefix.current. Systemd jobs may still be pending"
+      return 1
+    fi
+    sleep 1
+  done
+}
+
+# audio_overlay_client_prerequisites <playback|capture|loopback>
+# Check installed route and stream clients in the calling user's PATH before
+# service preparation or polling. No package recovery or service operations.
+# Return 0 when available, 1 with the missing capability on stderr. No stdout.
+audio_overlay_client_prerequisites() (
+  aocp_missing=""
+  command -v wpctl >/dev/null 2>&1 || aocp_missing="wpctl"
+  case "$1" in
+    playback|loopback)
+      if ! command -v pw-play >/dev/null 2>&1; then
+        aocp_help=""
+        if command -v pw-cat >/dev/null 2>&1; then
+          aocp_help="$(audio_exec_with_timeout 3s pw-cat --help 2>&1)" || aocp_help=""
+        fi
+        if ! printf '%s\n' "$aocp_help" | grep -q -- '--playback'; then
+          aocp_missing="${aocp_missing:+$aocp_missing, }pw-play or pw-cat with --playback"
+        fi
+      fi
+      ;;
+    capture)
+      ;;
+    *)
+      printf 'Invalid overlay direction: %s\n' "$1" >&2
+      return 1
+      ;;
+  esac
+  case "$1" in
+    capture|loopback)
+      if ! command -v pw-record >/dev/null 2>&1; then
+        aocp_missing="${aocp_missing:+$aocp_missing, }pw-record"
+      fi
+      ;;
+  esac
+  if [ -n "$aocp_missing" ]; then
+    printf 'Missing image-provided overlay %s capabilities: %s. Provision the matching PipeWire/WirePlumber clients in the image\n' \
+      "$1" "$aocp_missing" >&2
+    return 1
+  fi
+  return 0
+)
+
+# audio_validate_overlay_readiness <playback|capture|loopback> <route> [capture-route]
+# Check image-provided clients, then prepare desktop runtime for both explicit
+# and detected overlays. Validate heap access and PipeWire after DSP preparation, in
+# the same user context as the stream. Native modem overlays reuse a healthy
+# live route after bounded discovery. Attempt startup once only for an inactive
+# or failed PipeWire service. Roll back incomplete preparation, but retain
+# successfully prepared native services for subsequent tests and reruns.
+# Return 0 when ready, 1 on failure, with diagnostics on stdout/stderr.
+audio_validate_overlay_readiness() {
+  avor_direction="$1"
+  avor_requested="$2"
+  avor_capture="${3:-}"
+  AUDIO_OVERLAY_FAILURE_REASON=""
+  mkdir -p "$LOGDIR/overlay-services" || return 1
+  avor_since="$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+  if ! audio_run_helper_as_test_user --require-session \
+      audio_overlay_client_prerequisites "$avor_direction" \
+      >"$LOGDIR/overlay-services/clients.log" 2>&1; then
+    AUDIO_OVERLAY_FAILURE_REASON="Overlay $avor_direction client preflight failed, $(cat "$LOGDIR/overlay-services/clients.log")"
+    log_fail "$AUDIO_OVERLAY_FAILURE_REASON"
+    return 1
+  fi
+  # Package opt-in remains separate. Never start a desktop service on ramdisk
+  # or route native system services through a desktop-user helper.
+  if [ "${SYSTEMD_AVAILABLE:-0}" -eq 1 ] &&
+     { [ "${AUDIO_PLAYBACK_DESKTOP_ROOT_MODE:-0}" -eq 1 ] ||
+       [ "${AUDIO_RECORD_DESKTOP_ROOT_MODE:-0}" -eq 1 ]; }; then
+    if ! audio_prepare_overlay_runtime 1; then
+      AUDIO_OVERLAY_FAILURE_REASON="Desktop overlay runtime preparation failed, inspect service/session and device-access diagnostics"
+      log_fail "$AUDIO_OVERLAY_FAILURE_REASON"
+      audio_overlay_failure_diagnostics "$LOGDIR/overlay-services" "$avor_since"
+      return 1
+    fi
+  fi
+  avor_timeout="${PIPEWIRE_READY_TIMEOUT:-120}"
+  case "$avor_timeout" in
+    ''|*[!0-9]*)
+      avor_timeout=120
+      ;;
+  esac
+  avor_modem=0
+  if audio_overlay_modem_selected; then
+    avor_modem=1
+  fi
+  if ! audio_prepare_modem_overlay_services "$avor_direction" "$avor_requested" "$avor_timeout" "$avor_capture"; then
+    audio_overlay_failure_diagnostics "$LOGDIR/overlay-services" "$avor_since"
+    return 1
+  fi
+  if [ "${AUDIO_OVERLAY_ACCESS_CHECKED:-0}" -eq 0 ]; then
+    audio_validate_overlay_device_access "$avor_modem" || return 1
+  fi
+  # Native reuse has already waited and refreshed all unit states. Do not
+  # introduce a second discovery window after that successful decision.
+  if [ -n "${AUDIO_OVERLAY_READY_ROUTE:-}" ] ||
+     audio_wait_overlay_route "$avor_direction" "$avor_requested" \
+       "$LOGDIR/overlay-services/route-check" "$avor_timeout" "$avor_capture"; then
+    log_info "Overlay live $avor_direction route ready: $AUDIO_OVERLAY_READY_ROUTE"
+    if [ "${AUDIO_OVERLAY_SERVICES_PENDING:-0}" -eq 1 ]; then
+      AUDIO_OVERLAY_SERVICES_PENDING=0
+      log_info "Retaining prepared native overlay services for reuse, initial state remains in $AUDIO_OVERLAY_SERVICE_SNAPSHOT. Temporary capture processes and volume changes still require cleanup"
+    fi
+    return 0
+  fi
+  AUDIO_OVERLAY_FAILURE_REASON="Image-provided overlay PipeWire or requested $avor_direction route '$avor_requested' capture_route='${avor_capture:-not-applicable}' is not ready, inspect service/session and AudioReach configuration in $LOGDIR/overlay-services"
+  log_fail "$AUDIO_OVERLAY_FAILURE_REASON"
+  audio_overlay_failure_diagnostics "$LOGDIR/overlay-services" "$avor_since"
+  return 1
+}
+
+# audio_validate_overlay_device_access <modem-required> [service-user]
+# Wait for modem ABI nodes and log their current permissions without changing
+# ownership or mode. Verify access in the actual test-user context. The daemon
+# user is logged separately, successful PipeWire readiness/streaming is still
+# required and is not inferred from the client-side device access check.
+audio_validate_overlay_device_access() {
+  if [ "$1" -eq 1 ]; then
+    avoda_heap="$(audio_overlay_heap_node 1)"
+    log_info "Modem-overlay service user=${2:-${AUDIO_TEST_UID:-current-user}}, device permissions are left unchanged"
+    for avoda_node in /dev/aud_pasthru_modem "$avoda_heap"; do
+      if ! wait_for_path "$avoda_node" 10 || [ ! -c "$avoda_node" ]; then
+        log_fail "Modem overlay device is missing or not a character device: $avoda_node"
+        return 1
+      fi
+      avoda_state="$(stat -c '%a %U:%G %u:%g' "$avoda_node")" || return 1
+      log_info "Modem-overlay device: $avoda_node mode/owner=$avoda_state"
+    done
+  fi
+  audio_run_helper_as_test_user audio_validate_dma_heap_access "$1" || return 1
+  AUDIO_OVERLAY_ACCESS_CHECKED=1
+  return 0
+}
+
+
+# audio_overlay_modem_selected
+# Return 0 only for the runtime-selected audio modem, with no numeric instance
+# or board mapping. This is an internal policy check and produces no stdout.
+audio_overlay_modem_selected() {
+  [ -n "${AUDIO_REMOTE_PROC_PATH:-}" ] || return 1
+  [ -r "$AUDIO_REMOTE_PROC_PATH/name" ] || return 1
+  aoms_name="$(cat "$AUDIO_REMOTE_PROC_PATH/name")"
+  audio_remoteproc_is_modem "$aoms_name"
+}
+
+# audio_prepare_modem_overlay_services <direction> <route> [wait-seconds] [capture-route]
+# Prepare native Config2 services after DSP preparation. Discover installed
+# PipeWire/WirePlumber units and snapshot activity. Reuse active PipeWire after
+# bounded route discovery, otherwise attempt one reset-and-start transaction.
+# Check canonical units for pending jobs before reuse or startup,
+# without requiring optional inactive units to be active. Desktop sessions and
+# images without systemd keep their existing paths. Return 1 for setup failure.
+audio_prepare_modem_overlay_services() {
+  AUDIO_OVERLAY_READY_ROUTE=""
+  audio_overlay_modem_selected || return 0
+  [ "${SYSTEMD_AVAILABLE:-0}" -eq 1 ] || return 0
+  [ "${AUDIO_PLAYBACK_DESKTOP_ROOT_MODE:-0}" -eq 0 ] || return 0
+  [ "${AUDIO_RECORD_DESKTOP_ROOT_MODE:-0}" -eq 0 ] || return 0
+  [ "${AUDIO_OVERLAY_SERVICES_PENDING:-0}" -eq 0 ] || return 0
+  apos_direction="$1"
+  apos_requested="$2"
+  apos_timeout="${3:-120}"
+  apos_capture="${4:-}"
+  apos_out="$LOGDIR/overlay-services"
+  mkdir -p "$apos_out" || return 1
+  audio_validate_overlay_device_access 1 || return 1
+  audio_exec_with_timeout 10s systemctl list-unit-files --no-legend --no-pager \
+    'pipewire*' 'wireplumber*' >"$apos_out/inventory.log" 2>&1 || return 1
+  apos_units="$(awk '{print $1}' "$apos_out/inventory.log")"
+  AUDIO_OVERLAY_SERVICE_SNAPSHOT="$apos_out/initial-state.txt"
+  : >"$AUDIO_OVERLAY_SERVICE_SNAPSHOT" || return 1
+  apos_count=0
+  apos_pipewire=0
+  set --
+  for apos_unit in $apos_units; do
+    case "$apos_unit" in
+      *[!a-zA-Z0-9_.@-]*|*@*)
+        continue
+        ;;
+      pipewire*.service|pipewire*.socket|wireplumber.service|wireplumber.socket)
+        ;;
+      *)
+        continue
+        ;;
+    esac
+    audio_overlay_read_units "$apos_out/unit-query" "$apos_unit" || return 1
+    if [ "$(wc -l <"$apos_out/unit-query")" -ne 1 ]; then
+      log_fail "Overlay unit query did not identify one canonical unit: $apos_unit"
+      return 1
+    fi
+    apos_id="$(cut -d'|' -f1 "$apos_out/unit-query")"
+    case "$apos_id" in
+      *[!a-zA-Z0-9_.-]*)
+        log_fail "Overlay unit query returned an invalid canonical ID: $apos_unit"
+        return 1
+        ;;
+      pipewire*.service|pipewire*.socket|wireplumber.service|wireplumber.socket)
+        ;;
+      *)
+        log_fail "Overlay unit alias resolves outside the audio unit set: $apos_unit -> $apos_id"
+        return 1
+        ;;
+    esac
+    if cut -d'|' -f1 "$AUDIO_OVERLAY_SERVICE_SNAPSHOT" | grep -F -x "$apos_id" >/dev/null; then
+      log_info "Overlay unit alias already included: $apos_unit -> $apos_id"
+      continue
+    fi
+    apos_unit="$apos_id"
+    apos_count=$((apos_count + 1))
+    [ "$apos_count" -le 32 ] || return 1
+    apos_state="$(cut -d'|' -f2 "$apos_out/unit-query")"
+    case "$apos_state" in
+      active|inactive|failed)
+        ;;
+      *)
+        log_fail "Cannot safely reuse or start $apos_unit while its state is '$apos_state'"
+        return 1
+        ;;
+    esac
+    printf '%s|%s\n' "$apos_unit" "$apos_state" >>"$AUDIO_OVERLAY_SERVICE_SNAPSHOT" || return 1
+    [ "$apos_unit" != pipewire.service ] || apos_pipewire=1
+    set -- "$@" "$apos_unit"
+  done
+  if [ "$apos_pipewire" -ne 1 ]; then
+    log_fail "Modem overlay has no installed pipewire.service, provision the image service configuration"
+    return 1
+  fi
+  # Refresh all canonical units together before route discovery. Do not reuse
+  # or queue a start while another audio service/socket job is outstanding.
+  audio_overlay_read_units "$apos_out/preflight-units" "$@" || return 1
+  log_file_with_label AUDIO-OVERLAY-PREFLIGHT "$apos_out/preflight-units" 32
+  if ! audio_overlay_units_idle "$AUDIO_OVERLAY_SERVICE_SNAPSHOT" "$apos_out/preflight-units"; then
+    log_fail "Cannot reuse or start overlay audio units with pending jobs, transitional states or incomplete inventory. Inspect $apos_out/preflight-units and retry after the jobs settle"
+    return 1
+  fi
+  if awk -F '|' '$1=="pipewire.service" && $2=="active" { ready=1 } END { exit !ready }' "$apos_out/preflight-units"; then
+    if ! audio_wait_overlay_route "$apos_direction" "$apos_requested" "$apos_out/reuse-route" "$apos_timeout" "$apos_capture"; then
+      AUDIO_OVERLAY_FAILURE_REASON="Running PipeWire did not expose a ready $apos_direction route '$apos_requested' capture_route='${apos_capture:-not-applicable}' within ${apos_timeout}s, no service reset was attempted. Check image route configuration and session access in $apos_out"
+      log_fail "$AUDIO_OVERLAY_FAILURE_REASON"
+      return 1
+    fi
+    audio_overlay_read_units "$apos_out/reuse-units" "$@" || return 1
+    if ! audio_overlay_units_idle "$AUDIO_OVERLAY_SERVICE_SNAPSHOT" "$apos_out/reuse-units" ||
+       ! awk -F '|' '$1=="pipewire.service" && $2=="active" { ready=1 } END { exit !ready }' "$apos_out/reuse-units"; then
+      AUDIO_OVERLAY_FAILURE_REASON="Audio service state changed during route discovery, no service reset was attempted. Inspect $apos_out/reuse-units"
+      log_fail "$AUDIO_OVERLAY_FAILURE_REASON"
+      log_file_with_label AUDIO-OVERLAY-JOB "$apos_out/reuse-units" 32
+      return 1
+    fi
+    log_info "Reusing ready modem-overlay PipeWire control plane: $apos_direction route=$AUDIO_OVERLAY_READY_ROUTE, all discovered audio units have no pending jobs, no service reset. Functional audio validation is still required"
+    return 0
+  fi
+  awk -F '|' '{ print $1 "|" $2 }' "$apos_out/preflight-units" \
+    >"$AUDIO_OVERLAY_SERVICE_SNAPSHOT" || return 1
+  apos_user="$(audio_exec_with_timeout 5s systemctl show \
+    --property=User --value pipewire.service 2>>"$apos_out/setup.log")" || return 1
+  [ -n "$apos_user" ] || apos_user=root
+  log_file_with_label AUDIO-OVERLAY-INITIAL "$AUDIO_OVERLAY_SERVICE_SNAPSHOT" 32
+  audio_validate_overlay_device_access 1 "$apos_user" || return 1
+  # Mark cleanup ownership before the one recovery attempt can change state.
+  AUDIO_OVERLAY_SERVICES_PENDING=1
+  log_info "Recovering inactive or failed modem-overlay pipewire.service with one reset-and-start attempt"
+  if ! audio_overlay_service_action stop "$apos_out/setup-stop" "$@"; then
+    AUDIO_OVERLAY_FAILURE_REASON="Overlay service stop failed during recovery, inspect $apos_out/setup-stop.current.raw and failure-server.log for crash or pending-job evidence"
+    return 1
+  fi
+  audio_validate_overlay_device_access 1 "$apos_user" || return 1
+  if ! audio_overlay_service_action start "$apos_out/setup-start" pipewire.service; then
+    AUDIO_OVERLAY_FAILURE_REASON="Overlay PipeWire start failed during initialization, inspect $apos_out/setup-start.current.raw and failure-server.log"
+    return 1
+  fi
+  return 0
+}
+
+# audio_restore_overlay_services
+# Restore recorded activity, stopping only units that were not initially active.
+# Previously failed units return to inactive, their original failure is retained
+# in the snapshot. Return 1 if restoration cannot be completed and verified.
+audio_restore_overlay_services() {
+  [ "${AUDIO_OVERLAY_SERVICES_PENDING:-0}" -eq 1 ] || return 0
+  if [ ! -r "$AUDIO_OVERLAY_SERVICE_SNAPSHOT" ] ||
+     [ ! -s "$AUDIO_OVERLAY_SERVICE_SNAPSHOT" ]; then
+    log_fail "Overlay service activity snapshot is missing or unreadable: $AUDIO_OVERLAY_SERVICE_SNAPSHOT"
+    return 1
+  fi
+  aros_rc=0
+  aros_log="${AUDIO_OVERLAY_SERVICE_SNAPSHOT%/*}/restore.log"
+  set --
+  while IFS='|' read -r aros_unit aros_initial; do
+    set -- "$@" "$aros_unit"
+  done <"$AUDIO_OVERLAY_SERVICE_SNAPSHOT"
+  aros_preflight="${AUDIO_OVERLAY_SERVICE_SNAPSHOT%/*}/restore-preflight"
+  audio_overlay_read_units "$aros_preflight" "$@" || return 1
+  if ! awk -F '|' '$5!="0" { bad=1 } END { exit bad }' "$aros_preflight"; then
+    log_fail "Overlay restoration was not queued, audio units still have pending jobs"
+    log_file_with_label AUDIO-OVERLAY-JOBS "$aros_preflight" 32
+    return 1
+  fi
+  for aros_action in stop start; do
+    set --
+    while IFS='|' read -r aros_unit aros_initial; do
+      case "$aros_action:$aros_initial" in
+        start:active|stop:inactive|stop:failed)
+          set -- "$@" "$aros_unit"
+          ;;
+      esac
+    done <"$AUDIO_OVERLAY_SERVICE_SNAPSHOT"
+    if [ "$#" -gt 0 ]; then
+      audio_overlay_service_action "$aros_action" \
+        "${AUDIO_OVERLAY_SERVICE_SNAPSHOT%/*}/restore-$aros_action" "$@" || aros_rc=1
+    fi
+  done
+  while IFS='|' read -r aros_unit aros_initial; do
+    aros_state="$(audio_exec_with_timeout 5s systemctl show \
+      --property=ActiveState --value "$aros_unit" 2>>"$aros_log")" || aros_rc=1
+    case "$aros_initial:$aros_state" in
+      active:active|inactive:inactive|failed:inactive|failed:failed)
+        ;;
+      *)
+        log_warn "Overlay service activity restoration failed: $aros_unit initial=$aros_initial current=$aros_state"
+        aros_rc=1
+        ;;
+    esac
+  done <"$AUDIO_OVERLAY_SERVICE_SNAPSHOT"
+  AUDIO_OVERLAY_SERVICES_PENDING=0
+  if [ "$aros_rc" -eq 0 ]; then
+    log_info "Restored initial overlay service activity, snapshot=$AUDIO_OVERLAY_SERVICE_SNAPSHOT"
+  fi
+  return "$aros_rc"
+}
+
+# audio_cleanup_runtime
+# Run existing daemon cleanup and restore any modem-overlay service activity.
+# Service rollback applies only when native overlay preparation was incomplete.
+# Publish FAIL through the shared lifecycle if restoration fails, including
+# when cleanup follows an otherwise successful stream result.
+audio_cleanup_runtime() {
+  acr_cleanup_rc=0
+  audio_restore_playback_volume || acr_cleanup_rc=1
+  audio_cleanup_started_daemons
+  audio_restore_overlay_services || acr_cleanup_rc=1
+  if [ "$acr_cleanup_rc" -ne 0 ]; then
+    test_result_init "${RESULT_TESTNAME:-$TESTNAME}" "$RES_FILE" || exit 1
+    test_result_record FAIL "$TESTNAME FAIL - temporary audio state restoration or incomplete-setup rollback failed, inspect $LOGDIR"
+    test_result_finish
+  fi
+}
+
+# audio_discovery_finish <playback|capture> <reason> [optional-client]
+# Finish an unsuccessful discovery through the shared result lifecycle. Absent
+# optional routes SKIP, but explicit/overlay requirements, applicable prepared
+# DSPs and attempted candidate failures FAIL. Retain kernel evidence on FAIL.
+# This is terminal orchestration, test_result_finish exits the runner.
+audio_discovery_finish() {
+  adf_direction="$1"
+  adf_reason="$2"
+  adf_status=SKIP
+  case "$adf_direction" in
+    playback)
+      adf_failed="${AUDIO_PLAYBACK_PROBE_FAILED:-0}"
+      adf_explicit="${AUDIO_PLAYBACK_ROUTE_EXPLICIT:-0}"
+      ;;
+    capture)
+      adf_failed="${AUDIO_CAPTURE_PROBE_FAILED:-0}"
+      adf_explicit="${AUDIO_CAPTURE_ROUTE_EXPLICIT:-0}"
+      ;;
+    *)
+      adf_failed=1
+      adf_explicit=0
+      ;;
+  esac
+  if [ "$adf_failed" -eq 1 ] ||
+     [ "${AUDIO_OVERLAY_ACTIVE:-${AUDIO_OVERLAY_REQUESTED:-0}}" -eq 1 ] ||
+     { [ "${3:-}" != optional-client ] &&
+       { [ "$adf_explicit" -eq 1 ] || [ -n "${AUDIO_BACKEND_REQUESTED:-}" ] ||
+         [ "${audio_remoteproc_rc:-2}" -eq 0 ]; }; }; then
+    adf_status=FAIL
+    for adf_artifact in setup.log restore.log; do
+      if [ -s "$LOGDIR/overlay-services/$adf_artifact" ]; then
+        log_file_with_label AUDIO-OVERLAY "$LOGDIR/overlay-services/$adf_artifact" 40
+      fi
+    done
+    if [ -n "${AUDIO_OVERLAY_FAILURE_REASON:-}" ]; then
+      adf_reason="$adf_reason, $AUDIO_OVERLAY_FAILURE_REASON"
+    else
+      adf_reason="$adf_reason, inspect the retained ALSA probe logs, runtime routing and image audio services"
+    fi
+    if [ "${DMESG_SCAN:-1}" -eq 1 ]; then
+      scan_audio_dmesg "$LOGDIR/discovery-failure"
+      audio_remoteproc_report_health "$LOGDIR/discovery-failure" || true
+    fi
+  fi
+  test_result_init "$RESULT_TESTNAME" "$RES_FILE" || exit 1
+  test_result_record "$adf_status" "$TESTNAME $adf_status - $adf_reason"
+  test_result_finish
+}
+
+# audio_backend_for_mode <requested-backend> <effective-overlay-mode>
+# Print the effective request. Detected or explicit overlay requires PipeWire,
+# never a successful base ALSA fallback. Base-mode selection is unchanged.
+audio_backend_for_mode() {
+  case "$2:$1" in
+    0:*)
+      printf '%s\n' "$1"
+      ;;
+    1:|1:pipewire)
+      printf '%s\n' pipewire
+      ;;
+    *)
+      printf '%s\n' 'AudioReach overlay validation requires the PipeWire backend' >&2
+      return 1
+      ;;
+  esac
 }
 
 # Pick a plausible ALSA capture device.
@@ -2081,7 +3280,7 @@ audio_check_clips_available() {
 # Returns descriptive test case name for given config
 map_config_to_testcase() {
   config="$1"
-  
+
   # Extract config number if using playback_config format
   config_num=""
   case "$config" in
@@ -2108,7 +3307,7 @@ map_config_to_testcase() {
       config_num="$config"
       ;;
   esac
-  
+
   # Map config number to test case name
   case "$config_num" in
     1)  printf 'play_8KHz_8b_1ch\n' ;;
@@ -2129,7 +3328,7 @@ map_config_to_testcase() {
 # Discover all audio clip files in the clips directory
 # Outputs newline-separated list of clip filenames (basenames only) to stdout
 # Logs diagnostic messages to stderr
-# Exit codes: 0=success, 1=directory not found or no clips
+# Exit codes: 0=success, 1=directory not found or no clips, 2=discovery error
 discover_audio_clips() {
   clips_dir="${AUDIO_CLIPS_BASE_DIR:-AudioClips}"
   
@@ -2140,7 +3339,11 @@ discover_audio_clips() {
   fi
   
   # Find .wav files (only in top level, not recursive)
-  clips="$(find "$clips_dir" -maxdepth 1 -name "*.wav" -type f 2>/dev/null | sort)"
+  if ! clips="$(find "$clips_dir" -maxdepth 1 -name "*.wav" -type f)"; then
+    log_error "Cannot enumerate clips in $clips_dir, check directory permissions and find support" >&2
+    return 2
+  fi
+  clips="$(printf '%s\n' "$clips" | sort)" || return 2
   
   # Check if any clips found
   if [ -z "$clips" ]; then
@@ -2149,9 +3352,18 @@ discover_audio_clips() {
   fi
   
   # Output basenames only to stdout
-  for clip in $clips; do
-    basename "$clip"
-  done
+  while IFS= read -r clip; do
+    clip_basename="${clip##*/}"
+    case "$clip_basename" in
+      *[[:space:]]*)
+        log_error "Clip filenames containing whitespace are not supported by the selector list: $clip_basename" >&2
+        return 2
+        ;;
+    esac
+    printf '%s\n' "$clip_basename"
+  done <<EOF
+$clips
+EOF
   return 0
 }
 
@@ -2296,6 +3508,10 @@ validate_clip_name() {
   
   # Try exact match for specific clip names (play_48KHz_16b_2ch format)
   for clip in $available_clips; do
+    if [ "$clip" = "$requested_name" ]; then
+      printf '%s\n' "$clip"
+      return 0
+    fi
     test_name="$(generate_clip_testcase_name "$clip" 2>/dev/null)" || continue
     if [ "$test_name" = "$requested_name" ]; then
       printf '%s\n' "$clip"
@@ -2384,20 +3600,65 @@ validate_clip_file() {
   return 0
 }
 
+# audio_validate_clip_selectors <space-separated-selectors>
+# Validate syntax independently of installed assets, before service preparation.
+# Accept existing index/semantic names and exact WAV basenames. No stdout data.
+# Return 1 for malformed names, 0 otherwise. Asset availability is separate.
+audio_validate_clip_selectors() {
+  for avcs_name in $1; do
+    if printf '%s\n' "$avcs_name" |
+       grep -Eq '^(playback_config|[Cc]onfig)0*[1-9][0-9]*$|^play_[0-9]+([.][0-9]+)?KHz_[0-9]+b_[0-9]+ch$'; then
+      continue
+    fi
+    case "$avcs_name" in
+      */*|playback_config*|[Cc]onfig*)
+        ;;
+      *.wav)
+        continue
+        ;;
+    esac
+    log_error "Malformed clip selector '$avcs_name', use playback_configN (N greater than zero), play_RATEKHz_BITSb_CHANNELSch or an exact WAV basename" >&2
+    return 1
+  done
+  return 0
+}
+
+# audio_log_clip_inventory <newline-separated-filenames>
+# Log available runtime filenames, index aliases and parsed semantic selectors
+# to stderr. Unparseable names remain selectable by exact basename or index.
+audio_log_clip_inventory() {
+  alci_index=0
+  for alci_clip in $1; do
+    alci_index=$((alci_index + 1))
+    alci_name="$(generate_clip_testcase_name "$alci_clip" 2>/dev/null || true)"
+    log_info "Available clip: playback_config$alci_index filename='$alci_clip' semantic='${alci_name:-unavailable}'" >&2
+  done
+}
+
 # Discover and filter clips based on user input
 # Input: clip_names (explicit list), clip_filter (pattern filter)
 # Output: final list of clip filenames to test (to stdout)
 # Logs error messages to stderr
-# Returns: 0=success, 1=no valid clips
+# Returns: 0=success, 1=malformed selector, 2=discovery error, 3=missing assets.
+# Never silently run a partial explicit selection when another asset is absent.
 discover_and_filter_clips() {
   clip_names="$1"
   clip_filter="$2"
   
-  # Discover all available clips (logs go to stderr automatically)
-  available_clips="$(discover_audio_clips)" || {
-    log_error "Failed to discover audio clips" >&2
-    return 1
-  }
+  audio_validate_clip_selectors "$clip_names" || return 1
+  clip_discovery_rc=0
+  available_clips="$(discover_audio_clips)" || clip_discovery_rc=$?
+  case "$clip_discovery_rc" in
+    0)
+      ;;
+    1)
+      return 3
+      ;;
+    *)
+      return 2
+      ;;
+  esac
+  audio_log_clip_inventory "$available_clips"
   
   # If explicit clip names provided, validate and use them
   if [ -n "$clip_names" ]; then
@@ -2416,14 +3677,9 @@ discover_and_filter_clips() {
     validated="$(printf '%s' "$validated" | sed 's/^ //')"
     failed_names="$(printf '%s' "$failed_names" | sed 's/^ //')"
     
-    if [ -z "$validated" ]; then
-      # Don't repeat the error - validate_clip_name already showed it
-      return 1
-    fi
-    
-    # Warn about any failed names (only if there are some valid ones)
     if [ -n "$failed_names" ]; then
-      log_warn "Invalid clip/config names skipped: $failed_names" >&2
+      log_warn "Requested clip assets were not matched: $failed_names. No partial selection will run, provision the matching WAV files or use a listed selector" >&2
+      return 3
     fi
     
     printf '%s\n' "$validated"
@@ -2432,9 +3688,9 @@ discover_and_filter_clips() {
   
   # Apply filter if provided
   if [ -n "$clip_filter" ]; then
-    filtered="$(apply_clip_filter "$clip_filter" "$available_clips" 2>/dev/null)" || {
+    filtered="$(apply_clip_filter "$clip_filter" "$available_clips")" || {
       log_error "Filter did not match any clips" >&2
-      return 1
+      return 3
     }
     printf '%s\n' "$filtered"
     return 0
@@ -2477,6 +3733,9 @@ get_record_config_params() {
   esac
   
   case "$normalized_name" in
+    record_48KHz_1ch)
+      printf '%s\n' "48000 1"
+      ;;
     record_config1|record_8KHz_1ch)      printf '%s\n' "8000 1" ;;
     record_config2|record_16KHz_1ch)     printf '%s\n' "16000 1" ;;
     record_config3|record_16KHz_2ch)     printf '%s\n' "16000 2" ;;
@@ -2570,7 +3829,7 @@ validate_record_config_name() {
   fi
   
   log_error "Invalid record config name: $requested_name" >&2
-  log_error "Available configs: record_config1-record_config10, record_8KHz_1ch, record_16KHz_1ch, record_16KHz_2ch, record_24KHz_1ch, record_32KHz_2ch, record_44.1KHz_2ch, record_48KHz_2ch, record_48KHz_6ch, record_96KHz_2ch, record_96KHz_6ch" >&2
+  log_error "Available configs: record_config1-record_config10, record_8KHz_1ch, record_16KHz_1ch, record_16KHz_2ch, record_24KHz_1ch, record_32KHz_2ch, record_44.1KHz_2ch, record_48KHz_1ch, record_48KHz_2ch, record_48KHz_6ch, record_96KHz_2ch, record_96KHz_6ch" >&2
   return 1
 }
 
@@ -2732,7 +3991,7 @@ audio_cleanup_started_daemons() {
 }
 
 # Ensure XDG_RUNTIME_DIR is available for PipeWire/PulseAudio in minimal userspace.
-# Reuses an existing writable runtime dir when possible, otherwise creates one under /tmp.
+# Reuses an existing writable runtime dir, otherwise creates a private CWD child.
 audio_ensure_runtime_dir() {
   uid_now="$(id -u 2>/dev/null || echo 0)"
 
@@ -2743,7 +4002,15 @@ audio_ensure_runtime_dir() {
   elif [ -d "/run/user/$uid_now" ] && [ -w "/run/user/$uid_now" ]; then
     run_dir="/run/user/$uid_now"
   else
-    run_dir="/tmp/audio-runtime-$uid_now"
+    # Unix socket paths are limited to 107 bytes. Avoid the deeper run-log path
+    # and leave room for PipeWire's socket names below this private directory.
+    runtime_parent="${AUDIO_WORK_DIR:-$(pwd -P)}"
+    run_dir="$(mktemp -d "$runtime_parent/.ar.XXXXXX")" || return 1
+    if [ "$(printf '%s' "$run_dir" | wc -c)" -gt 88 ]; then
+      log_fail "CWD is too long for a private PipeWire socket directory, launch from a shorter writable directory: $runtime_parent"
+      rmdir "$run_dir" 2>/dev/null || true
+      return 1
+    fi
     AUDIO_CREATED_RUNTIME_DIR=1
     export AUDIO_CREATED_RUNTIME_DIR
   fi
@@ -2789,7 +4056,7 @@ audio_manual_start_pipewire() {
     return 1
   fi
 
-  export HOME="${HOME:-/tmp}"
+  export HOME="${HOME:-$(audio_scratch_dir)}"
 
   pw_pid="$(audio_start_bg_logged "$pipewire_log" pipewire)"
   audio_add_started_pid "$pw_pid"
@@ -2845,7 +4112,7 @@ audio_manual_start_pulseaudio() {
     return 1
   fi
 
-  export HOME="${HOME:-/tmp}"
+  export HOME="${HOME:-$(audio_scratch_dir)}"
 
   if [ "$uid_now" -eq 0 ] 2>/dev/null; then
     pa_pid="$(audio_start_bg_logged "$pulseaudio_log" pulseaudio --system --daemonize=no --disallow-exit --exit-idle-time=-1)"
@@ -3097,6 +4364,499 @@ audio_remoteproc_topology_path() {
   return 1
 }
 
+# audio_dt_requires_topology <sound-card-DT-node>
+# Return 0 when an enabled card link references the q6apm topology provider,
+# otherwise 1. Shared by pre-registration and registered-card validation.
+audio_dt_requires_topology() {
+  adrt_node="$1"
+  adrt_providers="$(dt_list_compatible_nodes 'qcom,q6apm' 2>/dev/null)"
+  for adrt_provider in $adrt_providers; do
+    if ! dt_property_text "$adrt_provider" compatible |
+        tr ' ' '\n' | grep -F -x qcom,q6apm >/dev/null; then
+      continue
+    fi
+    adrt_phandle="$(dt_property_hex "$adrt_provider" phandle)"
+    [ -n "$adrt_phandle" ] || continue
+    for adrt_link in "$adrt_node"/*; do
+      [ -d "$adrt_link/platform" ] || continue
+      dt_node_enabled "$adrt_link" || continue
+      dt_node_enabled "$adrt_link/platform" || continue
+      if [ "$(dt_property_hex "$adrt_link/platform" sound-dai)" = "$adrt_phandle" ]; then
+        return 0
+      fi
+    done
+  done
+  return 1
+}
+
+# audio_topology_for_dt_model <model>
+# Before ALSA registers, discover the installed driver directory containing the
+# exact DT-model topology basename. Print its nonempty image-provided path.
+# Reject ambiguous driver directories. The registered-card check later verifies
+# the exact ALSA driver name. Use the same roots/precedence as find_image_firmware.
+audio_topology_for_dt_model() {
+  atfdm_model="$1"
+  case "$atfdm_model" in
+    ''|*/*|*..*)
+      printf '%s\n' "Invalid or missing sound-card DT model for topology discovery: '$atfdm_model'" >&2
+      return 1
+      ;;
+  esac
+  atfdm_release="$(uname -r)"
+  atfdm_drivers=""
+  for atfdm_root in \
+      "/lib/firmware/$atfdm_release" \
+      "/usr/lib/firmware/$atfdm_release" \
+      /lib/firmware /usr/lib/firmware; do
+    for atfdm_dir in "$atfdm_root"/qcom/*; do
+      [ -d "$atfdm_dir" ] || continue
+      for atfdm_suffix in '' .xz .zst; do
+        if [ -f "$atfdm_dir/$atfdm_model-tplg.bin$atfdm_suffix" ]; then
+          atfdm_drivers="${atfdm_drivers}${atfdm_dir##*/}
+"
+          break
+        fi
+      done
+    done
+  done
+  atfdm_drivers="$(printf '%s' "$atfdm_drivers" | sort -u)"
+  if [ -z "$atfdm_drivers" ]; then
+    printf '%s\n' "Required DT-model topology '$atfdm_model-tplg.bin' is missing from the image firmware qcom/<driver>/ directories, provision it in the build" >&2
+    return 1
+  fi
+  if [ "$(printf '%s\n' "$atfdm_drivers" | wc -l)" -ne 1 ]; then
+    printf '%s\n' "Ambiguous image topology directories for DT model '$atfdm_model': $atfdm_drivers" >&2
+    return 1
+  fi
+  atfdm_path="$(find_image_firmware "qcom/$atfdm_drivers/$atfdm_model-tplg.bin")" || return 1
+  if [ ! -s "$atfdm_path" ]; then
+    printf '%s\n' "Required audio topology is empty: $atfdm_path, provision a valid topology in the build" >&2
+    return 1
+  fi
+  printf '%s\n' "$atfdm_path"
+}
+
+# audio_dt_fit_candidates
+# List canonical FIT candidate files from already accessible boot directories
+# and mounted FAT filesystems. No mounting, raw partition reads or boot-slot
+# assumptions. A candidate is not proof that firmware booted that file.
+audio_dt_fit_candidates() {
+  {
+    printf '%s\n' /boot /efi /firmware
+    if [ -r /proc/mounts ]; then
+      awk '$3 == "vfat" { print $2 }' /proc/mounts |
+        while IFS= read -r adfc_mount; do
+          printf '%b\n' "$adfc_mount"
+        done
+    fi
+  } | sort -u |
+    while IFS= read -r adfc_root; do
+      [ -d "$adfc_root" ] || continue
+      find "$adfc_root" -maxdepth 4 \( -type f -o -type l \) \
+        \( -name qclinux_fit.img -o -name qclinuxfitImage -o -name 'fitImage*' \) \
+        -print 2>/dev/null
+    done |
+    while IFS= read -r adfc_file; do
+      readlink -f "$adfc_file" 2>/dev/null
+    done | sort -u
+}
+
+# audio_dt_fit_select <inventory-file> <EFI-selector>
+# Select a unique configuration from config|compatibles|ordered-FDTs rows.
+# Prefer literal matches. Otherwise match vendor,board,qualifier[,qualifier]
+# against vendor,board-qualifier metadata, retaining every qualifier. Only
+# unambiguous full matches succeed. Print config|compatible|FDTs|match-kind.
+audio_dt_fit_select() {
+  awk -F '|' -v selector="$2" '
+    BEGIN {
+      parts = split(selector, selected, ",")
+      base = selected[1] "," selected[2]
+      qualified = parts > 2 && selected[1] != "" && selected[2] != ""
+      for (i = 3; i <= parts; i++) {
+        if (selected[i] !~ /^[a-zA-Z0-9_.+]+$/ || wanted[selected[i]]++) qualified = 0
+      }
+    }
+    function qualifiers_match(compatible, suffix, n, words, j) {
+      if (!qualified || substr(compatible, 1, length(base) + 1) != base "-") return 0
+      suffix = substr(compatible, length(base) + 2)
+      n = split(suffix, words, "-")
+      if (n != parts - 2) return 0
+      for (j in seen) delete seen[j]
+      for (j = 1; j <= n; j++) {
+        if (!(words[j] in wanted) || seen[words[j]]++) return 0
+      }
+      return 1
+    }
+    NF == 3 {
+      count = split($2, aliases, " ")
+      for (a = 1; a <= count; a++) {
+        if (aliases[a] == selector && !literal_seen[$1]++) {
+          literal_count++
+          literal = $1 "|" aliases[a] "|" $3 "|exact"
+        } else if (qualifiers_match(aliases[a]) && !qualified_seen[$1]++) {
+          qualified_count++
+          translated = $1 "|" aliases[a] "|" $3 "|qualified"
+        }
+      }
+    }
+    END {
+      if (literal_count == 1) print literal
+      else if (literal_count == 0 && qualified_count == 1) print translated
+      else exit 2
+    }
+  ' "$1"
+}
+
+# audio_dt_fit_resolve <FIT> <selector> <artifact-directory>
+# Enumerate configurations and ordered FDT references, resolve one selector
+# and extract its base DTB with image-provided tools. Print the base's first
+# compatible only. Return 2 when evidence is unavailable, invalid or ambiguous.
+# Do not infer identity from filenames or compare generic SoC compatibles.
+audio_dt_fit_resolve() {
+  adfr_fit="$1"
+  adfr_selector="$2"
+  adfr_out="$3"
+  : >"$adfr_out/fit_inventory.txt"
+  command -v fdtget >/dev/null 2>&1 &&
+    command -v dumpimage >/dev/null 2>&1 &&
+    command -v timeout >/dev/null 2>&1 || return 2
+  adfr_start="$(get_monotonic_seconds)"
+  adfr_configs="$(timeout 5 fdtget -l "$adfr_fit" /configurations 2>>"$adfr_out/fit_tools.log")" || return 2
+  adfr_total=0
+  for adfr_config in $adfr_configs; do
+    case "$adfr_config" in
+      ''|*[!a-zA-Z0-9_.+@-]*)
+        return 2
+        ;;
+    esac
+    [ "$(( $(get_monotonic_seconds) - adfr_start ))" -lt 30 ] || return 2
+    adfr_total=$((adfr_total + 1))
+    [ "$adfr_total" -le 512 ] || return 2
+    if adfr_compat="$(timeout 5 fdtget -t s "$adfr_fit" "/configurations/$adfr_config" compatible 2>>"$adfr_out/fit_tools.log")"; then
+      :
+    else
+      adfr_rc=$?
+      # fdtget returns 1 for a configuration without a compatible property.
+      # A timed-out or unavailable reader makes the inventory incomplete.
+      [ "$adfr_rc" -eq 1 ] || return 2
+      continue
+    fi
+    adfr_fdts="$(timeout 5 fdtget -t s "$adfr_fit" "/configurations/$adfr_config" fdt 2>>"$adfr_out/fit_tools.log")" || return 2
+    printf '%s|%s|%s\n' "$adfr_config" "$adfr_compat" "$adfr_fdts" >>"$adfr_out/fit_inventory.txt"
+  done
+  adfr_selection="$(audio_dt_fit_select "$adfr_out/fit_inventory.txt" "$adfr_selector")" || {
+    printf '%s\n' "EFI selector '$adfr_selector' has no unique full FIT match, qualifiers were not discarded" >>"$adfr_out/fit_tools.log"
+    return 2
+  }
+  printf '%s\n' "$adfr_selection" >"$adfr_out/selected_fit_config.txt"
+  adfr_selected="$(printf '%s\n' "$adfr_selection" | cut -d'|' -f3)"
+  adfr_base="${adfr_selected%% *}"
+  case "$adfr_base" in
+    ''|*[!a-zA-Z0-9_.+@-]*)
+      return 2
+      ;;
+  esac
+  adfr_images="$(timeout 5 fdtget -l "$adfr_fit" /images 2>>"$adfr_out/fit_tools.log")" || return 2
+  adfr_index=0
+  adfr_found=0
+  for adfr_image in $adfr_images; do
+    if [ "$adfr_image" = "$adfr_base" ]; then
+      adfr_found=1
+      break
+    fi
+    adfr_index=$((adfr_index + 1))
+  done
+  [ "$adfr_found" -eq 1 ] || return 2
+  [ "$(timeout 5 fdtget -t s "$adfr_fit" "/images/$adfr_base" type 2>>"$adfr_out/fit_tools.log")" = flat_dt ] || return 2
+  [ "$(timeout 5 fdtget -t s "$adfr_fit" "/images/$adfr_base" compression 2>>"$adfr_out/fit_tools.log")" = none ] || return 2
+  : >"$adfr_out/selected_base.dtb"
+  timeout 5 dumpimage -T flat_dt -p "$adfr_index" \
+    -o "$adfr_out/selected_base.dtb" "$adfr_fit" >>"$adfr_out/fit_tools.log" 2>&1 || return 2
+  adfr_identity="$(timeout 5 fdtget -t s "$adfr_out/selected_base.dtb" / compatible 2>>"$adfr_out/fit_tools.log")" || return 2
+  [ -n "$adfr_identity" ] || return 2
+  printf '%s\n' "$adfr_selected" >"$adfr_out/selected_fdt_refs.txt"
+  printf '%s\n' "${adfr_identity%% *}"
+}
+
+# audio_dt_fit_preflight <artifact-directory> [expected-compatible] [FIT-path]
+# Read-only active DT and EFI/FIT reporting before audio preparation. Explicit
+# expectations are enforced, automatically found FITs are only candidates.
+# Return 1 on an unmet explicit contract or evidence-artifact failure, otherwise
+# 0 (including unavailable optional evidence). Does not claim overlay application.
+audio_dt_fit_preflight() {
+  adfp_out="$1"
+  adfp_expected="${2:-}"
+  adfp_fit="${3:-}"
+  adfp_explicit_fit=0
+  [ -z "$adfp_fit" ] || adfp_explicit_fit=1
+  mkdir -p "$adfp_out" || return 1
+  for adfp_artifact in report.txt active_compatible.txt fit_inventory.txt \
+      fit_tools.log fit_candidates.txt selected_base.dtb selected_fdt_refs.txt selected_fit_config.txt \
+      sound_dai_nodes.txt sound_cards.txt; do
+    : >"$adfp_out/$adfp_artifact" || return 1
+  done
+  adfp_root="$(dt_runtime_root 2>/dev/null || true)"
+  if [ -z "$adfp_root" ]; then
+    log_info "[AUDIO-DT] Runtime DT unavailable, identity verification not performed"
+    printf '%s\n' 'runtime_dt=unavailable' >"$adfp_out/report.txt"
+    [ -z "$adfp_expected$adfp_fit" ] && return 0
+    log_fail "[AUDIO-DT] Explicit DT/FIT verification requires the running device tree"
+    return 1
+  fi
+  dt_property_text "$adfp_root" compatible |
+    tr ' ' '\n' >"$adfp_out/active_compatible.txt"
+  adfp_model="$(dt_property_text "$adfp_root" model)"
+  adfp_active="$(sed -n '1p' "$adfp_out/active_compatible.txt")"
+  printf '%s\n' "runtime_root=$adfp_root" "model=$adfp_model" \
+    "board_compatible=$adfp_active" >"$adfp_out/report.txt"
+  log_info "[AUDIO-DT] Active model='$adfp_model' board_compatible='$adfp_active' root=$adfp_root"
+  log_file_with_label AUDIO-DT-COMPATIBLE "$adfp_out/active_compatible.txt"
+  if [ -n "$adfp_expected" ] &&
+     ! grep -Fxq -- "$adfp_expected" "$adfp_out/active_compatible.txt"; then
+    log_fail "[AUDIO-DT] Expected '$adfp_expected' is absent from the active DT, select the correct boot DT and reboot before testing audio"
+    return 1
+  fi
+  # Log sound-card nodes even if no PCM/card has registered yet.
+  adfp_discovery_rc=0
+  dt_list_enabled_property_nodes "$adfp_root" sound-dai >"$adfp_out/sound_dai_nodes.txt" || adfp_discovery_rc=$?
+  if [ "$adfp_discovery_rc" -gt 1 ]; then
+    log_fail "[AUDIO-DT] Cannot inspect sound-dai nodes, discovery rc=$adfp_discovery_rc. Check DT access and discovery tools"
+    printf '%s\n' "sound_dai_discovery=failed rc=$adfp_discovery_rc" >>"$adfp_out/report.txt"
+    return 1
+  fi
+  while IFS= read -r adfp_dai; do
+    adfp_link="${adfp_dai%/*}"
+    adfp_card="${adfp_link%/*}"
+    [ -r "$adfp_card/model" ] || continue
+    printf '%s|%s|%s\n' "$adfp_card" \
+      "$(dt_property_text "$adfp_card" model)" \
+      "$(dt_property_text "$adfp_card" compatible)"
+  done <"$adfp_out/sound_dai_nodes.txt" | sort -u >"$adfp_out/sound_cards.txt"
+  log_file_with_label AUDIO-DT-SOUND "$adfp_out/sound_cards.txt"
+  adfp_selector=""
+  if ! command -v efi_read_text_variable >/dev/null 2>&1; then
+    # shellcheck disable=SC1091
+    . "$TOOLS/lib_system.sh"
+  fi
+  adfp_selector="$(efi_read_text_variable VendorDtbOverlays /sys/firmware/efi/efivars 2>/dev/null || true)"
+  printf '%s\n' "efi_selector=$adfp_selector" >>"$adfp_out/report.txt"
+  log_info "[AUDIO-DT] EFI selection='${adfp_selector:-unavailable}', this is not proof of the active boot selection"
+  if [ -z "$adfp_fit" ]; then
+    audio_dt_fit_candidates >"$adfp_out/fit_candidates.txt"
+    if [ "$(wc -l <"$adfp_out/fit_candidates.txt")" -eq 1 ]; then
+      IFS= read -r adfp_fit <"$adfp_out/fit_candidates.txt"
+    fi
+  fi
+  if [ -z "$adfp_fit" ]; then
+    log_info "[AUDIO-DT] Boot FIT not uniquely accessible, preserving runtime audio discovery. Optional --fit-image supplies the intended boot FIT"
+    return 0
+  fi
+  adfp_fit="$(readlink -f "$adfp_fit" 2>/dev/null || true)"
+  printf '%s\n' "fit=$adfp_fit" "fit_explicit=$adfp_explicit_fit" >>"$adfp_out/report.txt"
+  if [ -z "$adfp_fit" ] || [ ! -r "$adfp_fit" ] || [ ! -f "$adfp_fit" ]; then
+    log_warn "[AUDIO-DT] FIT is not a readable regular file"
+    [ "$adfp_explicit_fit" -eq 0 ]
+    return $?
+  fi
+  if adfp_base="$(audio_dt_fit_resolve "$adfp_fit" "$adfp_selector" "$adfp_out")"; then
+    printf '%s\n' "selected_base_compatible=$adfp_base" >>"$adfp_out/report.txt"
+    log_info "[AUDIO-DT] FIT=$adfp_fit EFI-selected base='$adfp_base', ordered FDT references: $(cat "$adfp_out/selected_fdt_refs.txt")"
+    log_file_with_label AUDIO-DT-FIT-SELECTION "$adfp_out/selected_fit_config.txt"
+    if ! grep -Fxq -- "$adfp_base" "$adfp_out/active_compatible.txt"; then
+      if [ "$adfp_explicit_fit" -eq 1 ]; then
+        log_fail "[AUDIO-DT] Supplied FIT and EFI selection expect '$adfp_base', active DT is '$adfp_active'. Correct the boot selection and reboot before audio validation"
+        return 1
+      fi
+      log_warn "[AUDIO-DT] Candidate FIT/EFI base differs from active DT, boot provenance is unverified. Confirm the boot FIT with --fit-image before enforcing this comparison"
+    else
+      log_info "[AUDIO-DT] Base identity agrees, this does not prove every FIT overlay was applied"
+    fi
+  else
+    log_warn "[AUDIO-DT] FIT selection could not be resolved, need fdtget, dumpimage, timeout, one readable EFI selector and a matching uncompressed base FDT. Artifacts: $adfp_out"
+    [ "$adfp_explicit_fit" -eq 0 ] || return 1
+  fi
+  return 0
+}
+
+# audio_base_topology_preflight
+# Discover enabled sound cards through runtime DT platform sound-dai links,
+# before any ALSA card exists. Print validated topology paths, diagnostics to
+# stderr. Return 0 when all q6apm dependencies are provisioned, 2 when none are
+# declared, 3 when DT is unavailable, and 1 for an unmet topology requirement.
+audio_base_topology_preflight() {
+  abtp_root="$(dt_runtime_root)" || return 3
+  abtp_discovery_rc=0
+  abtp_platforms="$(dt_list_enabled_property_nodes "$abtp_root" sound-dai)" || abtp_discovery_rc=$?
+  if [ "$abtp_discovery_rc" -gt 1 ]; then
+    printf '%s\n' "Audio topology discovery failed, rc=$abtp_discovery_rc. Check DT access and discovery tools" >&2
+    return 1
+  fi
+  abtp_cards="$(
+    printf '%s\n' "$abtp_platforms" |
+      while IFS= read -r abtp_platform; do
+        [ "${abtp_platform##*/}" = platform ] || continue
+        abtp_link="${abtp_platform%/*}"
+        abtp_card="${abtp_link%/*}"
+        dt_node_enabled "$abtp_link" || continue
+        dt_node_enabled "$abtp_card" || continue
+        printf '%s\n' "$abtp_card"
+      done | sort -u
+  )"
+  abtp_paths=""
+  while IFS= read -r abtp_card; do
+    [ -n "$abtp_card" ] || continue
+    audio_dt_requires_topology "$abtp_card" || continue
+    abtp_model="$(dt_property_text "$abtp_card" model)"
+    abtp_path="$(audio_topology_for_dt_model "$abtp_model")" || return 1
+    printf '%s\n' "Audio topology preflight: DT=$abtp_card model=$abtp_model file=$abtp_path, exact ALSA driver path will be checked after card registration" >&2
+    abtp_paths="${abtp_paths}${abtp_path}
+"
+  done <<EOF
+$abtp_cards
+EOF
+  [ -n "$abtp_paths" ] || return 2
+  printf '%s' "$abtp_paths"
+}
+
+# audio_wait_for_capture_payload <WAV> <owner-pid> <seconds>
+# Wait for a valid WAV header and at least one complete PCM frame while the
+# owned capture process is alive. No stdout data, return 1 on exit or timeout.
+audio_wait_for_capture_payload() (
+  awcp_file="$1"
+  awcp_pid="$2"
+  awcp_limit="$3"
+  awcp_start="$(get_monotonic_seconds)"
+  while kill -0 "$awcp_pid" 2>/dev/null; do
+    awcp_meta="$(audio_wav_header_metadata "$awcp_file" 2>/dev/null || true)"
+    if [ -n "$awcp_meta" ]; then
+      awcp_offset="${awcp_meta%%|*}"
+      awcp_size="$(file_size_bytes "$awcp_file" 2>/dev/null || echo 0)"
+      awcp_align="$(printf '%s\n' "$awcp_meta" | cut -d'|' -f7)"
+      if [ "$awcp_align" -gt 0 ] &&
+         [ "$awcp_size" -ge "$((awcp_offset + awcp_align))" ] &&
+         kill -0 "$awcp_pid" 2>/dev/null; then
+        return 0
+      fi
+    fi
+    [ "$(( $(get_monotonic_seconds) - awcp_start ))" -lt "$awcp_limit" ] || break
+    sleep 1
+  done
+  log_fail "Capture did not provide PCM payload while alive within ${awcp_limit}s, artifact=$awcp_file"
+  return 1
+)
+
+# audio_loopback_cleanup
+# Terminate/reap only this loopback's recorder owner, whose progress-helper
+# traps also terminate its recorder child and restore capture volume.
+audio_loopback_cleanup() {
+  if [ -n "${RECORDER_PID:-}" ]; then
+    # A desktop launcher/volume subshell can sit between the owner and recorder.
+    # Stop the verified recorder first, allowing progress/volume traps to finish.
+    audio_stop_capture_descendant "$RECORDER_PID" "${capture_wav:-}" || true
+    alc_start="$(get_monotonic_seconds)"
+    while kill -0 "$RECORDER_PID" 2>/dev/null &&
+          [ "$(( $(get_monotonic_seconds) - alc_start ))" -lt 30 ]; do
+      sleep 1
+    done
+    audio_record_stop_child "$RECORDER_PID" || true
+    RECORDER_PID=""
+  fi
+  audio_cleanup_runtime
+}
+
+# audio_stop_capture_descendant <owner-pid> <WAV>
+# Signal the recorder only if its saved start time still matches and /proc
+# proves it descends from the live test-owned launcher. Never signal a recycled
+# PID. Return 0 for no live matching child, 1 for invalid evidence or kill failure.
+audio_stop_capture_descendant() (
+  ascd_owner="$1"
+  ascd_file="$2.recorder"
+  [ -r "$ascd_file" ] || return 0
+  IFS='|' read -r ascd_pid ascd_start <"$ascd_file" || return 1
+  case "$ascd_pid:$ascd_start" in
+    *[!0-9:]*|:*)
+      return 1
+      ;;
+  esac
+  [ -r "/proc/$ascd_pid/stat" ] || return 0
+  ascd_current="$(awk '{sub(/^.*\) /, ""); print $20}' "/proc/$ascd_pid/stat")" || return 1
+  [ "$ascd_current" = "$ascd_start" ] || return 0
+  ascd_parent="$ascd_pid"
+  ascd_depth=0
+  while [ "$ascd_parent" -gt 1 ] && [ "$ascd_depth" -lt 64 ]; do
+    ascd_parent="$(awk '{sub(/^.*\) /, ""); print $2}' "/proc/$ascd_parent/stat" 2>/dev/null)" || return 0
+    if [ "$ascd_parent" = "$ascd_owner" ]; then
+      audio_record_stop_child "$ascd_pid"
+      return $?
+    fi
+    ascd_depth=$((ascd_depth + 1))
+  done
+  return 0
+)
+
+# audio_loopback_prepare_overlay
+# Reuse the existing modem-audio applicability and runtime-overlay discovery
+# before automatic native Loopback backend selection. Explicit ALSA devices,
+# desktop distributions and non-applicable boards retain their existing paths.
+# Prepare image-provided DSP/services, then require both routes in one readiness
+# decision. Return 0 when prepared, 1 on failure, 2 when not applicable.
+# Never install packages or fall back after overlay failure.
+audio_loopback_prepare_overlay() {
+  [ -z "${PLAYBACK_DEVICE:-}" ] && [ -z "${CAPTURE_DEVICE:-}" ] || return 2
+  case "${audio_loopback_os_id:-unknown}" in
+    debian|ubuntu|centos|rhel)
+      return 2
+      ;;
+  esac
+  audio_platform_is_shikra || return 2
+  audio_detect_runtime_mode 0
+  [ "$AUDIO_OVERLAY_ACTIVE" -eq 1 ] || return 2
+  SYSTEMD_AVAILABLE=0
+  if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+    SYSTEMD_AVAILABLE=1
+  fi
+  if ! audio_prepare_audio_remoteproc; then
+    AUDIO_OVERLAY_FAILURE_REASON="Loopback overlay DSP preparation failed: ${AUDIO_REMOTE_PROC_REASON:-no applicable image-provided audio remoteproc}"
+    audio_collect_remoteproc_diagnostics "$LOGDIR/remoteproc-preflight" || true
+    return 1
+  fi
+  if ! audio_overlay_modem_selected; then
+    AUDIO_OVERLAY_FAILURE_REASON="Loopback overlay did not identify its modem-audio remoteproc, inspect runtime DT and image firmware"
+    return 1
+  fi
+  audio_validate_overlay_readiness loopback "$PLAYBACK_ROUTE" "$CAPTURE_ROUTE" || return 1
+  return 0
+}
+
+# audio_loopback_prepare_alsa
+# Prepare provisioned audio firmware/topology before functional ALSA loopback
+# probes, then require playback and capture registration. Keep non-applicable
+# platforms' existing lazy recovery unchanged, only the existing runtime
+# Shikra modem-audio gate opts into eager startup. Return 1 on failure, 0 otherwise.
+audio_loopback_prepare_alsa() {
+  AUDIO_REMOTE_PROC_PATH=""
+  AUDIO_REMOTE_PROC_REASON=""
+  if ! audio_platform_is_shikra; then
+    return 0
+  fi
+  audio_prepare_audio_remoteproc
+  alpa_rc=$?
+  case "$alpa_rc" in
+    0)
+      audio_wait_for_alsa_registration playback || return 1
+      audio_wait_for_alsa_registration capture || return 1
+      ;;
+    2)
+      log_info "Loopback remoteproc preparation not applicable: $AUDIO_REMOTE_PROC_REASON"
+      ;;
+    *)
+      audio_collect_remoteproc_diagnostics "$LOGDIR/remoteproc-preflight" || true
+      return 1
+      ;;
+  esac
+  return 0
+}
+
 # Return success for a remoteproc identity commonly used to host the audio
 # firmware. The caller applies the Shikra platform gate to modem instances.
 audio_remoteproc_is_audio_candidate() {
@@ -3134,39 +4894,13 @@ audio_remoteproc_is_modem() {
 }
 
 # Return success when runtime platform evidence identifies a Shikra target.
-# The preflight runs before the suites call detect_platform, so inspect both
-# any already-populated platform variables and the standard runtime DT paths.
+#
+# All repository callers source functestlib.sh before audio_common.sh,
+# including child user-session paths. platform_identity_matches() from
+# functestlib.sh is therefore always available and is the single contract.
+# If standalone sourcing is required, source functestlib.sh explicitly first.
 audio_platform_is_shikra() {
-  apis_identity="${PLATFORM_MACHINE:-} ${PLATFORM_TARGET:-}"
-  apis_identity="$apis_identity ${PLATFORM_SOC_MACHINE:-}"
-  apis_identity="$apis_identity ${PLATFORM_DT_MODEL:-}"
-  apis_identity="$apis_identity ${PLATFORM_DT_COMPAT:-}"
-
-  for apis_file in \
-    /proc/device-tree/model \
-    /proc/device-tree/compatible \
-    /sys/firmware/devicetree/base/model \
-    /sys/firmware/devicetree/base/compatible
-  do
-    if [ -r "$apis_file" ]; then
-      apis_value="$(tr '\000' ' ' <"$apis_file" 2>/dev/null || true)"
-      apis_identity="$apis_identity $apis_value"
-    fi
-  done
-
-  apis_identity="$(
-    printf '%s\n' "$apis_identity" |
-      tr '[:upper:]' '[:lower:]'
-  )"
-
-  case "$apis_identity" in
-    *shikra*)
-      return 0
-      ;;
-    *)
-      return 1
-      ;;
-  esac
+  platform_identity_matches "shikra"
 }
 
 # Reorder an inventory so a modem-hosted audio path is considered before DSP
@@ -3204,7 +4938,13 @@ EOF
 audio_prepare_audio_remoteproc() {
   AUDIO_REMOTE_PROC_REASON=""
   AUDIO_REMOTE_PROC_STARTED=0
+  AUDIO_REMOTE_PROC_PATH=""
+  AUDIO_REMOTE_PROC_SINCE=""
+  AUDIO_REMOTE_PROC_CONTROLLER=""
+  AUDIO_REMOTE_PROC_INITIAL_STATE=""
   export AUDIO_REMOTE_PROC_STARTED
+  export AUDIO_REMOTE_PROC_PATH AUDIO_REMOTE_PROC_SINCE
+  export AUDIO_REMOTE_PROC_CONTROLLER AUDIO_REMOTE_PROC_INITIAL_STATE
   arpr_matched=0
 
   if ! command -v list_remoteproc_instances >/dev/null 2>&1 ||
@@ -3245,6 +4985,25 @@ audio_prepare_audio_remoteproc() {
     fi
 
     arpr_matched=1
+    AUDIO_REMOTE_PROC_PATH="$arpr_path"
+    AUDIO_REMOTE_PROC_INITIAL_STATE="$arpr_state"
+    arpr_device=""
+    if [ -e "$arpr_path/device" ]; then
+      arpr_device="$(readlink -f "$arpr_path/device" 2>/dev/null)"
+    else
+      arpr_realpath="$(readlink -f "$arpr_path" 2>/dev/null)"
+      case "$arpr_realpath" in
+        */remoteproc/*)
+          arpr_device="${arpr_realpath%/remoteproc/*}"
+          ;;
+      esac
+    fi
+    AUDIO_REMOTE_PROC_CONTROLLER="${arpr_device##*/}"
+    if [ -r /proc/uptime ]; then
+      AUDIO_REMOTE_PROC_SINCE="$(get_monotonic_seconds)"
+    fi
+    export AUDIO_REMOTE_PROC_PATH AUDIO_REMOTE_PROC_SINCE
+    export AUDIO_REMOTE_PROC_CONTROLLER AUDIO_REMOTE_PROC_INITIAL_STATE
     arpr_firmware_path="$(
       find_image_firmware "$arpr_firmware" 2>/dev/null || true
     )"
@@ -3253,12 +5012,30 @@ audio_prepare_audio_remoteproc() {
       continue
     fi
 
-    if [ "$arpr_is_shikra_modem" -eq 1 ]; then
-      # Public Shikra images package qdsp6sw as modem firmware and lpaicp as
-      # separate audio firmware. They do not provide an ALSA topology beside
-      # qdsp6sw, so firmware presence is the correct startup prerequisite.
-      arpr_topology_path="not-required"
+    arpr_topology_rc=2
+    if [ "${AUDIO_OVERLAY_ACTIVE:-${AUDIO_OVERLAY_REQUESTED:-0}}" -eq 0 ]; then
+      arpr_topology_path="$(audio_base_topology_preflight)"
+      arpr_topology_rc=$?
+      if [ "$arpr_topology_rc" -eq 1 ]; then
+        AUDIO_REMOTE_PROC_REASON="required base audio topology is missing, empty or ambiguous, see the runtime DT-model diagnostic above"
+        export AUDIO_REMOTE_PROC_REASON
+        return 1
+      fi
+    fi
+    if [ "$arpr_topology_rc" -eq 0 ]; then
+      :
+    elif [ "$arpr_is_shikra_modem" -eq 1 ]; then
+      if [ "${AUDIO_OVERLAY_ACTIVE:-${AUDIO_OVERLAY_REQUESTED:-0}}" -eq 1 ]; then
+        arpr_topology_path="managed-overlay, base ALSA topology check not applicable"
+      elif [ "$arpr_topology_rc" -eq 3 ]; then
+        AUDIO_REMOTE_PROC_REASON="runtime DT is unavailable, cannot verify the base audio topology prerequisite before modem startup"
+        export AUDIO_REMOTE_PROC_REASON
+        return 1
+      else
+        arpr_topology_path="runtime DT declares no q6apm topology consumer"
+      fi
     else
+      # Preserve older non-q6apm image layouts and their established check.
       arpr_topology_path="$(
         audio_remoteproc_topology_path "$arpr_firmware_path" 2>/dev/null || true
       )"
@@ -3335,8 +5112,292 @@ audio_alsa_control_exists() {
 
   command -v amixer >/dev/null 2>&1 || return 1
 
-  amixer -c "$aace_card" controls 2>/dev/null |
-    grep -F "name='$aace_name'" >/dev/null 2>&1
+  audio_alsa_control_names "$aace_card" |
+    grep -F -x "$aace_name" >/dev/null 2>&1
+}
+
+# audio_alsa_control_names <card>
+# Print exact mixer names, one per line. Return failure on inventory errors.
+audio_alsa_control_names() {
+  aacn_output="$(
+    audio_exec_with_timeout 5s env LC_ALL=C amixer -c "$1" controls 2>&1
+  )" || {
+    printf '%s\n' "ALSA mixer inventory failed for card $1: $aacn_output" >&2
+    return 1
+  }
+  printf '%s\n' "$aacn_output" | sed -n "s/.*name='\(.*\)'$/\1/p"
+}
+
+# audio_alsa_pcm_inventory <playback|capture>
+# Print card|device|PCM-name records from the image-provided ALSA client.
+# Names come from the runtime DAI/topology, never from a card-number table.
+audio_alsa_pcm_inventory() {
+  case "$1" in
+    playback)
+      aapi_client=aplay
+      ;;
+    capture)
+      aapi_client=arecord
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+  aapi_output="$(
+    audio_exec_with_timeout 5s env LC_ALL=C "$aapi_client" -l 2>&1
+  )" || {
+    printf '%s\n' "ALSA $1 inventory failed: $aapi_output" >&2
+    return 1
+  }
+  printf '%s\n' "$aapi_output" | sed -n \
+    's/^card[[:space:]]*\([0-9][0-9]*\):.*device[[:space:]]*\([0-9][0-9]*\):[[:space:]]*\(.*\)/\1|\2|\3/p'
+}
+
+# audio_alsa_route_links <card> <playback|capture>
+# Print exposed frontend links for one speaker/DMIC backend, one per line.
+# Return 2 for direct-codec cards, 1 on inventory error or competing backends.
+audio_alsa_route_links() {
+  aarc_names="$(audio_alsa_control_names "$1")" || return 1
+  case "$2" in
+    playback)
+      aarc_pattern='^(PRIMARY_MI2S_RX|SECONDARY_TDM_RX_0) Audio Mixer MultiMedia[0-9]+$'
+      ;;
+    capture)
+      aarc_pattern='^MultiMedia[0-9]+ Mixer (VA_CODEC_DMA_TX_0|TERTIARY_MI2S_TX)$'
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+  aarc_matches="$(printf '%s\n' "$aarc_names" | grep -E "$aarc_pattern")"
+  if [ -z "$aarc_matches" ]; then
+    return 2
+  fi
+  aarc_backends="$(
+    printf '%s\n' "$aarc_matches" |
+      sed -e 's/ Audio Mixer MultiMedia[0-9][0-9]*$//' \
+          -e 's/^MultiMedia[0-9][0-9]* Mixer //' | sort -u
+  )"
+  if [ "$(printf '%s\n' "$aarc_backends" | wc -l)" -ne 1 ]; then
+    printf '%s\n' "Conflicting $2 mixer backends on card $1, provision a UCM route: $aarc_matches" >&2
+    return 1
+  fi
+  printf '%s\n' "$aarc_matches"
+}
+
+# audio_alsa_route_candidates <card> <playback|capture>
+# Print PCM|mixer-link records ordered by runtime PCM number. Direct-codec
+# records have an empty mixer field. Reject duplicate mappings for a frontend.
+audio_alsa_route_candidates() {
+  aarp_card="$1"
+  aarp_direction="$2"
+  aarp_links="$(audio_alsa_route_links "$aarp_card" "$aarp_direction")"
+  aarp_link_rc=$?
+  aarp_inventory="$(audio_alsa_pcm_inventory "$aarp_direction")" || return 1
+  aarp_records=""
+  case "$aarp_link_rc" in
+    0)
+      ;;
+    2)
+      # One empty link selects the existing named direct-codec mapping below.
+      aarp_links=""
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+  while IFS= read -r aarp_link; do
+    if [ -n "$aarp_link" ]; then
+      aarp_frontend="$(printf '%s\n' "$aarp_link" | sed -n 's/.*\(MultiMedia[0-9][0-9]*\).*/\1/p')"
+      aarp_pattern="(^|[^[:alnum:]])($aarp_frontend|MM${aarp_frontend#MultiMedia})([^[:alnum:]]|$)"
+    else
+      case "$aarp_direction" in
+        playback)
+          aarp_pattern='(^|[^[:alnum:]])(wsa.*playback|speaker.*playback|playback.*speaker)([^[:alnum:]]|$)'
+          ;;
+        capture)
+          aarp_pattern='(^|[^[:alnum:]])(va[ _-]*dmic.*capture|dmic.*capture)([^[:alnum:]]|$)'
+          ;;
+      esac
+    fi
+    aarp_matches="$(
+      printf '%s\n' "$aarp_inventory" |
+        awk -F '|' -v card="$aarp_card" -v pattern="$aarp_pattern" '
+          $1 == card && tolower($3) ~ tolower(pattern) {
+            if (!seen[$2]++) print $2
+          }
+        '
+    )"
+    if [ -z "$aarp_matches" ]; then
+      printf '%s\n' "No registered $aarp_direction PCM for card=$aarp_card link=${aarp_link:-direct-codec}" >&2
+      continue
+    fi
+    if [ "$(printf '%s\n' "$aarp_matches" | wc -l)" -ne 1 ]; then
+      printf '%s\n' "Ambiguous $aarp_direction PCM mapping for card=$aarp_card link=${aarp_link:-direct-codec}" "$aarp_inventory" >&2
+      return 1
+    fi
+    aarp_records="${aarp_records}${aarp_matches}|plughw:${aarp_card},${aarp_matches}|${aarp_link}
+"
+  done <<EOF
+$aarp_links
+EOF
+  if [ -z "$aarp_records" ]; then
+    printf '%s\n' "No mapped $aarp_direction PCM on card $aarp_card, check ALSA registration, topology and mixer links" "$aarp_inventory" >&2
+    return 1
+  fi
+  printf '%s' "$aarp_records" | sort -t '|' -k1,1n | cut -d'|' -f2-
+}
+
+# audio_alsa_select_route <card> <playback|capture> [PCM]
+# Print one PCM|mixer-link record. Preserve an explicit PCM, otherwise choose
+# the lowest registered PCM number for the same backend. Callers must probe it.
+audio_alsa_select_route() {
+  aasr_candidates="$(audio_alsa_route_candidates "$1" "$2")" || return 1
+  aasr_requested="${3:-}"
+  case "$aasr_requested" in
+    hw:*)
+      aasr_requested="plughw:${aasr_requested#hw:}"
+      ;;
+  esac
+  aasr_selected="$(
+    printf '%s\n' "$aasr_candidates" |
+      awk -F '|' -v requested="$aasr_requested" '
+        requested == "" || $1 == requested {
+          print
+          exit
+        }
+      '
+  )"
+  if [ -z "$aasr_selected" ]; then
+    printf '%s\n' "Requested $2 PCM '$aasr_requested' is not mapped to the selected route on card $1" "$aasr_candidates" >&2
+    return 1
+  fi
+  printf '%s\n' "ALSA route candidates: direction=$2 card=$1" "$aasr_candidates" \
+    "ALSA selected route: $aasr_selected requested=${aasr_requested:-auto-lowest-pcm}" >&2
+  printf '%s\n' "$aasr_selected"
+}
+
+# audio_alsa_route_control <card> <playback|capture> [PCM]
+# Print the mixer link for the selected PCM. Return 2 for direct-codec cards,
+# 1 for invalid mappings. Omitting PCM retains deterministic automatic selection.
+audio_alsa_route_control() {
+  audio_alsa_route_links "$1" "$2" >/dev/null
+  aart_rc=$?
+  case "$aart_rc" in
+    0)
+      ;;
+    *)
+      return "$aart_rc"
+      ;;
+  esac
+  aart_selected="$(audio_alsa_select_route "$1" "$2" "${3:-}")" || return 1
+  printf '%s\n' "$aart_selected" | cut -d'|' -f2-
+}
+
+# audio_alsa_route_pcm <card> <playback|capture>
+# Print the deterministic runtime PCM for the selected speaker/microphone route.
+audio_alsa_route_pcm() {
+  aarp_selected="$(audio_alsa_select_route "$1" "$2")" || return 1
+  printf '%s\n' "$aarp_selected" | cut -d'|' -f1
+}
+
+# audio_alsa_card_dt_node <card>
+# Print the resolved DT node belonging to an ALSA card, including named cards.
+audio_alsa_card_dt_node() {
+  aacdn_card="$1"
+  if [ -L "/proc/asound/$aacdn_card" ]; then
+    aacdn_card="$(basename "$(readlink -f "/proc/asound/$aacdn_card")")"
+    aacdn_card="${aacdn_card#card}"
+  fi
+  aacdn_node="$(readlink -f "/sys/class/sound/card$aacdn_card/device/of_node" 2>/dev/null)"
+  [ -d "$aacdn_node" ] || return 1
+  printf '%s\n' "$aacdn_node"
+}
+
+# audio_alsa_validate_topology <card>
+# For a card linked to q6apm in runtime DT, verify the exact image-provided
+# topology using the kernel naming contract qcom/<driver>/<model>-tplg.bin.
+# Direct-codec cards have no such dependency. Never download or copy firmware.
+audio_alsa_validate_topology() {
+  aavt_card="$1"
+  if [ -L "/proc/asound/$aavt_card" ]; then
+    aavt_card="$(basename "$(readlink -f "/proc/asound/$aavt_card")")"
+    aavt_card="${aavt_card#card}"
+  fi
+  aavt_node="$(audio_alsa_card_dt_node "$aavt_card")" || return 0
+  audio_dt_requires_topology "$aavt_node" || return 0
+
+  aavt_model="$(dt_property_text "$aavt_node" model)"
+  aavt_driver="$(
+    awk -v card="$aavt_card" '
+      $1 == card {
+        sub(/^.*\]:[[:space:]]*/, "")
+        sub(/[[:space:]]+- .*/, "")
+        print
+        exit
+      }
+    ' /proc/asound/cards 2>/dev/null
+  )"
+  case "$aavt_driver:$aavt_model" in
+    :*|*:|*/*|*..*)
+      printf '%s\n' "Cannot derive the q6apm topology filename for ALSA card $aavt_card, DT=$aavt_node" >&2
+      return 1
+      ;;
+  esac
+  aavt_name="qcom/$aavt_driver/$aavt_model-tplg.bin"
+  aavt_path="$(find_image_firmware "$aavt_name")"
+  if [ -z "$aavt_path" ] || [ ! -s "$aavt_path" ]; then
+    printf '%s\n' "Required audio topology is missing or empty: $aavt_name, DT=$aavt_node. Include it in the build and boot with the matching audio DT." >&2
+    return 1
+  fi
+  printf '%s\n' "ALSA topology: card=$aavt_card DT=$aavt_node firmware=$aavt_path" >&2
+}
+
+# audio_log_phase <label> <monotonic-start> <status>
+# Emit elapsed preparation time to stderr, never contaminate discovery stdout.
+# Always return 0 so callers explicitly preserve their operation result.
+audio_log_phase() {
+  alp_elapsed=$(( $(get_monotonic_seconds) - $2 ))
+  if [ "$alp_elapsed" -lt 0 ]; then
+    alp_elapsed=0
+  fi
+  printf '%s\n' "[AUDIO-PHASE] $1 rc=$3 elapsed_s=$alp_elapsed" >&2
+  return 0
+}
+
+# audio_alsa_apply_controls <card> <required|optional> <name|value lines>
+# Apply the existing codec policy only to exposed controls. Missing required
+# controls and any failed write fail preparation, with command output on stderr.
+audio_alsa_apply_controls() {
+  aaac_card="$1"
+  aaac_policy="$2"
+  aaac_rows="$3"
+  aaac_names="$(audio_alsa_control_names "$aaac_card")" || return 1
+  while IFS='|' read -r aaac_name aaac_value; do
+    [ -n "$aaac_name" ] || continue
+    if ! printf '%s\n' "$aaac_names" | grep -F -x "$aaac_name" >/dev/null; then
+      if [ "$aaac_policy" = required ]; then
+        printf '%s\n' "Required ALSA control missing: card=$aaac_card name='$aaac_name'. Check the image codec/topology." >&2
+        return 1
+      fi
+      continue
+    fi
+    printf '%s\n' "ALSA mixer: card=$aaac_card name='$aaac_name' value='$aaac_value'" >&2
+    aaac_start="$(get_monotonic_seconds)"
+    if aaac_output="$(
+      audio_exec_with_timeout 5s amixer -c "$aaac_card" \
+        cset "iface=MIXER,name=$aaac_name" "$aaac_value" 2>&1
+    )"; then
+      audio_log_phase "mixer-write card=$aaac_card control='$aaac_name'" "$aaac_start" 0
+    else
+      aaac_rc=$?
+      audio_log_phase "mixer-write card=$aaac_card control='$aaac_name'" "$aaac_start" "$aaac_rc"
+      printf '%s\n' "ALSA mixer write failed: $aaac_output" >&2
+      return 1
+    fi
+  done <<EOF
+$aaac_rows
+EOF
 }
 
 # Set an optional mixer control without assuming that every platform has it.
@@ -3494,9 +5555,10 @@ audio_alsa_capture_inventory_available() {
 # The profile controls both mixer preparation and preferred PCM selection.
 audio_alsa_playback_profile() {
   aapp_card="$1"
+  aapp_controls="$(audio_alsa_control_names "$aapp_card")" || return 1
 
-  if audio_alsa_control_exists \
-      "$aapp_card" "PRIMARY_MI2S_RX Audio Mixer MultiMedia1"; then
+  if printf '%s\n' "$aapp_controls" |
+      grep -Eq '^PRIMARY_MI2S_RX Audio Mixer MultiMedia[0-9]+$'; then
     if audio_alsa_control_exists \
         "$aapp_card" "Left Speaker Mixer Left DAC Switch" ||
        audio_alsa_control_exists \
@@ -3509,8 +5571,8 @@ audio_alsa_playback_profile() {
     return 0
   fi
 
-  if audio_alsa_control_exists \
-      "$aapp_card" "SECONDARY_TDM_RX_0 Audio Mixer MultiMedia1"; then
+  if printf '%s\n' "$aapp_controls" |
+      grep -Eq '^SECONDARY_TDM_RX_0 Audio Mixer MultiMedia[0-9]+$'; then
     printf '%s\n' "secondary-tdm"
     return 0
   fi
@@ -3532,7 +5594,7 @@ audio_alsa_playback_profile() {
 # Find the first card exposing a recognized hardware playback route.
 audio_alsa_find_playback_card() {
   for aafpc_card in $(audio_alsa_card_indexes); do
-    aafpc_profile="$(audio_alsa_playback_profile "$aafpc_card")"
+    aafpc_profile="$(audio_alsa_playback_profile "$aafpc_card")" || continue
     if [ "$aafpc_profile" != "generic" ]; then
       printf '%s\n' "$aafpc_card"
       return 0
@@ -3943,15 +6005,21 @@ audio_alsa_enable_ucm_hifi_devices() {
 
 # Enable the selected UCM route when available, then retain legacy mixer
 # preparation only for images without a usable speaker UCM route.
+# Args: card, optional UCM card/device, optional selected PCM for mixer matching.
 audio_playback_alsa_prepare() {
   ap_card="${1:-}"
   ap_ucm_card="${2:-}"
   ap_ucm_device="${3:-}"
+  ap_selected_pcm="${4:-}"
   ap_profile=""
   ap_route_record=""
 
   if [ "${SINK_CHOICE:-speakers}" = "null" ]; then
     return 0
+  fi
+
+  if [ -n "$ap_card" ]; then
+    audio_alsa_validate_topology "$ap_card" || return 1
   fi
 
   if command -v alsaucm >/dev/null 2>&1; then
@@ -3993,65 +6061,70 @@ audio_playback_alsa_prepare() {
     return 0
   fi
 
-  ap_profile="$(audio_alsa_playback_profile "$ap_card")"
+  ap_profile="$(audio_alsa_playback_profile "$ap_card")" || return 1
 
   case "$ap_profile" in
     primary-mi2s)
-      audio_alsa_set_control_if_present \
-        "$ap_card" "Left Speaker Mixer Left DAC Switch" on || true
-      audio_alsa_set_control_if_present \
-        "$ap_card" "Right Speaker Mixer Right DAC Switch" on || true
-      audio_alsa_set_control_if_present \
-        "$ap_card" "Speaker Left Switch" on || true
-      audio_alsa_set_control_if_present \
-        "$ap_card" "Speaker Right Switch" on || true
-      audio_alsa_set_control_if_present \
-        "$ap_card" "Speaker Switch" on || true
-      audio_alsa_set_control_if_present \
-        "$ap_card" "Speaker Volume" 10 || true
-      audio_alsa_set_control_if_present \
-        "$ap_card" "Speaker Left Mixer Volume" 3 || true
-      audio_alsa_set_control_if_present \
-        "$ap_card" "Speaker Right Mixer Volume" 3 || true
-      audio_alsa_set_control_if_present \
-        "$ap_card" "Playback Path DC Blocking" 1 || true
-      audio_alsa_set_control_if_present \
-        "$ap_card" "PRIMARY_MI2S_RX Audio Mixer MultiMedia1" 1 || true
-      ;;
-    secondary-tdm)
-      audio_alsa_set_control_if_present \
-        "$ap_card" "SECONDARY_TDM_RX_0 Audio Mixer MultiMedia1" 1 || true
-      audio_alsa_set_control_if_present \
-        "$ap_card" "stream0.vol_ctrl0 MM1 Playback Volume" 65535 || true
-      ;;
-    legacy-primary)
-      audio_alsa_set_control_if_present \
-        "$ap_card" "PRIMARY_MI2S_RX Audio Mixer MultiMedia1" 1 || true
+      audio_alsa_apply_controls "$ap_card" optional \
+        "Left Speaker Mixer Left DAC Switch|on
+Right Speaker Mixer Right DAC Switch|on
+Speaker Left Switch|on
+Speaker Right Switch|on
+Speaker Switch|on
+Speaker Volume|10
+Speaker Left Mixer Volume|3
+Speaker Right Mixer Volume|3
+Playback Path DC Blocking|1" || return 1
       ;;
   esac
 
-  audio_alsa_set_control_if_present \
-    "$ap_card" "stream0.vol_ctrl0 MultiMedia1 Playback Volu" 65535 || true
+  ap_route_control="$(audio_alsa_route_control "$ap_card" playback "$ap_selected_pcm")"
+  ap_route_rc=$?
+  case "$ap_route_rc" in
+    0)
+      audio_alsa_apply_controls "$ap_card" required \
+        "$ap_route_control|1" || return 1
+      ap_frontend="${ap_route_control##*MultiMedia}"
+      ap_control_names="$(audio_alsa_control_names "$ap_card")" || return 1
+      ap_volume_controls="$(
+        printf '%s\n' "$ap_control_names" |
+          grep -E "^stream[0-9]+[.]vol_ctrl[0-9]+ (MultiMedia${ap_frontend}|MM${ap_frontend}) Playback (Volu|Volume)$"
+      )"
+      while IFS= read -r ap_volume_control; do
+        [ -n "$ap_volume_control" ] || continue
+        audio_alsa_apply_controls "$ap_card" required \
+          "$ap_volume_control|65535" || return 1
+      done <<EOF
+$ap_volume_controls
+EOF
+      ;;
+    2)
+      ;;
+    *)
+      return 1
+      ;;
+  esac
 
   if [ "$ap_profile" != "primary-mi2s" ]; then
-    audio_alsa_set_control_if_present \
-      "$ap_card" "Rx Slot Mask" 3 || true
+    ap_control_policy=optional
+    audio_alsa_apply_controls "$ap_card" "$ap_control_policy" \
+      "Rx Slot Mask|3" || return 1
 
     if audio_alsa_control_exists \
         "$ap_card" "SA1 FU21 Stereo Gain Offset dB"; then
-      audio_alsa_set_control_if_present \
-        "$ap_card" "SA1 FU21 Stereo Gain Offset dB" 72 || true
+      audio_alsa_apply_controls "$ap_card" "$ap_control_policy" \
+        "SA1 FU21 Stereo Gain Offset dB|72" || return 1
     else
-      audio_alsa_set_control_if_present \
-        "$ap_card" "Speaker Volume" 72 || true
+      audio_alsa_apply_controls "$ap_card" "$ap_control_policy" \
+        "Speaker Volume|72" || return 1
     fi
 
     if audio_alsa_control_exists "$ap_card" "OT23 Usage Mode"; then
-      audio_alsa_set_control_if_present \
-        "$ap_card" "OT23 Usage Mode" 3 || true
+      audio_alsa_apply_controls "$ap_card" "$ap_control_policy" \
+        "OT23 Usage Mode|3" || return 1
     else
-      audio_alsa_set_control_if_present \
-        "$ap_card" "Usage Mode" 3 || true
+      audio_alsa_apply_controls "$ap_card" "$ap_control_policy" \
+        "Usage Mode|3" || return 1
     fi
   fi
 
@@ -4076,19 +6149,9 @@ audio_playback_pick_legacy_alsa_sink() {
       ap_profile="$(audio_alsa_playback_profile "$ap_card")"
 
       case "$ap_profile" in
-        primary-mi2s|secondary-tdm)
-          if aplay -l 2>/dev/null |
-              grep -E "^card[[:space:]]+$ap_card:.*device[[:space:]]+0:" >/dev/null 2>&1; then
-            printf '%s\n' "plughw:$ap_card,0"
-            return 0
-          fi
-          ;;
-        codec-direct)
-          if aplay -l 2>/dev/null |
-              grep -E "^card[[:space:]]+$ap_card:.*device[[:space:]]+2:" >/dev/null 2>&1; then
-            printf '%s\n' "plughw:$ap_card,2"
-            return 0
-          fi
+        primary-mi2s|secondary-tdm|codec-direct)
+          audio_alsa_route_pcm "$ap_card" playback
+          return $?
           ;;
       esac
     fi
@@ -4167,9 +6230,57 @@ audio_playback_pick_alsa_sink() {
   printf '%s\n' "$appas_record" | cut -d'|' -f1
 }
 
+# audio_probe_log_begin <log-file> <label>
+# Announce preparation on stderr and print the first new artifact line number
+# on stdout. Keep helper return data separate from diagnostics. No execution
+# pipelines or process redirection changes are introduced for the media client.
+audio_probe_log_begin() {
+  aplb_file="$1"
+  aplb_label="$2"
+  aplb_first=1
+  if [ "$aplb_file" != /dev/stderr ]; then
+    if ! : >>"$aplb_file"; then
+      printf '%s\n' "[$aplb_label] Cannot write probe diagnostics: $aplb_file" >&2
+      return 1
+    fi
+    aplb_lines="$(wc -l <"$aplb_file")"
+    aplb_first=$((aplb_lines + 1))
+  fi
+  printf '%s\n' "[$aplb_label] Preparing route: discover PCM, validate topology, apply mixers, then run a bounded stream probe. Details: $aplb_file" >&2
+  printf '%s\n' "$aplb_first"
+}
+
+# audio_probe_log_finish <log-file> <label> <first-line> <status> <start-seconds>
+# Replay only this attempt's diagnostics to stderr and retain its status and
+# preparation-plus-probe elapsed time in the artifact. Always return success,
+# callers preserve and return the original probe status explicitly.
+audio_probe_log_finish() {
+  aplf_file="$1"
+  aplf_label="$2"
+  aplf_first="$3"
+  aplf_rc="$4"
+  aplf_start="$5"
+  aplf_now="$(get_monotonic_seconds)"
+  aplf_elapsed=$((aplf_now - aplf_start))
+  if [ "$aplf_elapsed" -lt 0 ]; then
+    aplf_elapsed=0
+  fi
+  if [ "$aplf_file" != /dev/stderr ]; then
+    sed -n "${aplf_first},\$p" "$aplf_file" >&2
+  fi
+  aplf_message="[$aplf_label] Preparation and probe finished: rc=$aplf_rc elapsed_s=$aplf_elapsed. This is not the full media test duration."
+  printf '%s\n' "$aplf_message" >&2
+  if [ "$aplf_file" != /dev/stderr ]; then
+    printf '%s\n' "$aplf_message" >>"$aplf_file"
+  fi
+  return 0
+}
+
 # Prepare the selected card before verifying that its playback PCM can open.
 # An explicit device is opened exactly as supplied after semantic-route checks.
+# Return 0 for success, 1 for no route, 3 for a selected candidate failure.
 audio_playback_alsa_probe() {
+  ap_discovery_start="$(get_monotonic_seconds)"
   ap_probe_requested_device="${1:-}"
   ap_probe_selection="auto"
   case "$ap_probe_requested_device" in
@@ -4179,9 +6290,14 @@ audio_playback_alsa_probe() {
       return 1
       ;;
   esac
-  ap_probe_route="$(
+  if ap_probe_route="$(
     audio_playback_resolve_alsa_route "${SINK_CHOICE:-speakers}"
-  )" || return 1
+  )"; then
+    :
+  else
+    audio_log_phase playback-discovery "$ap_discovery_start" 1
+    return 1
+  fi
   ap_probe_route_dev="$(printf '%s\n' "$ap_probe_route" | cut -d'|' -f1)"
   if [ -n "$ap_probe_requested_device" ]; then
     ap_probe_route_dev="$ap_probe_requested_device"
@@ -4216,19 +6332,26 @@ audio_playback_alsa_probe() {
 
   printf '%s\n' \
     "[ALSA-PROBE] discovered_pcm=$ap_probe_route_dev effective_target=$ap_probe_dev card=${ap_probe_card:-unknown} profile=$ap_probe_profile ucm_card=${ap_probe_ucm_card:-none} ucm_device=${ap_probe_ucm_device:-none}" >&2
+  audio_log_phase playback-discovery "$ap_discovery_start" 0
+  ap_prepare_start="$(get_monotonic_seconds)"
   if ! audio_playback_alsa_prepare \
-      "$ap_probe_card" "$ap_probe_ucm_card" "$ap_probe_ucm_device"; then
+      "$ap_probe_card" "$ap_probe_ucm_card" "$ap_probe_ucm_device" "$ap_probe_dev"; then
+    audio_log_phase playback-topology-mixers "$ap_prepare_start" 1
     printf '%s\n' \
       "[ALSA-PROBE] route preparation failed: choice=${SINK_CHOICE:-speakers} device=$ap_probe_dev" >&2
-    return 1
+    return 3
   fi
+  audio_log_phase playback-topology-mixers "$ap_prepare_start" 0
 
   printf '%s\n' \
     "[ALSA-PROBE] exec: aplay -D $ap_probe_dev -t raw -f S16_LE -r 48000 -c 2 -d 1 /dev/zero" >&2
+  ap_probe_start="$(get_monotonic_seconds)"
   audio_exec_with_timeout 5s \
     aplay -D "$ap_probe_dev" -t raw -f S16_LE -r 48000 -c 2 -d 1 \
     /dev/zero >/dev/null
   ap_probe_rc=$?
+  ap_probe_end="$(get_monotonic_seconds)"
+  printf '%s\n' "[ALSA-PROBE] stream probe finished: device=$ap_probe_dev rc=$ap_probe_rc elapsed_s=$((ap_probe_end - ap_probe_start))" >&2
 
   if [ "$ap_probe_rc" -eq 0 ]; then
     printf '%s\n' \
@@ -4240,15 +6363,13 @@ audio_playback_alsa_probe() {
 
   printf '%s\n' \
     "[ALSA-PROBE] playback candidate failed: device=$ap_probe_dev exit_status=$ap_probe_rc" >&2
-  return 1
+  return 3
 }
 
 # Print the successfully probed ALSA playback device for propagation from a
 # desktop Audio-user subprocess back into the root orchestrator.
 audio_playback_alsa_probe_device() {
-  if ! audio_playback_alsa_probe "${1:-}"; then
-    return 1
-  fi
+  audio_playback_alsa_probe "${1:-}" || return $?
 
   printf '%s\n' "$AUDIO_ALSA_PLAYBACK_DEVICE"
 }
@@ -4275,6 +6396,8 @@ audio_alsa_playback_inventory_available() {
 audio_playback_probe_alsa_with_recovery() {
   appawr_requested_device="${1:-}"
   appawr_log="${AUDIO_ALSA_PLAYBACK_PROBE_LOG:-/dev/stderr}"
+  appawr_start="$(get_monotonic_seconds)"
+  appawr_first="$(audio_probe_log_begin "$appawr_log" ALSA-PLAYBACK-PROBE)" || return 1
   if [ "$appawr_log" != "/dev/stderr" ]; then
     printf '\n%s\n' \
       "[ALSA-PROBE] attempt started at $(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
@@ -4287,11 +6410,19 @@ audio_playback_probe_alsa_with_recovery() {
       2>>"$appawr_log"
   )"
   appawr_rc=$?
+  audio_probe_log_finish "$appawr_log" ALSA-PLAYBACK-PROBE \
+    "$appawr_first" "$appawr_rc" "$appawr_start"
 
   if [ "$appawr_rc" -eq 0 ] && [ -n "$appawr_output" ]; then
     AUDIO_ALSA_PLAYBACK_DEVICE="$(printf '%s\n' "$appawr_output" | tail -n 1)"
     export AUDIO_ALSA_PLAYBACK_DEVICE
     return 0
+  fi
+
+  # Keep a failed selected candidate distinct across the user subprocess.
+  # Recovery is only for absent inventory, never a failed open or preparation.
+  if [ "$appawr_rc" -ne 1 ]; then
+    return 3
   fi
 
   if [ -n "$appawr_requested_device" ]; then
@@ -4338,14 +6469,21 @@ audio_playback_probe_alsa_with_recovery() {
     appawr_wait=$((appawr_wait + 1))
   done
 
+  appawr_start="$(get_monotonic_seconds)"
+  appawr_first="$(audio_probe_log_begin "$appawr_log" ALSA-PLAYBACK-RETRY)" || return 1
   appawr_output="$(
     audio_run_helper_as_test_user audio_playback_alsa_probe_device \
       "$appawr_requested_device" \
       2>>"$appawr_log"
   )"
   appawr_rc=$?
+  audio_probe_log_finish "$appawr_log" ALSA-PLAYBACK-RETRY \
+    "$appawr_first" "$appawr_rc" "$appawr_start"
 
   if [ "$appawr_rc" -ne 0 ] || [ -z "$appawr_output" ]; then
+    if [ "$appawr_rc" -ne 1 ]; then
+      return 3
+    fi
     return 1
   fi
 
@@ -4390,10 +6528,16 @@ audio_playback_probe_selected_alsa_with_recovery() {
 
     if audio_playback_probe_alsa_with_recovery \
         "$appsawr_requested_device"; then
+      AUDIO_PLAYBACK_PROBE_FAILED=0
       AUDIO_PLAYBACK_ROUTE_SELECTED="$appsawr_route"
       AUDIO_ALSA_PLAYBACK_REASON=""
       export AUDIO_PLAYBACK_ROUTE_SELECTED AUDIO_ALSA_PLAYBACK_REASON
       return 0
+    else
+      appsawr_rc=$?
+      if [ "$appsawr_rc" -ne 1 ]; then
+        AUDIO_PLAYBACK_PROBE_FAILED=1
+      fi
     fi
 
     if [ -n "$appsawr_reasons" ]; then
@@ -4504,11 +6648,17 @@ audio_alsa_find_ucm_capture_route() {
 
 # Enable the selected UCM route when available, then retain legacy mixer
 # preparation only for images without a usable built-in microphone UCM route.
+# Args: card, optional UCM card/device, optional selected PCM for mixer matching.
 audio_record_alsa_prepare_capture() {
   ar_card="${1:-}"
   ar_ucm_card="${2:-}"
   ar_ucm_device="${3:-}"
+  ar_selected_pcm="${4:-}"
   ar_route_record=""
+
+  if [ -n "$ar_card" ]; then
+    audio_alsa_validate_topology "$ar_card" || return 1
+  fi
 
   if command -v alsaucm >/dev/null 2>&1; then
     if [ -z "$ar_ucm_card" ] || [ -z "$ar_ucm_device" ]; then
@@ -4556,43 +6706,41 @@ audio_record_alsa_prepare_capture() {
     return 0
   fi
 
-  audio_alsa_set_control_if_present \
-    "$ar_card" "VA DEC0 MUX" "VA_DMIC" || true
-  audio_alsa_set_control_if_present \
-    "$ar_card" "VA DMIC MUX0" "DMIC0" || true
-  audio_alsa_set_control_if_present \
-    "$ar_card" "VA_AIF1_CAP Mixer DEC0" 1 || true
-  audio_alsa_set_control_if_present \
-    "$ar_card" "VA_DEC0 Volume" 100 || true
-  audio_alsa_set_control_if_present \
-    "$ar_card" "MultiMedia3 Mixer VA_CODEC_DMA_TX_0" 1 || true
-  audio_alsa_set_control_if_present \
-    "$ar_card" "MultiMedia2 Mixer TERTIARY_MI2S_TX" 1 || true
+  if audio_alsa_control_exists "$ar_card" "VA DEC0 MUX"; then
+    audio_alsa_apply_controls "$ar_card" required \
+      "VA DEC0 MUX|VA_DMIC
+VA DMIC MUX0|DMIC0
+VA_AIF1_CAP Mixer DEC0|1
+VA_DEC0 Volume|100" || return 1
+  fi
+  ar_route_control="$(audio_alsa_route_control "$ar_card" capture "$ar_selected_pcm")"
+  ar_route_rc=$?
+  case "$ar_route_rc" in
+    0)
+      audio_alsa_apply_controls "$ar_card" required \
+        "$ar_route_control|1" || return 1
+      ;;
+    2)
+      ;;
+    *)
+      return 1
+      ;;
+  esac
 
   return 0
 }
 
-# Prefer the capture PCM implied by the available VA DMA controls, falling back
-# to the first ALSA capture device for platforms with other routing schemes.
+# Resolve known microphone routes by runtime link names. Retain the original
+# first-device fallback only for cards with other routing schemes.
 audio_record_pick_legacy_alsa_capture() {
   ar_dev=""
   ar_card=""
 
   if command -v arecord >/dev/null 2>&1; then
     for ar_card in $(audio_alsa_card_indexes); do
-      if audio_alsa_control_exists \
-          "$ar_card" "MultiMedia3 Mixer VA_CODEC_DMA_TX_0"; then
-        if arecord -l 2>/dev/null |
-            grep -E "^card[[:space:]]+$ar_card:.*device[[:space:]]+2:" >/dev/null 2>&1; then
-          printf '%s\n' "plughw:$ar_card,2"
-          return 0
-        fi
-      elif audio_alsa_control_exists "$ar_card" "VA DEC0 MUX"; then
-        if arecord -l 2>/dev/null |
-            grep -E "^card[[:space:]]+$ar_card:.*device[[:space:]]+3:" >/dev/null 2>&1; then
-          printf '%s\n' "plughw:$ar_card,3"
-          return 0
-        fi
+      if audio_alsa_control_exists "$ar_card" "VA DEC0 MUX"; then
+        audio_alsa_route_pcm "$ar_card" capture
+        return $?
       fi
     done
 
@@ -4667,7 +6815,7 @@ audio_record_alsa_capture_probe() {
   fi
 
   ar_probe_card="$(audio_alsa_device_card "$ar_probe_dev")"
-  audio_record_alsa_prepare_capture "$ar_probe_card" >/dev/null 2>&1 || true
+  audio_record_alsa_prepare_capture "$ar_probe_card" "" "" "$ar_probe_dev" || return 1
 
   ar_probe_dir="$(audio_scratch_dir 2>/dev/null || true)"
   if [ -z "$ar_probe_dir" ]; then
@@ -4713,8 +6861,10 @@ audio_record_alsa_capture_probe() {
 
 # audio_probe_alsa_capture_profile [device]
 # Probe a supported capture format on one explicit device or discovered devices.
+# Return 0 for success, 1 for absent capability, 3 for preparation/open failure.
 # shellcheck disable=SC2120
 audio_probe_alsa_capture_profile() {
+  capture_discovery_start="$(get_monotonic_seconds)"
   requested_capture_device="${1:-}"
   # shellcheck disable=SC2034
   AUDIO_ALSA_CAPTURE_DEVICE=""
@@ -4736,7 +6886,7 @@ audio_probe_alsa_capture_profile() {
   probe_dir="$(audio_scratch_dir 2>/dev/null || true)"
   if [ -z "$probe_dir" ]; then
     AUDIO_ALSA_CAPTURE_REASON="no writable Audio scratch directory is available"
-    return 1
+    return 3
   fi
   probe_tmp=""
   if command -v mktemp >/dev/null 2>&1; then
@@ -4754,8 +6904,13 @@ audio_probe_alsa_capture_profile() {
 
   probe_devices=""
   probe_route_record="$(
-    audio_record_resolve_alsa_route "${SRC_CHOICE:-mic}" 2>/dev/null || true
+    audio_record_resolve_alsa_route "${SRC_CHOICE:-mic}"
   )"
+  if [ -z "$probe_route_record" ]; then
+    AUDIO_ALSA_CAPTURE_REASON="no unambiguous ${SRC_CHOICE:-mic} PCM route was discovered, check image topology/UCM and ALSA mixer/PCM inventory"
+    probe_cleanup
+    return 1
+  fi
   probe_ucm_card="$(
     printf '%s\n' "$probe_route_record" | cut -d'|' -f2
   )"
@@ -4805,7 +6960,9 @@ audio_probe_alsa_capture_profile() {
     fi
 
     extra_devices=""
-    if [ -z "$probe_ucm_card" ] && [ "${SRC_CHOICE:-mic}" = "mic" ]; then
+    probe_route_card="$(audio_alsa_device_card "$cand")"
+    if [ -z "$probe_ucm_card" ] && [ "${SRC_CHOICE:-mic}" = "mic" ] &&
+       ! audio_alsa_control_exists "$probe_route_card" "VA DEC0 MUX"; then
       extra_devices="$(
         sed -n \
           's/^\([0-9][0-9]*\)-\([0-9][0-9]*\):.*capture.*/hw:\1,\2/p' \
@@ -4844,15 +7001,19 @@ audio_probe_alsa_capture_profile() {
     return 1
   fi
 
+  audio_log_phase capture-discovery "$capture_discovery_start" 0
   for dev in $probe_devices; do
     # Mixer controls and PCM devices must come from the same ALSA card.
     probe_card="$(audio_alsa_device_card "$dev")"
+    capture_prepare_start="$(get_monotonic_seconds)"
     if ! audio_record_alsa_prepare_capture \
-        "$probe_card" "$probe_ucm_card" "$probe_ucm_device"; then
+        "$probe_card" "$probe_ucm_card" "$probe_ucm_device" "$dev"; then
+      audio_log_phase "capture-topology-mixers device=$dev" "$capture_prepare_start" 1
       AUDIO_ALSA_CAPTURE_REASON="could not prepare the ${SRC_CHOICE:-mic} capture route for $dev"
       probe_cleanup
-      return 1
+      return 3
     fi
+    audio_log_phase "capture-topology-mixers device=$dev" "$capture_prepare_start" 0
 
     for combo in \
       "S16_LE 48000 1" \
@@ -4867,10 +7028,19 @@ audio_probe_alsa_capture_profile() {
 
       : > "$probe_tmp"
 
+      printf '%s\n' "[ALSA-CAPTURE-PROBE] device=$dev format=$fmt rate=$rate channels=$ch duration_s=1 timeout_s=5" >&2
+      probe_stream_start="$(get_monotonic_seconds)"
       if audio_exec_with_timeout 5s \
-        arecord -q -D "$dev" -f "$fmt" -r "$rate" -c "$ch" -d 1 "$probe_tmp" >/dev/null 2>&1
+        arecord -q -D "$dev" -f "$fmt" -r "$rate" -c "$ch" -d 1 "$probe_tmp" >/dev/null
       then
-        bytes="$(file_size_bytes "$probe_tmp" 2>/dev/null || echo 0)"
+        probe_stream_rc=0
+      else
+        probe_stream_rc=$?
+      fi
+      probe_stream_end="$(get_monotonic_seconds)"
+      bytes="$(file_size_bytes "$probe_tmp" 2>/dev/null || echo 0)"
+      printf '%s\n' "[ALSA-CAPTURE-PROBE] Stream probe finished: rc=$probe_stream_rc elapsed_s=$((probe_stream_end - probe_stream_start)) bytes=${bytes:-0}" >&2
+      if [ "$probe_stream_rc" -eq 0 ]; then
         if [ "${bytes:-0}" -gt 44 ] 2>/dev/null; then
           # Used later by sourced run.sh
           # shellcheck disable=SC2034
@@ -4894,7 +7064,7 @@ audio_probe_alsa_capture_profile() {
   # shellcheck disable=SC2034
   AUDIO_ALSA_CAPTURE_REASON="no ALSA capture profile could be opened"
   probe_cleanup
-  return 1
+  return 3
 }
 
 ###############################################################################
@@ -5091,11 +7261,9 @@ audio_card_dt_audio_expected() {
     done
   fi
 
-  if [ ! -d /proc/device-tree ]; then
-    return 1
-  fi
+  audio_card_dt_root="$(dt_runtime_root)" || return 1
 
-  if find /proc/device-tree -type d \( \
+  if find "$audio_card_dt_root" -type d \( \
       -name "sound" -o \
       -name "*sound*" -o \
       -name "*audio*" \
@@ -5108,7 +7276,7 @@ audio_card_dt_audio_expected() {
   compat_match_file="$(mktemp "$compat_match_dir/audio_compat_match.XXXXXX" 2>/dev/null || printf '%s\n' "$compat_match_dir/audio_compat_match.$$")"
   : > "$compat_match_file" 2>/dev/null || return 1
 
-  find /proc/device-tree -name compatible -type f 2>/dev/null |
+  find "$audio_card_dt_root" -name compatible -type f 2>/dev/null |
   while IFS= read -r compat_file || [ -n "$compat_file" ]; do
     [ -n "$compat_file" ] || continue
 
@@ -5167,6 +7335,158 @@ audio_card_wait_for_cards() {
     esac
   done
 
+  return 1
+}
+
+# audio_remoteproc_filter_events <snapshot> <output-directory>
+# Reuse a captured kernel snapshot. Retain current-window audio context and
+# failures attributed to the selected remoteproc, never another DSP or old boot
+# messages. Missing monotonic timestamps cannot establish current-run failures.
+audio_remoteproc_filter_events() {
+  arfe_snapshot="$1"
+  arfe_out="$2"
+  : >"$arfe_out/remoteproc_events.log"
+  : >"$arfe_out/remoteproc_failures.log"
+  [ -r "$arfe_snapshot" ] || return 0
+  awk -v since="${AUDIO_REMOTE_PROC_SINCE:-}" \
+      -v instance="${AUDIO_REMOTE_PROC_PATH##*/}" \
+      -v controller="${AUDIO_REMOTE_PROC_CONTROLLER:-}" \
+      -v events="$arfe_out/remoteproc_events.log" \
+      -v failures="$arfe_out/remoteproc_failures.log" '
+    since ~ /^[0-9]+$/ && /^\[[[:space:]]*[0-9]+([.][0-9]+)?\]/ {
+      stamp = $0
+      sub(/^\[[[:space:]]*/, "", stamp)
+      sub(/\].*$/, "", stamp)
+      if (stamp + 0 < since + 0) next
+      message = tolower($0)
+      selected = (instance != "" && index($0, "remoteproc " instance ":") != 0) ||
+                 (controller != "" && index($0, " " controller ":") != 0)
+      benign = message ~ /dummy regulator|supply [^ ]+ not found/
+      if (selected || (!benign && message ~ /qcom.apm|apr|gpr|asoc|snd-|va_macro|codec|sound|failed to announce new service|failed while handling packet/))
+        print $0 > events
+      if (selected && message ~ /crash detected|handling crash|recovering |fatal error|watchdog|stalled initialization/)
+        print $0 > failures
+    }
+  ' "$arfe_snapshot"
+}
+
+# audio_remoteproc_report_health <captured-output-directory>
+# Retain selected remoteproc state and filtered kernel evidence. Return 1 on
+# observed current-run crash/recovery or crashed state, 0 otherwise. This does
+# not claim kernel-log availability or DSP health solely from state=running.
+audio_remoteproc_report_health() {
+  arrh_out="$1"
+  [ -n "${AUDIO_REMOTE_PROC_PATH:-}" ] || return 0
+  mkdir -p "$arrh_out" || return 1
+  arrh_state=unavailable
+  if [ -r "$AUDIO_REMOTE_PROC_PATH/state" ]; then
+    IFS= read -r arrh_state <"$AUDIO_REMOTE_PROC_PATH/state" || true
+  fi
+  printf '%s\n' \
+    "path=$AUDIO_REMOTE_PROC_PATH" \
+    "controller=${AUDIO_REMOTE_PROC_CONTROLLER:-unknown}" \
+    "initial_state=${AUDIO_REMOTE_PROC_INITIAL_STATE:-unknown}" \
+    "current_state=$arrh_state" \
+    "since_uptime=${AUDIO_REMOTE_PROC_SINCE:-unavailable}" \
+    >"$arrh_out/remoteproc_state.log"
+  list_remoteproc_instances >"$arrh_out/remoteproc_inventory.log" 2>&1 || true
+  if [ -r /sys/kernel/debug/devices_deferred ]; then
+    cat /sys/kernel/debug/devices_deferred >"$arrh_out/devices_deferred.log"
+  else
+    printf '%s\n' 'Deferred-probe inventory unavailable, debugfs was not mounted by the test' \
+      >"$arrh_out/devices_deferred.log"
+  fi
+  audio_remoteproc_filter_events "$arrh_out/dmesg_snapshot.log" "$arrh_out" || return 1
+  if [ -s "$arrh_out/remoteproc_failures.log" ] || [ "$arrh_state" = crashed ]; then
+    AUDIO_REMOTE_PROC_REASON="audio remoteproc crash/recovery observed for $AUDIO_REMOTE_PROC_PATH, current_state=$arrh_state, inspect firmware initialization and artifacts in $arrh_out"
+    export AUDIO_REMOTE_PROC_REASON
+    log_fail "$AUDIO_REMOTE_PROC_REASON"
+    log_file_with_label AUDIO-REMOTEPROC "$arrh_out/remoteproc_state.log"
+    log_file_with_label AUDIO-REMOTEPROC-FAILURE "$arrh_out/remoteproc_failures.log" 40
+    log_file_with_label AUDIO-KERNEL "$arrh_out/remoteproc_events.log" 60
+    return 1
+  fi
+  return 0
+}
+
+# audio_collect_remoteproc_diagnostics <output-directory>
+# Capture one preflight kernel snapshot through the common provider, retaining
+# access diagnostics. --no-dmesg disables capture and kernel-log classification.
+# Return the selected remoteproc health status, preserving an existing failure.
+audio_collect_remoteproc_diagnostics() {
+  acrd_out="$1"
+  [ -n "${AUDIO_REMOTE_PROC_PATH:-}" ] || return 0
+  mkdir -p "$acrd_out" || return 1
+  if [ "${DMESG_SCAN:-1}" -eq 1 ]; then
+    KERNEL_LOG_JOURNAL_FALLBACK="${KERNEL_LOG_JOURNAL_FALLBACK:-1}" \
+      scan_dmesg_errors "$acrd_out" \
+      'remoteproc[^:]*|qcom[-_]q6[^:]*|qcom[-_]apm[^:]*|snd[^:]*|.*codec[^:]*|asoc[^:]*|gpr[^:]*|apr[^:]*' \
+      'dummy regulator|supply [^ ]+ not found|using dummy regulator' \
+      >"$acrd_out/kernel_capture.log" 2>&1 || true
+    log_info "Audio kernel capture status=${DMESG_ACCESS_STATUS:-unavailable}, raw snapshot and provider diagnostics: $acrd_out"
+    if [ "${DMESG_ACCESS_STATUS:-unavailable}" != available ]; then
+      log_warn "Audio remoteproc kernel evidence unavailable, current sysfs state alone cannot rule out earlier recovery, see $acrd_out/dmesg_access.log"
+    fi
+  else
+    # Do not reuse a snapshot left by an earlier invocation with the same suffix.
+    : >"$acrd_out/dmesg_snapshot.log"
+    : >"$acrd_out/dmesg_errors.log"
+    log_info "Audio remoteproc kernel capture disabled by --no-dmesg"
+  fi
+  audio_remoteproc_report_health "$acrd_out" || return 1
+  log_file_with_label AUDIO-KERNEL "$acrd_out/remoteproc_events.log" 60
+  return 0
+}
+
+# audio_wait_for_alsa_registration <playback|capture>
+# Wait up to 30 seconds for a card and another 10 seconds for a directional PCM.
+# Called only for ALSA after applicable audio remoteproc preparation. Return 1
+# with ALSA and remoteproc diagnostics on stdout when registration is incomplete.
+# On timeout, retain FAIL and observe for another 15s before capturing late
+# watchdog evidence. Successful registration is also checked for prior recovery.
+audio_wait_for_alsa_registration() {
+  awfar_direction="$1"
+  case "$awfar_direction" in
+    playback|capture)
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+  if audio_card_wait_for_cards 30 ""; then
+    awfar_elapsed=0
+    while [ "$awfar_elapsed" -le 10 ]; do
+      if grep -E \
+          "^[0-9]+-[0-9]+:.*${awfar_direction}[[:space:]]+[1-9][0-9]*" \
+          /proc/asound/pcm >/dev/null 2>&1; then
+        log_info "ALSA $awfar_direction PCM registration is ready"
+        if [ -n "${LOGDIR:-}" ]; then
+          audio_collect_remoteproc_diagnostics "$LOGDIR/remoteproc-preflight" || return 1
+        fi
+        return 0
+      fi
+      if [ "$awfar_elapsed" -eq 10 ]; then
+        break
+      fi
+      sleep 1
+      awfar_elapsed=$((awfar_elapsed + 1))
+    done
+  fi
+  AUDIO_REMOTE_PROC_REASON="ALSA $awfar_direction registration timed out after audio remoteproc preparation, check sound-card probe, DT and image topology"
+  export AUDIO_REMOTE_PROC_REASON
+  log_fail "$AUDIO_REMOTE_PROC_REASON"
+  if [ -n "${LOGDIR:-}" ] && [ -n "${AUDIO_REMOTE_PROC_PATH:-}" ]; then
+    if [ "${DMESG_SCAN:-1}" -eq 1 ]; then
+      log_info "Registration has failed, observing for 15s to retain late remoteproc watchdog/recovery evidence, late registration will not change this result"
+      sleep 15
+    fi
+    audio_collect_remoteproc_diagnostics "$LOGDIR/remoteproc-preflight" || true
+    log_file_with_label AUDIO-DEFERRED "$LOGDIR/remoteproc-preflight/devices_deferred.log" 40
+    log_info "Audio remoteproc diagnostic artifacts: $LOGDIR/remoteproc-preflight"
+  fi
+  audio_card_log_alsa_inventory
+  awfar_remoteprocs="$(list_remoteproc_instances 2>/dev/null)"
+  log_info "Remoteproc inventory (path|name|firmware|state): $awfar_remoteprocs"
   return 1
 }
 
@@ -5357,23 +7677,7 @@ audio_card_validate_pcm_nodes() {
 
 # Audio-card focused dmesg scan.
 audio_card_dmesg_scan() {
-  outdir="$1"
-
-  if [ -z "$outdir" ]; then
-    outdir="."
-  fi
-
-  audio_dmesg_modules="snd|asoc|audio|lpass|q6|q6afe|q6asm|q6adm|apr|glink|wsa|rx-macro|tx-macro|va-macro|soundwire|swr|codec|remoteproc"
-  audio_dmesg_benign="dummy regulator|probe deferred|deferred probe pending"
-
-  if command -v scan_dmesg_errors >/dev/null 2>&1; then
-    scan_dmesg_errors \
-      "$outdir" \
-      "$audio_dmesg_modules" \
-      "$audio_dmesg_benign" || true
-  else
-    log_warn "scan_dmesg_errors helper not available, skipping audio dmesg scan"
-  fi
+  scan_audio_dmesg "${1:-.}"
 }
 
 ###############################################################################
@@ -5516,7 +7820,21 @@ audio_refresh_overlay_devices() {
   return 0
 }
 
-# Validate the dma-heap node required by the Debian AudioReach overlay.
+# Print the image's AudioReach heap path. Optional argument 1 requires modem
+# audio even if its passthrough node failed to appear. An explicit override wins.
+audio_overlay_heap_node() {
+  if [ -n "${AUDIO_DMA_HEAP_NODE:-}" ]; then
+    printf '%s\n' "$AUDIO_DMA_HEAP_NODE"
+  elif [ "${1:-0}" -eq 1 ] || [ -e /dev/aud_pasthru_modem ]; then
+    printf '%s\n' /dev/dma_heap/qcom,audio
+  else
+    printf '%s\n' /dev/dma_heap/system
+  fi
+}
+
+# Validate image-provided AudioReach device access for the executing user.
+# A modem passthrough device selects the dedicated audio heap. Other paths
+# retain the system heap, with AUDIO_DMA_HEAP_NODE taking precedence.
 #
 # The helper is deliberately non-mutating: it never chmods the node and never
 # changes users or groups. Packaged udev/group policy must provide access.
@@ -5525,10 +7843,21 @@ audio_refresh_overlay_devices() {
 #   0 - node exists and is readable/writable by the current test process
 #   1 - node is missing or inaccessible
 audio_validate_dma_heap_access() {
-  avdha_node="${AUDIO_DMA_HEAP_NODE:-/dev/dma_heap/system}"
+  avdha_node="$(audio_overlay_heap_node "${1:-0}")"
+
+  if [ "${1:-0}" -eq 1 ] && [ ! -e /dev/aud_pasthru_modem ]; then
+    log_fail "Selected modem audio has no /dev/aud_pasthru_modem, inspect AudioReach driver binding and image device configuration"
+    return 1
+  fi
+
+  if [ -e /dev/aud_pasthru_modem ] &&
+     { [ ! -r /dev/aud_pasthru_modem ] || [ ! -w /dev/aud_pasthru_modem ]; }; then
+    log_fail "The audio process cannot access /dev/aud_pasthru_modem, fix the image udev/group policy"
+    return 1
+  fi
 
   if [ ! -e "$avdha_node" ]; then
-    log_fail "$avdha_node is missing"
+    log_fail "$avdha_node is missing, provision the required AudioReach heap in the image"
     return 1
   fi
 
@@ -5555,7 +7884,7 @@ audio_validate_dma_heap_access() {
 #
 # Args:
 #   $1 - 0 for base Audio mode
-#        1 when --overlay was explicitly requested
+#        1 for an explicit or runtime-detected overlay, no package installation
 #
 # Prerequisite for the preferred desktop root path:
 #   audio_prepare_desktop_audio_environment 1
@@ -5565,7 +7894,8 @@ audio_validate_dma_heap_access() {
 #     - validate dma-heap access as the desktop Audio user
 #     - validate ALSA node access as the desktop Audio user
 #     - validate PipeWire through the desktop user session
-#     - restart PipeWire only when required
+#     - preserve active PipeWire, validate routes separately
+#     - one restart for inactive/failed PipeWire or changed overlay packages
 #
 #   Debian and CentOS base:
 #     - no-op
@@ -5714,23 +8044,24 @@ audio_prepare_overlay_runtime() {
   # dma-heap existence and diagnostic information
   ###########################################################################
 
-  if [ ! -e /dev/dma_heap/system ]; then
-    log_fail "/dev/dma_heap/system is missing"
+  apor_dma_node="$(audio_overlay_heap_node)"
+  if [ ! -e "$apor_dma_node" ]; then
+    log_fail "$apor_dma_node is missing"
     return 1
   fi
 
   if command -v stat >/dev/null 2>&1; then
     apor_dma_mode="$(
-      stat -c '%a' /dev/dma_heap/system 2>/dev/null ||
+      stat -c '%a' "$apor_dma_node" 2>/dev/null ||
         echo unknown
     )"
 
     apor_dma_owner="$(
-      stat -c '%U:%G' /dev/dma_heap/system 2>/dev/null ||
+      stat -c '%U:%G' "$apor_dma_node" 2>/dev/null ||
         echo unknown
     )"
 
-    log_info "/dev/dma_heap/system mode=$apor_dma_mode owner=$apor_dma_owner"
+    log_info "$apor_dma_node mode=$apor_dma_mode owner=$apor_dma_owner"
   fi
 
   ###########################################################################
@@ -5746,12 +8077,12 @@ audio_prepare_overlay_runtime() {
         [ -r "$dma_node" ] && [ -w "$dma_node" ]
       ' \
       sh \
-      /dev/dma_heap/system
+      "$apor_dma_node"
 
     apor_dma_rc=$?
   else
-    if [ -r /dev/dma_heap/system ] &&
-       [ -w /dev/dma_heap/system ]; then
+    if [ -r "$apor_dma_node" ] &&
+       [ -w "$apor_dma_node" ]; then
       apor_dma_rc=0
     else
       apor_dma_rc=1
@@ -5759,11 +8090,11 @@ audio_prepare_overlay_runtime() {
   fi
 
   if [ "$apor_dma_rc" -ne 0 ]; then
-    log_fail "Desktop Audio user cannot read and write /dev/dma_heap/system"
+    log_fail "Desktop Audio user cannot read and write $apor_dma_node"
     return 1
   fi
 
-  log_pass "/dev/dma_heap/system is accessible to the desktop Audio user"
+  log_pass "$apor_dma_node is accessible to the desktop Audio user"
 
   ###########################################################################
   # Validate ALSA nodes as the desktop Audio user
@@ -5864,23 +8195,30 @@ audio_prepare_overlay_runtime() {
   apor_pipewire_control_ready=0
 
   if [ "$apor_user_command_mode" = "root-wrapper" ]; then
-    if audio_run_as_test_user \
+    if audio_run_with_timeout_as_test_user \
         --require-session \
-        sh -c "$apor_pipewire_probe"; then
+        3s sh -c "$apor_pipewire_probe"; then
       apor_pipewire_control_ready=1
     fi
   else
-    if sh -c "$apor_pipewire_probe"; then
+    if audio_exec_with_timeout 3s sh -c "$apor_pipewire_probe"; then
       apor_pipewire_control_ready=1
     fi
   fi
 
   apor_pipewire_service_ready=0
 
-  if audio_pipewire_systemctl \
-      is-active \
-      --quiet \
-      pipewire >/dev/null 2>&1; then
+  apor_unit_dir="$(audio_scratch_dir)" || return 1
+  apor_unit_file="$apor_unit_dir/desktop-overlay-units"
+  if ! audio_overlay_read_units "$apor_unit_file" --user pipewire.service ||
+     [ "$(wc -l <"$apor_unit_file")" -ne 1 ] ||
+     ! grep -q '^pipewire.service|' "$apor_unit_file" ||
+     ! audio_overlay_units_idle "$apor_unit_file" "$apor_unit_file"; then
+    log_fail "Desktop PipeWire unit query failed or has pending/transitional state, inspect $apor_unit_file.raw. No restart attempted"
+    return 1
+  fi
+  log_file_with_label AUDIO-DESKTOP-UNITS "$apor_unit_file" 10
+  if [ "$(cut -d '|' -f 2 "$apor_unit_file")" = active ]; then
     apor_pipewire_service_ready=1
   fi
 
@@ -5889,10 +8227,13 @@ audio_prepare_overlay_runtime() {
   ###########################################################################
 
   if [ "$apor_packages_changed" -eq 0 ] &&
-     [ "$apor_pipewire_service_ready" -eq 1 ] &&
-     [ "$apor_pipewire_control_ready" -eq 1 ]; then
-    log_pass "PipeWire user service and control plane are already ready"
-    log_info "PipeWire restart is not required"
+     [ "$apor_pipewire_service_ready" -eq 1 ]; then
+    if [ "$apor_pipewire_control_ready" -eq 1 ]; then
+      log_info "PipeWire user service and control plane are already ready"
+    else
+      log_warn "Active PipeWire control plane is not ready, preserving the service for bounded route discovery"
+    fi
+    log_info "PipeWire restart is not required, physical route readiness is checked separately"
     return 0
   fi
 
@@ -5942,13 +8283,13 @@ audio_prepare_overlay_runtime() {
     fi
 
     if [ "$apor_user_command_mode" = "root-wrapper" ]; then
-      if audio_run_as_test_user \
+      if audio_run_with_timeout_as_test_user \
           --require-session \
-          sh -c "$apor_pipewire_probe"; then
+          3s sh -c "$apor_pipewire_probe"; then
         apor_pipewire_control_ready=1
       fi
     else
-      if sh -c "$apor_pipewire_probe"; then
+      if audio_exec_with_timeout 3s sh -c "$apor_pipewire_probe"; then
         apor_pipewire_control_ready=1
       fi
     fi
@@ -7439,9 +9780,29 @@ audio_run_as_test_user() {
 
   case "${VERBOSE:-0}" in
     1)
-      log_info "Running Audio command as user=$aratu_user: $1"
+      log_info "Running Audio command as user=$aratu_user: $1" >&2
       ;;
   esac
+
+  # Only the dedicated scratch child is writable by the desktop user.
+  aratu_tmp_owned=0
+  aratu_tmp_dir="${AUDIO_RECORD_USER_CAPTURE_DIR:-}"
+  if [ -z "$aratu_tmp_dir" ]; then
+    aratu_tmp_base="$(audio_scratch_dir)" || return 1
+    aratu_tmp_dir="$(mktemp -d "$aratu_tmp_base/audio-user-tmp.XXXXXX")" || return 1
+    aratu_tmp_owned=1
+    if ! chown "$aratu_uid" "$aratu_tmp_dir"; then
+      rmdir "$aratu_tmp_dir" 2>/dev/null || true
+      return 1
+    fi
+  fi
+  if ! runuser -u "$aratu_user" -- test -w "$aratu_tmp_dir"; then
+    log_fail "Audio user '$aratu_user' cannot write CWD scratch directory $aratu_tmp_dir, use a launch directory the user can traverse"
+    if [ "$aratu_tmp_owned" -eq 1 ]; then
+      rmdir "$aratu_tmp_dir" 2>/dev/null || true
+    fi
+    return 1
+  fi
 
   runuser \
     -u "$aratu_user" \
@@ -7451,7 +9812,7 @@ audio_run_as_test_user() {
       USER="$aratu_user" \
       LOGNAME="$aratu_user" \
       SHELL="$aratu_shell" \
-      TMPDIR="/tmp" \
+      TMPDIR="$aratu_tmp_dir" \
       XDG_RUNTIME_DIR="$aratu_runtime_dir" \
       DBUS_SESSION_BUS_ADDRESS="$aratu_bus_address" \
       AUDIO_TEST_USER="$aratu_user" \
@@ -7462,7 +9823,11 @@ audio_run_as_test_user() {
       AUDIO_TEST_COMMAND_USER_CONTEXT=1 \
       "$@"
 
-  return $?
+  aratu_command_rc=$?
+  if [ "$aratu_tmp_owned" -eq 1 ]; then
+    rmdir "$aratu_tmp_dir" 2>/dev/null || true
+  fi
+  return "$aratu_command_rc"
 }
 
 # Execute one existing audio_common.sh helper as the desktop Audio user.
@@ -7628,6 +9993,580 @@ audio_run_with_timeout_as_test_user() {
   return $?
 }
 
+# Stop and reap one recorder child owned by the calling shell.
+# Argument: child PID. No stdout, diagnostics go to stderr. Return 1 if SIGKILL
+# was needed, 2 if the child exited before TERM could be sent, otherwise 0.
+# pw-record may return 1 on SIGTERM even when it finalized a valid WAV.
+audio_record_stop_child() {
+  arsc_pid="$1"
+  arsc_forced=0
+  if ! kill -TERM "$arsc_pid" 2>/dev/null; then
+    arsc_rc=0
+    wait "$arsc_pid" 2>/dev/null || arsc_rc=$?
+    printf 'AUDIO_CAPTURE recorder_exit_before_stop_rc=%s\n' "$arsc_rc" >&2
+    return 2
+  fi
+  arsc_waited=0
+  while kill -0 "$arsc_pid" 2>/dev/null && [ "$arsc_waited" -lt 3 ]; do
+    sleep 1
+    arsc_waited=$((arsc_waited + 1))
+  done
+  if kill -0 "$arsc_pid" 2>/dev/null; then
+    arsc_forced=1
+    kill -KILL "$arsc_pid" 2>/dev/null || true
+  fi
+  wait "$arsc_pid" 2>/dev/null || true
+  return "$arsc_forced"
+}
+
+# Monitor a targeted PipeWire capture in the same user session as its child.
+# Arguments: WAV path, requested seconds, startup grace, explicit timeout (0=auto),
+# optionally --pipewire-links and --until-complete <marker>, then the command.
+# A completion marker additionally keeps loopback recording through playback.
+# Its absence never extends startup, stall or total capture deadlines.
+# Logs go to stderr. Optional pw-link output goes to <WAV path>.links while
+# recording, after the first payload. The diagnostic child is killed/reaped
+# within two polling intervals or when capture ends, without extending deadlines.
+# Auto mode allows requested+grace for startup, then requested+grace for capture.
+# Idle progress is bounded by max(grace, 3). Explicit timeout caps the whole
+# capture, never triggers a retry, and does not reduce the requested WAV length.
+# Return 0 only after collecting the requested PCM duration and a graceful stop.
+# Return 1 for startup, stall, deadline, format or child errors. Always reap the
+# owned child, allowing at most three additional seconds for WAV finalization.
+# Temporarily forwards termination signals to that child, preserving caller
+# traps on return and leaving its EXIT cleanup installed throughout.
+audio_record_with_progress() {
+  arwp_file="$1"
+  arwp_seconds="$(audio_parse_secs "$2" 2>/dev/null || echo 0)"
+  arwp_grace="$3"
+  arwp_limit="$(audio_parse_secs "$4" 2>/dev/null)" || {
+    printf '%s\n' 'AUDIO_CAPTURE status=FAIL reason=invalid-capture-timeout' >&2
+    return 1
+  }
+  shift 4
+  arwp_links=0
+  arwp_completion=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --pipewire-links)
+        arwp_links=1
+        shift
+        ;;
+      --until-complete)
+        [ "$#" -ge 2 ] && [ -n "$2" ] || return 1
+        arwp_completion="$2"
+        shift 2
+        ;;
+      *)
+        break
+        ;;
+    esac
+  done
+
+  if ! is_unsigned_number "$arwp_seconds" || [ "$arwp_seconds" -eq 0 ] ||
+     ! is_unsigned_number "$arwp_grace" || ! is_unsigned_number "$arwp_limit" ||
+     [ "$#" -eq 0 ]; then
+    printf '%s\n' 'AUDIO_CAPTURE status=FAIL reason=invalid-capture-budget' >&2
+    return 1
+  fi
+  for arwp_tool in dd od awk; do
+    if ! command -v "$arwp_tool" >/dev/null 2>&1; then
+      printf 'AUDIO_CAPTURE status=FAIL reason=missing-tool tool=%s\n' "$arwp_tool" >&2
+      return 1
+    fi
+  done
+
+  arwp_window=$((arwp_seconds + arwp_grace))
+  arwp_idle_limit="$arwp_grace"
+  if [ "$arwp_idle_limit" -lt 3 ]; then
+    arwp_idle_limit=3
+  fi
+  arwp_start="$(get_monotonic_seconds)"
+  arwp_deadline=$((arwp_start + 2 * arwp_window))
+  if [ "$arwp_limit" -gt 0 ]; then
+    arwp_deadline=$((arwp_start + arwp_limit))
+  fi
+  arwp_first=0
+  arwp_last="$arwp_start"
+  arwp_payload=0
+  arwp_previous=0
+  arwp_meta=""
+  arwp_reason=recorder-exited
+  arwp_pid=""
+  arwp_links_pid=""
+  arwp_links_start=0
+  if [ "$arwp_links" -eq 1 ]; then
+    if ! printf '%s\n' 'AUDIO_LINKS status=not-started reason=no-payload-yet' >"${arwp_file}.links"; then
+      printf '%s\n' 'AUDIO_LINKS status=unavailable reason=output-not-writable' >&2
+      arwp_links=0
+    fi
+  fi
+  arwp_saved_traps="$(trap)"
+  trap 'if [ -n "$arwp_links_pid" ]; then
+    audio_record_finish_link_snapshot "$arwp_links_pid" "${arwp_file}.links"
+  fi
+  if [ -n "$arwp_pid" ]; then
+    audio_record_stop_child "$arwp_pid" || true
+  fi
+  exit 1' HUP INT TERM
+  printf 'AUDIO_CAPTURE requested=%ss startup_limit=%ss idle_limit=%ss total_limit=%ss\n' \
+    "$arwp_seconds" "$arwp_window" "$arwp_idle_limit" "$((arwp_deadline - arwp_start))" >&2
+  "$@" &
+  arwp_pid=$!
+  arwp_child_start="$(awk '{sub(/^.*\) /, ""); print $20}' "/proc/$arwp_pid/stat" 2>/dev/null || true)"
+  if [ -n "$arwp_child_start" ]; then
+    printf '%s|%s\n' "$arwp_pid" "$arwp_child_start" >"$arwp_file.recorder" || true
+  fi
+
+  while kill -0 "$arwp_pid" 2>/dev/null; do
+    arwp_now="$(get_monotonic_seconds)"
+    if [ -n "$arwp_links_pid" ] &&
+       { ! kill -0 "$arwp_links_pid" 2>/dev/null ||
+         [ "$((arwp_now - arwp_links_start))" -ge 2 ]; }; then
+      audio_record_finish_link_snapshot "$arwp_links_pid" "${arwp_file}.links"
+      arwp_links_pid=""
+    fi
+    if [ "$arwp_now" -gt "$arwp_deadline" ]; then
+      arwp_reason=capture-deadline
+      break
+    fi
+    if [ -z "$arwp_meta" ]; then
+      arwp_meta="$(audio_wav_header_metadata "$arwp_file" 2>/dev/null || true)"
+      if [ -n "$arwp_meta" ]; then
+        IFS='|' read -r arwp_offset arwp_declared arwp_format arwp_channels \
+          arwp_rate arwp_byte_rate arwp_align arwp_bits <<EOF
+$arwp_meta
+EOF
+        if [ "$arwp_channels" -le 0 ] || [ "$arwp_rate" -le 0 ] ||
+           [ "$arwp_align" -le 0 ] ||
+           [ "$arwp_byte_rate" -ne $((arwp_rate * arwp_align)) ]; then
+          arwp_reason=invalid-wav-header
+          break
+        fi
+        case "$arwp_format" in
+          1|3)
+            ;;
+          *)
+            arwp_reason=unsupported-wav-format
+            break
+            ;;
+        esac
+        arwp_goal=$((arwp_seconds * arwp_byte_rate))
+        printf 'AUDIO_CAPTURE header_offset=%s declared=%s format=%s rate=%s channels=%s bits=%s byte_rate=%s goal_bytes=%s\n' \
+          "$arwp_offset" "$arwp_declared" "$arwp_format" "$arwp_rate" \
+          "$arwp_channels" "$arwp_bits" "$arwp_byte_rate" "$arwp_goal" >&2
+      fi
+    fi
+    if [ -n "$arwp_meta" ]; then
+      arwp_size="$(file_size_bytes "$arwp_file" 2>/dev/null || echo 0)"
+      # Header inspection and file reads take time too. Do not credit samples
+      # against a stale timestamp or extend the startup deadline on a busy DUT.
+      arwp_now="$(get_monotonic_seconds)"
+      if [ "$arwp_now" -gt "$arwp_deadline" ]; then
+        arwp_reason=capture-deadline
+        break
+      fi
+      if [ "$arwp_first" -eq 0 ] &&
+         [ "$((arwp_now - arwp_start))" -gt "$arwp_window" ]; then
+        arwp_reason=startup-no-payload
+        break
+      fi
+      arwp_payload=$((arwp_size - arwp_offset))
+      if [ "$arwp_payload" -lt 0 ]; then
+        arwp_payload=0
+      fi
+      arwp_payload=$((arwp_payload - arwp_payload % arwp_align))
+      if [ "$arwp_payload" -gt "$arwp_previous" ]; then
+        if [ "$arwp_first" -eq 0 ]; then
+          arwp_first=1
+          printf 'AUDIO_CAPTURE first_payload_after=%ss\n' "$((arwp_now - arwp_start))" >&2
+          if [ "$arwp_limit" -eq 0 ]; then
+            arwp_deadline=$((arwp_now + arwp_window))
+          fi
+          if [ "$arwp_links" -eq 1 ]; then
+            printf 'AUDIO_LINKS recorder_pid=%s phase=first-payload\n' "$arwp_pid" >"${arwp_file}.links"
+            if command -v pw-link >/dev/null 2>&1; then
+              pw-link -l -I >>"${arwp_file}.links" 2>&1 &
+              arwp_links_pid=$!
+              arwp_links_start="$arwp_now"
+            else
+              printf '%s\n' 'AUDIO_LINKS status=unavailable reason=pw-link-missing' >>"${arwp_file}.links"
+            fi
+          fi
+        fi
+        arwp_last="$arwp_now"
+        printf 'AUDIO_CAPTURE elapsed=%ss payload_bytes=%s goal_bytes=%s\n' \
+          "$((arwp_now - arwp_start))" "$arwp_payload" "$arwp_goal" >&2
+      fi
+      arwp_previous="$arwp_payload"
+      if [ "$arwp_payload" -ge "$arwp_goal" ] &&
+         { [ -z "$arwp_completion" ] || [ -f "$arwp_completion" ]; }; then
+        arwp_reason=requested-duration-collected
+        break
+      fi
+    fi
+    if [ "$arwp_now" -ge "$arwp_deadline" ]; then
+      arwp_reason=capture-deadline
+      break
+    fi
+    if [ "$arwp_first" -eq 0 ] &&
+       [ "$((arwp_now - arwp_start))" -ge "$arwp_window" ]; then
+      arwp_reason=startup-no-payload
+      break
+    fi
+    if [ "$arwp_first" -eq 1 ] &&
+       [ "$((arwp_now - arwp_last))" -ge "$arwp_idle_limit" ]; then
+      arwp_reason=payload-stalled
+      break
+    fi
+    sleep 1
+  done
+
+  if [ -n "$arwp_links_pid" ]; then
+    audio_record_finish_link_snapshot "$arwp_links_pid" "${arwp_file}.links"
+    arwp_links_pid=""
+  fi
+  if [ "$arwp_reason" = "recorder-exited" ]; then
+    arwp_rc=0
+    wait "$arwp_pid" || arwp_rc=$?
+    printf 'AUDIO_CAPTURE recorder_rc=%s\n' "$arwp_rc" >&2
+  else
+    arwp_stop_rc=0
+    audio_record_stop_child "$arwp_pid" || arwp_stop_rc=$?
+    case "$arwp_stop_rc" in
+      0)
+        ;;
+      1)
+        arwp_reason=recorder-required-sigkill
+        ;;
+      *)
+        arwp_reason=recorder-exited-before-stop
+        ;;
+    esac
+  fi
+  arwp_pid=""
+  arwp_status=FAIL
+  if [ "$arwp_reason" = "requested-duration-collected" ]; then
+    arwp_status=COMPLETE
+  fi
+  printf 'AUDIO_CAPTURE status=%s reason=%s elapsed=%ss payload_bytes=%s\n' \
+    "$arwp_status" "$arwp_reason" \
+    "$(($(get_monotonic_seconds) - arwp_start))" "$arwp_payload" >&2
+  trap - HUP INT TERM
+  # This is the shell's own trap snapshot, never command or DUT-provided text.
+  eval "$arwp_saved_traps"
+  [ "$arwp_status" = "COMPLETE" ]
+}
+
+# Finish only the owned, read-only pw-link child. Arguments: PID, output path.
+# Reap completed children, kill a still-running snapshot without a grace wait.
+# Append completion/truncation status to the artifact, return 0 regardless of
+# diagnostic failure. No stdout and no effect on the recording verdict.
+audio_record_finish_link_snapshot() {
+  arfls_pid="$1"
+  arfls_out="$2"
+  arfls_status=complete
+  if kill -0 "$arfls_pid" 2>/dev/null; then
+    kill -KILL "$arfls_pid" 2>/dev/null || true
+    arfls_status=truncated
+  fi
+  arfls_rc=0
+  wait "$arfls_pid" 2>/dev/null || arfls_rc=$?
+  if [ "$arfls_status" = "complete" ] && [ "$arfls_rc" -ne 0 ]; then
+    arfls_status=failed
+  fi
+  printf 'AUDIO_LINKS status=%s rc=%s\n' "$arfls_status" "$arfls_rc" >>"$arfls_out" 2>/dev/null || true
+  return 0
+}
+
+# audio_server_journal <system|user> <since> [unit] [pid]
+# Print at most 120 current-boot entries within the requested time window.
+# Root reads desktop logs by exact UID and user unit from the system journal,
+# avoiding unavailable per-user journal files. Other callers retain their scope.
+# Optional unit/PID narrow startup evidence to the current service process.
+# Return 0 on query success, nonzero on unavailable/failed evidence. Read-only.
+audio_server_journal() (
+  asj_scope="$1"
+  asj_since="$2"
+  asj_units="${3:-pipewire.service wireplumber.service pipewire-pulse.service}"
+  asj_pid="${4:-}"
+  asj_root_user=0
+  case "$asj_scope" in
+    user)
+      case "${AUDIO_TEST_UID:-}" in
+        ''|0|*[!0-9]*)
+          ;;
+        *)
+          if [ "$(id -u)" -eq 0 ]; then
+            asj_root_user=1
+          fi
+          ;;
+      esac
+      ;;
+    system)
+      ;;
+    *)
+      printf '%s\n' 'Journal unavailable, invalid service scope'
+      return 2
+      ;;
+  esac
+  case "$asj_pid" in
+    *[!0-9]*)
+      printf '%s\n' 'Journal unavailable, invalid service PID'
+      return 2
+      ;;
+  esac
+  set -- -b --no-pager -n 120 --since "$asj_since"
+  if [ "$asj_root_user" -eq 1 ]; then
+    asj_separator=""
+    for asj_unit in $asj_units; do
+      case "$asj_unit" in
+        pipewire.service|wireplumber.service|pipewire-pulse.service)
+          ;;
+        *)
+          printf '%s\n' 'Journal unavailable, invalid audio service'
+          return 2
+          ;;
+      esac
+      if [ -n "$asj_separator" ]; then
+        set -- "$@" +
+      fi
+      set -- "$@" "_UID=$AUDIO_TEST_UID" "_SYSTEMD_USER_UNIT=$asj_unit"
+      if [ -n "$asj_pid" ]; then
+        set -- "$@" "_PID=$asj_pid"
+      fi
+      asj_separator=1
+    done
+    printf 'Journal source: system journal, desktop UID=%s\n' "$AUDIO_TEST_UID"
+    if ! command -v journalctl >/dev/null 2>&1; then
+      printf '%s\n' 'Journal unavailable, journalctl is not installed'
+      return 2
+    fi
+    audio_exec_with_timeout 3s journalctl "$@"
+  else
+    [ "$asj_scope" != user ] || set -- "$@" --user
+    for asj_unit in $asj_units; do
+      case "$asj_unit" in
+        pipewire.service|wireplumber.service|pipewire-pulse.service)
+          set -- "$@" -u "$asj_unit"
+          ;;
+        *)
+          printf '%s\n' 'Journal unavailable, invalid audio service'
+          return 2
+          ;;
+      esac
+    done
+    [ -z "$asj_pid" ] || set -- "$@" "_PID=$asj_pid"
+    audio_run_with_timeout_as_test_user 3s sh -c '
+      if command -v journalctl >/dev/null 2>&1; then
+        exec journalctl "$@"
+      fi
+      printf "%s\n" "Journal unavailable, journalctl is not installed"
+      exit 2
+    ' sh "$@"
+  fi
+)
+
+# audio_server_startup_diagnostics <system|user>
+# Print bounded startup evidence for each current audio service process. Read
+# PID/start time from its manager, including ExecMainPID after a failed start.
+# This separate readiness-only history must never become stream-window evidence.
+# No state changes. Missing tools or identity are reported, not clean results.
+audio_server_startup_diagnostics() (
+  assd_scope="$1"
+  for assd_unit in pipewire.service wireplumber.service pipewire-pulse.service; do
+    set --
+    [ "$assd_scope" != user ] || set -- --user
+    if ! assd_identity="$(audio_run_with_timeout_as_test_user 3s sh -c '
+      command -v systemctl >/dev/null 2>&1 || exit 127
+      exec systemctl "$@"
+    ' sh "$@" show --no-pager --property=MainPID,ExecMainPID,ExecMainStartTimestamp "$assd_unit" 2>&1)"; then
+      printf 'Journal unavailable, startup identity query failed for %s: %s\n' "$assd_unit" "$assd_identity"
+      continue
+    fi
+    assd_pid="$(printf '%s\n' "$assd_identity" | awk -F= '
+      $1=="MainPID" { main=$2 }
+      $1=="ExecMainPID" { previous=$2 }
+      END { if (main ~ /^[1-9][0-9]*$/) print main; else print previous }
+    ')"
+    assd_since="$(printf '%s\n' "$assd_identity" | sed -n 's/^ExecMainStartTimestamp=//p')"
+    case "$assd_pid:$assd_since" in
+      :*|0:*|*:|*:n/a)
+        printf 'Journal unavailable, no current startup identity for %s\n' "$assd_unit"
+        continue
+        ;;
+    esac
+    printf 'Startup identity: unit=%s pid=%s since=%s\n' "$assd_unit" "$assd_pid" "$assd_since"
+    audio_server_journal "$assd_scope" "$assd_since" "$assd_unit" "$assd_pid" ||
+      printf 'Journal unavailable, startup query failed for %s, rc=%s\n' "$assd_unit" "$?"
+  done
+)
+
+# audio_check_overlay_initialization_errors <server-artifact> <error-artifact>
+# Extract up to 20 distinct ACDB/AGM initialization failures from marked startup
+# or operation journals. Preserve runtime paths, never infer board mappings or
+# file absence from an open error. No stdout. Return 1 for observed errors,
+# 0 for no recognized errors, 2 for missing/incomplete evidence or parser failure.
+audio_check_overlay_initialization_errors() {
+  [ -r "$1" ] || return 2
+  if awk '
+    /^---- current-service startup journal ----$/ { journal=1; found=1; next }
+    /^---- end current-service startup journal ----$/ { journal=0; next }
+    /^---- capture-window journal, last [0-9]+ entries ----$/ { journal=1; found=1; next }
+    journal {
+      line=tolower($0)
+      if (line ~ /journal unavailable|no journal files were found|permission denied|not seeing messages from other users/) incomplete=1
+      acdb=(line ~ /get_acdb_files_from_directory:/ && line ~ /cannot open acdb path/)
+      graph=(line ~ /session_obj_init:/ && line ~ /error:[ ]*-?[1-9][0-9]* initializing graph/)
+      agm=(line ~ /agm_init:/ && line ~ /session_obj_init failed with -?[1-9][0-9]*/)
+      if (acdb || graph || agm) {
+        message=$0
+        sub(/^.*get_acdb_files_from_directory: *[0-9]+ */, "", message)
+        sub(/^.*session_obj_init: *[0-9]+ */, "", message)
+        sub(/^.*agm_init: *[0-9]+ */, "", message)
+        if (!seen[message]++ && count++<20) print message
+        errors=1
+      }
+    }
+    END { if (errors) exit 3; if (!found || incomplete) exit 2 }
+  ' "$1" >"$2"; then
+    return 0
+  else
+    acoie_rc=$?
+    [ "$acoie_rc" -ne 3 ] || return 1
+    return 2
+  fi
+}
+
+# audio_record_server_diagnostics <artifact> [journal-since] [readiness]
+# Append bounded PipeWire identity and service evidence, plus at most 120 recent
+# journal entries since capture began. Use the same user/system scope as capture.
+# Unlike systemd_service_stdout_since, retain stderr/crash messages and bound
+# journal size and execution time. Readiness adds current-process startup history
+# before the stream-window marker. No stdout data, state changes or verdicts.
+audio_record_server_diagnostics() (
+  arsd_out="$1"
+  arsd_since="${2:-}"
+  arsd_history="${3:-}"
+  {
+    printf '\n---- server snapshot %s ----\n' "$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+    printf '%s\n' '---- PipeWire core identity ----'
+    audio_run_with_timeout_as_test_user --require-session 3s sh -c '
+      if command -v pw-cli >/dev/null 2>&1; then
+        exec pw-cli info 0
+      fi
+      printf "%s\n" "PipeWire identity unavailable, optional pw-cli is not installed"
+    ' ||
+      printf 'PipeWire identity unavailable, rc=%s\n' "$?"
+    set --
+    arsd_scope=system
+    if [ "${AUDIO_PLAYBACK_DESKTOP_ROOT_MODE:-0}" -eq 1 ] ||
+       [ "${AUDIO_RECORD_DESKTOP_ROOT_MODE:-0}" -eq 1 ] ||
+       [ "${AUDIO_USE_DESKTOP_SESSION:-0}" -eq 1 ] ||
+       [ "${AUDIO_SYSTEMCTL_USER_SCOPE:-0}" -eq 1 ]; then
+      set -- --user
+      arsd_scope=user
+    fi
+    printf '%s\n' "---- service scope: ${1:-system} ----"
+    audio_run_with_timeout_as_test_user 3s sh -c '
+      if command -v systemctl >/dev/null 2>&1; then
+        exec systemctl "$@"
+      fi
+      printf "%s\n" "Service identity unavailable, systemctl is not installed"
+    ' sh "$@" show --no-pager \
+      --property=Id,ActiveState,SubState,Result,MainPID,InvocationID,NRestarts,ExecMainStartTimestamp,ExecMainCode,ExecMainStatus \
+      pipewire.service wireplumber.service pipewire-pulse.service ||
+      printf 'Service identity unavailable, rc=%s\n' "$?"
+    if [ "$arsd_history" = readiness ]; then
+      printf '%s\n' '---- current-service startup journal ----'
+      audio_server_startup_diagnostics "$arsd_scope"
+      printf '%s\n' '---- end current-service startup journal ----'
+    fi
+    if [ -n "$arsd_since" ]; then
+      printf '%s\n' '---- capture-window journal, last 120 entries ----'
+      audio_server_journal "$arsd_scope" "$arsd_since" ||
+        printf 'Journal unavailable, rc=%s\n' "$?"
+    fi
+  } >>"$arsd_out" 2>&1
+)
+
+# audio_check_stream_server_errors <server-after-artifact> <error-artifact>
+# Inspect only the operation-window journal captured by the existing bounded
+# server diagnostic helper. Retain explicit stream-start/graph failures without
+# attributing shared-server errors to one direction during duplex operation.
+# Return 1 for observed failures, 0 for no recognized failures, 2 for missing or
+# incomplete journal evidence. No stdout, service actions or clean-driver claim.
+audio_check_stream_server_errors() {
+  [ -r "$1" ] || return 2
+  if awk '
+    /^---- capture-window journal, last [0-9]+ entries ----$/ {
+      journal=1
+      next
+    }
+    journal {
+      line=tolower($0)
+      if (line ~ /journal unavailable/ || line ~ /no journal files were found/ ||
+          line ~ /permission denied/ || line ~ /not seeing messages from other users/) {
+        incomplete=1
+      }
+      nonzero=(line ~ /(error|status|ret)[ :=]+-?[1-9][0-9]*/)
+      start_failure=(line ~ /pal_stream_start/ && line ~ /fail/ && nonzero)
+      session_failure=(line ~ /(rx|tx) session start/ && line ~ /fail/ && nonzero)
+      graph_failure=(line ~ /graph_open/ && line ~ /fail/ && nonzero)
+      graph_timeout=(line ~ /graph (open|close|open\/close) timeout[. ,]/)
+      if (start_failure || session_failure || graph_failure || graph_timeout) {
+        print
+        failures++
+      }
+    }
+    END {
+      if (failures) exit 3
+      if (!journal || incomplete) exit 2
+    }
+  ' "$1" >"$2"; then
+    return 0
+  else
+    acsse_rc=$?
+    [ "$acsse_rc" -ne 3 ] || return 1
+    return 2
+  fi
+}
+
+# Preserve bounded failure context beside the recorder log and replay to stdout.
+# Arguments: recorder log, backend, selected source, optional WAV path.
+# Existing callers default to record_out. No backend state changes.
+# Return 0, diagnostic command failures are retained but do not change verdicts.
+audio_record_failure_diagnostics() {
+  arfd_log="$1"
+  arfd_backend="$2"
+  arfd_source="$3"
+  arfd_wav="${4:-${record_out:-}}"
+  arfd_out="${arfd_log}.diagnostics"
+  {
+    printf 'backend=%s target=%s\n' "$arfd_backend" "$arfd_source"
+    printf '%s\n' '---- recorder log (first 40 and last 120 lines) ----'
+    head -n 40 "$arfd_log" 2>/dev/null || true
+    tail -n 120 "$arfd_log" 2>/dev/null || true
+    if [ "$arfd_backend" = "pipewire" ]; then
+      printf '%s\n' '---- wpctl status ----'
+      audio_run_with_timeout_as_test_user --require-session 3s wpctl status || true
+      if [ -n "$arfd_source" ]; then
+        printf '%s\n' '---- selected source ----'
+        audio_run_with_timeout_as_test_user --require-session 3s wpctl inspect "$arfd_source" || true
+      fi
+    fi
+  } >"$arfd_out" 2>&1
+  log_file_with_label AUDIO-RECORD-FAILURE "$arfd_out" 240
+  if [ "$arfd_backend" = "pipewire" ]; then
+    log_file_with_label AUDIO-RECORD-SERVER-BEFORE "$arfd_log.server-before" 180
+    log_file_with_label AUDIO-RECORD-SERVER-AFTER "$arfd_log.server-after" 240
+  fi
+  if [ "$arfd_backend" = "pipewire" ] && [ -f "${arfd_wav}.links" ]; then
+    log_file_with_label AUDIO-RECORD-LIVE-LINKS "${arfd_wav}.links" 160
+  fi
+  return 0
+}
+
 # AudioRecord root-orchestrator helpers
 #
 # Insert this block into Runner/utils/audio_common.sh after
@@ -7711,6 +10650,9 @@ audio_record_set_capture_paths() {
 # Remove the previous scratch WAV without pre-creating a root-owned file.
 audio_record_reset_capture_output() {
   rm -f "$record_user_out"
+  if [ "${AUDIO_BACKEND:-}" = "pipewire" ]; then
+    rm -f "${record_user_out}.links"
+  fi
 }
 
 # Return the current scratch WAV size.
@@ -7724,6 +10666,17 @@ audio_record_capture_size() {
 audio_record_promote_capture_output() {
   if [ "$record_user_out" = "$record_out" ]; then
     return 0
+  fi
+
+  if [ "${AUDIO_BACKEND:-}" = "pipewire" ]; then
+    rm -f "${record_out}.links"
+    if [ -f "${record_user_out}.links" ]; then
+      if ! mv "${record_user_out}.links" "${record_out}.links" ||
+         ! chown 0:0 "${record_out}.links" ||
+         ! chmod 0644 "${record_out}.links"; then
+        log_warn "Failed to preserve live PipeWire links: ${record_out}.links"
+      fi
+    fi
   fi
 
   rm -f "$record_out"
@@ -7801,10 +10754,22 @@ audio_record_dump_mixers() {
 # the root orchestrator.
 audio_record_probe_alsa_capture_profile_once() {
   arpacpo_requested_device="${1:-}"
+  arpacpo_log=/dev/stderr
+  if [ -n "${LOGDIR:-}" ]; then
+    arpacpo_log="$LOGDIR/alsa_capture_probe.log"
+  fi
+  arpacpo_start="$(get_monotonic_seconds)"
+  arpacpo_first="$(audio_probe_log_begin "$arpacpo_log" ALSA-CAPTURE-PROBE)" || return 1
 
   if [ "${AUDIO_RECORD_DESKTOP_ROOT_MODE:-0}" -ne 1 ]; then
-    audio_probe_alsa_capture_profile "$arpacpo_requested_device"
-    return $?
+    if audio_probe_alsa_capture_profile "$arpacpo_requested_device" 2>>"$arpacpo_log"; then
+      arpacpo_rc=0
+    else
+      arpacpo_rc=$?
+    fi
+    audio_probe_log_finish "$arpacpo_log" ALSA-CAPTURE-PROBE \
+      "$arpacpo_first" "$arpacpo_rc" "$arpacpo_start"
+    return "$arpacpo_rc"
   fi
 
   arpacp_output="$(
@@ -7815,7 +10780,7 @@ audio_record_probe_alsa_capture_profile_once() {
         . "$TOOLS/functestlib.sh"
         . "$TOOLS/audio_common.sh"
 
-        audio_probe_alsa_capture_profile "$1" >/dev/null 2>&1
+        audio_probe_alsa_capture_profile "$1" >/dev/null
         probe_rc=$?
 
         printf "%s\n" \
@@ -7828,9 +10793,11 @@ audio_record_probe_alsa_capture_profile_once() {
         exit "$probe_rc"
       ' \
       sh \
-      "$arpacpo_requested_device"
+      "$arpacpo_requested_device" 2>>"$arpacpo_log"
   )"
   arpacp_rc=$?
+  audio_probe_log_finish "$arpacpo_log" ALSA-CAPTURE-PROBE \
+    "$arpacpo_first" "$arpacp_rc" "$arpacpo_start"
 
   AUDIO_ALSA_CAPTURE_DEVICE="$(
     printf '%s\n' "$arpacp_output" |
@@ -7869,6 +10836,9 @@ audio_record_probe_alsa_capture_profile() {
 
   if audio_record_probe_alsa_capture_profile_once "$arpacp_requested_device"; then
     return 0
+  else
+    arpacp_probe_rc=$?
+    [ "$arpacp_probe_rc" -eq 1 ] || return 3
   fi
 
   if [ "${AUDIO_ALSA_CAPTURE_REASON:-}" != \
@@ -7901,6 +10871,9 @@ audio_record_probe_alsa_capture_profile() {
 
   if audio_record_probe_alsa_capture_profile_once "$arpacp_requested_device"; then
     return 0
+  else
+    arpacp_probe_rc=$?
+    [ "$arpacp_probe_rc" -eq 1 ] || return 3
   fi
 
   if [ "${AUDIO_ALSA_CAPTURE_REASON:-}" = \
@@ -7948,9 +10921,15 @@ audio_record_probe_selected_alsa_capture_profile() {
 
     if audio_record_probe_alsa_capture_profile \
         "$arpsacp_requested_device"; then
+      AUDIO_CAPTURE_PROBE_FAILED=0
       AUDIO_CAPTURE_ROUTE_SELECTED="$arpsacp_route"
       export AUDIO_CAPTURE_ROUTE_SELECTED
       return 0
+    else
+      arpsacp_rc=$?
+      if [ "$arpsacp_rc" -ne 1 ]; then
+        AUDIO_CAPTURE_PROBE_FAILED=1
+      fi
     fi
 
     if [ -n "$arpsacp_reasons" ]; then
@@ -8440,10 +11419,13 @@ audio_prepare_desktop_audio_test_user() {
   # Keep the stdout/stderr capture opened by the privileged launcher. The
   # unprivileged child inherits those descriptors and must not create another
   # suite-directory log. Unlinking the FIFO is safe while both ends remain
-  # open and prevents leaving a stale /tmp entry after exec replaces this shell.
+  # open and prevents leaving a stale CWD entry after exec replaces this shell.
   apdatu_stdout_active="${__RUN_STDOUT_ACTIVE:-}"
   if [ -n "$apdatu_stdout_active" ] && [ -n "${PIPE:-}" ]; then
     rm -f "$PIPE" 2>/dev/null || true
+    if [ -n "${RUN_STDOUT_PIPE_DIR:-}" ]; then
+      rmdir "$RUN_STDOUT_PIPE_DIR" 2>/dev/null || true
+    fi
   fi
 
   export AUDIO_TEST_USER
@@ -8468,7 +11450,7 @@ audio_prepare_desktop_audio_test_user() {
       USER="$apdatu_user" \
       LOGNAME="$apdatu_user" \
       SHELL="$apdatu_shell" \
-      TMPDIR="/tmp" \
+      TMPDIR="$apdatu_log_dir" \
       XDG_RUNTIME_DIR="$apdatu_runtime_dir" \
       DBUS_SESSION_BUS_ADDRESS="unix:path=$apdatu_bus_path" \
       AUDIO_TEST_USER="$apdatu_user" \
@@ -8491,30 +11473,16 @@ audio_prepare_debian_audio_test_user() {
   audio_prepare_desktop_audio_test_user "$@"
 }
 
-# Minimal WAV fallback for images without Python. It validates RIFF/WAVE/fmt/data,
-# requested rate/channels, bounded duration, and signed PCM sample activity.
-# WAVE_FORMAT_EXTENSIBLE PCM is supported. Float WAV validation requires Python.
-audio_validate_recorded_wav_od() {
-  avrwo_file="$1"
-  avrwo_source_kind="$2"
-  avrwo_rate="$3"
-  avrwo_channels="$4"
-  avrwo_expected_seconds="$5"
-  avrwo_expected_bits="${6:-0}"
-  avrwo_scope="${7:-record}"
-  avrwo_analyze_bytes="${AUDIO_RECORD_ANALYZE_BYTES:-4194304}"
-  avrwo_min_active="${AUDIO_RECORD_MIN_ACTIVE_SAMPLES:-100}"
-  avrwo_min_distinct="${AUDIO_RECORD_MIN_DISTINCT_SAMPLES:-4}"
-  avrwo_threshold_lsb="${AUDIO_RECORD_SAMPLE_THRESHOLD_LSB:-${AUDIO_RECORD_SAMPLE_THRESHOLD:-8}}"
-  avrwo_strict_signal="${AUDIO_RECORD_STRICT_SIGNAL:-0}"
-  avrwo_min_rms_dbfs="${AUDIO_RECORD_MIN_RMS_DBFS:--60}"
-
+# Read bounded WAV header metadata, including headers not finalized yet.
+# Output: offset|declared-bytes|format|channels|rate|byte-rate|block-align|bits.
+# This inventories the header only, final WAV/content validation is separate.
+audio_wav_header_metadata() {
   command -v od >/dev/null 2>&1 || return 1
   command -v dd >/dev/null 2>&1 || return 1
-  [ -s "$avrwo_file" ] || return 1
+  [ -s "$1" ] || return 1
 
-  avrwo_meta="$({
-    dd if="$avrwo_file" bs=1 count=1048576 2>/dev/null |
+  {
+    dd if="$1" bs=4096 count=256 2>/dev/null |
       od -An -v -tu1
   } | awk '
     function u16(i) {
@@ -8574,7 +11542,28 @@ audio_validate_recorded_wav_od() {
 
       exit 1
     }
-  ' 2>/dev/null)" || return 1
+  ' 2>/dev/null
+}
+
+# Minimal WAV fallback for images without Python. It validates RIFF/WAVE/fmt/data,
+# requested rate/channels, bounded duration, and signed PCM sample activity.
+# WAVE_FORMAT_EXTENSIBLE PCM is supported. Float WAV validation requires Python.
+audio_validate_recorded_wav_od() {
+  avrwo_file="$1"
+  avrwo_source_kind="$2"
+  avrwo_rate="$3"
+  avrwo_channels="$4"
+  avrwo_expected_seconds="$5"
+  avrwo_expected_bits="${6:-0}"
+  avrwo_scope="${7:-record}"
+  avrwo_analyze_bytes="${AUDIO_RECORD_ANALYZE_BYTES:-4194304}"
+  avrwo_min_active="${AUDIO_RECORD_MIN_ACTIVE_SAMPLES:-100}"
+  avrwo_min_distinct="${AUDIO_RECORD_MIN_DISTINCT_SAMPLES:-4}"
+  avrwo_threshold_lsb="${AUDIO_RECORD_SAMPLE_THRESHOLD_LSB:-${AUDIO_RECORD_SAMPLE_THRESHOLD:-8}}"
+  avrwo_strict_signal="${AUDIO_RECORD_STRICT_SIGNAL:-0}"
+  avrwo_min_rms_dbfs="${AUDIO_RECORD_MIN_RMS_DBFS:--60}"
+
+  avrwo_meta="$(audio_wav_header_metadata "$avrwo_file")" || return 1
 
   IFS='|' read -r \
     avrwo_offset \
@@ -9060,9 +12049,16 @@ audio_validate_recording_result() {
       log_info "Recorder ended through expected watchdog timeout rc=$avrr_rc, validated WAV payload is accepted"
       ;;
     *)
-      AUDIO_WAV_VALIDATION_SUMMARY="${AUDIO_WAV_VALIDATION_SUMMARY} recorder_rc=$avrr_rc recorder_status=failed"
-      AUDIO_VALIDATION_SUMMARY="${AUDIO_VALIDATION_SUMMARY} recorder_rc=$avrr_rc recorder_status=failed"
+      # Valid samples do not make a failed or stalled recorder successful.
+      AUDIO_WAV_VALIDATION_SUMMARY="$(printf '%s\n' "$AUDIO_WAV_VALIDATION_SUMMARY" |
+        sed 's/status=PASS/status=FAIL/; s/reason=[^ ]*/reason=recorder-failed/') recorder_rc=$avrr_rc recorder_status=failed"
+      AUDIO_VALIDATION_SUMMARY="$(printf '%s\n' "$AUDIO_VALIDATION_SUMMARY" |
+        sed 's/status=PASS/status=FAIL/; s/reason=[^ ]*/reason=recorder-failed/') recorder_rc=$avrr_rc recorder_status=failed"
       export AUDIO_WAV_VALIDATION_SUMMARY AUDIO_VALIDATION_SUMMARY
+      if [ -n "$avrr_log" ]; then
+        printf '%s\n%s\n' "$AUDIO_WAV_VALIDATION_SUMMARY" \
+          "$AUDIO_VALIDATION_SUMMARY" >>"$avrr_log"
+      fi
       return 1
       ;;
   esac

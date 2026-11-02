@@ -11,6 +11,7 @@ params:
   # Safe CI defaults: use the in-repository read-only EEPROM path and do not
   # invoke the optional legacy binary or any active bus operation.
   I2C_LEGACY_TEST_ENABLE: "0"
+  # Additional read-only modes: matrix and pm. Default auto remains unchanged.
   I2C_EEPROM_MODE: "auto"
   I2C_EEPROM_DEVICE: "auto"
   # Integrity mode must receive a target-approved range and explicit write

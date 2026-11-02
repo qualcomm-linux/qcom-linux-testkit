@@ -2,6 +2,11 @@
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause
 
+# Keep test-owned artifacts under the invocation directory, not inherited TMPDIR.
+AUDIO_WORK_DIR="$(pwd -P)" || exit 1
+TMPDIR="$AUDIO_WORK_DIR"
+export TMPDIR
+
 # ---------- Repo env + helpers ----------
 SCRIPT_DIR="$(
   cd "$(dirname "$0")" || exit 1
@@ -39,9 +44,11 @@ fi
 . "$TOOLS/audio_common.sh"
 
 TESTNAME="AudioLoopback"
-RES_FILE="$SCRIPT_DIR/${TESTNAME}.res"
+RES_FILE="$AUDIO_WORK_DIR/${TESTNAME}.res"
 
 DURATION=5
+EXPECTED_DT_COMPATIBLE=""
+DT_FIT_IMAGE=""
 PLAYBACK_ROUTE="auto"
 CAPTURE_ROUTE="auto"
 PLAYBACK_ROUTE_EXPLICIT=0
@@ -67,6 +74,8 @@ usage() {
 Usage: $0 [options]
 
 Options:
+  --expected-dt-compatible TEXT  Require this exact active DT compatible
+  --fit-image PATH               Verify EFI selection using the supplied boot FIT
   --duration SECONDS        Reference playback duration, default: 5
   --sink {auto|speaker|speakers|headphone|headphones|headset}
                             Semantic playback route, default: auto
@@ -90,6 +99,21 @@ EOF_USAGE
 parse_args() {
     while [ "$#" -gt 0 ]; do
         case "$1" in
+            --expected-dt-compatible|--fit-image)
+                if [ "$#" -lt 2 ] || [ -z "$2" ]; then
+                    ARG_ERROR="$1 requires a value"
+                    return 1
+                fi
+                case "$1" in
+                    --expected-dt-compatible)
+                        EXPECTED_DT_COMPATIBLE="$2"
+                        ;;
+                    --fit-image)
+                        DT_FIT_IMAGE="$2"
+                        ;;
+                esac
+                shift 2
+                ;;
             --duration)
                 if [ "$#" -lt 2 ]; then
                     ARG_ERROR="--duration requires a value"
@@ -174,15 +198,6 @@ parse_args() {
     return 0
 }
 
-# Stop only the recorder process started by this test.
-audio_loopback_cleanup() {
-    if [ -n "$RECORDER_PID" ]; then
-        kill "$RECORDER_PID" >/dev/null 2>&1 || true
-        wait "$RECORDER_PID" >/dev/null 2>&1 || true
-        RECORDER_PID=""
-    fi
-}
-
 parse_args "$@"
 parse_rc=$?
 
@@ -260,12 +275,21 @@ esac
 
 if [ -z "$LOGDIR" ]; then
     RUN_STAMP="$(date -u '+%Y%m%d-%H%M%S' 2>/dev/null || printf '%s' unknown)"
-    LOGDIR="$SCRIPT_DIR/results/$TESTNAME/run-${RUN_STAMP}-$$"
+    LOGDIR="$AUDIO_WORK_DIR/results/$TESTNAME/run-${RUN_STAMP}-$$"
 fi
 
 if ! mkdir -p "$LOGDIR"; then
     test_result_record "FAIL" \
         "$TESTNAME FAIL - cannot create retained evidence directory $LOGDIR"
+    test_result_finish
+fi
+
+TMPDIR="$LOGDIR"
+export TMPDIR
+
+if ! audio_dt_fit_preflight "$LOGDIR/dt-fit-preflight" \
+    "$EXPECTED_DT_COMPATIBLE" "$DT_FIT_IMAGE"; then
+    test_result_record FAIL "$TESTNAME FAIL - DT/FIT preflight failed, inspect $LOGDIR/dt-fit-preflight"
     test_result_finish
 fi
 
@@ -328,13 +352,11 @@ if ! command -v awk >/dev/null 2>&1; then
     missing_commands="$missing_commands awk"
 fi
 
-if ! command -v python3 >/dev/null 2>&1; then
-    for required_command in dd od; do
-        if ! command -v "$required_command" >/dev/null 2>&1; then
-            missing_commands="$missing_commands $required_command"
-        fi
-    done
-fi
+for required_command in dd od; do
+    if ! command -v "$required_command" >/dev/null 2>&1; then
+        missing_commands="$missing_commands $required_command"
+    fi
+done
 
 if [ -n "$missing_commands" ]; then
     test_result_record "SKIP" \
@@ -343,11 +365,26 @@ if [ -n "$missing_commands" ]; then
 fi
 
 log_info "Starting $TESTNAME, duration=${DURATION}s sink=$PLAYBACK_ROUTE source=$CAPTURE_ROUTE playback_device=${PLAYBACK_DEVICE:-auto} capture_device=${CAPTURE_DEVICE:-auto}"
+audio_loopback_since="$(get_monotonic_seconds)"
+AUDIO_REMOTE_PROC_SINCE="$audio_loopback_since"
+export AUDIO_REMOTE_PROC_SINCE
 log_info "AUDIO_ROUTE_DISCOVERY scope=loopback playback_requested='$PLAYBACK_ROUTE_REQUESTED' playback_explicit=$PLAYBACK_ROUTE_EXPLICIT playback_policy=$PLAYBACK_ROUTE automatic_playback_order='speakers headphones' capture_requested='$CAPTURE_ROUTE_REQUESTED' capture_explicit=$CAPTURE_ROUTE_EXPLICIT capture_policy=$CAPTURE_ROUTE automatic_capture_order='mic headset-mic'"
 log_info "Retaining loopback artifacts in $LOGDIR"
 
+audio_loopback_overlay_rc=0
+audio_loopback_prepare_overlay || audio_loopback_overlay_rc=$?
+if [ "$audio_loopback_overlay_rc" -ne 0 ] && [ "$audio_loopback_overlay_rc" -ne 2 ]; then
+    test_result_record FAIL "$TESTNAME FAIL - ${AUDIO_OVERLAY_FAILURE_REASON:-overlay readiness failed}, inspect $LOGDIR/overlay-services"
+    if [ "$DMESG_SCAN" -eq 1 ]; then
+        scan_audio_dmesg "$LOGDIR/discovery-failure"
+    fi
+    test_result_finish
+fi
+
 if [ -n "$PLAYBACK_DEVICE" ] || [ -n "$CAPTURE_DEVICE" ]; then
     AUDIO_BACKEND="alsa"
+elif [ "$audio_loopback_overlay_rc" -eq 0 ]; then
+    AUDIO_BACKEND="pipewire"
 else
     AUDIO_BACKEND="$(
         audio_run_helper_as_test_user \
@@ -475,6 +512,18 @@ case "$AUDIO_BACKEND" in
         ;;
 esac
 
+if [ "$audio_loopback_overlay_rc" -eq 0 ] && [ "$AUDIO_BACKEND" != pipewire ]; then
+    test_result_record FAIL "$TESTNAME FAIL - prepared overlay lost its required PipeWire clients or route pair: $MANAGED_BACKEND_FAILURE, no base ALSA fallback was attempted"
+    test_result_finish
+fi
+
+if [ -z "$AUDIO_BACKEND" ] || [ "$AUDIO_BACKEND" = alsa ]; then
+    if ! audio_loopback_prepare_alsa; then
+        test_result_record FAIL "$TESTNAME FAIL - ${AUDIO_REMOTE_PROC_REASON:-ALSA preparation failed}, inspect $LOGDIR/remoteproc-preflight"
+        test_result_finish
+    fi
+fi
+
 if [ -z "$AUDIO_BACKEND" ]; then
     if [ -n "$MANAGED_BACKEND_FAILURE" ]; then
         log_warn "$TESTNAME: $MANAGED_BACKEND_FAILURE, probing direct ALSA loopback paths"
@@ -588,7 +637,7 @@ if [ "$AUDIO_BACKEND" = "alsa" ]; then
     elif [ -n "$playback_ucm_card" ]; then
         if ! audio_playback_alsa_prepare \
             "$(audio_alsa_device_card "$PLAYBACK_DEVICE")" \
-            "$playback_ucm_card" "$playback_ucm_device"; then
+            "$playback_ucm_card" "$playback_ucm_device" "$PLAYBACK_DEVICE"; then
             test_result_record "FAIL" \
                 "$TESTNAME FAIL - could not prepare the $PLAYBACK_ROUTE ALSA playback route"
             test_result_finish
@@ -596,7 +645,7 @@ if [ "$AUDIO_BACKEND" = "alsa" ]; then
 
         if ! audio_record_alsa_prepare_capture \
             "$(audio_alsa_device_card "$AUDIO_ALSA_CAPTURE_DEVICE")" \
-            "$capture_ucm_card" "$capture_ucm_device"; then
+            "$capture_ucm_card" "$capture_ucm_device" "$AUDIO_ALSA_CAPTURE_DEVICE"; then
             test_result_record "FAIL" \
                 "$TESTNAME FAIL - could not prepare the $CAPTURE_ROUTE ALSA capture route"
             test_result_finish
@@ -604,7 +653,7 @@ if [ "$AUDIO_BACKEND" = "alsa" ]; then
     else
         if ! audio_record_alsa_prepare_capture \
             "$(audio_alsa_device_card "$AUDIO_ALSA_CAPTURE_DEVICE")" \
-            "$capture_ucm_card" "$capture_ucm_device"; then
+            "$capture_ucm_card" "$capture_ucm_device" "$AUDIO_ALSA_CAPTURE_DEVICE"; then
             test_result_record "FAIL" \
                 "$TESTNAME FAIL - could not prepare the $CAPTURE_ROUTE ALSA capture route"
             test_result_finish
@@ -612,7 +661,7 @@ if [ "$AUDIO_BACKEND" = "alsa" ]; then
 
         if ! audio_playback_alsa_prepare \
             "$(audio_alsa_device_card "$PLAYBACK_DEVICE")" \
-            "$playback_ucm_card" "$playback_ucm_device"; then
+            "$playback_ucm_card" "$playback_ucm_device" "$PLAYBACK_DEVICE"; then
             test_result_record "FAIL" \
                 "$TESTNAME FAIL - could not prepare the $PLAYBACK_ROUTE ALSA playback route"
             test_result_finish
@@ -638,27 +687,10 @@ else
 
     case "$AUDIO_BACKEND" in
         pipewire)
-            audio_run_helper_as_test_user \
-                --require-session \
-                pw_set_default_sink "$PLAYBACK_TARGET" >/dev/null 2>&1 ||
-                log_warn "Could not set PipeWire default sink id=$PLAYBACK_TARGET"
-            audio_run_helper_as_test_user \
-                --require-session \
-                pw_set_default_source "$CAPTURE_TARGET" >/dev/null 2>&1 ||
-                log_warn "Could not set PipeWire default source id=$CAPTURE_TARGET"
-            audio_run_with_timeout_as_test_user \
-                --require-session \
-                3s \
-                wpctl set-mute "$PLAYBACK_TARGET" 0 >/dev/null 2>&1 ||
-                log_warn "Could not unmute PipeWire sink id=$PLAYBACK_TARGET"
-            ;;
-        pulseaudio)
-            audio_run_helper_as_test_user \
-                --require-session \
-                pa_set_default_sink "$PLAYBACK_TARGET" >/dev/null 2>&1 || true
-            audio_run_helper_as_test_user \
-                --require-session \
-                pa_set_default_source "$CAPTURE_TARGET" >/dev/null 2>&1 || true
+            if ! audio_prepare_playback_volume "$PLAYBACK_TARGET"; then
+                test_result_record FAIL "$TESTNAME FAIL - cannot safely prepare playback mute state"
+                test_result_finish
+            fi
             ;;
     esac
 fi
@@ -718,7 +750,12 @@ test_result_record "PASS" \
 capture_duration=$((DURATION + 2))
 capture_timeout=$((capture_duration + 10))
 playback_timeout=$((DURATION + 10))
+# Include bounded identity, volume and server diagnostics before recorder launch.
+capture_start_limit=$((capture_duration + 40))
+capture_complete="$LOGDIR/playback.complete"
+rm -f "$capture_complete"
 rm -f "$capture_wav"
+: >"$capture_log"
 
 if [ "$AUDIO_USE_DESKTOP_SESSION" -eq 1 ] &&
    [ "$(id -u 2>/dev/null || echo 1)" -eq 0 ]; then
@@ -739,23 +776,16 @@ fi
 log_info "Starting capture before playback, backend=$AUDIO_BACKEND target=$CAPTURE_TARGET format=$capture_format rate=$capture_rate channels=$capture_channels duration=${capture_duration}s"
 case "$AUDIO_BACKEND" in
     pipewire)
-        capture_watchdog="${capture_duration}s"
-        audio_run_with_timeout_as_test_user \
-            --require-session \
-            "$capture_watchdog" \
-            env LC_ALL=C \
-            pw-record \
-            -v \
-            --rate="$capture_rate" \
-            --channels="$capture_channels" \
-            --target "$CAPTURE_TARGET" \
-            "$capture_wav" >"$capture_log" 2>&1 &
+        capture_watchdog=0
+        audio_record_pipewire_capture 0 "$CAPTURE_ROUTE" \
+            "$capture_wav" "$capture_log" "$capture_rate" \
+            "$capture_channels" "$capture_duration" 10 "$capture_complete" &
         ;;
     pulseaudio)
-        capture_watchdog="${capture_duration}s"
-        audio_run_with_timeout_as_test_user \
-            --require-session \
-            "$capture_watchdog" \
+        capture_watchdog=0
+        audio_run_helper_as_test_user --require-session \
+            audio_record_with_progress "$capture_wav" "$capture_duration" 10 0 \
+            --until-complete "$capture_complete" \
             env LC_ALL=C \
             parecord \
             --rate="$capture_rate" \
@@ -780,7 +810,16 @@ case "$AUDIO_BACKEND" in
 esac
 RECORDER_PID=$!
 
-sleep 1
+if ! audio_wait_for_capture_payload "$capture_wav" "$RECORDER_PID" "$capture_start_limit"; then
+    audio_loopback_cleanup
+    audio_record_failure_diagnostics "$capture_log" "$AUDIO_BACKEND" "$CAPTURE_TARGET" "$capture_wav"
+    test_result_record FAIL "$TESTNAME FAIL - capture did not become ready, playback was not started. Inspect $capture_log for startup, routing or stream errors"
+    if [ "$DMESG_SCAN" -eq 1 ]; then
+        AUDIO_REMOTE_PROC_SINCE="$audio_loopback_since"
+        scan_audio_dmesg "$LOGDIR"
+    fi
+    test_result_finish
+fi
 
 log_info "Playing deterministic reference while capture is active, backend=$AUDIO_BACKEND target=$PLAYBACK_TARGET"
 case "$AUDIO_BACKEND" in
@@ -793,6 +832,7 @@ case "$AUDIO_BACKEND" in
                 pw-cat \
                 --playback \
                 -v \
+                --target "$PLAYBACK_TARGET" \
                 "$reference_wav" >"$playback_log" 2>&1
         else
             audio_run_with_timeout_as_test_user \
@@ -801,6 +841,7 @@ case "$AUDIO_BACKEND" in
                 env LC_ALL=C \
                 pw-play \
                 -v \
+                --target "$PLAYBACK_TARGET" \
                 "$reference_wav" >"$playback_log" 2>&1
         fi
         ;;
@@ -823,22 +864,51 @@ case "$AUDIO_BACKEND" in
         ;;
 esac
 playback_rc=$?
+if ! : >"$capture_complete"; then
+    log_fail "Cannot signal playback completion to capture, artifact=$capture_complete"
+    playback_rc=1
+    audio_loopback_cleanup
+fi
 
-wait "$RECORDER_PID"
-capture_rc=$?
+capture_rc=1
+if [ -n "$RECORDER_PID" ]; then
+    wait "$RECORDER_PID"
+    capture_rc=$?
+fi
 RECORDER_PID=""
 
 if [ "$playback_rc" -eq 0 ]; then
-    test_result_record "PASS" \
-        "Deterministic reference playback completed, backend=$AUDIO_BACKEND target=$PLAYBACK_TARGET artifact=$playback_log"
+    log_info "Playback client completed, backend=$AUDIO_BACKEND target=$PLAYBACK_TARGET rc=0 artifact=$playback_log. Client exit status alone does not prove driver-level playback"
 else
+    log_file_with_label AUDIO-LOOPBACK-PLAYBACK "$playback_log" 120
     test_result_record "FAIL" \
         "$TESTNAME FAIL - deterministic reference playback failed, backend=$AUDIO_BACKEND target=$PLAYBACK_TARGET rc=$playback_rc artifact=$playback_log"
+fi
+
+loopback_server_rc=0
+if [ "$AUDIO_BACKEND" = pipewire ]; then
+    # The capture helper retains the journal after the playback-complete marker.
+    # It covers both duplex streams without another service query or reset.
+    audio_check_stream_server_errors "$capture_log.server-after" \
+        "$LOGDIR/loopback_server_errors.log" || loopback_server_rc=$?
+    case "$loopback_server_rc" in
+        0)
+            log_info "No explicit stream-start or graph failure found in the retained bounded journal, this is not proof of physical playback"
+            ;;
+        1)
+            log_file_with_label AUDIO-LOOPBACK-SERVER-ERROR "$LOGDIR/loopback_server_errors.log" 60
+            test_result_record FAIL "$TESTNAME FAIL - audio backend reported a stream-start or graph failure during loopback despite client exit statuses playback=$playback_rc capture=$capture_rc, inspect $LOGDIR/loopback_server_errors.log and $capture_log.server-after"
+            ;;
+        *)
+            log_warn "Loopback backend journal evidence is unavailable or incomplete, driver health is unverified. Inspect $capture_log.server-after. Client and WAV validation still apply"
+            ;;
+    esac
 fi
 
 AUDIO_RECORD_STRICT_SIGNAL=0
 export AUDIO_RECORD_STRICT_SIGNAL
 
+loopback_capture_ok=0
 if audio_validate_recording_result \
     "$capture_wav" \
     mic \
@@ -849,23 +919,31 @@ if audio_validate_recording_result \
     "$capture_watchdog" \
     "$capture_log" \
     loopback; then
-    log_info "AUDIO_VALIDATION scope=loopback policy=basic-integrity status=PASS backend=$AUDIO_BACKEND playback_target=$PLAYBACK_TARGET capture_target=$CAPTURE_TARGET playback_rc=$playback_rc capture_rc=$capture_rc"
+    loopback_capture_ok=1
     test_result_record "PASS" \
         "Loopback capture contains a valid non-zero signal, validation='$AUDIO_VALIDATION_SUMMARY' artifact=$capture_wav"
 else
-    log_info "AUDIO_VALIDATION scope=loopback policy=basic-integrity status=FAIL backend=$AUDIO_BACKEND playback_target=$PLAYBACK_TARGET capture_target=$CAPTURE_TARGET playback_rc=$playback_rc capture_rc=$capture_rc"
+    audio_record_failure_diagnostics "$capture_log" "$AUDIO_BACKEND" "$CAPTURE_TARGET" "$capture_wav"
     test_result_record "FAIL" \
-        "$TESTNAME FAIL - loopback capture is corrupt, empty, all-zero, or materially short, validation='${AUDIO_VALIDATION_SUMMARY:-unavailable}', verify the acoustic or electrical fixture, artifact=$capture_log"
+        "$TESTNAME FAIL - loopback capture validation failed, rc=$capture_rc validation='${AUDIO_VALIDATION_SUMMARY:-unavailable}'. Inspect capture startup/progress, driver errors and the acoustic or electrical fixture, artifact=$capture_log"
+fi
+
+loopback_stream_status=FAIL
+if [ "$loopback_capture_ok" -eq 1 ] && [ "$playback_rc" -eq 0 ] &&
+   [ "$loopback_server_rc" -ne 1 ]; then
+    loopback_stream_status=PASS
+fi
+log_info "AUDIO_VALIDATION scope=loopback policy=basic-integrity status=$loopback_stream_status backend=$AUDIO_BACKEND playback_target=$PLAYBACK_TARGET capture_target=$CAPTURE_TARGET playback_rc=$playback_rc capture_rc=$capture_rc server_evidence_rc=$loopback_server_rc"
+
+if ! audio_restore_playback_volume; then
+    test_result_record FAIL "$TESTNAME FAIL - temporary playback mute restoration failed, inspect $LOGDIR/playback-volume.initial"
 fi
 
 if [ "$DMESG_SCAN" -eq 1 ]; then
-    scan_dmesg_errors \
-        "$LOGDIR" \
-        'snd|asoc|audio|lpass|q6|codec|xrun|underrun|overrun' \
-        'dummy regulator|supply [^ ]+ not found|using dummy regulator|probe deferred' || true
-
-    if [ -s "$LOGDIR/dmesg_errors.log" ]; then
-        log_warn "Audio-related kernel errors were captured, artifact=$LOGDIR/dmesg_errors.log"
+    AUDIO_REMOTE_PROC_SINCE="$audio_loopback_since"
+    scan_audio_dmesg "$LOGDIR"
+    if ! audio_remoteproc_report_health "$LOGDIR"; then
+        test_result_record FAIL "$TESTNAME FAIL - $AUDIO_REMOTE_PROC_REASON"
     fi
 fi
 

@@ -1,0 +1,24 @@
+metadata:
+  name: audio-playback-overlay
+  format: "Lava-Test Test Definition 1.0"
+  description: "Physical speaker playback using image-provided AudioReach and PipeWire. Shikra coverage includes CQS and IQS."
+  os:
+    - linux
+  scope:
+    - functional
+
+params:
+  SINK_CHOICE: "speakers"
+  CLIP_NAMES: "playback_config10"
+  AUDIO_CLIPS_BASE_DIR: "/home/AudioClips"
+  TIMEOUT: "0"
+  LOOPS: 1
+  RES_SUFFIX: "Overlay"
+  LAVA_TESTCASE_ID: "AudioPlayback_Overlay"
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Multimedia/Audio/AudioPlayback/
+    - ./run.sh --overlay --backend pipewire --sink "${SINK_CHOICE}" --clip-name "${CLIP_NAMES}" --audio-clips-path "${AUDIO_CLIPS_BASE_DIR}" --no-extract-assets --timeout "${TIMEOUT}" --loops "${LOOPS}" --res-suffix "${RES_SUFFIX}" --lava-testcase-id "${LAVA_TESTCASE_ID}" || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh AudioPlayback${RES_SUFFIX:+_${RES_SUFFIX}}.res

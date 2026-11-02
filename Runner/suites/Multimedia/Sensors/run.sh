@@ -56,7 +56,8 @@ Usage: $0 [options]
 
 Package handling:
   --overlay Install the Qualcomm Sensors runtime/test package set from
-            qli-staging on Debian, Ubuntu, or CentOS.
+            qli on Debian, image APT sources on Ubuntu, or CentOS RPM sources.
+            Debian package recovery requires a reboot before validation.
             No package removal or base-mode transition is performed.
 
 Discovery:
@@ -211,7 +212,7 @@ SEE_DURATION="${SEE_DURATION:-5}"
 DRVA_DURATION="${DRVA_DURATION:-10}"
 HB_SECS="${HB_SECS:-5}"
 STRICT_REQUIRED="${STRICT_REQUIRED:-1}"
-SENSORS_SERVICE="${SENSORS_SERVICE:-sscrpcd.service}"
+SENSORS_SERVICE="${SENSORS_SERVICE:-}"
 : "${SENSORS_DRVA_NUM_SAMPLES:=325}"
 
 if ! mkdir -p "$OUT_DIR"; then
@@ -273,13 +274,25 @@ if [ "$OVERLAY_REQUESTED" -eq 1 ]; then
 
     pkg_provider_init
 
+    sensors_apt_source="qli-staging"
+    if [ "$OS_ID" = debian ]; then
+      sensors_apt_source="qli"
+      if ! pkg_verify_package_set_installed sensors; then
+        # Mark before recovery so an interrupted transaction cannot bypass the
+        # reboot requirement on a subsequent run. Recovery remains retryable.
+        if ! sensors_overlay_reboot_state mark; then
+          test_result_finish FAIL "Cannot retain Debian Sensors reboot state, check CWD permissions"
+        fi
+      fi
+    fi
+
     old_package_set_upgrade="${PKG_PACKAGE_SET_UPGRADE-__unset__}"
     PKG_PACKAGE_SET_UPGRADE=0
     export PKG_PACKAGE_SET_UPGRADE
 
     if ! pkg_ensure_optional_package_set_present \
       sensors \
-      qli-staging \
+      "$sensors_apt_source" \
       auto \
       --overlay; then
       case "$old_package_set_upgrade" in
@@ -313,7 +326,27 @@ else
   log_info "Overlay package installation not requested, validating installed Sensors runtime"
 fi
 
+if [ "$OS_ID" = debian ]; then
+  sensors_overlay_reboot_state check
+  sensors_reboot_rc=$?
+  case "$sensors_reboot_rc" in
+    0)
+      ;;
+    2)
+      test_result_finish SKIP "Debian Sensors package preparation requires a reboot, complete --overlay recovery if interrupted, then reboot and rerun from this directory"
+      ;;
+    *)
+      test_result_finish FAIL "Cannot validate Debian Sensors reboot state, check .sensors-overlay-boot-id in the testcase directory"
+      ;;
+  esac
+fi
+
 deps="ssc_sensor_info see_workhorse awk sed grep sort wc tr"
+# Debian package changes must use the explicit full-set flow above so they
+# cannot bypass reboot tracking through per-command dependency recovery.
+if [ "$OS_ID" = debian ]; then
+  export CHECK_DEPS_RECOVER=0
+fi
 if ! check_dependencies "$deps"; then
   test_result_finish SKIP "Missing sensor dependencies, provision image commands: $deps"
 fi
@@ -322,17 +355,19 @@ if [ ! -d /etc/sensors/config ]; then
   test_result_finish SKIP "/etc/sensors/config not present, provision Sensors runtime configuration"
 fi
 
-# The qcom-sensors-services package installs sscrpcd.service. On supported
-# desktop distributions, ensure an already-installed unit is running.
+# Debian's sensinghub-sensors-daemon provides sensors.qti.service. Retain the
+# legacy sscrpcd.service fallback and explicit service overrides.
 if [ "$DISTRO_SENSORS_HANDLING_SUPPORTED" -eq 1 ] &&
    command -v systemctl >/dev/null 2>&1; then
+  SENSORS_SERVICE="$(sensors_select_service "$SENSORS_SERVICE")"
   if systemctl cat "$SENSORS_SERVICE" >/dev/null 2>&1; then
     if ! systemctl is-active --quiet "$SENSORS_SERVICE"; then
       log_info "Starting Sensors service, $SENSORS_SERVICE"
 
-      if ! systemctl start "$SENSORS_SERVICE"; then
+      if ! systemctl start "$SENSORS_SERVICE" ||
+         ! systemctl is-active --quiet "$SENSORS_SERVICE"; then
         systemctl status "$SENSORS_SERVICE" --no-pager --full 2>/dev/null || true
-        test_result_finish FAIL "Failed to start $SENSORS_SERVICE, check the service status"
+        test_result_finish FAIL "$SENSORS_SERVICE did not become active, check the service status"
       fi
     fi
 

@@ -6,6 +6,75 @@
 
 This test is intended as an audio preflight check before running playback or record tests. It verifies the ALSA registration layer only and does not play audio, record audio, restart audio services, or modify mixer controls.
 
+## Active DT and FIT preflight
+
+Before topology and passive registration checks, the runner reports the live DT model, complete
+compatible list and sound-card identities. CQS, CQM, IQS and future boards are
+discovered from runtime data, not a fixed variant/PCM table. EFI
+`VendorDtbOverlays` is read separately without mounting, writing or rebooting.
+FIT DT overlays are independent of the audio `--overlay` package/runtime mode.
+
+`dt-fit-preflight/` under the suite log directory retains active DT identity,
+sound-card nodes, EFI selection, FIT candidates, configuration/FDT-reference
+inventory and extraction diagnostics. Only already accessible boot directories
+and mounted FAT filesystems are searched. Raw boot partitions are not mounted
+or read. A discovered FIT is a candidate, not proof of what booted.
+
+Optional CLI-only controls (no environment-variable equivalents):
+
+- `--expected-dt-compatible TEXT` requires an exact compatible in the live DT.
+  Use a board-specific compatible, not a generic SoC fallback.
+- `--fit-image PATH` asserts that this is the intended boot FIT. With a readable
+  EFI selector and image-provided `fdtget`, `dumpimage` and `timeout`, the test
+  resolves configuration metadata and the ordered base/overlay references.
+  An unavailable/ambiguous selection or base-identity mismatch fails preflight.
+
+Automatic mode reports missing DT/EFI/FIT tools as unavailable verification and
+preserves normal audio discovery. A candidate-FIT mismatch warns until the boot
+FIT is explicitly supplied. Matching the base DT does not prove every overlay
+was applied or independently identify the physical board. No packages or DT
+assets are installed for this inspection. FIT configurations with compressed
+base FDTs are currently reported as unverifiable. Configuration traversal is
+bounded to 30 seconds between entries and 512 entries, each tool call to 5 seconds.
+
+Selector matching prefers a unique literal FIT compatible. A compound EFI value
+such as `vendor,board,feature` can match `vendor,board-feature` when the FIT
+metadata contains every qualifier. Qualifier order may differ, but unknown,
+missing or extra qualifiers are never silently discarded. Ambiguous matches
+remain unverifiable. `dt-fit-preflight/selected_fit_config.txt` records the
+selected configuration, compatible, ordered FDT references and match type.
+
+Examples, use the compatible and FIT from your own device/build:
+
+```sh
+./run.sh
+./run.sh --expected-dt-compatible qcom,shikra-iqs-evk
+./run.sh --expected-dt-compatible qcom,shikra-iqs-evk --fit-image /boot/qclinux_fit.img
+```
+
+Run these commands from the suite directory. The FIT path is illustrative,
+replace it with the intended build's accessible FIT. For CQS or CQM base
+validation, replace the expected compatible with `qcom,shikra-cqs-evk` or
+`qcom,shikra-cqm-evk`. These examples do not introduce script-side variant maps.
+
+Suite-specific example, after the image has prepared its audio firmware:
+
+```sh
+./run.sh --required required --wait-secs 30 \
+    --require-playback-pcm 1 --require-capture-pcm 1 \
+    --expected-dt-compatible qcom,shikra-iqs-evk
+```
+
+The command checks registered cards and advertised playback/capture PCMs.
+It does not start the modem/DSP, change mixer controls or exercise a stream.
+
+Expected outcomes: a matching DT permits the normal test to run, it does not
+itself produce PASS. An explicit DT mismatch or unverifiable explicit FIT
+produces FAIL before topology validation. Missing optional automatic FIT/EFI
+evidence reports unverified detection and preserves the suite's normal
+PASS/FAIL/SKIP policy. Inspect `dt-fit-preflight/report.txt` and the accompanying
+inventory/tool logs under the suite's retained log directory.
+
 ## Test Location
 
 ```text
@@ -34,6 +103,14 @@ run as the prepared regular audio user. This validates the same access context
 used by the functional playback and recording suites.
 
 ## What This Test Validates
+
+Base-mode preflight verifies image topology for enabled runtime q6apm sound-card
+links before waiting for registration. After registration, each matched card's
+driver-specific topology path is checked. CQM/direct-codec and other cards that
+do not consume q6apm topology retain that exemption. Remoteproc inventory is
+retained for diagnosis, but this suite never starts or restarts a DSP, changes
+mixers or opens an audio stream. An offline modem must be prepared by the image
+or a functional audio test before passive card registration can pass.
 
 The test checks:
 
@@ -262,6 +339,14 @@ REQUIRE_CAPTURE_PCM: "1"
 
 ## Debug Output
 
+The kernel scan retains `audio_kernel_errors.log` and
+`audio_kernel_warnings.log` beside `dmesg_snapshot.log`, and replays findings
+to stdout. APM timeouts and DAPM/no-backend warnings remain visible even when
+registration passes. This passive suite reports boot-history scope, not errors
+proven to originate from its execution. Missing or empty kernel evidence is
+unverified, not clean. Diagnostics do not change the registration result and
+do not start the DSP or run playback/capture probes.
+
 The test logs the following inventories for CI debug:
 
 ```text
@@ -277,10 +362,25 @@ arecord -l, if available
 It also stores matched card data under:
 
 ```text
-results/Audio_Card_Registration/matched_cards.txt
+results/Audio_Card_Registration/run-<timestamp>.<id>/matched_cards.txt
 ```
 
 ## Notes for Qualcomm Boards
+
+Default artifacts are rooted in the invocation CWD. Each run retains a unique
+`results/Audio_Card_Registration/run-<timestamp>.<id>/` directory for inventory,
+DT/FIT and kernel diagnostics. `Audio_Card_Registration.res` stays in CWD for
+result publication. Temporary files ignore inherited `TMPDIR` and stay inside
+the evidence directory. Use a writable launch directory:
+
+```sh
+cd /var/qcom-linux-testkit/Runner/suites/Multimedia/Audio/Audio_Card_Registration
+./run.sh
+```
+
+A DT traversal/tool error fails preflight, rather than being treated as an empty
+hardware inventory. Existing optional-evidence and explicit DT/FIT policies
+remain unchanged.
 
 On Qualcomm boards, this test is useful for identifying early audio bring-up issues such as:
 

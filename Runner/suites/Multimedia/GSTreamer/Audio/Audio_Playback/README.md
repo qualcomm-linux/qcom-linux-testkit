@@ -336,6 +336,10 @@ PulseAudio example:
 
 ## Maintainers
 
+When the optional asset download uses `audio_common.sh`, its download archive
+and fetch log use the writable CWD workspace, not the installed script directory
+or an inherited `TMPDIR`. Existing explicit clip paths remain unchanged.
+
 - This test is intended to be robust and easy to extend alongside:
   - `Audio_Record`
   - `Audio_Duplex_Loopback`

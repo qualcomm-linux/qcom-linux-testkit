@@ -21,6 +21,394 @@ bus_validation_require_commands() {
     return 0
 }
 
+# i2c_dt_path_enabled <dt-node>
+# Returns 0 only when the node and all parents have absent/okay/ok status.
+# No stdout or hardware changes. Resolves firmware symlinks before walking.
+i2c_dt_path_enabled() {
+    idpe_path=$(readlink -f "$1" 2>/dev/null) || return 1
+    [ -d "$idpe_path" ] || return 1
+    while [ "$idpe_path" != / ]; do
+        if [ -f "$idpe_path/status" ]; then
+            idpe_status=$(dt_property_text "$idpe_path" status) || return 1
+            case "$idpe_status" in
+                ''|okay|ok)
+                    ;;
+                *)
+                    return 1
+                    ;;
+            esac
+        fi
+        idpe_path=${idpe_path%/*}
+        [ -n "$idpe_path" ] || break
+    done
+}
+
+# i2c_topology_issue <object> <expected> <observed>
+# Records a topology defect in the current report and sets its failure flag.
+# Logs to stdout, no hardware changes. Called only by i2c_validate_topology.
+i2c_topology_issue() {
+    ivt_failed=1
+    printf 'FAIL\t%s\t%s\t%s\n' "$1" "$2" "$3" >>"$ivt_report"
+    log_fail "[I2C-TOPOLOGY] object=$1 expected=$2 observed=$3 artifact=$ivt_report"
+}
+
+# i2c_topology_check_bus <dt-bus> <result-dir> <required|optional-camera>
+# Reconciles immediate firmware clients with exact runtime of_node identities.
+# Appends absent optional cameras for caller SKIPs. Never scans hardware.
+i2c_topology_check_bus() {
+    itcb_bus="$1"
+    itcb_dir="$2"
+    itcb_policy="$3"
+    [ ! -d "$itcb_bus/i2c-bus" ] || itcb_bus="$itcb_bus/i2c-bus"
+    for itcb_child in "$itcb_bus"/*; do
+        [ -d "$itcb_child" ] || continue
+        [ -f "$itcb_child/compatible" ] || [ -f "$itcb_child/reg" ] || continue
+        case "${itcb_child##*/}" in
+            ports|port|port@*)
+                continue
+                ;;
+        esac
+        i2c_dt_path_enabled "$itcb_child" || continue
+        itcb_node=$(readlink -f "$itcb_child") || return 1
+        if awk -F '\t' -v node="$itcb_node" '
+            $1 == node { found=1 } END { exit !found }
+        ' "$itcb_dir/i2c_client_nodes.tsv"; then
+            continue
+        fi
+        if [ "$itcb_policy" = optional-camera ] &&
+           i2c_client_is_camera_sensor "$itcb_node"; then
+            I2C_RUNTIME_OPTIONAL_CAMERA_COUNT=$((I2C_RUNTIME_OPTIONAL_CAMERA_COUNT + 1))
+            printf '%s\t%s\t%s\n' "dt:${itcb_node##*/}" \
+                "not-enumerated" "$itcb_node" >>"$itcb_dir/i2c_optional_camera_clients.tsv" || return 1
+            log_warn "[I2C-TOPOLOGY] optional camera node=$itcb_node has no runtime client, captured probe errors still fail"
+        else
+            i2c_topology_issue "$itcb_node" runtime-i2c-client not-enumerated
+        fi
+    done
+}
+
+# i2c_validate_topology <result-dir> <required|optional-camera>
+# Checks discovered controllers, exact DT adapter/client mappings and mux links.
+# Requires the inventory TSVs and functestlib.sh. Returns 0 healthy, 1 faulty.
+# Retains i2c_topology.tsv and node maps, logs findings, no hardware operations.
+i2c_validate_topology() {
+    ivt_dir="$1"
+    ivt_policy="$2"
+    ivt_report="$ivt_dir/i2c_topology.tsv"
+    ivt_failed=0
+    printf 'status\tobject\texpected\tobserved\n' >"$ivt_report" || return 1
+    : >"$ivt_dir/i2c_adapter_nodes.tsv" || return 1
+    : >"$ivt_dir/i2c_client_nodes.tsv" || return 1
+    while IFS="$(printf '\t')" read -r ivt_id ivt_rest; do
+        [ -n "$ivt_id" ] || continue
+        ivt_adapter="/sys/bus/i2c/devices/$ivt_id"
+        [ -d "$ivt_adapter" ] || ivt_adapter="/sys/class/i2c-adapter/$ivt_id"
+        ivt_real=$(readlink -f "$ivt_adapter") || return 1
+        ivt_node=""
+        if [ -L "$ivt_adapter/of_node" ]; then
+            ivt_node=$(readlink -f "$ivt_adapter/of_node") || return 1
+        elif [ -L "/sys/class/i2c-adapter/$ivt_id/of_node" ]; then
+            ivt_node=$(readlink -f "/sys/class/i2c-adapter/$ivt_id/of_node") || return 1
+        fi
+        printf '%s\t%s\t%s\n' "$ivt_node" "$ivt_id" "$ivt_real" >>"$ivt_dir/i2c_adapter_nodes.tsv" || return 1
+        if [ -L "$ivt_adapter/mux_device" ] && [ ! -d "$ivt_adapter/mux_device" ]; then
+            i2c_topology_issue "$ivt_id" accessible-mux-device broken-link
+        fi
+    done <"$ivt_dir/i2c_adapters.tsv"
+    for ivt_client in /sys/bus/i2c/devices/[0-9]*-[0-9a-fA-F]*; do
+        [ -d "$ivt_client" ] || continue
+        if [ -L "$ivt_client/of_node" ]; then
+            ivt_node=$(readlink -f "$ivt_client/of_node") || return 1
+            printf '%s\t%s\n' "$ivt_node" "${ivt_client##*/}" >>"$ivt_dir/i2c_client_nodes.tsv" || return 1
+        fi
+        for ivt_link in "$ivt_client"/channel-*; do
+            [ -L "$ivt_link" ] || continue
+            [ -d "$ivt_link" ] || i2c_topology_issue "$ivt_link" runtime-mux-adapter broken-link
+        done
+    done
+    # shellcheck disable=SC2034 # Remaining controller columns are retained in the source inventory.
+    while IFS="$(printf '\t')" read -r ivt_node ivt_rest; do
+        [ -n "$ivt_node" ] || continue
+        ivt_device=$(find_platform_device_for_dt_node "$ivt_node" 2>/dev/null || true)
+        ivt_device=$(readlink -f "$ivt_device" 2>/dev/null || true)
+        ivt_count=0
+        if [ -n "$ivt_device" ]; then
+            ivt_count=$(awk -F '\t' -v prefix="$ivt_device/" '
+                index($3, prefix) == 1 { count++ } END { print count+0 }
+            ' "$ivt_dir/i2c_adapter_nodes.tsv")
+        fi
+        ivt_subbuses=0
+        for ivt_bus in "$ivt_node"/i2c-bus@*; do
+            [ -d "$ivt_bus" ] || continue
+            i2c_dt_path_enabled "$ivt_bus" || continue
+            ivt_subbuses=$((ivt_subbuses + 1))
+            if ! awk -F '\t' -v node="$ivt_bus" '
+                $1 == node { found=1 } END { exit !found }
+            ' "$ivt_dir/i2c_adapter_nodes.tsv"; then
+                i2c_topology_issue "$ivt_bus" runtime-i2c-adapter not-enumerated
+            fi
+        done
+        ivt_compatible=$(dt_property_text "$ivt_node" compatible)
+        case "$ivt_compatible" in
+            *-cci*)
+                # A CCI parent may legitimately have no enabled master buses.
+                ;;
+            *)
+                [ "$ivt_count" -gt 0 ] || i2c_topology_issue "$ivt_node" owned-i2c-adapter none
+                ;;
+        esac
+        printf 'INFO\t%s\towned-adapters\t%s\n' "$ivt_node" "$ivt_count" >>"$ivt_report" || return 1
+        log_info "[I2C-TOPOLOGY] controller=$ivt_node owned_adapters=$ivt_count enabled_child_buses=$ivt_subbuses"
+    done <"$ivt_dir/i2c_controllers.tsv"
+    while IFS="$(printf '\t')" read -r ivt_node ivt_id ivt_real; do
+        [ -d "$ivt_node" ] || continue
+        i2c_topology_check_bus "$ivt_node" "$ivt_dir" "$ivt_policy" || return 1
+    done <"$ivt_dir/i2c_adapter_nodes.tsv"
+    # Mux channel nodes are buses, not I2C clients. Match their own firmware
+    # identities, never infer channel numbers from dynamically assigned bus IDs.
+    while IFS="$(printf '\t')" read -r ivt_node ivt_id; do
+        for ivt_bus in "$ivt_node"/i2c@* "$ivt_node"/i2c-mux/i2c@*; do
+            [ -d "$ivt_bus" ] || continue
+            i2c_dt_path_enabled "$ivt_bus" || continue
+            if ! awk -F '\t' -v node="$ivt_bus" '
+                $1 == node { found=1 } END { exit !found }
+            ' "$ivt_dir/i2c_adapter_nodes.tsv"; then
+                i2c_topology_issue "$ivt_bus" runtime-mux-channel not-enumerated
+            fi
+        done
+    done <"$ivt_dir/i2c_client_nodes.tsv"
+    [ "$ivt_failed" -eq 0 ]
+}
+
+# i2c_select_eeprom_adapter <tools-dir> <result-dir> <timeout-seconds> <device>
+# Prints a unique EEPROM adapter number, returns 1 when unavailable/ambiguous.
+# Retains discovery artifacts, no stdout diagnostics or device transfers.
+i2c_select_eeprom_adapter() {
+    isea_runner="$1/i2c_eeprom_read.sh"
+    isea_interpreter="sh"
+    if command -v python3 >/dev/null 2>&1; then
+        isea_runner="$1/i2c_eeprom_runner.py"
+        isea_interpreter=python3
+    fi
+    isea_log="$2/i2c_eeprom_adapter_discovery.log"
+    isea_report="$2/i2c_eeprom_adapter_discovery.tsv"
+    [ -f "$isea_runner" ] || return 1
+    run_with_timeout_log "$3" "$isea_log" "$isea_interpreter" "$isea_runner" \
+        --mode discover --device "$4" --report "$isea_report" || return 1
+    grep -q '^I2C_EEPROM_RESULT status=PASS ' "$isea_log" || return 1
+    isea_adapter=$(awk -F '\t' '$1 == "adapter" { print $2; exit }' "$isea_report")
+    case "$isea_adapter" in
+        ''|*[!0-9]*)
+            return 1
+            ;;
+    esac
+    [ -c "/dev/i2c-$isea_adapter" ] || return 1
+    printf '%s\n' "$isea_adapter"
+}
+
+# i2c_eeprom_client_path <sysfs-data-file>
+# Prints the resolved owning I2C client, returns 1 if it cannot be identified.
+# No logs or mutations. Used by the shell-only EEPROM discovery path.
+i2c_eeprom_client_path() {
+    for iecp_candidate in "$1" "${1%/*}/device"; do
+        [ -e "$iecp_candidate" ] || continue
+        iecp_path=$(readlink -f "$iecp_candidate" 2>/dev/null) || return 1
+        while [ -n "$iecp_path" ] && [ "$iecp_path" != / ]; do
+            if printf '%s\n' "${iecp_path##*/}" | grep -Eq '^[0-9]+-[0-9a-fA-F]{4}$'; then
+                printf '%s\n' "$iecp_path"
+                return 0
+            fi
+            iecp_path=${iecp_path%/*}
+        done
+    done
+    return 1
+}
+
+# i2c_eeprom_select <auto|sysfs-file> <result-dir>
+# Sets I2C_EEPROM_SELECTED, I2C_EEPROM_CLIENT and I2C_EEPROM_SIZE.
+# Retains candidates and logs selection. Returns 0 selected, 1 faulty,
+# 2 absent/ambiguous, 3 invalid input. Reads metadata only, never device data.
+i2c_eeprom_select() {
+    ies_request="$1"
+    ies_dir="$2"
+    I2C_EEPROM_SELECTED=""
+    I2C_EEPROM_CLIENT=""
+    I2C_EEPROM_SIZE=""
+    : >"$ies_dir/i2c_eeprom_candidates.tsv" || return 1
+    if [ "$ies_request" = auto ]; then
+        set -- /sys/bus/i2c/devices/*/eeprom /sys/bus/nvmem/devices/*/nvmem
+    else
+        [ -f "$ies_request" ] || {
+            log_fail "Requested EEPROM does not exist: $ies_request"
+            return 1
+        }
+        set -- "$ies_request"
+    fi
+    ies_seen=" "
+    ies_count=0
+    for ies_file in "$@"; do
+        [ -f "$ies_file" ] || continue
+        case "${ies_file##*/}" in
+            eeprom)
+                ;;
+            nvmem)
+                ies_type=""
+                if [ -r "${ies_file%/*}/type" ]; then
+                    ies_type=$(cat "${ies_file%/*}/type") || return 1
+                fi
+                case "$ies_type" in
+                    ''|EEPROM|eeprom)
+                        ;;
+                    *)
+                        [ "$ies_request" = auto ] && continue
+                        return 3
+                        ;;
+                esac
+                ;;
+            *)
+                return 3
+                ;;
+        esac
+        ies_client=$(i2c_eeprom_client_path "$ies_file") || {
+            [ "$ies_request" = auto ] && continue
+            return 3
+        }
+        case "$ies_seen" in
+            *" $ies_client "*)
+                continue
+                ;;
+        esac
+        ies_seen="$ies_seen$ies_client "
+        ies_count=$((ies_count + 1))
+        printf '%s\t%s\n' "$ies_file" "$ies_client" >>"$ies_dir/i2c_eeprom_candidates.tsv" || return 1
+        log_info "[I2C-EEPROM-CANDIDATE] path=$ies_file client=$ies_client"
+        I2C_EEPROM_SELECTED="$ies_file"
+        I2C_EEPROM_CLIENT="$ies_client"
+    done
+    if [ "$ies_count" -ne 1 ]; then
+        log_warn "EEPROM selection needs exactly one candidate, found=$ies_count, provide --eeprom-device for multiple candidates"
+        return 2
+    fi
+    I2C_EEPROM_SIZE=$(stat -L -c %s "$I2C_EEPROM_SELECTED" 2>/dev/null) || return 1
+    if [ "$I2C_EEPROM_SIZE" = 0 ]; then
+        for ies_size_file in "${I2C_EEPROM_SELECTED%/*}/size" "${I2C_EEPROM_SELECTED%/*}/../size"; do
+            [ -r "$ies_size_file" ] || continue
+            I2C_EEPROM_SIZE=$(cat "$ies_size_file") || return 1
+            break
+        done
+    fi
+    I2C_EEPROM_SIZE=$(i2c_tools_value_decimal "$I2C_EEPROM_SIZE") || return 1
+    [ "$I2C_EEPROM_SIZE" -gt 0 ] || return 2
+    log_info "[I2C-EEPROM-SELECT] path=$I2C_EEPROM_SELECTED client=$I2C_EEPROM_CLIENT size=$I2C_EEPROM_SIZE source=$ies_request"
+}
+
+# i2c_eeprom_read_exact <file> <offset> <length> <output> <result-dir>
+# Reads through the kernel driver with a finite timeout and verifies byte count.
+# Uses the largest aligned block up to 4096 bytes, compatible with BusyBox dd.
+# Returns 0 exact read, 1 failure. Retains output/error artifacts, no device writes.
+i2c_eeprom_read_exact() {
+    iere_file="$1"
+    iere_offset="$2"
+    iere_length="$3"
+    iere_output="$4"
+    iere_dir="$5"
+    if ! [ "$iere_offset" -ge 0 ] 2>/dev/null ||
+       ! [ "$iere_length" -gt 0 ] 2>/dev/null; then
+        log_fail "[I2C-EEPROM-READ] invalid offset=$iere_offset or length=$iere_length"
+        return 1
+    fi
+    iere_block=4096
+    for iere_value in "$iere_offset" "$iere_length"; do
+        while [ "$iere_value" -ne 0 ]; do
+            iere_remainder=$((iere_block % iere_value))
+            iere_block=$iere_value
+            iere_value=$iere_remainder
+        done
+    done
+    run_with_managed_timeout 10 "$iere_dir" eeprom-read \
+        dd iflag=fullblock "if=$iere_file" "of=$iere_output" "bs=$iere_block" \
+        "skip=$((iere_offset / iere_block))" "count=$((iere_length / iere_block))" \
+        >"$iere_output.log" 2>&1
+    iere_status=$?
+    iere_bytes=$(wc -c <"$iere_output" 2>/dev/null | tr -d '[:space:]')
+    if [ "$iere_status" -ne 0 ] || [ "$iere_bytes" != "$iere_length" ]; then
+        log_fail "[I2C-EEPROM-READ] path=$iere_file offset=$iere_offset expected=$iere_length actual=${iere_bytes:-0} rc=$iere_status artifact=$iere_output.log"
+        log_file_with_label I2C-EEPROM-ERROR "$iere_output.log" 12
+        return 1
+    fi
+}
+
+# i2c_eeprom_read_matrix <file> <offset> <length> <result-dir>
+# Compares bounded repeated reads against a baseline at start, middle and end.
+# Returns 0 exact matches, 1 failure. No claims about driver DMA/FIFO selection.
+i2c_eeprom_read_matrix() {
+    ierm_file="$1"
+    ierm_offset="$2"
+    ierm_length="$3"
+    ierm_dir="$4"
+    i2c_eeprom_read_exact "$ierm_file" "$ierm_offset" "$ierm_length" "$ierm_dir/eeprom-baseline.bin" "$ierm_dir" || return 1
+    ierm_case=0
+    for ierm_size in 1 2 3 16 32 64 "$ierm_length"; do
+        [ "$ierm_size" -le "$ierm_length" ] || continue
+        for ierm_relative in 0 "$(((ierm_length - ierm_size) / 2))" "$((ierm_length - ierm_size))"; do
+            ierm_case=$((ierm_case + 1))
+            ierm_expected="$ierm_dir/matrix-$ierm_case-expected.bin"
+            ierm_actual="$ierm_dir/matrix-$ierm_case-actual.bin"
+            i2c_eeprom_read_exact "$ierm_dir/eeprom-baseline.bin" "$ierm_relative" "$ierm_size" "$ierm_expected" "$ierm_dir" || return 1
+            i2c_eeprom_read_exact "$ierm_file" "$((ierm_offset + ierm_relative))" "$ierm_size" "$ierm_actual" "$ierm_dir" || return 1
+            if ! cmp -s "$ierm_expected" "$ierm_actual"; then
+                log_fail "[I2C-EEPROM-MATRIX] case=$ierm_case offset=$((ierm_offset + ierm_relative)) length=$ierm_size data-mismatch expected=$ierm_expected actual=$ierm_actual"
+                return 1
+            fi
+            ierm_digest=$(sha256sum "$ierm_actual") || return 1
+            log_info "[I2C-EEPROM-MATRIX] case=$ierm_case offset=$((ierm_offset + ierm_relative)) bytes=$ierm_size sha256=${ierm_digest%% *} exact-match artifact=$ierm_actual"
+        done
+    done
+}
+
+# i2c_eeprom_read_after_idle <file> <client> <offset> <length> <result-dir>
+# Observes natural runtime suspend on the client/controller path for at most
+# ten seconds, then verifies a fresh identical read. No power/control writes.
+# Returns 0 verified, 1 transfer failure, 2 no observable natural suspend.
+i2c_eeprom_read_after_idle() {
+    ierai_file="$1"
+    ierai_client="$2"
+    ierai_offset="$3"
+    ierai_length="$4"
+    ierai_dir="$5"
+    i2c_eeprom_read_exact "$ierai_file" "$ierai_offset" "$ierai_length" "$ierai_dir/pm-before.bin" "$ierai_dir" || return 1
+    ierai_attempt=0
+    ierai_suspended=""
+    while [ "$ierai_attempt" -lt 10 ]; do
+        ierai_path="$ierai_client"
+        while [ -n "$ierai_path" ] && [ "$ierai_path" != / ]; do
+            if [ -r "$ierai_path/power/runtime_status" ]; then
+                ierai_state=$(cat "$ierai_path/power/runtime_status") || return 1
+                printf '%s\t%s\t%s\n' "$ierai_attempt" "$ierai_path" "$ierai_state" >>"$ierai_dir/i2c_runtime_pm.tsv" || return 1
+                if [ "$ierai_state" = suspended ]; then
+                    ierai_suspended="$ierai_path"
+                    break
+                fi
+            fi
+            ierai_path=${ierai_path%/*}
+        done
+        [ -z "$ierai_suspended" ] || break
+        sleep 1
+        ierai_attempt=$((ierai_attempt + 1))
+    done
+    if [ -z "$ierai_suspended" ]; then
+        log_warn "[I2C-EEPROM-PM] no natural runtime suspend observed in 10 seconds, power policy unchanged"
+        return 2
+    fi
+    i2c_eeprom_read_exact "$ierai_file" "$ierai_offset" "$ierai_length" "$ierai_dir/pm-after.bin" "$ierai_dir" || return 1
+    if ! cmp -s "$ierai_dir/pm-before.bin" "$ierai_dir/pm-after.bin"; then
+        log_fail "[I2C-EEPROM-PM] post-idle data mismatch expected=$ierai_dir/pm-before.bin actual=$ierai_dir/pm-after.bin"
+        return 1
+    fi
+    ierai_after=$(cat "$ierai_suspended/power/runtime_status" 2>/dev/null || printf '%s' unavailable)
+    log_info "[I2C-EEPROM-PM] suspended_object=$ierai_suspended subsequent_read=exact-match bytes=$ierai_length post_read_state=$ierai_after"
+}
+
 # bus_validation_bool_true <value>
 # Returns success only for explicit affirmative fixture opt-in values.
 bus_validation_bool_true() {

@@ -1,6 +1,11 @@
 #!/bin/sh
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause
+
+# Keep test-owned artifacts under the invocation directory, not inherited TMPDIR.
+AUDIO_WORK_DIR="$(pwd -P)" || exit 1
+TMPDIR="$AUDIO_WORK_DIR"
+export TMPDIR
 #
 # Audio card registration validation:
 # - validates ALSA sound card registration
@@ -37,6 +42,8 @@ if [ -z "${__INIT_ENV_LOADED:-}" ]; then
     __INIT_ENV_LOADED=1
 fi
 
+# shellcheck disable=SC1090
+. "$INIT_ENV"
 # shellcheck disable=SC1091
 . "$TOOLS/functestlib.sh"
 # shellcheck disable=SC1091
@@ -48,6 +55,9 @@ if [ -r "$TOOLS/lib_pkg_provider.sh" ]; then
 fi
 
 TESTNAME="Audio_Card_Registration"
+RES_FILE="$AUDIO_WORK_DIR/$TESTNAME.res"
+EXPECTED_DT_COMPATIBLE=""
+DT_FIT_IMAGE=""
 
 # Only the explicit --overlay option enables AudioReach package preparation.
 # Ignore inherited values so native/base mode remains the default.
@@ -69,6 +79,10 @@ usage() {
 Usage: $0 [options]
 
 Options:
+  --expected-dt-compatible TEXT
+      Require this exact compatible in the active DT before registration checks.
+  --fit-image PATH
+      Verify EFI selection using this explicitly supplied boot FIT.
   --overlay
       On Debian or CentOS, ensure the Qualcomm AudioReach package set before
       validating ALSA card registration. Without this flag, use the
@@ -153,10 +167,17 @@ fi
 # Resolve absolute output paths. The complete runner remains the root
 # orchestrator on Debian and CentOS, so logs, results, inventory, and dmesg
 # evidence stay root-owned.
-RES_FILE="$SCRIPT_DIR/$TESTNAME.res"
-LOGDIR="$SCRIPT_DIR/results/$TESTNAME"
+RES_FILE="$AUDIO_WORK_DIR/$TESTNAME.res"
+if ! LOGDIR="$(audio_create_run_directory "$AUDIO_WORK_DIR/results/$TESTNAME")"; then
+    log_fail "$TESTNAME FAIL - cannot create artifacts under CWD=$AUDIO_WORK_DIR"
+    echo "$TESTNAME FAIL" >"$RES_FILE"
+    exit 1
+fi
 
 # Package preparation is privileged and runs exactly once in the root runner.
+TMPDIR="$LOGDIR"
+export TMPDIR
+
 if ! command -v audio_prepare_test_packages >/dev/null 2>&1; then
     log_fail "$TESTNAME FAIL: required helper is unavailable: audio_prepare_test_packages"
     echo "$TESTNAME FAIL" > "$RES_FILE"
@@ -236,8 +257,25 @@ if ! : > "$RES_FILE"; then
     exit 1
 fi
 
+# Parse registration options, return 1 for missing DT/FIT option values.
+parse_args() {
 while [ $# -gt 0 ]; do
     case "$1" in
+        --expected-dt-compatible|--fit-image)
+            if [ "$#" -lt 2 ] || [ -z "$2" ]; then
+                log_fail "$TESTNAME FAIL - $1 requires a value"
+                return 1
+            fi
+            case "$1" in
+                --expected-dt-compatible)
+                    EXPECTED_DT_COMPATIBLE="$2"
+                    ;;
+                --fit-image)
+                    DT_FIT_IMAGE="$2"
+                    ;;
+            esac
+            shift 2
+            ;;
         --overlay)
             AUDIO_OVERLAY_REQUESTED=1
             export AUDIO_OVERLAY_REQUESTED
@@ -326,6 +364,33 @@ while [ $# -gt 0 ]; do
             ;;
     esac
 done
+}
+
+if ! parse_args "$@"; then
+    test_result_init "$TESTNAME" "$RES_FILE" || exit 1
+    test_result_record FAIL "$TESTNAME FAIL - invalid command line"
+    test_result_finish
+fi
+
+if ! audio_dt_fit_preflight "$LOGDIR/dt-fit-preflight" \
+    "$EXPECTED_DT_COMPATIBLE" "$DT_FIT_IMAGE"; then
+    test_result_init "$TESTNAME" "$RES_FILE" || exit 1
+    test_result_record FAIL "$TESTNAME FAIL - DT/FIT preflight failed, inspect $LOGDIR/dt-fit-preflight"
+    test_result_finish
+fi
+
+# Passive prerequisite validation only, never start or restart a DSP here.
+if [ "$AUDIO_OVERLAY_REQUESTED" -eq 0 ]; then
+    audio_base_topology_preflight >"$LOGDIR/topology_preflight.txt"
+    audio_topology_rc=$?
+    if [ "$audio_topology_rc" -eq 1 ]; then
+        test_result_init "$TESTNAME" "$RES_FILE" || exit 1
+        test_result_record FAIL "$TESTNAME FAIL - required image topology is missing, empty or ambiguous for the active DT"
+        test_result_finish
+    fi
+fi
+list_remoteproc_instances >"$LOGDIR/remoteproc_inventory.txt" 2>&1 || true
+log_file_with_label AUDIO-REMOTEPROC "$LOGDIR/remoteproc_inventory.txt"
 
 case "$AUDIO_CARD_WAIT_SECS" in
     ''|*[!0-9]*)
@@ -507,6 +572,15 @@ while IFS='|' read -r card_idx card_id card_desc || [ -n "$card_idx" ]; do
 done < "$MATCHED_CARDS_FILE"
 
 test_failed=0
+
+if [ "$AUDIO_OVERLAY_REQUESTED" -eq 0 ]; then
+    while IFS='|' read -r card_idx card_id card_desc || [ -n "$card_idx" ]; do
+        [ -n "$card_idx" ] || continue
+        if ! audio_alsa_validate_topology "$card_idx"; then
+            test_failed=1
+        fi
+    done <"$MATCHED_CARDS_FILE"
+fi
 
 if [ "$REQUIRE_CONTROL_NODE" -eq 1 ]; then
     if ! audio_run_helper_as_test_user \

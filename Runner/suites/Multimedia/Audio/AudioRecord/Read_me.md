@@ -14,6 +14,326 @@ audio `data` chunk are reported as metadata rather than as trailing audio.
 
 ## Features
 
+### Active DT and FIT preflight
+
+Before topology checks and test-driven DSP startup, the runner reports the live DT model, complete
+compatible list and sound-card identities. CQS, CQM, IQS and future boards are
+discovered from runtime data, not a fixed variant/PCM table. EFI
+`VendorDtbOverlays` is read separately without mounting, writing or rebooting.
+FIT DT overlays are independent of the audio `--overlay` package/runtime mode.
+
+`dt-fit-preflight/` under the suite log directory retains active DT identity,
+sound-card nodes, EFI selection, FIT candidates, configuration/FDT-reference
+inventory and extraction diagnostics. Only already accessible boot directories
+and mounted FAT filesystems are searched. Raw boot partitions are not mounted
+or read. A discovered FIT is a candidate, not proof of what booted.
+
+Optional CLI-only controls (no environment-variable equivalents):
+
+- `--expected-dt-compatible TEXT` requires an exact compatible in the live DT.
+  Use a board-specific compatible, not a generic SoC fallback.
+- `--fit-image PATH` asserts that this is the intended boot FIT. With a readable
+  EFI selector and image-provided `fdtget`, `dumpimage` and `timeout`, the test
+  resolves configuration metadata and the ordered base/overlay references.
+  An unavailable/ambiguous selection or base-identity mismatch fails preflight.
+
+Automatic mode reports missing DT/EFI/FIT tools as unavailable verification and
+preserves normal audio discovery. A candidate-FIT mismatch warns until the boot
+FIT is explicitly supplied. Matching the base DT does not prove every overlay
+was applied or independently identify the physical board. No packages or DT
+assets are installed for this inspection. FIT configurations with compressed
+base FDTs are currently reported as unverifiable. Configuration traversal is
+bounded to 30 seconds between entries and 512 entries, each tool call to 5 seconds.
+
+Selector matching prefers a unique literal FIT compatible. A compound EFI value
+such as `vendor,board,feature` can match `vendor,board-feature` when the FIT
+metadata contains every qualifier. Qualifier order may differ, but unknown,
+missing or extra qualifiers are never silently discarded. Ambiguous matches
+remain unverifiable. `dt-fit-preflight/selected_fit_config.txt` records the
+selected configuration, compatible, ordered FDT references and match type.
+
+Examples, use the compatible and FIT from your own device/build:
+
+```sh
+./run.sh
+./run.sh --expected-dt-compatible qcom,shikra-iqs-evk
+./run.sh --expected-dt-compatible qcom,shikra-iqs-evk --fit-image /boot/qclinux_fit.img
+```
+
+Run these commands from the suite directory. The FIT path is illustrative,
+replace it with the intended build's accessible FIT. For CQS or CQM base
+validation, replace the expected compatible with `qcom,shikra-cqs-evk` or
+`qcom,shikra-cqm-evk`. These examples do not introduce script-side variant maps.
+
+Suite-specific examples, with an active non-silent microphone source:
+
+```sh
+# Base mono capture, discover the microphone PCM dynamically.
+./run.sh --backend alsa --source mic --config-name record_48KHz_1ch \
+    --record-seconds 10s --expected-dt-compatible qcom,shikra-iqs-evk
+
+# Prepared CQS/IQS AudioReach image, this does not select a boot DT.
+./run.sh --overlay --source mic --config-name record_48KHz_1ch \
+    --record-seconds 10s --expected-dt-compatible qcom,shikra-iqs-evk
+```
+
+Expected outcomes: a matching DT permits the normal test to run, it does not
+itself produce PASS. An explicit DT mismatch or unverifiable explicit FIT
+produces FAIL before topology validation. Missing optional automatic FIT/EFI
+evidence reports unverified detection and preserves the suite's normal
+PASS/FAIL/SKIP policy. Inspect `dt-fit-preflight/report.txt` and the accompanying
+inventory/tool logs under the suite's retained log directory.
+
+### Runtime microphone routing and image-provided assets
+
+Base recording uses the installed UCM `CapturePCM` first. For the existing
+VA-DMIC mixer path without UCM, the shared helper matches the exposed
+`MultiMedia` frontend to the capture PCM name from `arecord -l`. Direct-codec
+cards use the named `VA DMIC Capture` link. It does not select a PCM by SoC,
+form-factor name, or fixed card/device number. Multiple frontends for the same
+microphone backend are valid candidates. Automatic selection chooses the lowest
+registered PCM number, then runs the existing bounded capture probe. Preparation
+uses that PCM's mixer link, including when the caller supplies an explicit PCM.
+Conflicting backends or ambiguous PCM mappings for a single frontend still fail
+instead of probing an unrelated headset input. Failed mixer writes
+and missing required VA-DMIC controls fail preparation with diagnostics.
+
+Before remoteproc startup, base preflight discovers enabled sound-card DT links
+to `qcom,q6apm`. It requires a nonempty `<DT-model>-tplg.bin` in one unambiguous
+image firmware `qcom/<driver>/` directory, including running-kernel directories
+and compressed firmware supported by the shared resolver. A missing, empty or
+ambiguous file fails before the DSP starts. No card registration is needed for
+this prerequisite check, and no SoC-to-file lookup table is used. Once a card
+registers, the exact ALSA driver-directory check runs before mixer preparation.
+
+Base coverage for issue #624 includes CQS, CQM and IQS. CQS and IQS require the
+matching topology in the build. CQM's direct-codec path does not require a
+q6apm topology. The helper follows the selected card's runtime DT links and the
+kernel `qcom/<driver>/<model>-tplg.bin` naming contract, not a variant table.
+It only checks build-provided assets, it never transfers or downloads topology,
+UCM, firmware, or calibration. Applicable remoteproc preparation failures and
+missing required topology are FAIL, not SKIP. Generic capture and UCM selection
+remain available on other images.
+
+For base ALSA or automatic backend selection, an applicable audio remoteproc is
+followed by a bounded registration wait, up to 30 seconds for a card and another
+10 seconds for a capture PCM. A timeout reports registration failure with ALSA
+and remoteproc inventory. Explicit managed backends, overlay and null routes
+do not acquire this ALSA readiness requirement.
+
+When registration times out, the result stays FAIL and the test observes for
+another 15 seconds to capture late remoteproc watchdog/recovery messages. It
+does not restart the DSP or turn late registration into PASS. A crash/recovery
+observed before registration completes also fails preparation. Diagnostics are
+stored under `results/AudioRecord_<suffix>/run-<timestamp>.<id>/remoteproc-preflight/` (without the
+suffix when none is supplied): kernel snapshot, filtered errors, access status,
+remoteproc state/inventory, current-window audio events, attributed remoteproc
+failures and deferred probes. Key evidence is replayed to stdout. At normal
+completion the same health classifier reuses the final kernel snapshot, without
+recapturing it. Old messages and crashes from unrelated remoteprocs do not
+become current-run failures. Missing kernel-log access is reported as a
+diagnostic limitation, never proof of a healthy DSP. `--no-dmesg` disables kernel
+capture and the extra observation window, but retains sysfs failure diagnostics.
+
+Preflight retains the complete kernel snapshot. Scanner output is kept in
+`kernel_capture.log`, but only current-window audio/selected-remoteproc events
+are replayed. Unrelated PCIe/Ethernet messages and benign dummy-regulator context
+are not presented as audio failures. Selected remoteproc crash evidence is retained.
+
+The final scan also writes `audio_kernel_errors.log` and
+`audio_kernel_warnings.log` beside the raw snapshot, and replays findings to
+stdout. APM timeouts and DAPM/no-backend warnings remain visible even when the
+streams pass. Counts cover the recorded preparation window, or boot history
+when no window was established. Missing or empty kernel evidence is unverified,
+not clean. These diagnostics do not change functional PASS policy or the
+separate selected-DSP crash gate.
+
+ALSA preparation announces its start before discovery, topology and mixer checks.
+Each attempt's diagnostics are replayed on completion and retained in
+`alsa_capture_probe.log` under the suite result directory. Each candidate logs
+its PCM, format, rate, channels, exit status, elapsed stream time and byte count.
+Total preparation time is reported separately. Media invocation and WAV validation
+policy are unchanged. `[AUDIO-PHASE]` lines show discovery, per-device
+topology/mixer preparation and each mixer write with elapsed seconds and status.
+These phases are nested, not additive, and do not change stream command timeouts.
+The post-execution snapshot can show inactive streams after
+a valid capture. These counters are not continuous monitoring, and existing
+log-derived/fallback evidence remains part of the summary. A silent channel in
+an otherwise valid stereo WAV remains a warning under the default policy, not
+proof of working stereo microphones.
+
+On a prepared Yocto image with a microphone connected and a non-silent source:
+
+The explicit `record_48KHz_1ch` configuration covers the mono DMIC use case.
+The existing automatic ten-configuration matrix and numbered aliases are
+unchanged, select this additional configuration by name.
+
+```sh
+# Base ALSA capture, shared by all three form factors.
+./run.sh --backend alsa --source mic --config-name record_48KHz_1ch --record-seconds 10s
+
+# Overlay capture, supported scope is CQS and IQS only.
+./run.sh --overlay --source mic --config-name record_48KHz_1ch --record-seconds 10s
+```
+
+Before overlay service preparation or route polling, the selected test user must
+have `wpctl` and `pw-record`. Missing clients fail immediately with the required
+image capabilities in stdout and `overlay-services/clients.log`, without waiting
+for nonexistent routes or installing packages. Optional `pw-cli` supplies richer
+diagnostics and volume control, its absence is reported as unavailable evidence,
+not a shell error.
+
+On Debian and CentOS, both explicit and detected overlays use the existing
+desktop-user runtime preparation. Active unchanged PipeWire is preserved even
+when its control plane is unresponsive, then bounded physical-route discovery
+must succeed. An inactive or failed service gets one existing bounded restart.
+Pending jobs, transitional or incomplete core-unit evidence fail without restart.
+An explicitly requested package transition retains its existing restart policy.
+Ubuntu's explicit-overlay SKIP, base ALSA/PulseAudio paths, and native
+system-service policies are unchanged. RHEL does not gain Debian/CentOS package
+or desktop service preparation. Non-systemd images require image-provided
+running services. An active server with no physical sources still fails, without
+ALSA fallback.
+
+On readiness failure, `overlay-services/failure-server.log` includes current
+PipeWire/WirePlumber process startup logs, bounded by service start time, PID and
+current boot. Root uses the system journal filtered by test UID and user-unit
+names, avoiding dependence on per-user journal files. Native and non-root paths
+retain their scope. Missing tools, identity or access remain diagnostic limits.
+`initialization-errors.log` retains and prints up to 20 distinct ACDB-open and
+AGM graph-init errors. The final failure reason includes a short summary with
+runtime-reported paths, without board mappings or assumed package names. Check
+image provisioning and service access, an open error alone does not prove that
+a file is absent. Startup history explains failed readiness only, it is excluded
+from recording-window validation. No service reset, package installation or
+permission change is performed by these diagnostics.
+
+Explicit overlay selection or runtime-detected AudioReach modules require
+PipeWire. Base ALSA fallback is disabled during discovery and recording.
+Detection alone does not request package installation. An already provisioned
+CQS/IQS overlay can use the normal capture command without `--overlay`:
+
+```sh
+./run.sh --source mic --config-name record_48KHz_1ch --record-seconds 10s
+```
+
+The runtime-selected modem is prepared before PipeWire readiness is checked.
+Native systemd modem overlays wait up to 10 seconds per device for modem
+passthrough and its heap and validate test-user access. When the DSP was already
+running or has just been started, PipeWire responds in the test-user session, the requested capture route
+exists and `pipewire.service` is active, the live setup is eligible for reuse.
+Installed audio-unit aliases are discovered and deduplicated before reuse, then
+every discovered service/socket must have no pending job or transitional state.
+No setup marker is used. Active PipeWire is never stopped by preparation.
+Allow up to `PIPEWIRE_READY_TIMEOUT` (default 120 seconds) for its route to
+appear, with individually bounded client queries. If discovery still fails,
+report FAIL without resetting the running services. If PipeWire is inactive or
+failed, snapshot activity and perform one reset-and-start attempt using the
+installed audio units. Recheck device access before starting PipeWire, with
+mode/owner and service-user logging. No repeated recovery attempt is made.
+A physical capture node
+must be selected before recording. Missing devices, access failures, unavailable
+PipeWire or missing required capture routes produce FAIL, not SKIP.
+**Device permissions and ownership are never changed by this setup.**
+
+Pending jobs, transitional states or incomplete unit queries prevent both reuse
+and startup, with FAIL and no service mutation by this preparation. Wait for the
+existing jobs to settle before retrying. Optional inactive services/sockets are
+not required to be active. Pre-existing failed optional units remain visible in
+the inventory, the requested live route and functional recording are still required.
+`overlay-services/preflight-units` and its `.raw` file retain the canonical unit
+set and refreshed states/jobs before the decision, also replayed to stdout.
+`reuse-units` rechecks those states after route discovery. `reuse-route.log`
+retains each reuse probe's return code, target and diagnostics. `route-check.log`
+does the same after startup. Readiness failures capture `failure-server.log`
+and `failure-nodes.log` before rollback, replaying service identity, recent
+journal errors and node inventory to stdout. Missing diagnostic tools are
+reported without replacing the original failure. A startup crash remains FAIL
+even if rollback restores the initial activity.
+
+After successful readiness, retain the prepared native overlay services for
+subsequent tests and reruns. Do not stop recovered PipeWire just because it
+was initially inactive or failed. Only incomplete setup rolls back activity,
+and rollback failure makes the suite FAIL. Initial failures remain recorded.
+Temporary recording-volume changes still restore their original values.
+Desktop user sessions and non-modem
+platforms keep their existing service behavior. Non-systemd images use already
+provisioned running services. See `overlay-services/` for inventory, initial
+activity and setup/restore output. Nonblocking service actions wait for final
+activity and no pending job using `PIPEWIRE_SYSTEMCTL_TIMEOUT` (default 180
+seconds). Command return codes, unit states, results, job IDs and configured
+systemd timeouts are retained in `setup-*` and `restore-*` artifacts, with
+progress on stdout. Timeout fails without cancelling systemd jobs. Cleanup
+refuses conflicting restoration while audio jobs remain pending, inspect those
+jobs before retrying. Every rerun rechecks live readiness without trusting a
+persistent marker. Failed streams still fail, without retries or tearing down
+a successfully prepared native overlay stack.
+Terminal discovery failures retain kernel
+evidence under `discovery-failure/`, except with `--no-dmesg`.
+
+The modem path requires `/dev/aud_pasthru_modem` and
+`/dev/dma_heap/qcom,audio`. Other overlays retain the system heap,
+with `AUDIO_DMA_HEAP_NODE` still taking precedence. CQM overlay is not part of
+this coverage. Ubuntu's explicit overlay SKIP and Debian/CentOS package
+preparation policy remain unchanged. In base automatic discovery, absent
+optional routes still SKIP. A discovered candidate that fails preparation or
+all capture profiles makes exhausted discovery FAIL, while a working
+alternative route remains eligible.
+
+Use `AudioRecord.yaml` with `AUDIO_BACKEND=alsa` for base CI, or
+`AudioRecord_Overlay.yaml` for overlay CI. Existing duration, WAV integrity,
+format, and non-zero payload validation still determine the recording result.
+ALSA card/PCM inventory and mixer contents supplement the managed-backend logs.
+
+PipeWire recording resolves the requested source before every initial and retry
+attempt, including after backend recovery. It reads the selected node's
+`node.name` (or `object.serial` when no usable name exists) and passes that exact
+identity to `pw-record --target`. The numeric `wpctl` node ID is not assumed to
+be its object serial. Recording does not change the session's default source.
+Missing or invalid target identity prevents recorder invocation and cannot fall
+back to an unrelated ALSA source. No SoC-specific target is used.
+
+The actual target, format and timeout are logged to stdout and the per-case
+`.log`. The accompanying `.log.route` retains node inspection and route identity
+for each attempt.
+Before physical PipeWire capture, the shared helper snapshots the selected
+source's volume, mute, channel volumes and any exposed soft-volume/mute controls.
+It sets those capture controls to unmuted unity gain (100%), verifies readback,
+then records. An already-normalized source is read and verified without writes.
+The saved per-channel balance and mute state are restored after each attempt,
+including recorder failures, timeouts and catchable interruption signals.
+The node ID and object serial are checked before writes and restoration so a
+replacement node is not modified after a server restart. SIGKILL or power loss
+cannot run cleanup.
+
+Preparation or restoration failure makes the invocation fail and cannot be
+hidden by ALSA fallback or a successful later loop. Each new capture attempt
+rediscovers the source and takes a new snapshot. PipeWire capture failures do not
+restart services or retry the recording. Volume diagnostics and readback
+are retained in `.log.volume` and replayed to stdout. Image-provided `pw-cli`
+enables this preparation. If absent, the existing recording path continues with
+an explicit warning and no volume changes, preserving minimal-image support.
+No package is installed. Null-source tests, ALSA/PulseAudio execution, session
+defaults, hardware ADC boost and PAL mixer routing are unchanged. Unity gain
+does not repair a PAL graph-start failure or make all-zero samples valid.
+
+Failed recordings also replay up to 40 lines of their client log to stdout,
+with the full log retained in the result directory.
+
+Both config-discovery and duration-matrix modes use this path:
+
+```sh
+./run.sh --backend pipewire --source mic --config-name "record_48KHz_2ch record_8KHz_1ch"
+./run.sh --backend pipewire --source headset-mic --record-seconds auto --durations "short medium"
+```
+
+Reuse confirms control-plane readiness only. Failed optional units and DSP/APM
+errors remain visible. A short or all-zero recording still fails, even when the
+services are active and the capture node exists. PipeWire uses the sample-progress
+monitor described below inside the volume-preparation session, without a second
+outer watchdog. Final WAV validation and base ALSA/PulseAudio invocation policies
+are retained.
+
 - Supports **PipeWire**, **PulseAudio**, and direct **ALSA** backends
 - **10-config test coverage**: Comprehensive validation across diverse audio formats (sample rates: 8KHz-96KHz, channels: 1ch-6ch)
 - **Flexible config selection**: 
@@ -67,7 +387,7 @@ Ensure the following components are present in the target Yocto build:
 - PipeWire: `pw-record`, `wpctl`
 - PulseAudio: `parecord`, `pactl`
 - ALSA: `arecord`
-- Common tools: `pgrep`, `timeout`, `grep`, `sed`
+- Common tools: `pgrep`, `timeout`, `grep`, `sed`, `awk`, `dd`, `od`, `stat`
 - Daemon: `pipewire` or `pulseaudio` must be running
 
 On Debian, Ubuntu, and CentOS, the selected backend controls client package
@@ -100,7 +420,7 @@ evidence.
 
 Before backend discovery, the suite enumerates runtime remoteprocs and checks the configured firmware and topology under `/lib/firmware` or `/usr/lib/firmware`. It recognizes audio DSP identities and the Shikra modem-hosted audio path. A remoteproc named `modem` is ignored on non-Shikra targets because it is not their audio preflight dependency.
 
-If the matching remoteproc is `running`, the suite records its name and firmware evidence. If it is `offline`, the suite starts it only after confirming the corresponding firmware is provisioned. Generic audio DSP paths also require adjacent topology evidence. Shikra's modem-hosted path does not require an adjacent topology file because its public image packages `qdsp6sw` modem firmware and `lpaicp` audio firmware separately. The suite never stops a remoteproc. Platforms with no applicable audio remoteproc continue normally. Provisioning or start issues produce a clean skip with the reason.
+If the matching remoteproc is `running`, the suite records its name and firmware evidence. If it is `offline`, the suite starts it only after confirming the corresponding firmware is provisioned. Generic audio DSP paths also require adjacent topology evidence. Shikra's modem-hosted path does not require a topology beside the modem firmware, the selected ALSA card's q6apm topology is validated separately. The suite never stops a remoteproc. Platforms with no applicable audio remoteproc continue normally. Provisioning or start issues on an applicable remoteproc report FAIL with the reason.
 
 ## Overlay Build Support
 
@@ -128,7 +448,7 @@ a generic physical source as the compatibility fallback for older releases.
 
 For overlay builds using audioreach kernel modules, the test automatically:
 - Detects the overlay build configuration
-- Sets required DMA heap permissions
+- Checks image-provided DMA heap access without changing permissions
 - Restarts PipeWire service
 - Waits for the service to be ready
 
@@ -253,7 +573,7 @@ DURATIONS	      Recording durations: short, medium, long (legacy mode only)     
 RECORD_SECONDS	  Number of seconds to record (e.g., 5s, 10s)                     30s
 LOOPS	          Number of recording loops	                                      1
 TIMEOUT	          Explicit timeout override (e.g., 15s, 0=automatic)              0
-AUDIO_RECORD_START_GRACE Startup headroom added to the automatic watchdog       5
+AUDIO_RECORD_START_GRACE Startup/progress headroom in seconds                  5
 STRICT	          Strict mode (0=disabled, 1=enabled, fail on any error)	      0
 DMESG_SCAN	      Scan dmesg for errors after recording	                          1
 VERBOSE	          Enable verbose logging	                                      0
@@ -272,7 +592,7 @@ Option	                      Description
 --durations	                  Recording durations: short, medium, long (legacy mode only)
 --loops	                      Number of recording loops
 --timeout <duration>          Override the automatic duration-based watchdog
---start-grace <seconds>      Recorder startup headroom, default: 5
+--start-grace <seconds>      Startup/progress headroom, default: 5
 --strict [0|1]                Enable strict mode (0=disabled, 1=enabled)
 --no-dmesg	                  Disable dmesg scan
 --res-suffix <suffix>         Suffix for unique result file and log directory (e.g., "Config01" generates AudioRecord_Config01.res and results/AudioRecord_Config01/)
@@ -284,12 +604,59 @@ Option	                      Description
 
 ### Recording watchdog and clock handling
 
-When `TIMEOUT=0`, AudioRecord uses an automatic watchdog for recorder commands.
-The watchdog duration is the requested recording duration plus
-`AUDIO_RECORD_START_GRACE`, which defaults to five seconds. The additional time
-allows PipeWire or PulseAudio to establish the stream without reducing the WAV
-duration being validated. An explicit `--timeout` value overrides the automatic
-watchdog and does not receive startup grace.
+PipeWire records directly from the discovered source using `pw-record --target`.
+The selected `wpctl` global ID is resolved in the audio-user session to
+`node.name`, or a positive `object.serial` when the name is unavailable.
+Global IDs and serials are different identifiers. `AUDIO_RECORD_TARGET` logs
+both the discovery ID and the actual recorder target. Failed inspection or
+missing target properties produce FAIL rather than recording the default input.
+It does not change the session's default microphone, restart the server after a
+capture failure, or substitute an unrelated virtual ALSA input. Source discovery
+before capture retains its existing automatic-backend policy.
+
+With `TIMEOUT=0`, PipeWire allows requested duration plus
+`AUDIO_RECORD_START_GRACE` (default five seconds) for the first WAV payload.
+Once payload arrives, a separate window of the same length permits collection
+of the requested audio duration. For a five-second capture with default grace,
+startup is bounded to ten seconds and capture to another ten seconds. A healthy
+stream stops as soon as five seconds of PCM have arrived. No payload progress
+for `max(start-grace, 3)` seconds fails the capture. Slow trickle progress cannot
+extend the capture window. These limits include file-buffering delays.
+
+An explicit `--timeout` / `TIMEOUT` replaces the total capture deadline, without
+extra startup grace or retries. Startup and idle checks still apply. It does not
+lower PipeWire's requested sample duration. Set it high enough for startup and
+the requested capture. Termination allows up to three additional seconds to
+finalize the WAV, then kills and reaps only the test-owned recorder. Forced kill,
+early recorder exit, startup failure, stall, and incomplete capture are FAIL.
+Final WAV format, duration and content validation remains mandatory. This
+monitor uses image-provided shell tools and does not require Python or systemd.
+
+ALSA and PulseAudio retain their existing capture, timeout and retry behavior.
+Their automatic watchdog remains requested duration plus startup grace.
+
+`AUDIO_CAPTURE` records the parsed WAV format, first-payload delay, byte progress
+and termination reason in the per-case recorder log. On any failed loop, a
+bounded head/tail of that log and, for PipeWire, bounded `wpctl status` and
+selected-source inspection are saved to `<case>.log.diagnostics` and replayed to
+stdout. The complete recorder log and WAV remain in the existing case directory.
+Diagnostics never restart services or alter the verdict.
+
+When the image provides `pw-link`, a read-only `pw-link -l -I` snapshot starts
+at the first PCM payload while the recorder is alive. It is stopped within two
+polling intervals or when capture ends, without extending the capture deadline.
+The snapshot is retained as `<case>.wav.links`, including in desktop-user mode,
+and replayed to stdout on failure (up to 160 lines). Missing tools, unsupported
+options, and interrupted snapshots are recorded without changing PASS/FAIL.
+No-payload captures retain a `not-started` marker. Live links help distinguish
+the requested node from the node that actually feeds the stream.
+
+For example, validate LeMans Config09 using runtime microphone discovery:
+
+```sh
+./run.sh --backend pipewire --source mic --config-name record_config9 --record-seconds 5s --loops 1
+./run.sh --backend pipewire --source mic --config-name record_config9 --record-seconds 5s --start-grace 10 --timeout 25s --loops 1
+```
 
 Watchdog deadlines and elapsed-time reporting use monotonic uptime rather than
 the system wall clock. RTC or NTP corrections during recording therefore do not
@@ -465,7 +832,7 @@ sh-5.3# ./run.sh --record-seconds 3s
 ```
 
 Results:
-- Results are stored in: results/AudioRecord/ (or results/AudioRecord_<suffix>/ when using --res-suffix)
+- Results are stored in a unique run directory below CWD/results/AudioRecord/ (or CWD/results/AudioRecord_<suffix>/ when using --res-suffix).
 - Summary result file: AudioRecord.res (or AudioRecord_<suffix>.res when using --res-suffix)
 - JUnit XML (if enabled): <your-path>.xml
 - Diagnostic logs: dmesg snapshots, mixer dumps, record logs per test case
@@ -481,6 +848,33 @@ Results:
 - **Config discovery mode** is enabled by default, testing all 10 configurations automatically.
 - Use `--config-name` to test specific configurations or `--config-filter` to filter by sample rate or channels.
 - The `--durations` option is for legacy matrix mode only; use `--config-name` or `--config-filter` for config discovery mode (recommended).
+
+## Working directory and reruns
+
+Launch from a writable directory. Test-owned logs, scratch files and default
+result files are stored under that invocation directory, even when using an
+absolute path to `run.sh`. An inherited `TMPDIR=/data/local/tmp` is not used.
+Source/config discovery still uses the installed test directory. Existing
+explicit output-path options remain supported.
+
+If a minimal image needs a test-started audio daemon, its private runtime
+directory is a short `.ar.<id>` child of CWD. An excessively long CWD fails
+with a request to use a shorter directory, rather than exceeding Linux's
+Unix-socket path limit. Existing system-managed runtime directories are reused.
+
+Each invocation retains a separate `results/AudioRecord[_suffix]/run-<timestamp>.<id>/` directory, including WAV files, route/volume sidecars and summaries. PipeWire captures also retain `.log.server-before` and `.log.server-after` with core identity, service PID/invocation/restart properties and up to 120 capture-window journal entries. These are replayed on failure. Missing diagnostic tools do not change the capture verdict. A healthy service setup is reused, but broken-pipe, short or silent recordings still fail without an automatic retry.
+
+For example, use the suite directory on the DUT:
+
+```sh
+cd /var/qcom-linux-testkit/Runner/suites/Multimedia/Audio/AudioRecord
+./run.sh
+```
+
+Keep the same working directory when publishing the `AudioRecord.res` file.
+The LAVA definitions already launch from the suite directory. A CWD permission
+or artifact-creation error must be corrected before rerunning, it is not proof
+that audio hardware is absent.
 
 ## License
 

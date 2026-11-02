@@ -14,6 +14,89 @@ The suite includes a **reboot-free video stack switcher** (upstream ↔ downstre
 
 ---
 
+## Runtime discovery on other boards
+
+Boards outside the module-switch policy list, including Glymur, use registered
+V4L2 codec devices to identify the active stack. The test follows each node's
+sysfs device parents to its bound driver and module. This supports modular and
+built-in Iris/Venus drivers without adding board-name aliases. DT compatible
+values are included in `[VIDEO-RUNTIME]` diagnostics when available.
+
+For these boards, `--stack auto` reuses the detected upstream or downstream
+stack. `--stack upstream` and `--stack downstream` require the matching stack
+to be active already. Provision its driver, firmware and tools in the image.
+The fallback does not install overlay packages or attempt a board-specific
+module switch. A camera-only node, an unbound codec, a missing device node or
+conflicting active stacks fails readiness validation. Successful discovery is
+followed by the normal encode/decode tests, it does not itself produce PASS.
+
+From `Runner/`, validate the image's active stack:
+
+```sh
+./run-test.sh Video_V4L2_Runner --stack auto
+```
+
+To require a particular already-active stack:
+
+```sh
+./run-test.sh Video_V4L2_Runner --stack upstream
+./run-test.sh Video_V4L2_Runner --stack downstream
+```
+
+Existing LeMans, Monaco, Kodiak and Shikra stack policies remain in effect.
+These discovery checks use shell and sysfs, with no Python, systemd or
+`v4l2-ctl` dependency. The complete video test still requires the build-provided
+test application and its existing prerequisites.
+
+## Shikra Platform Support
+
+**Shikra** is an upstream-only platform. The sole video driver is `qcom_iris`, which may be
+modular (visible in `lsmod`) or compiled in as a built-in (bound under
+`/sys/bus/platform/drivers/qcom_iris`). Both cases are detected automatically.
+
+| Property | Value |
+|---|---|
+| Supported stack | `upstream` only (`--stack upstream` or `--stack auto`) |
+| Downstream stack | Not supported — rejected with a clear error |
+| Video driver | `qcom_iris` (modular or built-in) |
+| Max H.264/HEVC encode Level | **4.0** (automatically applied to bundled fixtures) |
+
+### Automatic Level cap for bundled encoder fixtures
+
+On Shikra, Level 4.0 is the maximum supported H.264 and HEVC encode level.
+The runner automatically rewrites the `Level` control to `4.0` in the four
+bundled encoder configs before execution:
+
+- `base_h264Encoder.json`
+- `base_h265Encoder.json`
+- `overlay_h264Encoder.json`
+- `overlay_h265Encoder.json`
+
+User-supplied configs passed via `--config` are **not** modified by default.
+Set `VIDEO_POLICY_SCOPE=all` to apply the rewrite to every config.
+
+### Extending the policy table
+
+Additional per-platform control overrides can be injected at runtime without
+modifying any source file:
+
+```sh
+# Apply a Profile override for Shikra H.264 encode in addition to the built-in Level cap
+export VIDEO_POLICY_EXTRA="shikra|encode|h264|Profile|High"
+./run-test.sh Video_V4L2_Runner --app /path/to/iris_v4l2_test --stack upstream
+```
+
+Format: `platform|mode|codec|control|value` (one row per line, pipe-separated).
+
+### Example: run all configs on Shikra
+
+```sh
+# From the Runner/ directory on the device:
+./run-test.sh Video_V4L2_Runner --app /path/to/iris_v4l2_test --stack upstream
+```
+
+---
+
 ## What’s New (since 2025‑10‑03)
 
 - **Network stabilization delay (post-connect)**  
@@ -111,6 +194,29 @@ Runner/
 ---
 
 ## Quick Start
+
+On LRH/CentOS, early bundle downloads, per-test missing-clip fetches and local
+`--clips-tar` extraction first check tar support, including gzip for gzip bundles.
+If it is unavailable, the shared package provider
+recovers the complete `video-extract` set, `tar gzip`, and checks it again before
+fetching. Provider permissions and installation policy still apply. Existing
+working extractors are reused without package work. Debian, Ubuntu, RHEL and
+Yocto retain their image-provided extractor policy, including tar implementations
+with built-in gzip support. Probe diagnostics are retained under the run's
+artifact directory and printed on failure. Preparation failure preserves the
+existing online fetch-failure result, it does not become a codec failure.
+
+```sh
+./run.sh --config overlay_vp9Decoder.json --extract-input-clips true
+./run.sh --config overlay_vp9Decoder.json --clips-tar /path/to/video_clips_iris.tar.gz
+```
+
+When the configured clips are already present, per-test asset recovery is
+bypassed. `--extract-input-clips false` retains the existing no-fetch behavior.
+Local `--clips-tar` remains an explicit extraction request even with automatic
+fetching disabled. Non-gzip tar formats retain their existing compression-tool
+requirements, ZIP handling is unchanged. No driver or base/overlay stack policy
+is changed by extractor preparation.
 
 ```bash
 git clone <this-repo>
