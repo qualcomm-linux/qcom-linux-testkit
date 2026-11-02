@@ -125,6 +125,97 @@ video_devices_present() {
     [ -e "$1" ]
 }
 
+# video_platform_has_stack_policy <platform>
+# Identifies platforms with an explicit module-switch policy. Other boards use
+# runtime codec discovery without borrowing a different board's switch sequence.
+video_platform_has_stack_policy() {
+    case "$1" in
+        lemans|monaco|kodiak|shikra)
+            return 0
+            ;;
+    esac
+    return 1
+}
+
+# video_runtime_stack_status
+# Prints upstream, downstream, mixed or unknown from registered codec nodes.
+# Walks each V4L2 device's parents to its bound driver, covering built-in drivers
+# and modules. A camera node, loaded module alone or unbound DT node is not proof
+# of codec readiness. Diagnostics go to stderr, stdout contains only the status.
+video_runtime_stack_status() {
+    vrs_up=0
+    vrs_down=0
+    for vrs_node in /sys/class/video4linux/video*; do
+        [ -e "$vrs_node" ] || continue
+        vrs_name=${vrs_node##*/}
+        if [ ! -c "/dev/$vrs_name" ]; then
+            log_warn "[VIDEO-RUNTIME] Registered node has no character device: /dev/$vrs_name" >&2
+            continue
+        fi
+        vrs_parent=$(readlink -f "$vrs_node/device" 2>/dev/null || true)
+        while :; do
+            case "$vrs_parent" in
+                /sys/devices/*)
+                    ;;
+                *)
+                    break
+                    ;;
+            esac
+            vrs_driver=$(readlink -f "$vrs_parent/driver" 2>/dev/null || true)
+            if [ -d "$vrs_driver" ]; then
+                vrs_module=""
+                if [ -L "$vrs_driver/module" ]; then
+                    vrs_module=$(readlink -f "$vrs_driver/module" 2>/dev/null || true)
+                fi
+                vrs_owner=${vrs_module##*/}
+                if [ -z "$vrs_module" ]; then
+                    vrs_owner=${vrs_driver##*/}
+                fi
+                vrs_kind=""
+                case "$vrs_owner" in
+                    qcom_iris|qcom-iris|venus_core|venus_dec|venus_enc|qcom-venus|venus-dec|venus-enc)
+                        vrs_kind=upstream
+                        vrs_up=1
+                        ;;
+                    iris_vpu|iris-vpu|msm_vidc)
+                        vrs_kind=downstream
+                        vrs_down=1
+                        ;;
+                esac
+                if [ -n "$vrs_kind" ]; then
+                    vrs_compat=""
+                    if [ -r "$vrs_parent/of_node/compatible" ]; then
+                        vrs_compat=$(tr '\000\n' '  ' <"$vrs_parent/of_node/compatible")
+                    fi
+                    log_info "[VIDEO-RUNTIME] node=/dev/$vrs_name driver=${vrs_driver##*/} owner=$vrs_owner stack=$vrs_kind compatible=${vrs_compat:-unavailable}" >&2
+                    break
+                fi
+                log_info "[VIDEO-RUNTIME] node=/dev/$vrs_name driver=${vrs_driver##*/} owner=$vrs_owner is not a recognized codec driver" >&2
+            fi
+            vrs_parent=${vrs_parent%/*}
+        done
+    done
+    case "$vrs_up:$vrs_down" in
+        1:0)
+            printf '%s\n' upstream
+            return 0
+            ;;
+        0:1)
+            printf '%s\n' downstream
+            return 0
+            ;;
+        1:1)
+            log_warn "[VIDEO-RUNTIME] Both codec stacks expose devices, cannot select one safely" >&2
+            printf '%s\n' mixed
+            ;;
+        *)
+            log_warn "[VIDEO-RUNTIME] No registered codec node with a recognized bound driver was found" >&2
+            printf '%s\n' unknown
+            ;;
+    esac
+    return 1
+}
+
 video_step() {
     id="$1"
     msg="$2"
@@ -830,9 +921,11 @@ video_validate_upstream_loaded() {
             fi
             return 1
             ;;
+        *)
+            [ "$(video_runtime_stack_status)" = "upstream" ]
+            return $?
+            ;;
     esac
- 
-    return 1
 }
 
 video_validate_downstream_loaded() {
@@ -855,7 +948,8 @@ video_validate_downstream_loaded() {
             return 1
             ;;
         *)
-            return 1
+            [ "$(video_runtime_stack_status)" = "downstream" ]
+            return $?
             ;;
     esac
 }
@@ -970,6 +1064,10 @@ video_stack_status() {
                 printf '%s\n' "upstream"
                 return 0
             fi
+            ;;
+        *)
+            video_runtime_stack_status
+            return $?
             ;;
     esac
  
@@ -1138,8 +1236,37 @@ video_hot_switch_modules() {
 }
 
 # -----------------------------------------------------------------------------
-# Entry point: ensure desired stack
+# Resolve the same desired stack for preparation and final validation.
 # -----------------------------------------------------------------------------
+video_resolve_stack() {
+    vrs_want=$(video_normalize_stack "$1")
+    vrs_plat="$2"
+    if [ "$vrs_want" != "auto" ]; then
+        printf '%s\n' "$vrs_want"
+        return 0
+    fi
+    vrs_pref=$(video_auto_preference_from_blacklist "$vrs_plat")
+    if [ "$vrs_pref" != "unknown" ]; then
+        printf '%s\n' "$vrs_pref"
+        return 0
+    fi
+    vrs_current=$(video_stack_status "$vrs_plat")
+    case "$vrs_current" in
+        upstream|downstream)
+            printf '%s\n' "$vrs_current"
+            ;;
+        *)
+            if video_platform_has_stack_policy "$vrs_plat"; then
+                printf '%s\n' upstream
+            else
+                printf '%s\n' "$vrs_current"
+            fi
+            ;;
+    esac
+}
+
+# video_ensure_stack <stack> <platform>
+# Reuse active runtime codecs on boards without a module-switch policy.
 video_ensure_stack() {
     want_raw="$1" # upstream|downstream|auto|base|overlay|up|down
     plat="$2"
@@ -1148,21 +1275,25 @@ video_ensure_stack() {
         plat="$(video_detect_platform)"
     fi
  
-    want="$(video_normalize_stack "$want_raw")"
+    want="$(video_resolve_stack "$want_raw" "$plat")"
  
-    if [ "$want" = "auto" ]; then
-        pref="$(video_auto_preference_from_blacklist "$plat")"
-        if [ "$pref" != "unknown" ]; then
-            want="$pref"
-        else
-            cur_aut="$(video_stack_status "$plat")"
-            if [ "$cur_aut" != "unknown" ]; then
-                want="$cur_aut"
-            else
-                want="upstream"
-            fi
-        fi
+    if [ "$(video_normalize_stack "$want_raw")" = "auto" ]; then
         log_info "AUTO stack selection => $want"
+    fi
+
+    if ! video_platform_has_stack_policy "$plat"; then
+        runtime_state=$(video_stack_status "$plat")
+        case "$runtime_state" in
+            upstream|downstream)
+                if [ "$runtime_state" = "$want" ]; then
+                    printf '%s\n' "$runtime_state"
+                    return 0
+                fi
+                ;;
+        esac
+        log_warn "[STACK] requested=$want observed=$runtime_state platform=$plat, no module-switch policy is available" >&2
+        printf '%s\n' "$runtime_state"
+        return 1
     fi
  
     # ----------------------------------------------------------------------

@@ -14,6 +14,40 @@ The suite includes a **reboot-free video stack switcher** (upstream ↔ downstre
 
 ---
 
+## Runtime discovery on other boards
+
+Boards outside the module-switch policy list, including Glymur, use registered
+V4L2 codec devices to identify the active stack. The test follows each node's
+sysfs device parents to its bound driver and module. This supports modular and
+built-in Iris/Venus drivers without adding board-name aliases. DT compatible
+values are included in `[VIDEO-RUNTIME]` diagnostics when available.
+
+For these boards, `--stack auto` reuses the detected upstream or downstream
+stack. `--stack upstream` and `--stack downstream` require the matching stack
+to be active already. Provision its driver, firmware and tools in the image.
+The fallback does not install overlay packages or attempt a board-specific
+module switch. A camera-only node, an unbound codec, a missing device node or
+conflicting active stacks fails readiness validation. Successful discovery is
+followed by the normal encode/decode tests, it does not itself produce PASS.
+
+From `Runner/`, validate the image's active stack:
+
+```sh
+./run-test.sh Video_V4L2_Runner --stack auto
+```
+
+To require a particular already-active stack:
+
+```sh
+./run-test.sh Video_V4L2_Runner --stack upstream
+./run-test.sh Video_V4L2_Runner --stack downstream
+```
+
+Existing LeMans, Monaco, Kodiak and Shikra stack policies remain in effect.
+These discovery checks use shell and sysfs, with no Python, systemd or
+`v4l2-ctl` dependency. The complete video test still requires the build-provided
+test application and its existing prerequisites.
+
 ## Shikra Platform Support
 
 **Shikra** is an upstream-only platform. The sole video driver is `qcom_iris`, which may be
