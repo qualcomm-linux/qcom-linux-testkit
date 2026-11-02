@@ -15,7 +15,7 @@ Options:
   --base             Use upstream MSM/freedreno on supported desktop distros.
   --overlay          Use the Qualcomm graphics overlay on supported desktop distros.
   --auto             Preserve and validate the currently active graphics stack.
-  --timeout SECONDS  Set continuous-build runtime, default: 60.
+  --timeout SECONDS  Set execution deadline for either build, default: 60.
   -h, --help         Show this help text and exit without changing target state.
 EOF
 }
@@ -131,8 +131,13 @@ TESTNAME="KMSCube"
 RES_FILE="$SCRIPT_DIR/$TESTNAME.res"
 test_result_init "$TESTNAME" "$RES_FILE" || exit 1
 
-test_path="$(find_test_case_by_name "$TESTNAME")"
-cd "$test_path" || exit 1
+# Keep execution evidence under the directory from which the user launched us.
+test_path="$(pwd -P)" || exit 1
+if [ ! -w "$test_path" ]; then
+    log_fail "$TESTNAME FAIL - working directory is not writable: $test_path"
+    printf '%s\n' "$TESTNAME FAIL" >"$RES_FILE"
+    exit 1
+fi
 
 LOG_FILE="./${TESTNAME}_run.log"
 FAILURE_LOG="./${TESTNAME}_failure_markers.log"
@@ -146,6 +151,7 @@ if [ "$PARSE_RC" -ne 0 ]; then
     exit 0
 fi
 
+KMSCUBE_TIMEOUT="$(printf '%s' "$KMSCUBE_TIMEOUT" | sed 's/^0*//')"
 case "$KMSCUBE_TIMEOUT" in
     ''|*[!0-9]*|0)
         rm -f "$RES_FILE"
@@ -155,7 +161,19 @@ case "$KMSCUBE_TIMEOUT" in
         ;;
 esac
 
-FRAME_COUNT="${FRAME_COUNT:-999}"
+FRAME_COUNT="$(printf '%s' "${FRAME_COUNT:-999}" | sed 's/^0*//')"
+case "$FRAME_COUNT" in
+    ''|*[!0-9]*)
+        log_fail "$TESTNAME FAIL - FRAME_COUNT must be a positive integer"
+        printf '%s\n' "$TESTNAME FAIL" >"$RES_FILE"
+        exit 1
+        ;;
+esac
+if [ "${#FRAME_COUNT}" -gt 9 ] || [ "${#KMSCUBE_TIMEOUT}" -gt 9 ]; then
+    log_fail "$TESTNAME FAIL - frame count and timeout must have at most 9 digits"
+    printf '%s\n' "$TESTNAME FAIL" >"$RES_FILE"
+    exit 1
+fi
 EXPECTED_MIN=$((FRAME_COUNT - 1))
 
 KMSCUBE_DRM_CONNECTOR=""
@@ -180,7 +198,19 @@ rm -f \
     "$CAPABILITY_LOG" \
     "$DISPLAY_MANAGER_STATE_FILE"
 
+BOUNDED_TIMEOUT_PID=""
+cleanup_status=0
 trap '
+cleanup_status=$?
+trap "" HUP INT TERM
+if ! bounded_timeout_cancel; then
+    log_fail "$TESTNAME FAIL - child still owns graphics resources, display restoration withheld, state=$DISPLAY_MANAGER_STATE_FILE"
+    printf "%s\n" "$TESTNAME FAIL" >"$RES_FILE"
+    exit 1
+fi
+if [ "$cleanup_status" -ne 0 ]; then
+    printf "%s\n" "$TESTNAME FAIL" >"$RES_FILE"
+fi
 if [ "${weston_stopped_by_test:-0}" -eq 1 ] &&
    command -v weston_restore_runtime >/dev/null 2>&1; then
     weston_restore_runtime 15 >/dev/null 2>&1 || true
@@ -189,6 +219,7 @@ if command -v display_restore_service_from_state >/dev/null 2>&1; then
     display_restore_service_from_state "$DISPLAY_MANAGER_STATE_FILE" >/dev/null 2>&1 || true
 fi
 rm -f "$DISPLAY_MANAGER_STATE_FILE"
+exit "$cleanup_status"
 ' 0
 trap 'exit 129' HUP
 trap 'exit 130' INT
@@ -444,8 +475,8 @@ if [ ! -e "$1" ]; then
     exit 0
 fi
 
-if ! command -v run_with_managed_timeout >/dev/null 2>&1; then
-    log_fail "$TESTNAME FAIL - required timeout helper is unavailable: run_with_managed_timeout"
+if ! command -v run_with_bounded_timeout >/dev/null 2>&1; then
+    log_fail "$TESTNAME FAIL - required timeout helper is unavailable: run_with_bounded_timeout"
     echo "$TESTNAME FAIL" >"$RES_FILE"
     exit 0
 fi
@@ -470,6 +501,13 @@ if display_kmscube_supports_count \
     KMSCUBE_SUPPORTS_COUNT=1
     log_info "KMSCube capability, finite --count execution supported"
 else
+    capability_rc=$?
+    if [ "$capability_rc" -ne 1 ]; then
+        log_fail "$TESTNAME FAIL - KMSCube help probe failed, see $CAPABILITY_LOG"
+        cat "$CAPABILITY_LOG"
+        printf '%s\n' "$TESTNAME FAIL" >"$RES_FILE"
+        exit 1
+    fi
     log_info "KMSCube capability, continuous execution without --count"
 fi
 
@@ -477,21 +515,13 @@ log_info "KMSCube capability output retained in $CAPABILITY_LOG"
 
 # --- GPU acceleration gating -------------------------------------------------
 if command -v display_is_cpu_renderer >/dev/null 2>&1; then
-    if display_is_cpu_renderer gbm >/dev/null 2>&1; then
-        if display_is_cpu_renderer gbm; then
-            log_skip "$TESTNAME SKIP - CPU/software renderer detected on GBM"
-            echo "$TESTNAME SKIP" >"$RES_FILE"
-            exit 0
-        fi
-    else
-        log_warn "display_is_cpu_renderer gbm not supported, falling back to auto"
-
-        if display_is_cpu_renderer auto; then
-            log_skip "$TESTNAME SKIP - CPU/software renderer detected"
-            echo "$TESTNAME SKIP" >"$RES_FILE"
-            exit 0
-        fi
+    if display_is_cpu_renderer gbm; then
+        log_skip "$TESTNAME SKIP - CPU/software renderer detected on GBM"
+        echo "$TESTNAME SKIP" >"$RES_FILE"
+        exit 0
     fi
+    # A non-CPU result includes unknown when eglinfo is absent. Let the
+    # actual KMSCube execution validate GBM instead of calling it unsupported.
 else
     log_warn "display_is_cpu_renderer helper not found, continuing without GPU acceleration gating"
 fi
@@ -542,15 +572,14 @@ KMSCUBE_EXECUTION_MODE="continuous"
 
 if [ "$KMSCUBE_SUPPORTS_COUNT" -eq 1 ]; then
     KMSCUBE_EXECUTION_MODE="finite-count"
-    set -- "$KMSCUBE_BIN"
+fi
+
+if command -v stdbuf >/dev/null 2>&1; then
+    set -- stdbuf -oL -eL "$KMSCUBE_BIN"
+    log_info "Using stdbuf to retain KMSCube output if execution stalls"
 else
-    if command -v stdbuf >/dev/null 2>&1; then
-        set -- stdbuf -oL -eL "$KMSCUBE_BIN"
-        log_info "Using stdbuf so continuous KMSCube initialization output is retained"
-    else
-        set -- "$KMSCUBE_BIN"
-        log_warn "stdbuf is unavailable, continuous KMSCube output may remain buffered until exit"
-    fi
+    set -- "$KMSCUBE_BIN"
+    log_warn "stdbuf is unavailable, KMSCube output may remain buffered until exit"
 fi
 
 if [ -n "$KMSCUBE_DRM_DEV" ]; then
@@ -573,16 +602,16 @@ else
     fi
 fi
 
-if [ "$KMSCUBE_SUPPORTS_COUNT" -eq 1 ]; then
-    "$@" >"$LOG_FILE" 2>&1
-    rc=$?
-else
-    run_with_managed_timeout \
-        "$KMSCUBE_TIMEOUT" \
-        /tmp \
-        kmscube \
-        "$@" >"$LOG_FILE" 2>&1
-    rc=$?
+log_info "KMSCube deadline=${KMSCUBE_TIMEOUT}s, count=${FRAME_COUNT} frames, output=$LOG_FILE"
+run_with_bounded_timeout "$KMSCUBE_TIMEOUT" "$@" >"$LOG_FILE" 2>&1
+rc=$?
+
+# Do not restore a compositor while an unkillable child still owns DRM.
+if [ -n "${BOUNDED_TIMEOUT_PID:-}" ]; then
+    log_fail "$TESTNAME FAIL - KMSCube cleanup incomplete, pid=$BOUNDED_TIMEOUT_PID, see $LOG_FILE"
+    cat "$LOG_FILE"
+    printf '%s\n' "$TESTNAME FAIL" >"$RES_FILE"
+    exit 1
 fi
 
 if [ -n "$EGL_PLATFORM_SAVED" ]; then
@@ -665,7 +694,9 @@ VERDICT_FAILURE="$POSTPROCESS_FAILURE"
 
 if [ -z "$VERDICT_FAILURE" ] &&
    [ "$KMSCUBE_SUPPORTS_COUNT" -eq 1 ]; then
-    if [ "$rc" -ne 0 ]; then
+    if [ "$rc" -eq 124 ] && [ "$BOUNDED_TIMEOUT_EXPIRED" -eq 1 ]; then
+        VERDICT_FAILURE="finite --count=${FRAME_COUNT} did not complete within ${KMSCUBE_TIMEOUT}s"
+    elif [ "$rc" -ne 0 ]; then
         VERDICT_FAILURE="finite --count execution failed with rc=$rc"
     elif [ "$FAILURE_MARKER_COUNT" -gt 0 ]; then
         VERDICT_FAILURE="kmscube reported ERROR or FAIL output, matches=$FAILURE_MARKER_COUNT"
@@ -676,7 +707,7 @@ if [ -z "$VERDICT_FAILURE" ] &&
         VERDICT_FAILURE="rendered ${FRAMES_RENDERED} frames, minimum required is ${EXPECTED_MIN}"
     fi
 elif [ -z "$VERDICT_FAILURE" ]; then
-    if [ "$rc" -eq 124 ]; then
+    if [ "$rc" -eq 124 ] && [ "$BOUNDED_TIMEOUT_EXPIRED" -eq 1 ]; then
         log_info "Continuous KMSCube reached the expected controlled ${KMSCUBE_TIMEOUT}s timeout"
     elif [ "$rc" -eq 0 ]; then
         VERDICT_FAILURE="continuous KMSCube exited before the controlled ${KMSCUBE_TIMEOUT}s validation completed"

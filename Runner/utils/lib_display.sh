@@ -6395,26 +6395,27 @@ display_apply_test_fps_gate_policy() {
 # Probe whether a KMSCube executable advertises the finite --count option.
 # Arguments: KMSCube executable path and capability-log path.
 # Stdout: none. Returns: 0 when --count is advertised, 1 otherwise.
+# Return 2 on a timed-out/failed probe or unavailable bounded execution helper.
 # Side effects: replaces the capability log with the retained help output.
 display_kmscube_supports_count() {
     dksc_bin="$1"
     dksc_log="$2"
 
-    : >"$dksc_log" || return 1
+    : >"$dksc_log" || return 2
+    command -v run_with_bounded_timeout >/dev/null 2>&1 || return 2
 
     printf '%s\n' "command=$dksc_bin --help" >>"$dksc_log"
-    if command -v run_with_managed_timeout >/dev/null 2>&1; then
-        run_with_managed_timeout \
-            5 \
-            /tmp \
-            kmscube-capability \
-            "$dksc_bin" \
-            --help >>"$dksc_log" 2>&1
-    else
-        "$dksc_bin" --help >>"$dksc_log" 2>&1
-    fi
+    run_with_bounded_timeout 5 "$dksc_bin" --help >>"$dksc_log" 2>&1
     dksc_rc=$?
     printf '%s\n' "exit_status=$dksc_rc" >>"$dksc_log"
+    case "$dksc_rc" in
+        124|125|126|127|1[3-8][0-9]|12[89]|19[0-2])
+            return 2
+            ;;
+        *)
+            # Preserve nonzero usage statuses, including builds returning 255.
+            ;;
+    esac
 
     if awk '
         {
@@ -6429,18 +6430,14 @@ display_kmscube_supports_count() {
     fi
 
     printf '%s\n' "command=$dksc_bin -h" >>"$dksc_log"
-    if command -v run_with_managed_timeout >/dev/null 2>&1; then
-        run_with_managed_timeout \
-            5 \
-            /tmp \
-            kmscube-capability \
-            "$dksc_bin" \
-            -h >>"$dksc_log" 2>&1
-    else
-        "$dksc_bin" -h >>"$dksc_log" 2>&1
-    fi
+    run_with_bounded_timeout 5 "$dksc_bin" -h >>"$dksc_log" 2>&1
     dksc_rc=$?
     printf '%s\n' "exit_status=$dksc_rc" >>"$dksc_log"
+    case "$dksc_rc" in
+        124|125|126|127|1[3-8][0-9]|12[89]|19[0-2])
+            return 2
+            ;;
+    esac
 
     awk '
         {

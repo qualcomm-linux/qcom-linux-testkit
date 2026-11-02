@@ -110,16 +110,37 @@ Qualcomm overlay.
 
 The suite detects the capabilities of the installed `kmscube` instead of
 assuming one package implementation. A build advertising `--count` runs in the
-foreground with `--count=999`, preserving the DRM/page-flip behavior of the
-Yocto implementation. Its exit status and rendered-frame summary are both
+same process group with `--count=999` and a bounded deadline. The count is
+in frames, not seconds, and the default remains unchanged for Yocto. Its exit status and rendered-frame summary are both
 validated. Standard builds without `--count`, including the common Debian
 package, run continuously under the managed timeout. For those builds, reaching
 the timeout is the expected controlled completion, and retained EGL plus OpenGL
 initialization output is required for PASS.
 
-`--timeout SECONDS` changes the continuous-build runtime from its 60-second
-default. Display-manager or Weston state stopped by the suite is restored before
-the final result. `-h` and `--help` print usage and exit without changing
+`--timeout SECONDS` sets the execution deadline for **both** builds, defaulting
+to 60 seconds. A finite build must finish and report at least `FRAME_COUNT - 1`
+frames before that deadline. A finite timeout is FAIL, even when initialization
+succeeded. For slower targets, increase the deadline without reducing coverage:
+
+```sh
+./run.sh --auto --timeout 120
+```
+
+After expiry, the runner allows two seconds for TERM and two for KILL. If the
+child still cannot stop, the test reports FAIL and withholds display restoration
+to avoid competing DRM ownership. Inspect the reported PID and retained
+`.KMSCube-display-manager.*.state` file before recovering the display runtime.
+Otherwise, display-manager or Weston state stopped by the suite is restored
+before the final result. Interrupting the runner also stops its child before
+restoration and records FAIL. Help probes have a five-second deadline, and an
+expired probe is FAIL rather than being classified as a continuous build.
+The existing timeout helper used by other suites is unchanged.
+
+Logs and display-state files are written under the invocation working directory.
+Run from the suite directory for the usual artifact paths. If `stdbuf` is
+available, output is line-buffered in both modes. Without it, a forcibly stopped
+application may leave an incomplete log. The complete available run log is
+printed on failure. `-h` and `--help` print usage and exit without changing
 package, GPU, display-manager, or Weston state. Unknown arguments are reported
 as FAIL.
 
@@ -159,7 +180,7 @@ sh-5.2#
 - Output markers are retained in `KMSCube_failure_markers.log` and the complete
   command output remains in `KMSCube_run.log`.
 - Capability-probe output is retained in `KMSCube_capabilities.log`.
-- Temporary display-manager state is kept in the testcase working directory
+- Temporary display-manager state is kept in the invocation working directory
   and removed after restoration, not stored under `/tmp`.
 
 ## CentOS Stream 10 base preparation
