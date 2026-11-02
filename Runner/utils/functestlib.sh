@@ -3308,6 +3308,99 @@ managed_timeout_cancel_bounded() {
     return "$mtcb_rc"
 }
 
+# bounded_timeout_pid_running PID
+# Check an owned child, treating an exited Linux zombie as ready to reap.
+bounded_timeout_pid_running() {
+    kill -0 "$1" 2>/dev/null || return 1
+    if [ -r "/proc/$1/status" ]; then
+        while read -r btp_key btp_value; do
+            if [ "$btp_key" = "State:" ]; then
+                case "$btp_value" in
+                    Z*|X*)
+                        return 1
+                        ;;
+                esac
+                break
+            fi
+        done <"/proc/$1/status"
+    fi
+    return 0
+}
+
+# bounded_timeout_cancel
+# Stop only the child owned by run_with_bounded_timeout, TERM then KILL.
+# Allow two seconds per signal. Never wait for a still-running child.
+# Return 1 and retain BOUNDED_TIMEOUT_PID if the child survives cleanup.
+bounded_timeout_cancel() {
+    [ -n "${BOUNDED_TIMEOUT_PID:-}" ] || return 0
+    for btc_signal in TERM KILL; do
+        if bounded_timeout_pid_running "$BOUNDED_TIMEOUT_PID"; then
+            kill -"$btc_signal" "$BOUNDED_TIMEOUT_PID" 2>/dev/null || true
+        fi
+        btc_waited=0
+        while bounded_timeout_pid_running "$BOUNDED_TIMEOUT_PID" &&
+              [ "$btc_waited" -lt 2 ]; do
+            sleep 1
+            btc_waited=$((btc_waited + 1))
+        done
+        if ! bounded_timeout_pid_running "$BOUNDED_TIMEOUT_PID"; then
+            wait "$BOUNDED_TIMEOUT_PID" 2>/dev/null || true
+            BOUNDED_TIMEOUT_PID=""
+            return 0
+        fi
+    done
+    printf '[ERROR] child pid=%s survived TERM/KILL, inspect its kernel wait state before restoring services\n' \
+        "$BOUNDED_TIMEOUT_PID" >&2
+    return 1
+}
+
+# run_with_bounded_timeout SECONDS COMMAND [ARG...]
+# Opt-in deadline for a single executable, without an unbounded wait after KILL.
+# Preserve stdin and the process group. The command must not daemonize or spawn
+# workers requiring group cleanup. Call directly, not in command substitution.
+# Callers must invoke bounded_timeout_cancel from their exit/signal cleanup
+# before restoring resources. Existing managed-timeout consumers are unchanged.
+# Return command status, 124 on expiry, or 125 on invalid input/cleanup failure.
+# BOUNDED_TIMEOUT_PID remains set when cleanup fails. Poll at one-second intervals.
+# BOUNDED_TIMEOUT_EXPIRED distinguishes our deadline from a command exiting 124.
+run_with_bounded_timeout() {
+    BOUNDED_TIMEOUT_EXPIRED=0
+    rbt_seconds="${1:-}"
+    case "$rbt_seconds" in
+        ''|*[!0-9]*|0*)
+            return 125
+            ;;
+    esac
+    [ "${#rbt_seconds}" -le 9 ] || return 125
+    shift
+    [ "$#" -gt 0 ] || return 125
+    # Do not lose ownership of a previous child that could not be stopped.
+    [ -z "${BOUNDED_TIMEOUT_PID:-}" ] || return 125
+    # POSIX asynchronous lists may replace stdin with /dev/null before applying
+    # child redirections. Save it in the parent, then restore the caller's fd 3.
+    {
+        "$@" <&3 3<&- &
+        BOUNDED_TIMEOUT_PID=$!
+    } 3<&0
+    rbt_elapsed=0
+    while bounded_timeout_pid_running "$BOUNDED_TIMEOUT_PID"; do
+        if [ "$rbt_elapsed" -ge "$rbt_seconds" ]; then
+            # shellcheck disable=SC2034  # Public result consumed by the caller.
+            BOUNDED_TIMEOUT_EXPIRED=1
+            printf '[TIMEOUT] command exceeded %ss, pid=%s: %s\n' \
+                "$rbt_seconds" "$BOUNDED_TIMEOUT_PID" "$*" >&2
+            bounded_timeout_cancel || return 125
+            return 124
+        fi
+        sleep 1
+        rbt_elapsed=$((rbt_elapsed + 1))
+    done
+    wait "$BOUNDED_TIMEOUT_PID"
+    rbt_status=$?
+    BOUNDED_TIMEOUT_PID=""
+    return "$rbt_status"
+}
+
 # Purpose: Run a command with a timeout and capture stdout and stderr.
 # Arguments:
 #   $1 - Timeout in seconds.
