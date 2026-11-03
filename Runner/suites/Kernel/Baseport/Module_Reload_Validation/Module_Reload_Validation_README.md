@@ -701,12 +701,40 @@ Useful files:
 ```text
 unload.log
 load.log
+module_observations.log
+failure_diagnostics/module_runtime.log
+failure_diagnostics/services.log
+failure_diagnostics/open_fds.log
+failure_diagnostics/open_fds_scan.log
 pre_state/lsmod.log
 pre_state/holders.log
 unload_failure_state/lsmod.log
 unload_failure_state/holders.log
 hang_evidence/dmesg_after_sysrq.log
 ```
+
+Unload/load command logs include their exit status. The console also prints the
+command status and elapsed polling count. `module_observations.log` records the
+expected and observed module state at each settle poll. A successful unload
+command followed by a present module still fails validation. These observations
+alone cannot establish whether the module stayed loaded or was automatically
+reloaded between observations.
+
+On iteration failure, the suite prints bounded excerpts of command logs, the
+latest snapshot, module refcount/initialization state/holders, and fresh client
+evidence before restoring services. Service queries include both profile units
+and every service recorded during earlier client discovery, even when its
+process is no longer running. Saved original service state and test-owned masks
+are printed alongside current state. Manager queries and the failure-time
+open-descriptor scan use eight-second managed timeouts. A timeout or unavailable
+diagnostic remains visible without replacing the original failure.
+
+Kernel evidence comes from the shared `scan_dmesg_errors` capture. Snapshots keep
+`dmesg_snapshot.log`, `dmesg_errors.log`, and `dmesg_access.log`, with the existing
+`dmesg.log` name retained for compatibility. Reporting reuses the latest captured
+snapshot. It does not perform another kernel-log scan or change the health
+verdict. Command logs are cleared at iteration start so a failed rerun cannot
+report a previous attempt's load command as current evidence.
 
 ## Hang handling policy
 
@@ -1219,3 +1247,18 @@ The FastRPC profile also records whether the module was initially loaded. Before
 restoring clients it reloads a removed original module, or safely removes a
 module loaded only by the test. Failed recovery remains FAIL. The original
 module-state record and recovery command logs are retained for diagnosis.
+
+## Unload failure evidence
+
+For supervised-client profiles, an image-provided `udevadm` observes kernel
+module events during removal and the settle period. The observer stops before
+explicit module loading or client restoration. `module_events.log` can distinguish
+a remove followed by an automatic add from a module that never disappeared.
+No events, or unavailable observer readiness, cannot establish either outcome.
+The events do not identify which process requested a reload.
+
+Failure diagnostics retain `modprobe_config.log` and print matching rules in
+`module_config.log`, alongside module state, command status, client state and
+open descriptors. Unsupported `modprobe --showconfig` is reported as unavailable
+evidence. Both tools are optional for these diagnostics, and no packages are
+installed. The original unload failure remains FAIL.
