@@ -11,199 +11,494 @@ metadata:
     devices:
         - rb3gen2
 
+
 run:
     steps:
-        - cd Runner
-        - tar -xzvf /Lava_binaries/AudioClips.tar.gz -C /Lava_binaries || true
-        - tar -xzvf /Lava_binaries/video_clips_iris.tar.gz -C $PWD/suites/Multimedia/Video/Video_V4L2_Runner/ || true
-        - tar -xzvf /Lava_binaries/video_clips_iris.tar.gz -C $PWD/suites/Multimedia/GSTreamer/Video/Video_Encode_Decode/ || true
-        - chmod -R 777 /Lava_binaries
-        - chmod -R 777 $PWD/suites/Multimedia/Video/Video_V4L2_Runner
-        - chmod -R 777 $PWD/suites/Multimedia/GSTreamer/Video/Video_Encode_Decode/
-        - export PATH=$PATH:/Lava_binaries
+        - REPO_PATH="$PWD"
+        - cd "$REPO_PATH/Runner"
+        - export TMPDIR="$PWD"
+        - tar -xzvf /Lava_binaries/AudioClips.tar.gz -C /Lava_binaries || lava-test-case AudioClips_setup --result fail
+        - tar -xzvf /Lava_binaries/video_clips_iris.tar.gz -C "$PWD/suites/Multimedia/Video/Video_V4L2_Runner/" || lava-test-case Video_V4L2_assets_setup --result fail
+        - chmod -R a+rX /Lava_binaries
+        - chmod -R a+rX "$PWD/suites/Multimedia/Video/Video_V4L2_Runner"
+        - export PATH="$PATH:/Lava_binaries"
         - ls -la /Lava_binaries/AudioClips/
-        - ls -la $PWD/suites/Multimedia/Video/Video_V4L2_Runner
-        - ls -la $PWD/suites/Multimedia/GSTreamer/Video/Video_Encode_Decode/
-        - $PWD/suites/Connectivity/Bluetooth/BT_FW_KMD_Service/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Connectivity/Bluetooth/BT_FW_KMD_Service/BT_FW_KMD_Service.res || true
-        - $PWD/suites/Connectivity/Bluetooth/BT_ON_OFF/run.sh --adapter '' --power-cycle-delay 10 --power-on-attempts 2 --power-on-retry-delay 10 --restart-service-on-retry 1 || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Connectivity/Bluetooth/BT_ON_OFF/BT_ON_OFF.res || true
-        - $PWD/suites/Connectivity/Bluetooth/BT_SCAN/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Connectivity/Bluetooth/BT_SCAN/BT_SCAN.res || true
-        - $PWD/suites/Connectivity/Ethernet/Ethernet_Basic_Validation/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Connectivity/Ethernet/Ethernet_Basic_Validation/Ethernet_Basic_Validation.res || true
-        - $PWD/suites/Connectivity/WiFi/WiFi_Firmware_Driver/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Connectivity/WiFi/WiFi_Firmware_Driver/WiFi_Firmware_Driver.res || true
-        - $PWD/suites/Connectivity/WiFi/WiFi_OnOff/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Connectivity/WiFi/WiFi_OnOff/WiFi_OnOff.res || true
-        - $PWD/suites/Kernel/Baseport/Buses/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/Buses/Buses.res || true
-        - $PWD/suites/Kernel/Baseport/CPUFreq_Validation/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/CPUFreq_Validation/CPUFreq_Validation.res || true
-        - $PWD/suites/Kernel/Baseport/GIC/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/GIC/GIC.res || true
-        - $PWD/suites/Kernel/Baseport/IPA/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/IPA/IPA.res || true
-        - $PWD/suites/Kernel/Baseport/Interrupts/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/Interrupts/Interrupts.res || true
-        - $PWD/suites/Kernel/Baseport/PCIe/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/PCIe/PCIe.res || true
-        - $PWD/suites/Kernel/Baseport/Probe_Failure_Check/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/Probe_Failure_Check/Probe_Failure_Check.res || true
-        - $PWD/suites/Kernel/Baseport/RMNET/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/RMNET/RMNET.res || true
-        - $PWD/suites/Kernel/Baseport/Storage/Partition_PostBoot_Validation/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/Storage/Partition_PostBoot_Validation/Partition_PostBoot_Validation.res || true
-        - $PWD/suites/Kernel/Baseport/Storage/UFS_Validation/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/Storage/UFS_Validation/UFS_Validation.res || true
-        - $PWD/suites/Kernel/Baseport/Timer/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/Timer/Timer.res || true
-        - $PWD/suites/Kernel/Baseport/USBHost/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/USBHost/USBHost.res || true
-        - $PWD/suites/Kernel/Baseport/UserDataEncryption/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/UserDataEncryption/UserDataEncryption.res || true
-        - $PWD/suites/Kernel/Baseport/adsp_remoteproc/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/adsp_remoteproc/adsp_remoteproc.res || true
-        - $PWD/suites/Kernel/Baseport/cacheflush/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/cacheflush/cacheflush.res || true
-        - $PWD/suites/Kernel/Baseport/cdsp_remoteproc/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/cdsp_remoteproc/cdsp_remoteproc.res || true
-        - $PWD/suites/Kernel/Baseport/dmabuf/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/dmabuf/dmabuf.res || true
-        - $PWD/suites/Kernel/Baseport/dmabuf_heap_kselftest/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/dmabuf_heap_kselftest/dmabuf_heap_kselftest.res || true
-        - $PWD/suites/Kernel/Baseport/etm_trace/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/etm_trace/etm_trace.res || true
-        - $PWD/suites/Kernel/Baseport/gpdsp_remoteproc/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/gpdsp_remoteproc/gpdsp_remoteproc.res || true
-        - $PWD/suites/Kernel/Baseport/hotplug/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/hotplug/hotplug.res || true
-        - $PWD/suites/Kernel/Baseport/hrtimer/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/hrtimer/hrtimer.res || true
-        - $PWD/suites/Kernel/Baseport/ipi/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/ipi/ipi.res || true
-        - $PWD/suites/Kernel/Baseport/irq/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/irq/irq.res || true
-        - $PWD/suites/Kernel/Baseport/kaslr/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/kaslr/kaslr.res || true
-        - $PWD/suites/Kernel/Baseport/pinctrl/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/pinctrl/pinctrl.res || true
-        - $PWD/suites/Kernel/Baseport/qcom_crypto/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/qcom_crypto/qcom_crypto.res || true
-        - $PWD/suites/Kernel/Baseport/qcom_hwrng/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/qcom_hwrng/qcom_hwrng.res || true
-        - $PWD/suites/Kernel/Baseport/qcrypto/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/qcrypto/qcrypto.res || true
-        - $PWD/suites/Kernel/Baseport/remoteproc/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/remoteproc/remoteproc.res || true
-        - $PWD/suites/Kernel/Baseport/rngtest/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/rngtest/rngtest.res || true
-        - $PWD/suites/Kernel/Baseport/shmbridge/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/shmbridge/shmbridge.res || true
-        - $PWD/suites/Kernel/Baseport/watchdog/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/watchdog/watchdog.res || true
-        - $PWD/suites/Kernel/Baseport/wpss_remoteproc/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/wpss_remoteproc/wpss_remoteproc.res || true
-        - $PWD/suites/Kernel/DCVS/Freq_Scaling/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/DCVS/Freq_Scaling/Freq_Scaling.res || true
-        - $PWD/suites/Kernel/Scheduler/CPU_affinity/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Scheduler/CPU_affinity/CPU_affinity.res || true
-        - rm -f "$PWD/AudioPlayback_config1.res"
-        - $PWD/suites/Multimedia/Audio/AudioPlayback/run.sh --sink "speakers" --clip-name "playback_config1" --loops 1 --timeout "10s" --audio-clips-path "/Lava_binaries/AudioClips/" --res-suffix "config1" --lava-testcase-id "AudioPlayback" || true
-        - grep -Eq "^AudioPlayback (PASS|FAIL|SKIP)$" "$PWD/AudioPlayback_config1.res" && TMPDIR="$PWD" $PWD/utils/send-to-lava.sh $PWD/AudioPlayback_config1.res || lava-test-case AudioPlayback_config1_result_publication --result fail
-        - rm -f "$PWD/AudioPlayback_config2.res"
-        - $PWD/suites/Multimedia/Audio/AudioPlayback/run.sh --sink "speakers" --clip-name "playback_config2" --loops 1 --timeout "10s" --audio-clips-path "/Lava_binaries/AudioClips/" --res-suffix "config2" --lava-testcase-id "AudioPlayback" || true
-        - grep -Eq "^AudioPlayback (PASS|FAIL|SKIP)$" "$PWD/AudioPlayback_config2.res" && TMPDIR="$PWD" $PWD/utils/send-to-lava.sh $PWD/AudioPlayback_config2.res || lava-test-case AudioPlayback_config2_result_publication --result fail
-        - rm -f "$PWD/AudioPlayback_config3.res"
-        - $PWD/suites/Multimedia/Audio/AudioPlayback/run.sh --sink "speakers" --clip-name "playback_config3" --loops 1 --timeout "10s" --audio-clips-path "/Lava_binaries/AudioClips/" --res-suffix "config3" --lava-testcase-id "AudioPlayback" || true
-        - grep -Eq "^AudioPlayback (PASS|FAIL|SKIP)$" "$PWD/AudioPlayback_config3.res" && TMPDIR="$PWD" $PWD/utils/send-to-lava.sh $PWD/AudioPlayback_config3.res || lava-test-case AudioPlayback_config3_result_publication --result fail
-        - rm -f "$PWD/AudioPlayback_config4.res"
-        - $PWD/suites/Multimedia/Audio/AudioPlayback/run.sh --sink "speakers" --clip-name "playback_config4" --loops 1 --timeout "10s" --audio-clips-path "/Lava_binaries/AudioClips/" --res-suffix "config4" --lava-testcase-id "AudioPlayback" || true
-        - grep -Eq "^AudioPlayback (PASS|FAIL|SKIP)$" "$PWD/AudioPlayback_config4.res" && TMPDIR="$PWD" $PWD/utils/send-to-lava.sh $PWD/AudioPlayback_config4.res || lava-test-case AudioPlayback_config4_result_publication --result fail
-        - rm -f "$PWD/AudioPlayback_config5.res"
-        - $PWD/suites/Multimedia/Audio/AudioPlayback/run.sh --sink "speakers" --clip-name "playback_config5" --loops 1 --timeout "10s" --audio-clips-path "/Lava_binaries/AudioClips/" --res-suffix "config5" --lava-testcase-id "AudioPlayback" || true
-        - grep -Eq "^AudioPlayback (PASS|FAIL|SKIP)$" "$PWD/AudioPlayback_config5.res" && TMPDIR="$PWD" $PWD/utils/send-to-lava.sh $PWD/AudioPlayback_config5.res || lava-test-case AudioPlayback_config5_result_publication --result fail
-        - rm -f "$PWD/AudioPlayback_config6.res"
-        - $PWD/suites/Multimedia/Audio/AudioPlayback/run.sh --sink "speakers" --clip-name "playback_config6" --loops 1 --timeout "10s" --audio-clips-path "/Lava_binaries/AudioClips/" --res-suffix "config6" --lava-testcase-id "AudioPlayback" || true
-        - grep -Eq "^AudioPlayback (PASS|FAIL|SKIP)$" "$PWD/AudioPlayback_config6.res" && TMPDIR="$PWD" $PWD/utils/send-to-lava.sh $PWD/AudioPlayback_config6.res || lava-test-case AudioPlayback_config6_result_publication --result fail
-        - rm -f "$PWD/AudioPlayback_config7.res"
-        - $PWD/suites/Multimedia/Audio/AudioPlayback/run.sh --sink "speakers" --clip-name "playback_config7" --loops 1 --timeout "10s" --audio-clips-path "/Lava_binaries/AudioClips/" --res-suffix "config7" --lava-testcase-id "AudioPlayback" || true
-        - grep -Eq "^AudioPlayback (PASS|FAIL|SKIP)$" "$PWD/AudioPlayback_config7.res" && TMPDIR="$PWD" $PWD/utils/send-to-lava.sh $PWD/AudioPlayback_config7.res || lava-test-case AudioPlayback_config7_result_publication --result fail
-        - rm -f "$PWD/AudioPlayback_config8.res"
-        - $PWD/suites/Multimedia/Audio/AudioPlayback/run.sh --sink "speakers" --clip-name "playback_config8" --loops 1 --timeout "10s" --audio-clips-path "/Lava_binaries/AudioClips/" --res-suffix "config8" --lava-testcase-id "AudioPlayback" || true
-        - grep -Eq "^AudioPlayback (PASS|FAIL|SKIP)$" "$PWD/AudioPlayback_config8.res" && TMPDIR="$PWD" $PWD/utils/send-to-lava.sh $PWD/AudioPlayback_config8.res || lava-test-case AudioPlayback_config8_result_publication --result fail
-        - rm -f "$PWD/AudioPlayback_config9.res"
-        - $PWD/suites/Multimedia/Audio/AudioPlayback/run.sh --sink "speakers" --clip-name "playback_config9" --loops 1 --timeout "10s" --audio-clips-path "/Lava_binaries/AudioClips/" --res-suffix "config9" --lava-testcase-id "AudioPlayback" || true
-        - grep -Eq "^AudioPlayback (PASS|FAIL|SKIP)$" "$PWD/AudioPlayback_config9.res" && TMPDIR="$PWD" $PWD/utils/send-to-lava.sh $PWD/AudioPlayback_config9.res || lava-test-case AudioPlayback_config9_result_publication --result fail
-        - rm -f "$PWD/AudioPlayback_config10.res"
-        - $PWD/suites/Multimedia/Audio/AudioPlayback/run.sh --sink "speakers" --clip-name "playback_config10" --loops 1 --timeout "10s" --audio-clips-path "/Lava_binaries/AudioClips/" --res-suffix "config10" --lava-testcase-id "AudioPlayback" || true
-        - grep -Eq "^AudioPlayback (PASS|FAIL|SKIP)$" "$PWD/AudioPlayback_config10.res" && TMPDIR="$PWD" $PWD/utils/send-to-lava.sh $PWD/AudioPlayback_config10.res || lava-test-case AudioPlayback_config10_result_publication --result fail
-        - rm -f "$PWD/AudioRecord_config1.res"
-        - $PWD/suites/Multimedia/Audio/AudioRecord/run.sh --source "mic" --config-name "record_config1" --record-seconds "5s" --loops 1 --res-suffix "config1" --lava-testcase-id "AudioRecord" || true
-        - grep -Eq "^AudioRecord (PASS|FAIL|SKIP)$" "$PWD/AudioRecord_config1.res" && TMPDIR="$PWD" $PWD/utils/send-to-lava.sh $PWD/AudioRecord_config1.res || lava-test-case AudioRecord_config1_result_publication --result fail
-        - rm -f "$PWD/AudioRecord_config2.res"
-        - $PWD/suites/Multimedia/Audio/AudioRecord/run.sh --source "mic" --config-name "record_config2" --record-seconds "5s" --loops 1 --res-suffix "config2" --lava-testcase-id "AudioRecord" || true
-        - grep -Eq "^AudioRecord (PASS|FAIL|SKIP)$" "$PWD/AudioRecord_config2.res" && TMPDIR="$PWD" $PWD/utils/send-to-lava.sh $PWD/AudioRecord_config2.res || lava-test-case AudioRecord_config2_result_publication --result fail
-        - rm -f "$PWD/AudioRecord_config3.res"
-        - $PWD/suites/Multimedia/Audio/AudioRecord/run.sh --source "mic" --config-name "record_config3" --record-seconds "5s" --loops 1 --res-suffix "config3" --lava-testcase-id "AudioRecord" || true
-        - grep -Eq "^AudioRecord (PASS|FAIL|SKIP)$" "$PWD/AudioRecord_config3.res" && TMPDIR="$PWD" $PWD/utils/send-to-lava.sh $PWD/AudioRecord_config3.res || lava-test-case AudioRecord_config3_result_publication --result fail
-        - rm -f "$PWD/AudioRecord_config4.res"
-        - $PWD/suites/Multimedia/Audio/AudioRecord/run.sh --source "mic" --config-name "record_config4" --record-seconds "5s" --loops 1 --res-suffix "config4" --lava-testcase-id "AudioRecord" || true
-        - grep -Eq "^AudioRecord (PASS|FAIL|SKIP)$" "$PWD/AudioRecord_config4.res" && TMPDIR="$PWD" $PWD/utils/send-to-lava.sh $PWD/AudioRecord_config4.res || lava-test-case AudioRecord_config4_result_publication --result fail
-        - rm -f "$PWD/AudioRecord_config5.res"
-        - $PWD/suites/Multimedia/Audio/AudioRecord/run.sh --source "mic" --config-name "record_config5" --record-seconds "5s" --loops 1 --res-suffix "config5" --lava-testcase-id "AudioRecord" || true
-        - grep -Eq "^AudioRecord (PASS|FAIL|SKIP)$" "$PWD/AudioRecord_config5.res" && TMPDIR="$PWD" $PWD/utils/send-to-lava.sh $PWD/AudioRecord_config5.res || lava-test-case AudioRecord_config5_result_publication --result fail
-        - rm -f "$PWD/AudioRecord_config6.res"
-        - $PWD/suites/Multimedia/Audio/AudioRecord/run.sh --source "mic" --config-name "record_config6" --record-seconds "5s" --loops 1 --res-suffix "config6" --lava-testcase-id "AudioRecord" || true
-        - grep -Eq "^AudioRecord (PASS|FAIL|SKIP)$" "$PWD/AudioRecord_config6.res" && TMPDIR="$PWD" $PWD/utils/send-to-lava.sh $PWD/AudioRecord_config6.res || lava-test-case AudioRecord_config6_result_publication --result fail
-        - rm -f "$PWD/AudioRecord_config7.res"
-        - $PWD/suites/Multimedia/Audio/AudioRecord/run.sh --source "mic" --config-name "record_config7" --record-seconds "5s" --loops 1 --res-suffix "config7" --lava-testcase-id "AudioRecord" || true
-        - grep -Eq "^AudioRecord (PASS|FAIL|SKIP)$" "$PWD/AudioRecord_config7.res" && TMPDIR="$PWD" $PWD/utils/send-to-lava.sh $PWD/AudioRecord_config7.res || lava-test-case AudioRecord_config7_result_publication --result fail
-        - rm -f "$PWD/AudioRecord_config8.res"
-        - $PWD/suites/Multimedia/Audio/AudioRecord/run.sh --source "mic" --config-name "record_config8" --record-seconds "5s" --loops 1 --res-suffix "config8" --lava-testcase-id "AudioRecord" || true
-        - grep -Eq "^AudioRecord (PASS|FAIL|SKIP)$" "$PWD/AudioRecord_config8.res" && TMPDIR="$PWD" $PWD/utils/send-to-lava.sh $PWD/AudioRecord_config8.res || lava-test-case AudioRecord_config8_result_publication --result fail
-        - rm -f "$PWD/AudioRecord_config9.res"
-        - $PWD/suites/Multimedia/Audio/AudioRecord/run.sh --source "mic" --config-name "record_config9" --record-seconds "5s" --loops 1 --res-suffix "config9" --lava-testcase-id "AudioRecord" || true
-        - grep -Eq "^AudioRecord (PASS|FAIL|SKIP)$" "$PWD/AudioRecord_config9.res" && TMPDIR="$PWD" $PWD/utils/send-to-lava.sh $PWD/AudioRecord_config9.res || lava-test-case AudioRecord_config9_result_publication --result fail
-        - rm -f "$PWD/AudioRecord_config10.res"
-        - $PWD/suites/Multimedia/Audio/AudioRecord/run.sh --source "mic" --config-name "record_config10" --record-seconds "5s" --loops 1 --res-suffix "config10" --lava-testcase-id "AudioRecord" || true
-        - grep -Eq "^AudioRecord (PASS|FAIL|SKIP)$" "$PWD/AudioRecord_config10.res" && TMPDIR="$PWD" $PWD/utils/send-to-lava.sh $PWD/AudioRecord_config10.res || lava-test-case AudioRecord_config10_result_publication --result fail
-        - $PWD/suites/Multimedia/CDSP/fastrpc_test/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/CDSP/fastrpc_test/fastrpc_test.res || true
-        - $PWD/suites/Multimedia/DSP_AudioPD/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/DSP_AudioPD/DSP_AudioPD.res || true
-        - $PWD/suites/Multimedia/Display/Weston_Runtime_Preflight/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/Display/Weston_Runtime_Preflight/Weston_Runtime_Preflight.res || true
-        - $PWD/suites/Multimedia/Display/igt-gpu-tools/core_auth/run.sh --core-auth-path /usr/libexec/igt-gpu-tools/core_auth || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/Display/igt-gpu-tools/core_auth/core_auth.res || true
-        - $PWD/suites/Multimedia/GSTreamer/Audio/Audio_Playback/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/GSTreamer/Audio/Audio_Playback/Audio_Playback.res || true
-        - $PWD/suites/Multimedia/GSTreamer/Audio/Audio_Record_Playback/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/GSTreamer/Audio/Audio_Record_Playback/Audio_Record_Playback.res || true
-        - $PWD/suites/Multimedia/GSTreamer/Video/Video_Encode_Decode/run.sh --config $PWD/suites/Multimedia/GSTreamer/Video/Video_Encode_Decode/ --pattern "base_*.json" || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/GSTreamer/Video/Video_Encode_Decode/Video_Encode_Decode.res || true
-        - $PWD/suites/Multimedia/Graphics/KMSCube/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/Graphics/KMSCube/KMSCube.res || true
-        - $PWD/suites/Multimedia/Graphics/weston-simple-egl/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/Graphics/weston-simple-egl/weston-simple-egl.res || true
-        - $PWD/suites/Multimedia/Graphics/weston-simple-shm/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/Graphics/weston-simple-shm/weston-simple-shm.res || true
-        - $PWD/suites/Multimedia/OpenCV/run.sh --build-dir . --cwd . --suite all --list 0 --shuffle 0 || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/OpenCV/OpenCV.res || true
-        - $PWD/suites/Multimedia/Video/Video_V4L2_Runner/run.sh --config $PWD/suites/Multimedia/Video/Video_V4L2_Runner/ --pattern "base_*.json" || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/Video/Video_V4L2_Runner/Video_V4L2_Runner.res || true
-        - $PWD/suites/Performance/Boot_Systemd_KPI_Loop/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Performance/Boot_Systemd_KPI_Loop/Boot_Systemd_KPI_Loop.res || true
-        - $PWD/suites/Performance/Boot_Systemd_Validate/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Performance/Boot_Systemd_Validate/Boot_Systemd_Validate.res || true
-        - $PWD/suites/System/Docker_Kernel_Config/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/System/Docker_Kernel_Config/Docker_Kernel_Config.res || true
-        - $PWD/suites/System/EFI_Variable_Validation/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/System/EFI_Variable_Validation/EFI_Variable_Validation.res || true
-        - $PWD/suites/System/Kubernetes_Kernel_Config/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/System/Kubernetes_Kernel_Config/Kubernetes_Kernel_Config.res || true
-        - $PWD/suites/System/Logging/Logging_Journalctl_Validation/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/System/Logging/Logging_Journalctl_Validation/Logging_Journalctl_Validation.res || true
-        - $PWD/suites/Kernel/Baseport/Module_Reload_Validation/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/Module_Reload_Validation/Module_Reload_Validation.res || true
-        - $PWD/utils/result_parse.sh
+        - ls -la "$PWD/suites/Multimedia/Video/Video_V4L2_Runner"
+        # GStreamer uses a WebM fixture, the Iris archive is not a substitute.
+        - |
+          if [ -f /Lava_binaries/video_clips_gst.tar.gz ]; then
+              tar -xzf /Lava_binaries/video_clips_gst.tar.gz -C "$REPO_PATH/Runner/suites/Multimedia/GSTreamer/Video/Video_Encode_Decode" || lava-test-case GStreamer_video_assets_setup --result fail
+          fi
+        # cacheflush, hrtimer and ipi have no runners in this checkout.
+        # See README.md for the remaining coverage gaps.
+        - cd "$REPO_PATH/Runner/suites/Connectivity/Bluetooth/BT_FW_KMD_Service"
+        - export TMPDIR="$PWD"
+        - rm -f "BT_FW_KMD_Service.res"
+        - ./run.sh || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "BT_FW_KMD_Service.res" --strict || lava-test-case BT_FW_KMD_Service_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Connectivity/Bluetooth/BT_ON_OFF"
+        - export TMPDIR="$PWD"
+        - rm -f "BT_ON_OFF.res"
+        - ./run.sh --adapter '' --power-cycle-delay 10 --power-on-attempts 2 --power-on-retry-delay 10 --restart-service-on-retry 1 || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "BT_ON_OFF.res" --strict || lava-test-case BT_ON_OFF_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Connectivity/Bluetooth/BT_SCAN"
+        - export TMPDIR="$PWD"
+        - rm -f "BT_SCAN.res"
+        - ./run.sh || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "BT_SCAN.res" --strict || lava-test-case BT_SCAN_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Connectivity/Ethernet/Ethernet_Basic_Validation"
+        - export TMPDIR="$PWD"
+        - rm -f "Ethernet_Basic_Validation.res"
+        - ./run.sh || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "Ethernet_Basic_Validation.res" --strict || lava-test-case Ethernet_Basic_Validation_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Connectivity/WiFi/WiFi_Firmware_Driver"
+        - export TMPDIR="$PWD"
+        - rm -f "WiFi_Firmware_Driver.res"
+        - ./run.sh || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "WiFi_Firmware_Driver.res" --strict || lava-test-case WiFi_Firmware_Driver_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Connectivity/WiFi/WiFi_OnOff"
+        - export TMPDIR="$PWD"
+        - rm -f "WiFi_OnOff.res"
+        - ./run.sh || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "WiFi_OnOff.res" --strict || lava-test-case WiFi_OnOff_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Kernel/Baseport/Buses"
+        - export TMPDIR="$PWD"
+        - rm -f "Buses.res"
+        - ./run.sh || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "Buses.res" --strict || lava-test-case Buses_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Kernel/Baseport/CPUFreq_Validation"
+        - export TMPDIR="$PWD"
+        - rm -f "CPUFreq_Validation.res"
+        - ./run.sh || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "CPUFreq_Validation.res" --strict || lava-test-case CPUFreq_Validation_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Kernel/Baseport/GIC"
+        - export TMPDIR="$PWD"
+        - rm -f "GIC.res"
+        - ./run.sh || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "GIC.res" --strict || lava-test-case GIC_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Kernel/Baseport/IPA"
+        - export TMPDIR="$PWD"
+        - rm -f "IPA.res"
+        - ./run.sh || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "IPA.res" --strict || lava-test-case IPA_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Kernel/Baseport/Interrupts"
+        - export TMPDIR="$PWD"
+        - rm -f "Interrupts.res"
+        - ./run.sh || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "Interrupts.res" --strict || lava-test-case Interrupts_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Kernel/Baseport/PCIe"
+        - export TMPDIR="$PWD"
+        - rm -f "PCIe.res"
+        - ./run.sh || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "PCIe.res" --strict || lava-test-case PCIe_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Kernel/Baseport/Probe_Failure_Check"
+        - export TMPDIR="$PWD"
+        - rm -f "Probe_Failure_Check.res"
+        - ./run.sh || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "Probe_Failure_Check.res" --strict || lava-test-case Probe_Failure_Check_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Kernel/Baseport/RMNET"
+        - export TMPDIR="$PWD"
+        - rm -f "RMNET.res"
+        - ./run.sh || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "RMNET.res" --strict || lava-test-case RMNET_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Kernel/Baseport/Storage/Partition_PostBoot_Validation"
+        - export TMPDIR="$PWD"
+        - rm -f "Partition_PostBoot_Validation.res"
+        - ./run.sh || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "Partition_PostBoot_Validation.res" --strict || lava-test-case Partition_PostBoot_Validation_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Kernel/Baseport/Storage/UFS_Validation"
+        - export TMPDIR="$PWD"
+        - rm -f "UFS_Validation.res"
+        - ./run.sh || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "UFS_Validation.res" --strict || lava-test-case UFS_Validation_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Kernel/Baseport/Timer"
+        - export TMPDIR="$PWD"
+        - rm -f "Timer.res"
+        - ./run.sh || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "Timer.res" --strict || lava-test-case Timer_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Kernel/Baseport/USBHost"
+        - export TMPDIR="$PWD"
+        - rm -f "USBHost.res"
+        - ./run.sh || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "USBHost.res" --strict || lava-test-case USBHost_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Kernel/Baseport/UserDataEncryption"
+        - export TMPDIR="$PWD"
+        - rm -f "UserDataEncryption.res"
+        - ./run.sh || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "UserDataEncryption.res" --strict || lava-test-case UserDataEncryption_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Kernel/Baseport/adsp_remoteproc"
+        - export TMPDIR="$PWD"
+        - rm -f "adsp_remoteproc.res"
+        - ./run.sh || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "adsp_remoteproc.res" --strict || lava-test-case adsp_remoteproc_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Kernel/Baseport/cdsp_remoteproc"
+        - export TMPDIR="$PWD"
+        - rm -f "cdsp_remoteproc.res"
+        - ./run.sh || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "cdsp_remoteproc.res" --strict || lava-test-case cdsp_remoteproc_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Multimedia/Display/igt-gpu-tools/dmabuf"
+        - export TMPDIR="$PWD"
+        - rm -f "dmabuf.res"
+        - ./run.sh || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "dmabuf.res" --strict || lava-test-case dmabuf_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Kernel/Baseport/DMA_BUF_Heap_Validation"
+        - export TMPDIR="$PWD"
+        - rm -f "DMA_BUF_Heap_Validation.res"
+        - ./run.sh || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "DMA_BUF_Heap_Validation.res" --strict || lava-test-case DMA_BUF_Heap_Validation_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Kernel/Baseport/etm_trace"
+        - export TMPDIR="$PWD"
+        - rm -f "etm_trace.res"
+        - ./run.sh || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "etm_trace.res" --strict || lava-test-case etm_trace_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Kernel/Baseport/gpdsp_remoteproc"
+        - export TMPDIR="$PWD"
+        - rm -f "gpdsp_remoteproc.res"
+        - ./run.sh || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "gpdsp_remoteproc.res" --strict || lava-test-case gpdsp_remoteproc_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Kernel/Baseport/hotplug"
+        - export TMPDIR="$PWD"
+        - rm -f "hotplug.res"
+        - ./run.sh || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "hotplug.res" --strict || lava-test-case hotplug_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Kernel/Baseport/irq"
+        - export TMPDIR="$PWD"
+        - rm -f "irq.res"
+        - ./run.sh || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "irq.res" --strict || lava-test-case irq_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Kernel/Baseport/kaslr"
+        - export TMPDIR="$PWD"
+        - rm -f "kaslr.res"
+        - ./run.sh || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "kaslr.res" --strict || lava-test-case kaslr_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Kernel/Baseport/pinctrl"
+        - export TMPDIR="$PWD"
+        - rm -f "pinctrl.res"
+        - ./run.sh || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "pinctrl.res" --strict || lava-test-case pinctrl_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Kernel/Baseport/qcom_crypto"
+        - export TMPDIR="$PWD"
+        - rm -f "qcom_crypto.res"
+        - ./run.sh || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "qcom_crypto.res" --strict || lava-test-case qcom_crypto_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Kernel/Baseport/qcom_hwrng"
+        - export TMPDIR="$PWD"
+        - rm -f "qcom_hwrng.res"
+        - ./run.sh || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "qcom_hwrng.res" --strict || lava-test-case qcom_hwrng_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Kernel/Baseport/qcrypto"
+        - export TMPDIR="$PWD"
+        - rm -f "qcrypto.res"
+        - ./run.sh || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "qcrypto.res" --strict || lava-test-case qcrypto_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Kernel/Baseport/remoteproc"
+        - export TMPDIR="$PWD"
+        - rm -f "remoteproc.res"
+        - ./run.sh || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "remoteproc.res" --strict || lava-test-case remoteproc_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Kernel/Baseport/rngtest"
+        - export TMPDIR="$PWD"
+        - rm -f "rngtest.res"
+        - ./run.sh || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "rngtest.res" --strict || lava-test-case rngtest_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Kernel/Baseport/shmbridge"
+        - export TMPDIR="$PWD"
+        - rm -f "shmbridge.res"
+        - ./run.sh || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "shmbridge.res" --strict || lava-test-case shmbridge_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Kernel/Baseport/watchdog"
+        - export TMPDIR="$PWD"
+        - rm -f "watchdog.res"
+        - ./run.sh || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "watchdog.res" --strict || lava-test-case watchdog_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Kernel/Baseport/wpss_remoteproc"
+        - export TMPDIR="$PWD"
+        - rm -f "wpss_remoteproc.res"
+        - ./run.sh || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "wpss_remoteproc.res" --strict || lava-test-case wpss_remoteproc_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Kernel/DCVS/Freq_Scaling"
+        - export TMPDIR="$PWD"
+        - rm -f "Freq_Scaling.res"
+        - ./run.sh || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "Freq_Scaling.res" --strict || lava-test-case Freq_Scaling_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Kernel/Scheduler/CPU_affinity"
+        - export TMPDIR="$PWD"
+        - rm -f "CPU_affinity.res"
+        - ./run.sh || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "CPU_affinity.res" --strict || lava-test-case CPU_affinity_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Multimedia/Audio/AudioPlayback"
+        - export TMPDIR="$PWD"
+        - rm -f "AudioPlayback_config1.res"
+        - ./run.sh --sink "speakers" --clip-name "playback_config1" --loops 1 --timeout "10s" --audio-clips-path "/Lava_binaries/AudioClips/" --res-suffix "config1" --lava-testcase-id "AudioPlayback_config1" || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "AudioPlayback_config1.res" --strict || lava-test-case AudioPlayback_config1_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Multimedia/Audio/AudioPlayback"
+        - export TMPDIR="$PWD"
+        - rm -f "AudioPlayback_config2.res"
+        - ./run.sh --sink "speakers" --clip-name "playback_config2" --loops 1 --timeout "10s" --audio-clips-path "/Lava_binaries/AudioClips/" --res-suffix "config2" --lava-testcase-id "AudioPlayback_config2" || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "AudioPlayback_config2.res" --strict || lava-test-case AudioPlayback_config2_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Multimedia/Audio/AudioPlayback"
+        - export TMPDIR="$PWD"
+        - rm -f "AudioPlayback_config3.res"
+        - ./run.sh --sink "speakers" --clip-name "playback_config3" --loops 1 --timeout "10s" --audio-clips-path "/Lava_binaries/AudioClips/" --res-suffix "config3" --lava-testcase-id "AudioPlayback_config3" || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "AudioPlayback_config3.res" --strict || lava-test-case AudioPlayback_config3_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Multimedia/Audio/AudioPlayback"
+        - export TMPDIR="$PWD"
+        - rm -f "AudioPlayback_config4.res"
+        - ./run.sh --sink "speakers" --clip-name "playback_config4" --loops 1 --timeout "10s" --audio-clips-path "/Lava_binaries/AudioClips/" --res-suffix "config4" --lava-testcase-id "AudioPlayback_config4" || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "AudioPlayback_config4.res" --strict || lava-test-case AudioPlayback_config4_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Multimedia/Audio/AudioPlayback"
+        - export TMPDIR="$PWD"
+        - rm -f "AudioPlayback_config5.res"
+        - ./run.sh --sink "speakers" --clip-name "playback_config5" --loops 1 --timeout "10s" --audio-clips-path "/Lava_binaries/AudioClips/" --res-suffix "config5" --lava-testcase-id "AudioPlayback_config5" || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "AudioPlayback_config5.res" --strict || lava-test-case AudioPlayback_config5_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Multimedia/Audio/AudioPlayback"
+        - export TMPDIR="$PWD"
+        - rm -f "AudioPlayback_config6.res"
+        - ./run.sh --sink "speakers" --clip-name "playback_config6" --loops 1 --timeout "10s" --audio-clips-path "/Lava_binaries/AudioClips/" --res-suffix "config6" --lava-testcase-id "AudioPlayback_config6" || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "AudioPlayback_config6.res" --strict || lava-test-case AudioPlayback_config6_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Multimedia/Audio/AudioPlayback"
+        - export TMPDIR="$PWD"
+        - rm -f "AudioPlayback_config7.res"
+        - ./run.sh --sink "speakers" --clip-name "playback_config7" --loops 1 --timeout "10s" --audio-clips-path "/Lava_binaries/AudioClips/" --res-suffix "config7" --lava-testcase-id "AudioPlayback_config7" || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "AudioPlayback_config7.res" --strict || lava-test-case AudioPlayback_config7_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Multimedia/Audio/AudioPlayback"
+        - export TMPDIR="$PWD"
+        - rm -f "AudioPlayback_config8.res"
+        - ./run.sh --sink "speakers" --clip-name "playback_config8" --loops 1 --timeout "10s" --audio-clips-path "/Lava_binaries/AudioClips/" --res-suffix "config8" --lava-testcase-id "AudioPlayback_config8" || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "AudioPlayback_config8.res" --strict || lava-test-case AudioPlayback_config8_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Multimedia/Audio/AudioPlayback"
+        - export TMPDIR="$PWD"
+        - rm -f "AudioPlayback_config9.res"
+        - ./run.sh --sink "speakers" --clip-name "playback_config9" --loops 1 --timeout "10s" --audio-clips-path "/Lava_binaries/AudioClips/" --res-suffix "config9" --lava-testcase-id "AudioPlayback_config9" || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "AudioPlayback_config9.res" --strict || lava-test-case AudioPlayback_config9_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Multimedia/Audio/AudioPlayback"
+        - export TMPDIR="$PWD"
+        - rm -f "AudioPlayback_config10.res"
+        - ./run.sh --sink "speakers" --clip-name "playback_config10" --loops 1 --timeout "10s" --audio-clips-path "/Lava_binaries/AudioClips/" --res-suffix "config10" --lava-testcase-id "AudioPlayback_config10" || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "AudioPlayback_config10.res" --strict || lava-test-case AudioPlayback_config10_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Multimedia/Audio/AudioRecord"
+        - export TMPDIR="$PWD"
+        - rm -f "AudioRecord_config1.res"
+        - ./run.sh --source "mic" --config-name "record_config1" --record-seconds "5s" --loops 1 --res-suffix "config1" --lava-testcase-id "AudioRecord_config1" || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "AudioRecord_config1.res" --strict || lava-test-case AudioRecord_config1_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Multimedia/Audio/AudioRecord"
+        - export TMPDIR="$PWD"
+        - rm -f "AudioRecord_config2.res"
+        - ./run.sh --source "mic" --config-name "record_config2" --record-seconds "5s" --loops 1 --res-suffix "config2" --lava-testcase-id "AudioRecord_config2" || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "AudioRecord_config2.res" --strict || lava-test-case AudioRecord_config2_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Multimedia/Audio/AudioRecord"
+        - export TMPDIR="$PWD"
+        - rm -f "AudioRecord_config3.res"
+        - ./run.sh --source "mic" --config-name "record_config3" --record-seconds "5s" --loops 1 --res-suffix "config3" --lava-testcase-id "AudioRecord_config3" || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "AudioRecord_config3.res" --strict || lava-test-case AudioRecord_config3_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Multimedia/Audio/AudioRecord"
+        - export TMPDIR="$PWD"
+        - rm -f "AudioRecord_config4.res"
+        - ./run.sh --source "mic" --config-name "record_config4" --record-seconds "5s" --loops 1 --res-suffix "config4" --lava-testcase-id "AudioRecord_config4" || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "AudioRecord_config4.res" --strict || lava-test-case AudioRecord_config4_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Multimedia/Audio/AudioRecord"
+        - export TMPDIR="$PWD"
+        - rm -f "AudioRecord_config5.res"
+        - ./run.sh --source "mic" --config-name "record_config5" --record-seconds "5s" --loops 1 --res-suffix "config5" --lava-testcase-id "AudioRecord_config5" || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "AudioRecord_config5.res" --strict || lava-test-case AudioRecord_config5_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Multimedia/Audio/AudioRecord"
+        - export TMPDIR="$PWD"
+        - rm -f "AudioRecord_config6.res"
+        - ./run.sh --source "mic" --config-name "record_config6" --record-seconds "5s" --loops 1 --res-suffix "config6" --lava-testcase-id "AudioRecord_config6" || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "AudioRecord_config6.res" --strict || lava-test-case AudioRecord_config6_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Multimedia/Audio/AudioRecord"
+        - export TMPDIR="$PWD"
+        - rm -f "AudioRecord_config7.res"
+        - ./run.sh --source "mic" --config-name "record_config7" --record-seconds "5s" --loops 1 --res-suffix "config7" --lava-testcase-id "AudioRecord_config7" || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "AudioRecord_config7.res" --strict || lava-test-case AudioRecord_config7_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Multimedia/Audio/AudioRecord"
+        - export TMPDIR="$PWD"
+        - rm -f "AudioRecord_config8.res"
+        - ./run.sh --source "mic" --config-name "record_config8" --record-seconds "5s" --loops 1 --res-suffix "config8" --lava-testcase-id "AudioRecord_config8" || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "AudioRecord_config8.res" --strict || lava-test-case AudioRecord_config8_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Multimedia/Audio/AudioRecord"
+        - export TMPDIR="$PWD"
+        - rm -f "AudioRecord_config9.res"
+        - ./run.sh --source "mic" --config-name "record_config9" --record-seconds "5s" --loops 1 --res-suffix "config9" --lava-testcase-id "AudioRecord_config9" || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "AudioRecord_config9.res" --strict || lava-test-case AudioRecord_config9_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Multimedia/Audio/AudioRecord"
+        - export TMPDIR="$PWD"
+        - rm -f "AudioRecord_config10.res"
+        - ./run.sh --source "mic" --config-name "record_config10" --record-seconds "5s" --loops 1 --res-suffix "config10" --lava-testcase-id "AudioRecord_config10" || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "AudioRecord_config10.res" --strict || lava-test-case AudioRecord_config10_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Multimedia/CDSP/fastrpc_test"
+        - export TMPDIR="$PWD"
+        - rm -f "fastrpc_test.res"
+        - ./run.sh || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "fastrpc_test.res" --strict || lava-test-case fastrpc_test_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Multimedia/DSP_AudioPD"
+        - export TMPDIR="$PWD"
+        - rm -f "DSP_AudioPD.res"
+        - ./run.sh || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "DSP_AudioPD.res" --strict || lava-test-case DSP_AudioPD_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Multimedia/Display/Weston_Runtime_Preflight"
+        - export TMPDIR="$PWD"
+        - rm -f "Weston_Runtime_Preflight.res"
+        - ./run.sh || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "Weston_Runtime_Preflight.res" --strict || lava-test-case Weston_Runtime_Preflight_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Multimedia/Display/igt-gpu-tools/core_auth"
+        - export TMPDIR="$PWD"
+        - rm -f "core_auth.res"
+        - ./run.sh --core-auth-path /usr/libexec/igt-gpu-tools/core_auth || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "core_auth.res" --strict || lava-test-case core_auth_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Multimedia/GSTreamer/Audio/Audio_Playback"
+        - export TMPDIR="$PWD"
+        - rm -f "Audio_Playback.res"
+        - ./run.sh --clips-dir "/Lava_binaries/AudioClips" || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "Audio_Playback.res" --strict --legacy-testcase-id Audio_Playback || lava-test-case Audio_Playback_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Multimedia/GSTreamer/Audio/Audio_Record_Playback"
+        - export TMPDIR="$PWD"
+        - rm -f "Audio_Record_Playback.res"
+        - ./run.sh || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "Audio_Record_Playback.res" --strict || lava-test-case Audio_Record_Playback_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Multimedia/GSTreamer/Video/Video_Encode_Decode"
+        - export TMPDIR="$PWD"
+        - rm -f "Video_Encode_Decode.res"
+        - ./run.sh --stack auto --clip-path "$PWD" || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "Video_Encode_Decode.res" --strict || lava-test-case Video_Encode_Decode_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Multimedia/Graphics/KMSCube"
+        - export TMPDIR="$PWD"
+        - rm -f "KMSCube.res"
+        - ./run.sh || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "KMSCube.res" --strict || lava-test-case KMSCube_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Multimedia/Graphics/weston-simple-egl"
+        - export TMPDIR="$PWD"
+        - rm -f "weston-simple-egl.res"
+        - ./run.sh || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "weston-simple-egl.res" --strict || lava-test-case weston-simple-egl_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Multimedia/Graphics/weston-simple-shm"
+        - export TMPDIR="$PWD"
+        - rm -f "weston-simple-shm.res"
+        - ./run.sh || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "weston-simple-shm.res" --strict || lava-test-case weston-simple-shm_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Multimedia/OpenCV"
+        - export TMPDIR="$PWD"
+        - rm -f "OpenCV.res"
+        - ./run.sh --build-dir . --cwd . --suite all || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "OpenCV.res" --strict || lava-test-case OpenCV_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Multimedia/Video/Video_V4L2_Runner"
+        - export TMPDIR="$PWD"
+        - rm -f "Video_V4L2_Runner.res"
+        - ./run.sh --config "$REPO_PATH/Runner/suites/Multimedia/Video/Video_V4L2_Runner/" --pattern "base_*.json" || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "Video_V4L2_Runner.res" --strict || lava-test-case Video_V4L2_Runner_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Performance/Boot_Systemd_KPI_Loop"
+        - export TMPDIR="$PWD"
+        - rm -f "Boot_Systemd_KPI_Loop.res"
+        - ./run.sh || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "Boot_Systemd_KPI_Loop.res" --strict || lava-test-case Boot_Systemd_KPI_Loop_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Performance/Boot_Systemd_Validate"
+        - export TMPDIR="$PWD"
+        - rm -f "Boot_Systemd_Validate.res"
+        - ./run.sh || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "Boot_Systemd_Validate.res" --strict || lava-test-case Boot_Systemd_Validate_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/System/Docker_Kernel_Config"
+        - export TMPDIR="$PWD"
+        - rm -f "Docker_Kernel_Config.res"
+        - ./run.sh || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "Docker_Kernel_Config.res" --strict || lava-test-case Docker_Kernel_Config_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/System/EFI_Variable_Validation"
+        - export TMPDIR="$PWD"
+        - rm -f "EFI_Variable_Validation.res"
+        - ./run.sh || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "EFI_Variable_Validation.res" --strict || lava-test-case EFI_Variable_Validation_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/System/Kubernetes_Kernel_Config"
+        - export TMPDIR="$PWD"
+        - rm -f "Kubernetes_Kernel_Config.res"
+        - ./run.sh || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "Kubernetes_Kernel_Config.res" --strict || lava-test-case Kubernetes_Kernel_Config_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/System/Logging/Logging_Journalctl_Validation"
+        - export TMPDIR="$PWD"
+        - rm -f "Logging_Journalctl_Validation.res"
+        - ./run.sh || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "Logging_Journalctl_Validation.res" --strict || lava-test-case Logging_Journalctl_Validation_result_publication --result fail
+        - cd "$REPO_PATH/Runner/suites/Kernel/Baseport/Module_Reload_Validation"
+        - export TMPDIR="$PWD"
+        - rm -f "Module_Reload_Validation.res"
+        - ./run.sh || true
+        - >-
+          "$REPO_PATH/Runner/utils/send-to-lava.sh" "Module_Reload_Validation.res" --strict || lava-test-case Module_Reload_Validation_result_publication --result fail
+        - cd "$REPO_PATH/Runner"
+        - >-
+          "$REPO_PATH/Runner/utils/result_parse.sh"
