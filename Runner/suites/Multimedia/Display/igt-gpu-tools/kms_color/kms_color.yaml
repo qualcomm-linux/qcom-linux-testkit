@@ -1,0 +1,20 @@
+metadata:
+  name: kms-color
+  format: "Lava-Test Test Definition 1.0"
+  description: "Validates DRM color management pipelines (gamma, degamma, CTM) using the IGT kms_color test suite. Stops any active Weston compositor before running and restores it afterwards."
+  os:
+    - linux
+  scope:
+    - functional
+
+params:
+  KMS_COLOR_PATH: "/usr/libexec/igt-gpu-tools/kms_color"
+  IGT_TIMEOUT: "300"
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Multimedia/Display/igt-gpu-tools/kms_color
+    - export IGT_TIMEOUT="${IGT_TIMEOUT}"
+    - ./run.sh --kms-color-path "${KMS_COLOR_PATH}" || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh kms_color.res || true
