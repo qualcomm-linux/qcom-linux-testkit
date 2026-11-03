@@ -1194,3 +1194,28 @@ modinfo <module>
 find /lib/modules/$(uname -r) /usr/lib/modules/$(uname -r) -name '*.ko*' | grep -E '<module>|<subsystem>'
 ```
 
+
+## FastRPC client isolation
+
+The FastRPC profile supplements its declared clients with runtime service
+owners discovered from process cgroups and open FastRPC device descriptors.
+It verifies ownership against the system manager's ControlGroup property.
+It never treats a complete user manager as a client service to stop.
+
+Before module preload it captures loaded service states so services activated
+by preload are not mistaken for originally active clients. Before unload it
+saves mask state, temporarily masks activation and checks that systemd reports
+the unit masked. It stops clients and verifies that processes and open device
+users remain absent. Repeated service names are handled once.
+Failed quiesce aborts the unload. Original mask and active state are retained,
+only masks created for this run are removed, and only originally active units
+are restarted. Restoration errors fail the profile and preserve recovery data.
+Pre-masked active services are not stopped because their restart cannot be
+performed without changing the preexisting mask. A running systemd manager is
+required for this supervised-client path. Other profiles retain their existing
+service handling. Real unload, DSP or IOMMU failures remain failures.
+
+The FastRPC profile also records whether the module was initially loaded. Before
+restoring clients it reloads a removed original module, or safely removes a
+module loaded only by the test. Failed recovery remains FAIL. The original
+module-state record and recovery command logs are retained for diagnosis.

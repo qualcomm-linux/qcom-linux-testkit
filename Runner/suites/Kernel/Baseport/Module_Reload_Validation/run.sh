@@ -2,6 +2,8 @@
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause
 
+MRV_WORK_DIR="$(pwd -P)" || exit 1
+
 SCRIPT_DIR="$(
   cd "$(dirname "$0")" || exit 1
   pwd
@@ -241,7 +243,7 @@ if ! cd "$test_path"; then
 fi
 
 RES_FILE="$SCRIPT_DIR/${TESTNAME}.res"
-RESULT_ROOT="$SCRIPT_DIR/results/$TESTNAME"
+RESULT_ROOT="$MRV_WORK_DIR/results/$TESTNAME"
 SUMMARY_FILE="$RESULT_ROOT/summary.txt"
 mkdir -p "$RESULT_ROOT"
 : > "$SUMMARY_FILE"

@@ -10,11 +10,12 @@ PROFILE_MODE_DEFAULT="basic"
 PROFILE_REQUIRED_CMDS="modprobe rmmod systemctl ps sed grep readlink sort awk tr"
 
 PROFILE_QUIESCE_ONCE="yes"
+PROFILE_DISCOVER_CLIENT_SERVICES="yes"
 PROFILE_QUIESCE_SERVICES="adsprpcd.service cdsprpcd.service"
 PROFILE_PROC_PATTERNS="adsprpcd cdsprpcd fastrpc_shell"
 PROFILE_QUIESCE_PROC_PATTERNS="$PROFILE_PROC_PATTERNS"
 
-PROFILE_DEVICE_PATTERNS="/dev/fastrpc-* /dev/adsprpc-* /dev/cdsprpc-* /dev/*dsp*"
+PROFILE_DEVICE_PATTERNS="/dev/fastrpc-* /dev/adsprpc-* /dev/cdsprpc-*"
 PROFILE_QUIESCE_DEVICE_PATTERNS="$PROFILE_DEVICE_PATTERNS"
 
 PROFILE_SYSFS_PATTERNS="/sys/module/fastrpc /sys/class/remoteproc/* /sys/kernel/debug/fastrpc* /sys/kernel/debug/adsprpc*"
