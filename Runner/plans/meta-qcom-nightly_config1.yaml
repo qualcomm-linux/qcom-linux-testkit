@@ -108,46 +108,66 @@ run:
         - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/DCVS/Freq_Scaling/Freq_Scaling.res || true
         - $PWD/suites/Kernel/Scheduler/CPU_affinity/run.sh || true
         - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Scheduler/CPU_affinity/CPU_affinity.res || true
+        - rm -f "$PWD/AudioPlayback_config1.res"
         - $PWD/suites/Multimedia/Audio/AudioPlayback/run.sh --sink "speakers" --clip-name "playback_config1" --loops 1 --timeout "10s" --audio-clips-path "/Lava_binaries/AudioClips/" --res-suffix "config1" --lava-testcase-id "AudioPlayback" || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/Audio/AudioPlayback/AudioPlayback_config1.res || true
+        - grep -Eq "^AudioPlayback (PASS|FAIL|SKIP)$" "$PWD/AudioPlayback_config1.res" && TMPDIR="$PWD" $PWD/utils/send-to-lava.sh $PWD/AudioPlayback_config1.res || lava-test-case AudioPlayback_config1_result_publication --result fail
+        - rm -f "$PWD/AudioPlayback_config2.res"
         - $PWD/suites/Multimedia/Audio/AudioPlayback/run.sh --sink "speakers" --clip-name "playback_config2" --loops 1 --timeout "10s" --audio-clips-path "/Lava_binaries/AudioClips/" --res-suffix "config2" --lava-testcase-id "AudioPlayback" || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/Audio/AudioPlayback/AudioPlayback_config2.res || true
+        - grep -Eq "^AudioPlayback (PASS|FAIL|SKIP)$" "$PWD/AudioPlayback_config2.res" && TMPDIR="$PWD" $PWD/utils/send-to-lava.sh $PWD/AudioPlayback_config2.res || lava-test-case AudioPlayback_config2_result_publication --result fail
+        - rm -f "$PWD/AudioPlayback_config3.res"
         - $PWD/suites/Multimedia/Audio/AudioPlayback/run.sh --sink "speakers" --clip-name "playback_config3" --loops 1 --timeout "10s" --audio-clips-path "/Lava_binaries/AudioClips/" --res-suffix "config3" --lava-testcase-id "AudioPlayback" || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/Audio/AudioPlayback/AudioPlayback_config3.res || true
+        - grep -Eq "^AudioPlayback (PASS|FAIL|SKIP)$" "$PWD/AudioPlayback_config3.res" && TMPDIR="$PWD" $PWD/utils/send-to-lava.sh $PWD/AudioPlayback_config3.res || lava-test-case AudioPlayback_config3_result_publication --result fail
+        - rm -f "$PWD/AudioPlayback_config4.res"
         - $PWD/suites/Multimedia/Audio/AudioPlayback/run.sh --sink "speakers" --clip-name "playback_config4" --loops 1 --timeout "10s" --audio-clips-path "/Lava_binaries/AudioClips/" --res-suffix "config4" --lava-testcase-id "AudioPlayback" || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/Audio/AudioPlayback/AudioPlayback_config4.res || true
+        - grep -Eq "^AudioPlayback (PASS|FAIL|SKIP)$" "$PWD/AudioPlayback_config4.res" && TMPDIR="$PWD" $PWD/utils/send-to-lava.sh $PWD/AudioPlayback_config4.res || lava-test-case AudioPlayback_config4_result_publication --result fail
+        - rm -f "$PWD/AudioPlayback_config5.res"
         - $PWD/suites/Multimedia/Audio/AudioPlayback/run.sh --sink "speakers" --clip-name "playback_config5" --loops 1 --timeout "10s" --audio-clips-path "/Lava_binaries/AudioClips/" --res-suffix "config5" --lava-testcase-id "AudioPlayback" || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/Audio/AudioPlayback/AudioPlayback_config5.res || true
+        - grep -Eq "^AudioPlayback (PASS|FAIL|SKIP)$" "$PWD/AudioPlayback_config5.res" && TMPDIR="$PWD" $PWD/utils/send-to-lava.sh $PWD/AudioPlayback_config5.res || lava-test-case AudioPlayback_config5_result_publication --result fail
+        - rm -f "$PWD/AudioPlayback_config6.res"
         - $PWD/suites/Multimedia/Audio/AudioPlayback/run.sh --sink "speakers" --clip-name "playback_config6" --loops 1 --timeout "10s" --audio-clips-path "/Lava_binaries/AudioClips/" --res-suffix "config6" --lava-testcase-id "AudioPlayback" || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/Audio/AudioPlayback/AudioPlayback_config6.res || true
+        - grep -Eq "^AudioPlayback (PASS|FAIL|SKIP)$" "$PWD/AudioPlayback_config6.res" && TMPDIR="$PWD" $PWD/utils/send-to-lava.sh $PWD/AudioPlayback_config6.res || lava-test-case AudioPlayback_config6_result_publication --result fail
+        - rm -f "$PWD/AudioPlayback_config7.res"
         - $PWD/suites/Multimedia/Audio/AudioPlayback/run.sh --sink "speakers" --clip-name "playback_config7" --loops 1 --timeout "10s" --audio-clips-path "/Lava_binaries/AudioClips/" --res-suffix "config7" --lava-testcase-id "AudioPlayback" || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/Audio/AudioPlayback/AudioPlayback_config7.res || true
+        - grep -Eq "^AudioPlayback (PASS|FAIL|SKIP)$" "$PWD/AudioPlayback_config7.res" && TMPDIR="$PWD" $PWD/utils/send-to-lava.sh $PWD/AudioPlayback_config7.res || lava-test-case AudioPlayback_config7_result_publication --result fail
+        - rm -f "$PWD/AudioPlayback_config8.res"
         - $PWD/suites/Multimedia/Audio/AudioPlayback/run.sh --sink "speakers" --clip-name "playback_config8" --loops 1 --timeout "10s" --audio-clips-path "/Lava_binaries/AudioClips/" --res-suffix "config8" --lava-testcase-id "AudioPlayback" || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/Audio/AudioPlayback/AudioPlayback_config8.res || true
+        - grep -Eq "^AudioPlayback (PASS|FAIL|SKIP)$" "$PWD/AudioPlayback_config8.res" && TMPDIR="$PWD" $PWD/utils/send-to-lava.sh $PWD/AudioPlayback_config8.res || lava-test-case AudioPlayback_config8_result_publication --result fail
+        - rm -f "$PWD/AudioPlayback_config9.res"
         - $PWD/suites/Multimedia/Audio/AudioPlayback/run.sh --sink "speakers" --clip-name "playback_config9" --loops 1 --timeout "10s" --audio-clips-path "/Lava_binaries/AudioClips/" --res-suffix "config9" --lava-testcase-id "AudioPlayback" || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/Audio/AudioPlayback/AudioPlayback_config9.res || true
+        - grep -Eq "^AudioPlayback (PASS|FAIL|SKIP)$" "$PWD/AudioPlayback_config9.res" && TMPDIR="$PWD" $PWD/utils/send-to-lava.sh $PWD/AudioPlayback_config9.res || lava-test-case AudioPlayback_config9_result_publication --result fail
+        - rm -f "$PWD/AudioPlayback_config10.res"
         - $PWD/suites/Multimedia/Audio/AudioPlayback/run.sh --sink "speakers" --clip-name "playback_config10" --loops 1 --timeout "10s" --audio-clips-path "/Lava_binaries/AudioClips/" --res-suffix "config10" --lava-testcase-id "AudioPlayback" || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/Audio/AudioPlayback/AudioPlayback_config10.res || true
+        - grep -Eq "^AudioPlayback (PASS|FAIL|SKIP)$" "$PWD/AudioPlayback_config10.res" && TMPDIR="$PWD" $PWD/utils/send-to-lava.sh $PWD/AudioPlayback_config10.res || lava-test-case AudioPlayback_config10_result_publication --result fail
+        - rm -f "$PWD/AudioRecord_config1.res"
         - $PWD/suites/Multimedia/Audio/AudioRecord/run.sh --source "mic" --config-name "record_config1" --record-seconds "5s" --loops 1 --res-suffix "config1" --lava-testcase-id "AudioRecord" || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/Audio/AudioRecord/AudioRecord_config1.res || true
+        - grep -Eq "^AudioRecord (PASS|FAIL|SKIP)$" "$PWD/AudioRecord_config1.res" && TMPDIR="$PWD" $PWD/utils/send-to-lava.sh $PWD/AudioRecord_config1.res || lava-test-case AudioRecord_config1_result_publication --result fail
+        - rm -f "$PWD/AudioRecord_config2.res"
         - $PWD/suites/Multimedia/Audio/AudioRecord/run.sh --source "mic" --config-name "record_config2" --record-seconds "5s" --loops 1 --res-suffix "config2" --lava-testcase-id "AudioRecord" || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/Audio/AudioRecord/AudioRecord_config2.res || true
+        - grep -Eq "^AudioRecord (PASS|FAIL|SKIP)$" "$PWD/AudioRecord_config2.res" && TMPDIR="$PWD" $PWD/utils/send-to-lava.sh $PWD/AudioRecord_config2.res || lava-test-case AudioRecord_config2_result_publication --result fail
+        - rm -f "$PWD/AudioRecord_config3.res"
         - $PWD/suites/Multimedia/Audio/AudioRecord/run.sh --source "mic" --config-name "record_config3" --record-seconds "5s" --loops 1 --res-suffix "config3" --lava-testcase-id "AudioRecord" || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/Audio/AudioRecord/AudioRecord_config3.res || true
+        - grep -Eq "^AudioRecord (PASS|FAIL|SKIP)$" "$PWD/AudioRecord_config3.res" && TMPDIR="$PWD" $PWD/utils/send-to-lava.sh $PWD/AudioRecord_config3.res || lava-test-case AudioRecord_config3_result_publication --result fail
+        - rm -f "$PWD/AudioRecord_config4.res"
         - $PWD/suites/Multimedia/Audio/AudioRecord/run.sh --source "mic" --config-name "record_config4" --record-seconds "5s" --loops 1 --res-suffix "config4" --lava-testcase-id "AudioRecord" || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/Audio/AudioRecord/AudioRecord_config4.res || true
+        - grep -Eq "^AudioRecord (PASS|FAIL|SKIP)$" "$PWD/AudioRecord_config4.res" && TMPDIR="$PWD" $PWD/utils/send-to-lava.sh $PWD/AudioRecord_config4.res || lava-test-case AudioRecord_config4_result_publication --result fail
+        - rm -f "$PWD/AudioRecord_config5.res"
         - $PWD/suites/Multimedia/Audio/AudioRecord/run.sh --source "mic" --config-name "record_config5" --record-seconds "5s" --loops 1 --res-suffix "config5" --lava-testcase-id "AudioRecord" || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/Audio/AudioRecord/AudioRecord_config5.res || true
+        - grep -Eq "^AudioRecord (PASS|FAIL|SKIP)$" "$PWD/AudioRecord_config5.res" && TMPDIR="$PWD" $PWD/utils/send-to-lava.sh $PWD/AudioRecord_config5.res || lava-test-case AudioRecord_config5_result_publication --result fail
+        - rm -f "$PWD/AudioRecord_config6.res"
         - $PWD/suites/Multimedia/Audio/AudioRecord/run.sh --source "mic" --config-name "record_config6" --record-seconds "5s" --loops 1 --res-suffix "config6" --lava-testcase-id "AudioRecord" || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/Audio/AudioRecord/AudioRecord_config6.res || true
+        - grep -Eq "^AudioRecord (PASS|FAIL|SKIP)$" "$PWD/AudioRecord_config6.res" && TMPDIR="$PWD" $PWD/utils/send-to-lava.sh $PWD/AudioRecord_config6.res || lava-test-case AudioRecord_config6_result_publication --result fail
+        - rm -f "$PWD/AudioRecord_config7.res"
         - $PWD/suites/Multimedia/Audio/AudioRecord/run.sh --source "mic" --config-name "record_config7" --record-seconds "5s" --loops 1 --res-suffix "config7" --lava-testcase-id "AudioRecord" || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/Audio/AudioRecord/AudioRecord_config7.res || true
+        - grep -Eq "^AudioRecord (PASS|FAIL|SKIP)$" "$PWD/AudioRecord_config7.res" && TMPDIR="$PWD" $PWD/utils/send-to-lava.sh $PWD/AudioRecord_config7.res || lava-test-case AudioRecord_config7_result_publication --result fail
+        - rm -f "$PWD/AudioRecord_config8.res"
         - $PWD/suites/Multimedia/Audio/AudioRecord/run.sh --source "mic" --config-name "record_config8" --record-seconds "5s" --loops 1 --res-suffix "config8" --lava-testcase-id "AudioRecord" || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/Audio/AudioRecord/AudioRecord_config8.res || true
+        - grep -Eq "^AudioRecord (PASS|FAIL|SKIP)$" "$PWD/AudioRecord_config8.res" && TMPDIR="$PWD" $PWD/utils/send-to-lava.sh $PWD/AudioRecord_config8.res || lava-test-case AudioRecord_config8_result_publication --result fail
+        - rm -f "$PWD/AudioRecord_config9.res"
         - $PWD/suites/Multimedia/Audio/AudioRecord/run.sh --source "mic" --config-name "record_config9" --record-seconds "5s" --loops 1 --res-suffix "config9" --lava-testcase-id "AudioRecord" || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/Audio/AudioRecord/AudioRecord_config9.res || true
+        - grep -Eq "^AudioRecord (PASS|FAIL|SKIP)$" "$PWD/AudioRecord_config9.res" && TMPDIR="$PWD" $PWD/utils/send-to-lava.sh $PWD/AudioRecord_config9.res || lava-test-case AudioRecord_config9_result_publication --result fail
+        - rm -f "$PWD/AudioRecord_config10.res"
         - $PWD/suites/Multimedia/Audio/AudioRecord/run.sh --source "mic" --config-name "record_config10" --record-seconds "5s" --loops 1 --res-suffix "config10" --lava-testcase-id "AudioRecord" || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/Audio/AudioRecord/AudioRecord_config10.res || true
+        - grep -Eq "^AudioRecord (PASS|FAIL|SKIP)$" "$PWD/AudioRecord_config10.res" && TMPDIR="$PWD" $PWD/utils/send-to-lava.sh $PWD/AudioRecord_config10.res || lava-test-case AudioRecord_config10_result_publication --result fail
         - $PWD/suites/Multimedia/CDSP/fastrpc_test/run.sh || true
         - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/CDSP/fastrpc_test/fastrpc_test.res || true
         - $PWD/suites/Multimedia/DSP_AudioPD/run.sh || true
