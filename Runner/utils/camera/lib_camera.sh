@@ -1,14 +1,66 @@
 #!/bin/sh
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
-# SPDX-License-Identifier: BSD-3-Clause# Shared libcamera helpers
+# SPDX-License-Identifier: BSD-3-Clause
+# Shared libcamera helpers
 # ---------- Sensor & index helpers ----------
 
-# Return the number of sensors visible in `cam -l`
+# libcam_list_indices_from_file <cam-list-output>
+# List camera indices from retained `cam -l` output.
+libcam_list_indices_from_file() {
+    libcam_indices_file="$1"
+    if [ ! -r "$libcam_indices_file" ]; then
+        printf '%s\n' "libcamera list output is not readable: $libcam_indices_file" >&2
+        return 1
+    fi
+
+    awk '
+        /^[[:space:]]*Available cameras:/ {
+            in_list=1
+            next
+        }
+        !in_list {
+            next
+        }
+        /^[[:space:]]*\[[0-9]+\]/ {
+            index_value=$0
+            sub(/^[[:space:]]*\[/, "", index_value)
+            sub(/\].*$/, "", index_value)
+            if (!seen[index_value]++) {
+                print index_value
+            }
+            next
+        }
+        /^[[:space:]]*[0-9]+:[[:space:]]/ {
+            index_value=$0
+            sub(/^[[:space:]]*/, "", index_value)
+            sub(/:.*/, "", index_value)
+            if (!seen[index_value]++) {
+                print index_value
+            }
+        }
+    ' "$libcam_indices_file"
+}
+
+# libcam_count_sensors_from_file <cam-list-output>
+# Return the number of cameras in retained `cam -l` output.
+libcam_count_sensors_from_file() {
+    libcam_count_file="$1"
+    if [ ! -r "$libcam_count_file" ]; then
+        printf '%s\n' "libcamera list output is not readable: $libcam_count_file" >&2
+        return 1
+    fi
+
+    libcam_list_indices_from_file "$libcam_count_file" |
+        awk 'NF { count++ } END { print count + 0 }'
+}
+
+# Return the number of sensors visible in `cam -l`.
 libcam_list_sensors_count() {
     out="$(cam -l 2>&1 || true)"
     printf '%s\n' "$out" | awk '
         BEGIN { c=0; inlist=0 }
-        /^Available cameras:/ { inlist=1; next }
+        /^[[:space:]]*Available cameras:/ { inlist=1; next }
+        /^[[:space:]]*\[[0-9]+\]/ { if (inlist) c++ }
         /^[[:space:]]*[0-9]+:[[:space:]]/ { if (inlist) c++ }
         END { print c+0 }
     '
@@ -28,7 +80,12 @@ libcam_list_indices() {
 # Outputs space-separated indices to stdout.
 libcam_resolve_indices() {
     want="${1:-auto}"
-    all="$(libcam_list_indices | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g;s/^ //;s/ $//')"
+    list_file="${2:-}"
+    if [ -n "$list_file" ]; then
+        all="$(libcam_list_indices_from_file "$list_file" | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g;s/^ //;s/ $//')"
+    else
+        all="$(libcam_list_indices | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g;s/^ //;s/ $//')"
+    fi
     [ -n "$all" ] || { printf '\n'; return 1; }
 
     case "$want" in
@@ -49,6 +106,50 @@ libcam_resolve_indices() {
             printf '%s\n' "$(printf '%s' "$good" | sed 's/^ //')"
             ;;
     esac
+}
+
+# List enabled Qualcomm libcamera pipeline nodes from the runtime device tree.
+libcam_list_enabled_pipeline_nodes() {
+    dt_list_compatible_nodes \
+        '(^|[[:space:]])qcom,[^[:space:]]*camss([[:space:]]|$)' \
+        regex
+}
+
+# libcam_disable_ipa_config <config-path> <backup-path>
+# Moves one IPA config aside for a test-owned temporary workaround.
+libcam_disable_ipa_config() {
+    libcam_ipa_config="$1"
+    libcam_ipa_backup="$2"
+
+    [ -f "$libcam_ipa_config" ] || return 2
+    if [ -e "$libcam_ipa_backup" ]; then
+        log_warn "IPA config backup already exists, leaving both files unchanged: $libcam_ipa_backup"
+        return 1
+    fi
+
+    if mv "$libcam_ipa_config" "$libcam_ipa_backup"; then
+        log_info "Temporarily moved IPA config to $libcam_ipa_backup"
+        return 0
+    fi
+
+    log_warn "Failed to move IPA config $libcam_ipa_config"
+    return 1
+}
+
+# libcam_restore_ipa_config <config-path> <backup-path>
+# Restores an IPA config moved by libcam_disable_ipa_config.
+libcam_restore_ipa_config() {
+    libcam_ipa_config="$1"
+    libcam_ipa_backup="$2"
+
+    [ -f "$libcam_ipa_backup" ] || return 0
+    if mv "$libcam_ipa_backup" "$libcam_ipa_config"; then
+        log_info "Restored IPA config $libcam_ipa_config"
+        return 0
+    fi
+
+    log_warn "Failed to restore IPA config from $libcam_ipa_backup"
+    return 1
 }
 
 # Pick first camera index (helper used by older paths)
@@ -558,8 +659,175 @@ camx_opkg_list_camx() {
 }
 
 # -----------------------------------------------------------------------------
-# DT camera nodes sample using fdtdump
+# Runtime DT and camera overlay evidence
 # -----------------------------------------------------------------------------
+# camx_dump_runtime_dts <output-dts> <warnings-log>
+# Decodes the active runtime device tree from the resolved filesystem root.
+camx_dump_runtime_dts() {
+    runtime_dts_output="$1"
+    runtime_dts_warnings="$2"
+    runtime_dts_root=""
+
+    command -v dtc >/dev/null 2>&1 || return 2
+    runtime_dts_root="$(dt_runtime_root 2>/dev/null || true)"
+    [ -n "$runtime_dts_root" ] || return 3
+
+    : >"$runtime_dts_warnings"
+    if ! dtc \
+        -I fs \
+        -O dts \
+        -o "$runtime_dts_output" \
+        "$runtime_dts_root" \
+        2>"$runtime_dts_warnings"; then
+        return 1
+    fi
+
+    [ -s "$runtime_dts_output" ]
+}
+
+# camx_extract_runtime_dts_evidence <dts> <camera-log> <sensor-log>
+# Extracts line-numbered camera and sensor matches from a decoded runtime DTS.
+camx_extract_runtime_dts_evidence() {
+    runtime_dts_input="$1"
+    runtime_camera_log="$2"
+    runtime_sensor_log="$3"
+
+    [ -r "$runtime_dts_input" ] || return 1
+
+    if ! grep -nEi \
+        'camera|cam[-_@]|qcom,cam|cci(@|[-_])|csiphy' \
+        "$runtime_dts_input" >"$runtime_camera_log"; then
+        : >"$runtime_camera_log"
+    fi
+
+    if ! grep -nEi \
+        'imx[0-9]+|ov[0-9]+|ar[0-9]+|cam[_-]sensor|cam[_-]gmsl' \
+        "$runtime_dts_input" >"$runtime_sensor_log"; then
+        : >"$runtime_sensor_log"
+    fi
+}
+
+# camx_list_enabled_runtime_nodes
+# Lists enabled downstream CamX nodes from the active runtime DT.
+camx_list_enabled_runtime_nodes() {
+    {
+        dt_list_compatible_nodes \
+            '(^|[[:space:]])qcom,cam[-_][^[:space:]]+([[:space:]]|$)' \
+            regex 2>/dev/null || true
+        dt_list_compatible_nodes \
+            '(^|[[:space:]])qcom,camera[^[:space:]]*([[:space:]]|$)' \
+            regex 2>/dev/null || true
+    } | sort -u
+}
+
+# camx_ensure_fit_selection variable value read_log pending_file
+# Read the current EFI selection before changing it. Return 0 when selected,
+# 2 when a manual reboot is pending, 1 on read/write or post-reboot failure.
+# Log raw before/write/readback evidence to stdout and separate files. A small
+# atomic pending record tracks variable, requested value and boot ID, never
+# substitutes for runtime validation. Only explicit overlay callers may use it.
+camx_ensure_fit_selection() {
+    cefs_variable="$1"
+    cefs_value="$2"
+    cefs_read_log="$3"
+    cefs_pending="$4"
+    if [ -z "$cefs_variable" ] || [ -z "$cefs_value" ] ||
+        [ -z "$cefs_read_log" ] || [ -z "$cefs_pending" ]; then
+        log_fail "CAMX selection requires a variable, value and diagnostic/state paths"
+        return 1
+    fi
+    cefs_payload=$(efi_text_variable_matches \
+        "$cefs_variable" "$cefs_value" "$cefs_read_log" csv-token)
+    cefs_read_status=$?
+    log_file_with_label NHX-EFI-BEFORE "$cefs_read_log"
+    case "$cefs_read_status" in
+        0|2)
+            ;;
+        *)
+            log_fail "Cannot read CAMX EFI selection reliably, no EFI write attempted"
+            return 1
+            ;;
+    esac
+    log_info "CAMX EFI overlay list: $cefs_payload"
+    if [ -L "$cefs_pending" ] || {
+        [ -e "$cefs_pending" ] && [ ! -f "$cefs_pending" ]
+    }; then
+        log_fail "Invalid CAMX pending-selection file: $cefs_pending"
+        return 1
+    fi
+    if [ "$cefs_read_status" -eq 0 ] && [ ! -e "$cefs_pending" ]; then
+        log_pass "CAMX FIT DTB is already selected in EFI, no write or reboot requested"
+        return 0
+    fi
+    if ! IFS= read -r cefs_boot_id </proc/sys/kernel/random/boot_id ||
+        ! printf '%s\n' "$cefs_boot_id" | grep -Eq '^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$'; then
+        log_fail "Cannot read the current kernel boot ID, no EFI write attempted"
+        return 1
+    fi
+    if [ -e "$cefs_pending" ]; then
+        if ! {
+            IFS= read -r cefs_previous_variable &&
+            IFS= read -r cefs_previous_value &&
+            IFS= read -r cefs_previous_boot
+        } <"$cefs_pending" ||
+            [ "$cefs_previous_variable" != "$cefs_variable" ] ||
+            [ "$cefs_previous_value" != "$cefs_value" ] ||
+            ! printf '%s\n' "$cefs_previous_boot" | grep -Eq '^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$'; then
+            log_fail "Invalid or conflicting CAMX pending record, inspect $cefs_pending before retrying"
+            return 1
+        fi
+        if [ "$cefs_read_status" -ne 0 ]; then
+            log_fail "CAMX EFI selection no longer matches the previous request, inspect firmware persistence and $cefs_pending. No repeated write attempted"
+            return 1
+        fi
+        if [ "$cefs_previous_boot" = "$cefs_boot_id" ]; then
+            log_info "CAMX selection was written during this boot, reboot manually once. No repeated EFI write attempted"
+            return 2
+        fi
+        cefs_nodes=$(camx_list_enabled_runtime_nodes)
+        if [ -z "$cefs_nodes" ]; then
+            log_fail "A reboot occurred but active DT has no enabled CamX nodes, inspect the bootloader/CDT FIT selection. No repeated write or reboot requested"
+            return 1
+        fi
+        log_info "Post-reboot enabled CamX nodes: $cefs_nodes"
+        if ! rm -f "$cefs_pending"; then
+            log_fail "Cannot retire verified CAMX pending record: $cefs_pending"
+            return 1
+        fi
+        log_pass "CAMX EFI selection and post-reboot runtime DT verified"
+        return 0
+    fi
+    cefs_temp=$(mktemp "$cefs_pending.XXXXXX") || return 1
+    if ! printf '%s\n' "$cefs_variable" "$cefs_value" "$cefs_boot_id" >"$cefs_temp" ||
+        ! mv "$cefs_temp" "$cefs_pending"; then
+        rm -f "$cefs_temp"
+        log_fail "Cannot record the pending CAMX selection, no EFI write attempted"
+        return 1
+    fi
+    cefs_write_payload="$cefs_payload,$cefs_value"
+    log_info "Selecting CAMX FIT DTB for the next boot, preserving existing overlays: $cefs_write_payload"
+    efi_write_text_variable "$cefs_variable" "$cefs_write_payload" "$cefs_read_log.write"
+    cefs_write_status=$?
+    log_file_with_label NHX-EFI-WRITE "$cefs_read_log.write"
+    log_file_with_label NHX-EFI-READBACK "$cefs_read_log.write.readback"
+    if [ "$cefs_write_status" -ne 0 ]; then
+        log_fail "CAMX EFI write or readback failed. Retaining $cefs_pending for inspection, no automatic retry"
+        return 1
+    fi
+    return 2
+}
+
+# camx_list_enabled_sensor_nodes
+# Lists enabled physical or CamX sensor nodes from the active runtime DT.
+camx_list_enabled_sensor_nodes() {
+    {
+        dt_list_compatible_nodes \
+            '(^|[[:space:]])(sony,imx[^[:space:]]*|ovti,ov[^[:space:]]*|onsemi,ar[^[:space:]]*|onnn,ar[^[:space:]]*|aptina,ar[^[:space:]]*|qcom,cam[-_](sensor|gmsl[-_]sensor|gmsl[-_]deserializer))([[:space:]]|$)' \
+            regex 2>/dev/null || true
+    } | sort -u
+}
+
+# DT camera nodes sample using fdtdump.
 camx_fdtdump_has_cam_nodes() {
   command -v fdtdump >/dev/null 2>&1 || return 2
   [ -r /sys/firmware/fdt ] || return 1
@@ -575,11 +843,383 @@ camx_fdtdump_has_cam_nodes() {
 
 # ---- NHX dump + checksum validation helpers (POSIX) ----
 
+# nhx_find_launcher mode override_path [libexec_root]
+# Print one executable path. Wrapper discovery preserves the legacy order.
+# Native discovery prefers an explicit path, then PATH, then camx* libexec
+# directories without a SoC table. Resolve aliases before counting candidates.
+# Return 0 for one executable, 2 when absent, 1 for invalid/ambiguous selection.
+# Read-only discovery, diagnostics go to stderr.
+nhx_find_launcher() {
+  nfl_mode="$1"
+  nfl_override="$2"
+  nfl_root="${3:-/usr/libexec}"
+  if [ "$nfl_mode" = wrapper ]; then
+    for nfl_name in nhx.sh camera-nhx; do
+      nfl_path=$(command -v "$nfl_name" 2>/dev/null || true)
+      if [ -n "$nfl_path" ] && [ -f "$nfl_path" ] && [ -x "$nfl_path" ]; then
+        printf '%s\n' "$nfl_path"
+        return 0
+      fi
+    done
+    if [ -f "$nfl_root/camx/nhx.sh" ] && [ -x "$nfl_root/camx/nhx.sh" ]; then
+      printf '%s\n' "$nfl_root/camx/nhx.sh"
+      return 0
+    fi
+    return 2
+  fi
+  [ "$nfl_mode" = native ] || return 1
+  if [ -n "$nfl_override" ]; then
+    case "$nfl_override" in
+      /*)
+        ;;
+      *)
+        printf '%s\n' 'Native binary override must be an absolute path' >&2
+        return 1
+        ;;
+    esac
+    if [ ! -f "$nfl_override" ] || [ ! -x "$nfl_override" ]; then
+      printf 'Native executable is unavailable: %s\n' "$nfl_override" >&2
+      return 1
+    fi
+    printf '%s\n' "$nfl_override"
+    return 0
+  fi
+  nfl_path=$(command -v nativehaltest 2>/dev/null || true)
+  if [ -n "$nfl_path" ] && [ -f "$nfl_path" ] && [ -x "$nfl_path" ]; then
+    printf '%s\n' "$nfl_path"
+    return 0
+  fi
+  nfl_selected=""
+  for nfl_path in "$nfl_root"/camx*/nativehaltest; do
+    if [ ! -f "$nfl_path" ] || [ ! -x "$nfl_path" ]; then
+      continue
+    fi
+    nfl_resolved=$(readlink -f "$nfl_path" 2>/dev/null) || return 1
+    if [ -n "$nfl_selected" ] && [ "$nfl_resolved" != "$nfl_selected" ]; then
+      printf 'Multiple native HAL executables found: %s, %s. Select --native-bin\n' \
+        "$nfl_selected" "$nfl_resolved" >&2
+      return 1
+    fi
+    nfl_selected="$nfl_resolved"
+  done
+  [ -n "$nfl_selected" ] || return 2
+  printf '%s\n' "$nfl_selected"
+}
+
+# nhx_native_check_cli binary log_directory camera_id [mode]
+# Probe documented help only, never guess enumeration switches or run tests.
+# Print the supported exact-test selector. Bound each help query to 15 seconds.
+# Retry an advertised --h when --help returns a usage status. Accept status
+# 1, 2 or 255 only with usage text and all required options, never crashes/timeouts.
+# Retain help output. Return 1 for a broken client or missing required options.
+# Optional json mode requires only --test, other modes retain capture checks.
+nhx_native_check_cli() {
+  nncc_binary="$1"
+  nncc_logs="$2"
+  nncc_camera="$3"
+  if run_with_managed_timeout 15 "$nncc_logs" native-hal-help \
+    "$nncc_binary" --help >"$nncc_logs/native-hal-help.log" 2>&1; then
+    nncc_status=0
+  else
+    nncc_status=$?
+  fi
+  case "$nncc_status" in
+    1|2|255)
+      if grep -Eq '^[[:space:]]*--h([[:space:]]|$)' "$nncc_logs/native-hal-help.log"; then
+        if ! cp "$nncc_logs/native-hal-help.log" "$nncc_logs/native-hal-help-long.log"; then
+          printf '%s\n' 'Could not retain the native HAL --help output' >&2
+          return 1
+        fi
+        printf 'Native HAL --help returned %s, trying advertised --h\n' "$nncc_status" >&2
+        if run_with_managed_timeout 15 "$nncc_logs" native-hal-help \
+          "$nncc_binary" --h >"$nncc_logs/native-hal-help.log" 2>&1; then
+          nncc_status=0
+        else
+          nncc_status=$?
+        fi
+      fi
+      ;;
+  esac
+  case "$nncc_status" in
+    0)
+      ;;
+    1|2|255)
+      if ! grep -Eiq '(^|[^[:alnum:]_])usage([^[:alnum:]_]|$)' "$nncc_logs/native-hal-help.log"; then
+        printf 'Native HAL help failed with status %s and no usage text\n' "$nncc_status" >&2
+        return 1
+      fi
+      ;;
+    *)
+      printf 'Native HAL help query failed, status=%s, inspect %s/native-hal-help.log\n' \
+        "$nncc_status" "$nncc_logs" >&2
+      return 1
+      ;;
+  esac
+  nncc_options='--frames --timeout --p'
+  if [ "${4:-test}" = json ]; then
+    nncc_options='--test'
+  fi
+  for nncc_option in $nncc_options; do
+    if ! grep -Eq "^[[:space:]]*$nncc_option([[:space:]]|$)" "$nncc_logs/native-hal-help.log"; then
+      printf 'Native HAL does not advertise required option %s\n' "$nncc_option" >&2
+      return 1
+    fi
+  done
+  if [ -n "$nncc_camera" ] && \
+    ! grep -Eq '^[[:space:]]*-c([[:space:]]|$)' "$nncc_logs/native-hal-help.log"; then
+    printf '%s\n' 'Native HAL does not advertise the requested camera override' >&2
+    return 1
+  fi
+  for nncc_option in --test --gtest_filter; do
+    if grep -Eq "^[[:space:]]*$nncc_option([[:space:]]|$)" "$nncc_logs/native-hal-help.log"; then
+      printf '%s\n' "$nncc_option"
+      return 0
+    fi
+  done
+  printf '%s\n' 'Native HAL does not advertise an exact testcase selector' >&2
+  return 1
+}
+
+# nhx_run_native binary selector testcase frames camera_id run_log log_directory [mode]
+# Run one explicitly selected native testcase with dumps enabled and stdout
+# logging. A 5-second per-buffer timeout is separate from the 180-second total
+# deadline. Capture raw output, then replay it to stdout. No wrapper semantics
+# or service state are changed here. JSON mode passes only --test and its basename,
+# preserving all JSON settings. Return the native process/timeout status.
+nhx_run_native() {
+  nrn_binary="$1"
+  nrn_selector="$2"
+  nrn_test="$3"
+  nrn_frames="$4"
+  nrn_camera="$5"
+  nrn_log="$6"
+  nrn_directory="$7"
+  if [ "${8:-test}" = json ]; then
+    set -- "$nrn_binary" --test "$nrn_test"
+    log_info "Running native HAL JSON=$nrn_test, capture settings from JSON, total-timeout=180s"
+  else
+    set -- "$nrn_binary" "$nrn_selector" "$nrn_test" \
+      --frames "$nrn_frames" --timeout 5000 --p
+    if [ -n "$nrn_camera" ]; then
+      set -- "$@" -c "$nrn_camera"
+    fi
+    log_info "Running native HAL testcase=$nrn_test frames=$nrn_frames camera=${nrn_camera:-client-default-physical} total-timeout=180s"
+  fi
+  run_with_managed_timeout 180 "$nrn_directory" native-hal-capture \
+    "$@" >"$nrn_log" 2>&1
+  nrn_status=$?
+  log_file_with_label NATIVE-HAL "$nrn_log"
+  return "$nrn_status"
+}
+
+# nhx_native_result_counts run_log testcase [mode]
+# Print PASSED FAILED SKIPPED counts for exactly one executed native testcase.
+# Require matching RUN/OK markers and a completed single-test summary, either
+# GoogleTest or CAMX Final Report. Reject zero/multiple tests, skips, conflicting
+# summaries and unrelated successful testcases. No mutation, return 2 for an
+# explicit zero-test report without execution markers, 1 for other gaps.
+# JSON mode accepts one successful CAMX report without RUN/OK markers. If those
+# markers exist, require exactly one matching pair (internal name may differ
+# from the JSON basename). The caller must also validate staged JSON and dumps.
+# CAMX quoted per-test reports are distinct from GoogleTest numeric totals.
+# If present, require one PASSED report consistent with any execution markers.
+nhx_native_result_counts() {
+  awk -v selected="$2" -v mode="${3:-test}" '
+    /"[^"]+"[[:space:]]+report[[:space:]]*->/ {
+      match($0, /"[^"]+"[[:space:]]+report[[:space:]]*->/)
+      line=substr($0, RSTART)
+      split(line, camx_fields, /"/)
+      camx_name=camx_fields[2]
+      sub(/^"[^"]+"[[:space:]]+report[[:space:]]*->[[:space:]]*/, "", line)
+      camx_reports++
+      if (camx_reports != 1 || line !~ /^\[[[:space:]]*PASSED[[:space:]]*\][[:space:]]*$/) bad=1
+      if (mode != "json" && camx_name != selected) bad=1
+      next
+    }
+    /\[[[:space:]]*RUN[[:space:]]*\]/ {
+      line=$0
+      sub(/^.*\[[[:space:]]*RUN[[:space:]]*\][[:space:]]*/, "", line)
+      split(line, fields, /[[:space:]]+/)
+      runs++
+      run_name=fields[1]
+      if (mode != "json" && fields[1] != selected) bad=1
+    }
+    /\[[[:space:]]*OK[[:space:]]*\]/ {
+      line=$0
+      sub(/^.*\[[[:space:]]*OK[[:space:]]*\][[:space:]]*/, "", line)
+      split(line, fields, /[[:space:]]+/)
+      oks++
+      ok_name=fields[1]
+      if (mode != "json" && fields[1] != selected) bad=1
+    }
+    /\[[[:space:]]*(FAILED|SKIPPED)[[:space:]]*\]/ { bad=1 }
+    /\[==========\].*ran\./ {
+      line=$0
+      sub(/^.*\[==========\][[:space:]]*/, "", line)
+      split(line, fields, /[[:space:]]+/)
+      if (fields[1] == "0") empty_reports++
+      if (fields[1] != 1) bad=1
+      completed++
+    }
+    /\[[[:space:]]*PASSED[[:space:]]*\]/ {
+      line=$0
+      sub(/^.*\[[[:space:]]*PASSED[[:space:]]*\][[:space:]]*/, "", line)
+      split(line, fields, /[[:space:]]+/)
+      if (fields[1] != 1) bad=1
+      summaries++
+    }
+    /Final Report ->/ {
+      if ($0 ~ /\[0 PASSED\]/ && $0 ~ /\[0 FAILED\]/ && $0 ~ /\[0 SKIPPED\]/) empty_reports++
+      if ($0 !~ /\[1 PASSED\]/ || $0 !~ /\[0 FAILED\]/ || $0 !~ /\[0 SKIPPED\]/) bad=1
+      reports++
+    }
+    END {
+      if (empty_reports == 1 && runs == 0 && oks == 0 && camx_reports == 0 &&
+          (reports + completed) == 1) exit 2
+      if (camx_reports && ((runs && run_name != camx_name) ||
+          (oks && ok_name != camx_name))) bad=1
+      if (mode == "json" && !bad && reports == 1 && completed == 0 && summaries == 0 &&
+          ((runs == 0 && oks == 0) ||
+           (runs == 1 && oks == 1 && run_name == ok_name))) {
+        print "1 0 0"
+        exit 0
+      }
+      if (mode == "json") exit 1
+      if (bad || runs != 1 || oks != 1 ||
+          !((completed == 1 && summaries == 1 && reports == 0) ||
+            (reports == 1 && completed == 0 && summaries == 0))) exit 1
+      print "1 0 0"
+    }
+  ' "$1"
+}
+
+# nhx_stop_native_capture
+# Stop only the command and watcher owned by an interrupted native capture.
+# Call before restoring camera services, only while the caller-owned native
+# capture flag is set. Reuse bounded process termination and reap children.
+# Log to stdout, return 1 if an owned process cannot be stopped safely.
+nhx_stop_native_capture() {
+  for nsnc_pid in "${MANAGED_TIMEOUT_WATCHER_PID:-}" "${MANAGED_TIMEOUT_CMD_PID:-}"; do
+    case "$nsnc_pid" in
+      "")
+        continue
+        ;;
+      0|1|*[!0-9]*)
+        log_fail "Invalid owned native capture PID: $nsnc_pid"
+        return 1
+        ;;
+    esac
+    if ! kill_process "$nsnc_pid"; then
+      log_fail "Could not stop owned native capture process $nsnc_pid, camera service will not be restarted while capture may remain active"
+      return 1
+    fi
+    wait "$nsnc_pid" 2>/dev/null || true
+  done
+  for nsnc_file in "${MANAGED_TIMEOUT_SLEEP_PID_FILE:-}" "${MANAGED_TIMEOUT_MARKER_FILE:-}"; do
+    [ -n "$nsnc_file" ] || continue
+    rm -f "$nsnc_file"
+  done
+  return 0
+}
+
+# nhx_restore_camera_service service log_directory
+# Restore a service stopped by NHX and verify it is active. The caller owns
+# the initial-state decision. Retain bounded systemctl output and log errors.
+# Return 0 when active, 1 on start, timeout or post-start state failure.
+nhx_restore_camera_service() {
+  nrcs_service="$1"
+  nrcs_directory="$2"
+  if ! run_with_managed_timeout 60 "$nrcs_directory" nhx-service-restore \
+    systemctl start "$nrcs_service" >"$nrcs_directory/service-restore.log" 2>&1; then
+    log_file_with_label NHX-SERVICE "$nrcs_directory/service-restore.log"
+    log_fail "Could not restore $nrcs_service after NHX, inspect service-restore.log and the service journal"
+    return 1
+  fi
+  if ! systemd_service_is_active "$nrcs_service"; then
+    log_fail "Restored $nrcs_service is not active after start, inspect the service journal"
+    return 1
+  fi
+  return 0
+}
+
+# nhx_check_rpm_setup log_directory
+# Read-only CentOS setup check using the configured camera-nhx package map.
+# Required CAMX packages are checked locally. Repository listings use cached
+# metadata only, never install, refresh, enable a repository or access a share.
+# Log missing repositories/cache as provisioning diagnostics, not a requirement
+# for an already installed offline NHX runtime. Return 0 when core packages
+# exist, 2 when required tools/packages are absent, 1 on execution failure.
+nhx_check_rpm_setup() {
+  ncrs_directory="$1"
+  command -v rpm >/dev/null 2>&1 || return 2
+  ncrs_packages=$(pkg_lookup_package_set camera-nhx) || return 2
+  ncrs_missing=0
+  ncrs_failed=0
+  ncrs_count=0
+  for ncrs_package in $ncrs_packages; do
+    case "$ncrs_package" in
+      camx-*|libcamx-*)
+        ncrs_count=$((ncrs_count + 1))
+        if LC_ALL=C run_with_managed_timeout 20 "$ncrs_directory" nhx-rpm-query \
+          rpm -q "$ncrs_package" >"$ncrs_directory/package-$ncrs_package.log" 2>&1; then
+          :
+        else
+          ncrs_status=$?
+          if [ "$ncrs_status" -eq 1 ] && grep -Fq 'is not installed' "$ncrs_directory/package-$ncrs_package.log"; then
+            ncrs_missing=1
+            log_warn "NHX package prerequisite missing: $ncrs_package. Provision the matching CAMX package set in the image"
+          else
+            ncrs_failed=1
+            log_fail "NHX package query failed: $ncrs_package rc=$ncrs_status, inspect the retained package log"
+          fi
+        fi
+        log_file_with_label NHX-PACKAGE "$ncrs_directory/package-$ncrs_package.log"
+        ;;
+    esac
+  done
+  if command -v dnf >/dev/null 2>&1; then
+    if run_with_managed_timeout 20 "$ncrs_directory" nhx-repolist \
+      dnf -C repolist >"$ncrs_directory/repositories.log" 2>&1; then
+      log_file_with_label NHX-REPOSITORIES "$ncrs_directory/repositories.log"
+      for ncrs_repo in epel qualcomm-linux-aarch64 qualcomm-linux-noarch clo-rpm-aarch64 clo-rpm-noarch; do
+        if awk -v repo="$ncrs_repo" '$1 == repo { found=1 } END { exit !found }' \
+          "$ncrs_directory/repositories.log"; then
+          if ! run_with_managed_timeout 20 "$ncrs_directory" nhx-repository-packages \
+            dnf -C repo-pkgs "$ncrs_repo" list \
+            >"$ncrs_directory/repository-$ncrs_repo.log" 2>&1; then
+            log_warn "Cached package listing unavailable for $ncrs_repo. Refresh its metadata during image provisioning"
+          elif ! awk '$1 ~ /\.(aarch64|noarch)$/ { found=1 } END { exit !found }' \
+            "$ncrs_directory/repository-$ncrs_repo.log"; then
+            log_warn "Cached repository $ncrs_repo exposes no aarch64/noarch packages. Check repository provisioning"
+          fi
+          log_file_with_label NHX-REPOSITORY "$ncrs_directory/repository-$ncrs_repo.log" 25
+        else
+          log_warn "LRH setup repository $ncrs_repo is not enabled. Provision it if CAMX package resolution requires it"
+        fi
+      done
+    else
+      log_file_with_label NHX-REPOSITORIES "$ncrs_directory/repositories.log"
+      log_warn "DNF cached repository inventory is unavailable. Installed CAMX package checks remain authoritative for offline NHX"
+    fi
+  else
+    log_warn "dnf is unavailable, repository provisioning cannot be checked"
+  fi
+  [ "$ncrs_count" -gt 0 ] || return 2
+  [ "$ncrs_failed" -eq 0 ] || return 1
+  [ "$ncrs_missing" -eq 0 ] || return 2
+  return 0
+}
+
+# nhx_pick_cksum_tool
+# Print the first available checksum utility, or an empty line when absent.
+# Uses image-provided tools only, preferring SHA-256 over MD5 and POSIX cksum.
 nhx_pick_cksum_tool() {
   if command -v sha256sum >/dev/null 2>&1; then
     echo "sha256sum"
   elif command -v md5sum >/dev/null 2>&1; then
     echo "md5sum"
+  elif command -v cksum >/dev/null 2>&1; then
+    echo "cksum"
   else
     echo ""
   fi
@@ -665,10 +1305,11 @@ nhx_resolve_json_file() {
 # /etc/camera/test/NHX/${JSON_FILE}.json
 #
 # Usage:
-# nhx_stage_json_for_launcher "<base_dir>" "<resolved_json>" "<target>"
+# nhx_stage_json_for_launcher "<base_dir>" "<resolved_json>" "<target>" [mode]
 #
 # Prints launcher argument, for example:
 # Lemans/Prev_plus_Video_YUVNV12_MaxResolution_NHX
+# Optional native mode stages at the root and returns only the basename.
 nhx_stage_json_for_launcher() {
   base_dir="$1"
   src_json="$2"
@@ -692,7 +1333,9 @@ nhx_stage_json_for_launcher() {
     return 1
   fi
 
-  if [ -z "$target" ]; then
+  if [ "${4:-wrapper}" = native ]; then
+    target=""
+  elif [ -z "$target" ]; then
     case "$src_json" in
       "$base_dir"/*)
         rel="${src_json#"$base_dir"/}"
@@ -742,6 +1385,86 @@ nhx_stage_json_for_launcher() {
   return 1
 }
 
+# nhx_json_files_match first second
+# Compare JSON bytes using the already-required checksum utility and stdin.
+# No stdout or mutation. Return 0 for equal files, 1 for mismatch/read failure.
+nhx_json_files_match() {
+  njfm_tool=$(nhx_pick_cksum_tool) || return 1
+  [ -n "$njfm_tool" ] || return 1
+  njfm_first=$("$njfm_tool" <"$1") || return 1
+  njfm_second=$("$njfm_tool" <"$2") || return 1
+  [ -n "$njfm_first" ] && [ "$njfm_first" = "$njfm_second" ]
+}
+
+# nhx_prepare_native_json base_directory source_json state_directory
+# Retain the selected JSON, reuse an identical existing root config or stage a
+# new one through the shared staging helper. Never overwrite a different file
+# or symlink. Record ownership for cleanup. Print basename, return 1 on failure.
+nhx_prepare_native_json() {
+  npnj_base="$1"
+  npnj_source="$2"
+  npnj_state="$3"
+  npnj_name=${npnj_source##*/}
+  if ! printf '%s\n' "$npnj_name" | grep -Eq '^[A-Za-z_][A-Za-z0-9_-]*\.json$'; then
+    printf 'Native JSON requires a simple filename ending in .json: %s\n' "$npnj_name" >&2
+    return 1
+  fi
+  npnj_destination="${NHX_JSON_ROOT:-/etc/camera/test/NHX}/$npnj_name"
+  case "$npnj_destination" in
+    /*)
+      ;;
+    *)
+      printf 'Native JSON root must be an absolute directory\n' >&2
+      return 1
+      ;;
+  esac
+  if printf '%s' "$npnj_destination" | LC_ALL=C grep -q '[[:cntrl:]]'; then
+    printf 'Native JSON destination contains control characters\n' >&2
+    return 1
+  fi
+  if ! cp "$npnj_source" "$npnj_state/selected.json"; then
+    return 1
+  fi
+  if [ -L "$npnj_destination" ] || { [ -e "$npnj_destination" ] && [ ! -f "$npnj_destination" ]; }; then
+    printf 'Refusing non-regular native JSON destination: %s\n' "$npnj_destination" >&2
+    return 1
+  fi
+  if [ -f "$npnj_destination" ]; then
+    if ! nhx_json_files_match "$npnj_state/selected.json" "$npnj_destination"; then
+      printf 'Different JSON already exists at %s, preserve or relocate it before retrying\n' "$npnj_destination" >&2
+      return 1
+    fi
+    printf '%s\n' "$npnj_destination" >"$npnj_state/destination" || return 1
+  else
+    printf '%s\n' "$npnj_destination" >"$npnj_state/destination" || return 1
+    : >"$npnj_state/created" || return 1
+    nhx_stage_json_for_launcher "$npnj_base" "$npnj_source" "" native >/dev/null || return 1
+  fi
+  nhx_json_files_match "$npnj_state/selected.json" "$npnj_destination" || return 1
+  printf '%s\n' "${npnj_name%.json}"
+}
+
+# nhx_restore_native_json state_directory
+# Verify the selected file and remove it only if created by this run. Existing
+# files are never removed. Retain selected.json. Return 1 and preserve changed files
+# on conflict/read failure, logging to stdout. Safe to call repeatedly.
+nhx_restore_native_json() {
+  nrnj_state="$1"
+  [ -n "$nrnj_state" ] && [ -f "$nrnj_state/destination" ] || return 0
+  IFS= read -r nrnj_destination <"$nrnj_state/destination" || return 1
+  if [ -L "$nrnj_destination" ] ||
+    ! nhx_json_files_match "$nrnj_state/selected.json" "$nrnj_destination"; then
+    log_fail "Native JSON changed or cannot be read at $nrnj_destination, preserving it for manual cleanup"
+    return 1
+  fi
+  if [ -f "$nrnj_state/created" ]; then
+    rm -f "$nrnj_destination" || return 1
+    rm -f "$nrnj_state/created" || return 1
+    log_info "Removed native JSON staged by this run: $nrnj_destination, retained $nrnj_state/selected.json"
+  fi
+  rm -f "$nrnj_state/destination"
+}
+
 nhx_collect_new_dumps() {
   # $1 = dump_dir, $2 = marker_file, $3 = output_list_file
   # Collect NHX yuvs created after marker. Fallback to any *.yuv if none match.
@@ -750,6 +1473,19 @@ nhx_collect_new_dumps() {
   out="$3"
 
   : >"$out"
+
+  if [ "${4:-wrapper}" = native ]; then
+    # Native captures need not carry the NHX filename tag. Restrict collection
+    # to image formats under the selected output root, excluding logs/metadata.
+    if ! find "$ddir" -type f \
+      \( -name '*.yuv' -o -name '*.raw' -o -name '*.bin' \
+      -o -name '*.jpg' -o -name '*.jpeg' \) \
+      -newer "$marker" >"$out"; then
+      return 1
+    fi
+    sort -o "$out" "$out"
+    return $?
+  fi
 
   # Prefer NHX-tagged files (matches your observed names)
   find "$ddir" -maxdepth 1 -type f \
@@ -762,6 +1498,12 @@ nhx_collect_new_dumps() {
   fi
 }
 
+# nhx_validate_dumps_and_checksums dump_dir marker_file log_dir [unused] [unused] [mode]
+# Validate fresh nonempty dumps and checksum diversity, retaining file lists
+# and checksums in log_dir. The previous-run diff is advisory and optional.
+# Optional mode is native for untagged image formats including JPEG, otherwise
+# keep legacy NHX collection. Reset current list/checksums before validation so
+# failures cannot expose stale captures. Log to stdout, return 1 on failure.
 nhx_validate_dumps_and_checksums() {
   # $1 = dump_dir, $2 = marker_file, $3 = log_dir
   ddir="$1"
@@ -773,17 +1515,29 @@ nhx_validate_dumps_and_checksums() {
   prevsum="$ldir/nhx_checksums.prev.txt"
   tool="$(nhx_pick_cksum_tool)"
 
+  if ! {
+    mkdir -p "$ldir" &&
+      : >"$list" &&
+      : >"$sumfile"
+  }; then
+    log_fail "Cannot initialize capture artifacts in $ldir, check permissions and free space"
+    return 1
+  fi
+
   if [ ! -d "$ddir" ]; then
     log_fail "DUMP_DIR does not exist: $ddir"
     return 1
   fi
 
   if [ -z "$tool" ]; then
-    log_skip "No checksum tool found (sha256sum/md5sum). Skipping dump checksum validation."
+    log_skip "No checksum tool found (sha256sum/md5sum/cksum). Skipping dump checksum validation."
     return 0
   fi
 
-  nhx_collect_new_dumps "$ddir" "$marker" "$list"
+  if ! nhx_collect_new_dumps "$ddir" "$marker" "$list" "${6:-wrapper}"; then
+    log_fail "Could not collect fresh captures from $ddir"
+    return 1
+  fi
 
   if [ ! -s "$list" ]; then
     log_fail "No NHX dump files found in $ddir (after marker). Dump/checksum validation not exercised."
@@ -804,8 +1558,11 @@ nhx_validate_dumps_and_checksums() {
       return 1
     fi
 
-    # Produce "HASH FILE" lines, same as sha256sum/md5sum
-    line="$($tool "$f" 2>/dev/null)"
+    # Retain native output, HASH FILE or CRC SIZE FILE for POSIX cksum.
+    if ! line="$("$tool" "$f" 2>/dev/null)"; then
+      log_fail "Checksum tool failed for: $f"
+      return 1
+    fi
     if [ -z "$line" ]; then
       log_fail "Checksum tool failed for: $f"
       return 1
@@ -839,10 +1596,19 @@ nhx_validate_dumps_and_checksums() {
 
   # Optional drift check: compare against previous run (same log dir)
   if [ -f "$prevsum" ]; then
-    if ! diff -q "$prevsum" "$sumfile" >/dev/null 2>&1; then
-      log_warn "Dump checksums changed vs previous run ($prevsum). This may be expected; keeping as WARN."
+    if command -v diff >/dev/null 2>&1; then
+      if diff -q "$prevsum" "$sumfile" >/dev/null 2>&1; then
+        log_info "Dump checksums match previous run ($prevsum)"
+      else
+        nhx_diff_status=$?
+        if [ "$nhx_diff_status" -eq 1 ]; then
+          log_warn "Dump checksums changed vs previous run ($prevsum). This may be expected, keeping as WARN."
+        else
+          log_warn "Previous-run checksum comparison could not complete, diff rc=$nhx_diff_status. Current-run dump validation is unaffected"
+        fi
+      fi
     else
-      log_info "Dump checksums match previous run ($prevsum)"
+      log_info "Previous-run checksum comparison omitted because optional diff is unavailable. Current-run dump validation is unaffected"
     fi
   fi
 
