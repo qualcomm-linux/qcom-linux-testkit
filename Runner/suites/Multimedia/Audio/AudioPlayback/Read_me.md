@@ -896,3 +896,17 @@ that audio hardware is absent.
 ## License
 
 SPDX-License-Identifier: BSD-3-Clause(C) Qualcomm Technologies, Inc. and/or its subsidiaries.
+
+## Bounded playback reporting
+
+When an explicit playback timeout ends a run and stream activity was observed,
+the existing acceptance policy reports PASS. The message identifies the configured
+playback limit and does not claim the entire clip completed. For example:
+
+```sh
+./run.sh --backend pipewire --sink speakers --clip-name playback_config1 --timeout 10s
+```
+
+A clip longer than ten seconds is intentionally bounded in this example.
+Unexpected exits retain their warnings. Automatic clip-duration timeouts,
+backend selection, runtime evidence and result classification are unchanged.
