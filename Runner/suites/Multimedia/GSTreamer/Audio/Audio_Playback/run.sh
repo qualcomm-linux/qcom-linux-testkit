@@ -554,9 +554,9 @@ fi
 alsaPick="$(gstreamer_alsa_pick_playback_hw)"
 log_info "ALSA playback device (best-effort): $alsaPick"
 
-# -------------------- GStreamer debug capture (single level only) --------------------
+# -------------------- GStreamer debug capture and sink evidence --------------------
 export GST_DEBUG_NO_COLOR=1
-export GST_DEBUG="$gstDebugLevel"
+export GST_DEBUG="$gstDebugLevel,basesink:5"
 export GST_DEBUG_FILE="$GST_LOG"
 
 # -------------------- Attempt playback across backends --------------------
@@ -592,7 +592,7 @@ for b in $chain; do
   fi
 
   finalBackend="$b"
-  finalPipe="$pipe"
+  finalPipe="$pipe name=testkit_audio_sink"
 
   log_info "Selected backend: $finalBackend"
 
@@ -604,16 +604,18 @@ for b in $chain; do
 
   log_info "gst-launch exit code: $gstRc"
 
-  # Evidence after run (backend + optional asoc fallback centralized in lib)
-  ev="$(gstreamer_backend_evidence_sampled "$finalBackend" 3)"
-  log_info "Evidence streaming/path_on: $ev"
+  # Retain evidence from this sink before EOS closes the device. Sampling
+  # global stream state after teardown misses successful finite playback.
+  ev="$(gstreamer_playback_rendered "$GST_LOG" testkit_audio_sink)"
+  log_info "Evidence rendered buffers from this pipeline: $ev ($GST_LOG)"
 
   okRc="0"
   if [ "$gstRc" -eq 0 ] 2>/dev/null; then
     okRc="1"
   elif [ "$secs" -gt 0 ] 2>/dev/null; then
     # tolerate timeout exit codes when we intentionally stop playback
-    if [ "$gstRc" -eq 124 ] 2>/dev/null || [ "$gstRc" -eq 143 ] 2>/dev/null; then
+    if [ "$gstRc" -eq 124 ] 2>/dev/null &&
+       [ "${GST_BOUNDED_RAW_RC:-}" != "137" ]; then
       okRc="1"
     fi
   fi
