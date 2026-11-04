@@ -1,0 +1,14 @@
+metadata:
+  format: Lava-Test Test Definition 1.0
+  name: Reboot_health_check
+  description: Validate the booted root shell without initiating another reboot
+  os:
+    - openembedded
+  scope:
+    - functional
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/Reboot_health_check
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh Reboot_health_check.res --strict
