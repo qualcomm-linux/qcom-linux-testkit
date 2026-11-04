@@ -4,12 +4,12 @@ SPDX-License-Identifier: BSD-3-Clause
 
 ## Overview
 
-This test case validates the PCIe interface on the target device by checking for the presence of key PCIe attributes using the `lspci -vvv` command. It ensures that the PCIe subsystem is correctly enumerated and functional
+This test validates PCI enumeration, driver binding and runtime link health using sysfs. When lspci is installed, its output is retained as supplemental evidence. Functional endpoint tests remain in their respective suites.
 
 ### The test checks for:
 
 - Presence of **Device Tree Node**
-- Availability of **PCIe Capabilities**
+- Supplemental PCI capabilities when exposed by lspci
 - Binding of a **Kernel Driver**
 - Per-device negotiated and maximum link speed and width
 - MSI/MSI-X runtime IRQ exposure
@@ -97,3 +97,14 @@ PCIe controller, link, or uncorrected AER errors fail the suite:
 ```sh
 PCIE_DMESG_STRICT=1 ./run.sh
 ```
+
+## Runtime evidence and portability
+
+Driver binding, link state, MSI and power inventory come from PCI sysfs through
+pcie_collect_runtime_health. Human-readable lspci labels are not mandatory.
+When provided by the image, lspci is collected with a 15-second watchdog and a
+failed installed command remains FAIL. Without lspci, sysfs coverage still runs.
+No devices is SKIP unless lspci and sysfs contradict each other. No binding is
+reported as missing functional coverage, not as proof of a healthy endpoint.
+Existing kernel error gating and QPS615 checks retain their configured policy.
+Artifacts are stored under CWD/results/PCIe and diagnostics appear in stdout.

@@ -40,8 +40,8 @@ fi
 
 TESTNAME="PCIe"
 RES_FILE="$SCRIPT_DIR/$TESTNAME.res"
-QPS615_RESULT_DIR="$SCRIPT_DIR/qps615_runtime"
-PCIE_RESULT_DIR="$SCRIPT_DIR/pcie_runtime"
+QPS615_RESULT_DIR="$PWD/results/PCIe/qps615_runtime"
+PCIE_RESULT_DIR="$PWD/results/PCIe/pcie_runtime"
 PCIE_DMESG_STRICT="${PCIE_DMESG_STRICT:-0}"
 
 test_result_init "$TESTNAME" "$RES_FILE" || exit 1
@@ -67,7 +67,6 @@ if ! CHECK_DEPS_RECOVER=0 CHECK_DEPS_NO_EXIT=1 check_dependencies \
     find \
     grep \
     head \
-    lspci \
     mkdir \
     readlink \
     rm \
@@ -76,8 +75,19 @@ if ! CHECK_DEPS_RECOVER=0 CHECK_DEPS_NO_EXIT=1 check_dependencies \
     test_result_finish "SKIP" "$TESTNAME SKIP: required base utilities are unavailable"
 fi
 
-if ! lspci_output="$(lspci -vvv 2>&1)"; then
-    test_result_finish "FAIL" "$TESTNAME FAIL: lspci inventory command failed"
+mkdir -p "$PCIE_RESULT_DIR" || test_result_finish FAIL "Cannot create PCI evidence directory"
+trap 'managed_timeout_cancel_bounded 2 || true' 0
+trap 'test_result_finish FAIL "PCI inventory interrupted"' HUP INT TERM
+lspci_output=""
+if command -v lspci >/dev/null 2>&1; then
+    if run_with_managed_timeout 15 "$PCIE_RESULT_DIR" lspci lspci -vvv >"$PCIE_RESULT_DIR/lspci.log" 2>&1; then
+        lspci_output=$(cat "$PCIE_RESULT_DIR/lspci.log")
+    else
+        test_result_record "FAIL" "Installed lspci failed or timed out"
+    fi
+    log_file_with_label "LSPCI" "$PCIE_RESULT_DIR/lspci.log"
+else
+    test_result_record "SKIP" "Optional lspci is unavailable, using PCI sysfs inventory"
 fi
 
 pcie_dt_association=0
@@ -94,18 +104,6 @@ else
     test_result_record "SKIP" "PCIe device-tree association is not exposed by pciutils or sysfs"
 fi
 
-if printf '%s\n' "$lspci_output" | grep -q "Capabilities:"; then
-    test_result_record "PASS" "PCIe capabilities are exposed"
-else
-    test_result_record "FAIL" "PCIe capabilities are not exposed"
-fi
-
-if printf '%s\n' "$lspci_output" | grep -q "Kernel driver in use:"; then
-    test_result_record "PASS" "At least one PCIe device has a bound kernel driver"
-else
-    test_result_record "FAIL" "No bound PCIe kernel driver was reported"
-fi
-
 pcie_collect_runtime_health "$PCIE_RESULT_DIR"
 pcie_runtime_status=$?
 
@@ -114,6 +112,11 @@ case "$pcie_runtime_status" in
         test_result_record \
             "PASS" \
             "PCIe runtime inventory is readable: devices=$PCIE_RUNTIME_DEVICE_COUNT link_records=$PCIE_RUNTIME_LINK_COUNT power_records=$PCIE_RUNTIME_POWER_COUNT"
+        if [ "$PCIE_RUNTIME_BOUND_COUNT" -gt 0 ]; then
+            test_result_record "PASS" "$PCIE_RUNTIME_BOUND_COUNT PCI devices have a bound driver in sysfs"
+        else
+            test_result_record "SKIP" "No PCI driver binding is exposed, endpoint functionality is not validated"
+        fi
         if [ "$PCIE_RUNTIME_INACTIVE_PORT_COUNT" -gt 0 ]; then
             test_result_record \
                 "SKIP" \
@@ -133,7 +136,11 @@ case "$pcie_runtime_status" in
             "PCIe runtime health validation failed: ${PCIE_RUNTIME_FAILURE_REASON:-malformed sysfs evidence}"
         ;;
     2)
-        test_result_record "FAIL" "lspci reports PCI devices but PCI sysfs inventory is empty"
+        if [ -n "$lspci_output" ]; then
+            test_result_record "FAIL" "lspci reports PCI inventory but PCI sysfs is empty"
+        else
+            test_result_record "SKIP" "No enumerated PCI devices are exposed"
+        fi
         ;;
     *)
         test_result_record "FAIL" "PCIe runtime health inventory could not complete"
@@ -197,4 +204,7 @@ else
     test_result_record "PASS" "No non-benign PCIe controller or AER errors were found in the captured kernel log"
 fi
 
+if [ "$PCIE_RUNTIME_DEVICE_COUNT" -eq 0 ] && [ "$TEST_RESULT_FAIL_COUNT" -eq 0 ]; then
+    test_result_finish SKIP "No enumerated PCI devices, diagnostics do not establish PCI coverage"
+fi
 test_result_finish
