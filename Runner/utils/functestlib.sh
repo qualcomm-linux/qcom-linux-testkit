@@ -677,44 +677,36 @@ wait_for_interrupt_cpu_count_increment() {
 # 0 - workload was launched and stopped
 # 1 - invalid input or workload could not be launched
 # 2 - taskset is missing
-run_pinned_cpu_workload() {
-    cpu_index="$1"
-    workload_seconds="$2"
-
-    if ! command -v taskset >/dev/null 2>&1; then
-        log_warn "taskset command is not available; cannot run pinned workload on CPU$cpu_index"
-        return 2
-    fi
-
-    if ! is_unsigned_number "$cpu_index"; then
-        log_warn "Invalid CPU index for pinned workload: ${cpu_index:-<empty>}"
-        return 1
-    fi
-
-    if ! is_unsigned_number "$workload_seconds"; then
-        log_warn "Invalid workload duration for CPU$cpu_index: ${workload_seconds:-<empty>}"
-        return 1
-    fi
-
-    if ! taskset -c "$cpu_index" sh -c 'true' >/dev/null 2>&1; then
-        log_warn "CPU$cpu_index is not schedulable with taskset"
-        return 1
-    fi
-
-    taskset -c "$cpu_index" sh -c 'while :; do :; done' >/dev/null 2>&1 &
-    busy_pid=$!
-
-    taskset -c "$cpu_index" sh -c 'while :; do sleep 1; done' >/dev/null 2>&1 &
-    sleeper_pid=$!
-
-    sleep "$workload_seconds"
-
-    kill "$busy_pid" "$sleeper_pid" >/dev/null 2>&1
-    wait "$busy_pid" >/dev/null 2>&1
-    wait "$sleeper_pid" >/dev/null 2>&1
-
-    return 0
-}
+run_pinned_cpu_workload() (
+    rpcw_cpu="$1"
+    rpcw_seconds="$2"
+    command -v taskset >/dev/null 2>&1 || exit 2
+    is_unsigned_number "$rpcw_cpu" || exit 1
+    is_unsigned_number "$rpcw_seconds" || exit 1
+    [ "$rpcw_seconds" -gt 0 ] || exit 1
+    taskset -c "$rpcw_cpu" sh -c 'true' >/dev/null 2>&1 || exit 1
+    rpcw_busy=""
+    rpcw_timer=""
+    rpcw_pid=""
+    rpcw_status=0
+    trap 'rpcw_status=$?
+        trap - 0
+        for rpcw_pid in "$rpcw_busy" "$rpcw_timer"; do
+            [ -n "$rpcw_pid" ] || continue
+            kill "$rpcw_pid" 2>/dev/null || true
+            wait "$rpcw_pid" 2>/dev/null || true
+        done
+        exit "$rpcw_status"' 0
+    trap 'exit 1' HUP INT TERM
+    taskset -c "$rpcw_cpu" sh -c 'while :; do :; done' >/dev/null 2>&1 &
+    rpcw_busy=$!
+    # A pinned timer wakeup exercises tickless CPUs too, without relying on idle ticks.
+    taskset -c "$rpcw_cpu" sleep "$rpcw_seconds" >/dev/null 2>&1 &
+    rpcw_timer=$!
+    wait "$rpcw_timer" || exit 1
+    rpcw_timer=""
+    kill -0 "$rpcw_busy" 2>/dev/null || exit 1
+)
 
 # Log CPU topology and timer/tick diagnostics.
 #
@@ -772,6 +764,9 @@ validate_per_cpu_interrupt_active() {
     workload_seconds="$2"
     retries="$3"
     skip_isolated="$4"
+    irq_budget="${5:-0}"
+    [ "$irq_budget" = auto ] || is_unsigned_number "$irq_budget" || return 1
+    irq_started=$(date +%s) || return 1
 
     IRQ_ACTIVE_TESTED=0
     IRQ_ACTIVE_PASSED=0
@@ -825,6 +820,11 @@ validate_per_cpu_interrupt_active() {
         return 1
     fi
 
+    if [ "$irq_budget" = auto ]; then
+        irq_cpu_count=$(printf '%s\n' "$online_cpus" | awk '{ count += NF } END { print count+0 }')
+        irq_budget=$((irq_cpu_count * retries * (workload_seconds + 2) + 10))
+    fi
+    log_info "Active interrupt workload budget: ${irq_budget}s"
     log_info "Online CPUs selected for active interrupt validation:"
     printf '%s\n' "$online_cpus" |
     while IFS= read -r cpu_index || [ -n "$cpu_index" ]; do
@@ -875,6 +875,13 @@ validate_per_cpu_interrupt_active() {
         cpu_pass=0
 
         while [ "$attempt" -le "$retries" ]; do
+            if [ "$irq_budget" -gt 0 ]; then
+                irq_now=$(date +%s) || return 1
+                if [ "$((irq_now - irq_started + workload_seconds))" -gt "$irq_budget" ]; then
+                    log_fail "Active interrupt validation exceeded its ${irq_budget}s budget"
+                    return 1
+                fi
+            fi
             initial_count="$(get_interrupt_cpu_count "$irq_name" "$cpu_index")"
 
             if ! is_unsigned_number "$initial_count"; then
@@ -939,8 +946,9 @@ validate_per_cpu_interrupt_active() {
     log_info "IRQ_ACTIVE_SUMMARY: tested=$IRQ_ACTIVE_TESTED passed=$IRQ_ACTIVE_PASSED failed=$IRQ_ACTIVE_FAILED skipped=$IRQ_ACTIVE_SKIPPED"
 
     if [ "$IRQ_ACTIVE_TESTED" -eq 0 ]; then
-        log_fail "No CPUs were testable for '$irq_name'"
-        return 1
+        IRQ_ACTIVE_SKIP_REASON="No online CPUs were eligible for active validation"
+        log_skip "$IRQ_ACTIVE_SKIP_REASON"
+        return 2
     fi
 
     if [ "$IRQ_ACTIVE_FAILED" -eq 0 ]; then
