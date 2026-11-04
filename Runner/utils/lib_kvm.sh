@@ -138,50 +138,43 @@ PY
 # 0 if no fatal error is detected
 # 1 if fatal KVM/EL2-related messages are detected
 kvm_check_boot_dmesg_errors() {
-    outdir="$1"
-    include_regex='kvm|KVM|hyp|HYP|el2|EL2|vgic|VGIC|gicv|GICV'
-    exclude_regex='not found|dummy regulator|probe deferred|using dummy regulator|EEXIST'
-
-    mkdir -p "$outdir" 2>/dev/null || true
-
-    if command -v scan_dmesg_errors >/dev/null 2>&1; then
-        scan_dmesg_errors "$outdir" "$include_regex" "$exclude_regex" || true
-
-        if [ -s "$outdir/dmesg_errors.log" ]; then
-            if grep -Ei 'fail|failed|error|disabled|unavailable|not in hyp|hyp mode|EL2.*unavailable|HYP.*unavailable|KVM.*not available|kvm.*not available|panic|BUG|Oops' "$outdir/dmesg_errors.log" >/dev/null 2>&1; then
-                log_fail "Fatal KVM/EL2 related messages found in dmesg: $outdir/dmesg_errors.log"
-                return 1
-            fi
-
-            log_warn "KVM/EL2 related dmesg messages found but no fatal pattern matched: $outdir/dmesg_errors.log"
-            return 0
-        fi
-
-        log_info "No relevant KVM/EL2 dmesg errors found."
-        return 0
+    kvm_log_dir="$1"
+    if [ "${KVM_CAPTURED_DIR:-}" != "$kvm_log_dir" ]; then
+        scan_dmesg_errors "$kvm_log_dir" 'kvm|hyp|el2|vgic|gicv' \
+            'dummy regulator|probe deferred|using dummy regulator|EEXIST' || true
+        KVM_CAPTURED_DIR="$kvm_log_dir"
     fi
-
-    if command -v get_kernel_log >/dev/null 2>&1; then
-        get_kernel_log >"$outdir/dmesg_snapshot.log" 2>/dev/null || true
-    elif command -v dmesg >/dev/null 2>&1; then
-        dmesg >"$outdir/dmesg_snapshot.log" 2>/dev/null || true
-    else
-        log_warn "No kernel log source available for KVM dmesg validation"
-        return 0
+    if [ "${DMESG_ACCESS_STATUS:-unknown}" != available ]; then
+        log_warn "KVM kernel log access: ${DMESG_ACCESS_STATUS:-unknown}, see $kvm_log_dir"
     fi
-
-    if grep -Ei 'KVM|kvm|HYP|hyp|EL2|el2' "$outdir/dmesg_snapshot.log" >/dev/null 2>&1; then
-        grep -Ei 'KVM|kvm|HYP|hyp|EL2|el2' "$outdir/dmesg_snapshot.log" >"$outdir/kvm_dmesg.log" 2>/dev/null || true
-        log_info "KVM/EL2 dmesg lines captured: $outdir/kvm_dmesg.log"
-
-        if grep -Ei 'fail|failed|error|disabled|unavailable|not in hyp|hyp mode|EL2.*unavailable|HYP.*unavailable|KVM.*not available|kvm.*not available|panic|BUG|Oops' "$outdir/kvm_dmesg.log" >/dev/null 2>&1; then
-            log_fail "Fatal KVM/EL2 related messages found in dmesg: $outdir/kvm_dmesg.log"
-            return 1
-        fi
-    else
-        log_warn "No KVM/EL2 dmesg lines found"
+    # The generic error filter does not include all HYP availability messages.
+    grep -Ei '(^|[^[:alnum:]_])(kvm|hyp|el2|vgic|gicv)([^[:alnum:]_]|$)' "$kvm_log_dir/dmesg_snapshot.log" \
+        | grep -vE 'Kernel command line:|Command line:' >"$kvm_log_dir/kvm_dmesg.log" 2>/dev/null || true
+    if grep -Ei '(^|[^[:alnum:]_])(failed|failure|error|unavailable|panic|BUG|Oops)([^[:alnum:]_]|$)|not available|not in hyp|(^|:)[[:space:]]*KVM[[:space:]]+(is[[:space:]]+)?disabled' \
+        "$kvm_log_dir/kvm_dmesg.log" >"$kvm_log_dir/kvm_errors.log"; then
+        cat "$kvm_log_dir/kvm_errors.log"
+        log_fail "KVM/EL2 initialization errors found in $kvm_log_dir/kvm_errors.log"
+        return 1
     fi
+    return 0
+}
 
+# kvm_log_readiness <output-directory>
+# Capture readiness before callers gate on config, /dev/kvm, or optional clients.
+# This diagnostic does not replace ioctl or QEMU functional validation.
+kvm_log_readiness() {
+    kvm_readiness_dir="$1"
+    KVM_CAPTURED_DIR=""
+    log_info "KVM runtime: kernel=$(uname -r) architecture=$(uname -m)"
+    kvm_log_dt_identity
+    for kvm_config in CONFIG_VIRTUALIZATION CONFIG_KVM; do
+        check_kernel_config "$kvm_config" || true
+    done
+    ls -l /dev/kvm 2>&1 || true
+    if ! kvm_check_boot_dmesg_errors "$kvm_readiness_dir"; then
+        log_fail "KVM initialization failed, check firmware EL2 handoff and kernel diagnostics above"
+        return 1
+    fi
     return 0
 }
 
@@ -196,7 +189,7 @@ kvm_check_boot_dmesg_errors() {
 kvm_dt_roots() {
     for root in /proc/device-tree /sys/firmware/devicetree/base; do
         if [ -d "$root" ]; then
-            printf '%s\n' "$root"
+            readlink -f "$root"
         fi
     done
 }
