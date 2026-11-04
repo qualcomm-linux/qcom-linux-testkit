@@ -5701,3 +5701,193 @@ perf_mem_collect_all() {
   return 0
 }
 
+
+# cpufreq_policy_cpu <policy-path>
+# Print one online CPU in this policy. Return 4 for an inactive policy and 1
+# for malformed evidence. This helper does not change online/affinity state.
+cpufreq_policy_cpu() (
+    cpp_policy="$1"
+    if [ -r "$cpp_policy/affected_cpus" ]; then
+        cpp_members=$(cat "$cpp_policy/affected_cpus") || exit 1
+    else
+        cpp_members=$(cat "$cpp_policy/related_cpus") || exit 1
+    fi
+    cpp_online=$(get_online_cpus)
+    [ -n "$cpp_online" ] || exit 1
+    for cpp_cpu in $cpp_members; do
+        is_unsigned_number "$cpp_cpu" || exit 1
+        if printf '%s\n' "$cpp_online" | grep -qx "$cpp_cpu"; then
+            printf '%s\n' "$cpp_cpu"
+            exit 0
+        fi
+    done
+    exit 4
+)
+
+# cpufreq_write <attribute-path> <value>
+# Write and verify a control. No stdout, return 1 on rejection/readback mismatch.
+cpufreq_write() {
+    printf '%s\n' "$2" >"$1" || return 1
+    [ "$(cat "$1")" = "$2" ]
+}
+
+# cpufreq_set_limits <policy> <min-kHz> <max-kHz>
+# Order writes to avoid min > max. No stdout, return 1 on failure.
+cpufreq_set_limits() {
+    if [ "$2" -gt "$(cat "$1/scaling_max_freq")" ]; then
+        cpufreq_write "$1/scaling_max_freq" "$3" || return 1
+        cpufreq_write "$1/scaling_min_freq" "$2"
+    else
+        cpufreq_write "$1/scaling_min_freq" "$2" || return 1
+        cpufreq_write "$1/scaling_max_freq" "$3"
+    fi
+}
+
+# cpufreq_restore_policy
+# Restore the validation snapshot, including an initial userspace request.
+# No stdout. Return nonzero when any original setting cannot be restored.
+cpufreq_restore_policy() {
+    cpufreq_restore_rc=0
+    if [ "$cpufreq_changed" = 1 ]; then
+        cpufreq_set_limits "$cpufreq_policy" "$cpufreq_min" "$cpufreq_max" || cpufreq_restore_rc=1
+        cpufreq_write "$cpufreq_policy/scaling_governor" "$cpufreq_governor" || cpufreq_restore_rc=1
+        if [ -n "$cpufreq_request" ]; then
+            cpufreq_write "$cpufreq_policy/scaling_setspeed" "$cpufreq_request" || cpufreq_restore_rc=1
+        fi
+    fi
+    return "$cpufreq_restore_rc"
+}
+
+# cpufreq_validate_policy <policy-path> <evidence-directory> [controls|load]
+# Exercise supported controls within original limits. Logs go to stdout.
+# Restore on exit/signals. Return 0/1/4 = PASS/FAIL/SKIP.
+cpufreq_validate_policy() (
+    cpufreq_policy=$1
+    cpufreq_evidence=$2
+    cpufreq_mode=${3:-controls}
+    case "$cpufreq_mode" in
+        controls|load)
+            ;;
+        *)
+            exit 1
+            ;;
+    esac
+    cpufreq_cpu=$(cpufreq_policy_cpu "$cpufreq_policy") || exit $?
+    echo "policy=$cpufreq_policy online_cpu=$cpufreq_cpu mode=$cpufreq_mode"
+    if [ "$cpufreq_mode" = load ]; then
+        command -v taskset >/dev/null 2>&1 || exit 4
+        # Choose any schedulable member, not necessarily the first online CPU.
+        cpufreq_cpu=""
+        cpufreq_members=$(cat "$cpufreq_policy/affected_cpus" 2>/dev/null || cat "$cpufreq_policy/related_cpus") || exit 1
+        cpufreq_online=$(get_online_cpus)
+        for cpufreq_member in $cpufreq_members; do
+            is_unsigned_number "$cpufreq_member" || exit 1
+            printf '%s\n' "$cpufreq_online" | grep -qx "$cpufreq_member" || continue
+            if cpu_is_schedulable "$cpufreq_member"; then
+                cpufreq_cpu="$cpufreq_member"
+                break
+            fi
+        done
+        [ -n "$cpufreq_cpu" ] || exit 4
+    fi
+    cpufreq_changed=0
+    cpufreq_rc=0
+    cpufreq_request=""
+    cpufreq_exercised=0
+    for cpufreq_attr in scaling_governor scaling_min_freq scaling_max_freq scaling_available_governors; do
+        if [ ! -r "$cpufreq_policy/$cpufreq_attr" ]; then
+            echo "Missing readable policy attribute $cpufreq_policy/$cpufreq_attr"
+            exit 1
+        fi
+        cat "$cpufreq_policy/$cpufreq_attr" >"$cpufreq_evidence/$cpufreq_attr" || exit 1
+    done
+    cpufreq_min=$(cat "$cpufreq_evidence/scaling_min_freq")
+    cpufreq_max=$(cat "$cpufreq_evidence/scaling_max_freq")
+    cpufreq_governor=$(cat "$cpufreq_evidence/scaling_governor")
+    cpufreq_governors=$(cat "$cpufreq_evidence/scaling_available_governors")
+    if ! is_unsigned_number "$cpufreq_min" || ! is_unsigned_number "$cpufreq_max" ||
+       [ "$cpufreq_min" -eq 0 ] || [ "$cpufreq_min" -gt "$cpufreq_max" ] ||
+       [ -z "$cpufreq_governor" ] || [ -z "$cpufreq_governors" ]; then
+        echo "Malformed policy snapshot at $cpufreq_policy"
+        exit 1
+    fi
+    if [ "$cpufreq_governor" = userspace ]; then
+        cpufreq_request=$(cat "$cpufreq_policy/scaling_setspeed") || exit 1
+        is_unsigned_number "$cpufreq_request" || exit 1
+    fi
+    trap 'cpufreq_rc=$?
+        trap - 0
+        if ! cpufreq_restore_policy; then
+            echo "Failed to restore $cpufreq_policy, saved state: $cpufreq_evidence" >&2
+            cpufreq_rc=1
+        fi
+        exit "$cpufreq_rc"' 0
+    trap 'exit 1' HUP INT TERM
+    cpufreq_freqs=$(cat "$cpufreq_policy/scaling_available_frequencies" 2>/dev/null || true)
+    case " $cpufreq_governors " in
+        *" userspace "*)
+            if [ -n "$cpufreq_freqs" ]; then
+                cpufreq_selected=""
+                for cpufreq_freq in $cpufreq_freqs; do
+                    is_unsigned_number "$cpufreq_freq" && [ "$cpufreq_freq" -gt 0 ] || exit 1
+                    [ "$cpufreq_freq" -ge "$cpufreq_min" ] || continue
+                    [ "$cpufreq_freq" -le "$cpufreq_max" ] || continue
+                    case " $cpufreq_selected " in
+                        *" $cpufreq_freq "*)
+                            continue
+                            ;;
+                    esac
+                    cpufreq_selected="${cpufreq_selected:+$cpufreq_selected }$cpufreq_freq"
+                done
+                [ -n "$cpufreq_selected" ] || exit 4
+                cpufreq_changed=1
+                cpufreq_write "$cpufreq_policy/scaling_governor" userspace || exit 1
+                for cpufreq_freq in $cpufreq_selected; do
+                    cpufreq_set_limits "$cpufreq_policy" "$cpufreq_freq" "$cpufreq_freq" || exit 1
+                    cpufreq_write "$cpufreq_policy/scaling_setspeed" "$cpufreq_freq" || exit 1
+                    if [ "$cpufreq_mode" = load ]; then
+                        run_pinned_cpu_workload "$cpufreq_cpu" 2 || exit 1
+                    fi
+                    cpufreq_attempt=0
+                    while [ "$cpufreq_attempt" -lt 5 ]; do
+                        cpufreq_seen=$(cat "$cpufreq_policy/scaling_cur_freq") || exit 1
+                        is_unsigned_number "$cpufreq_seen" || exit 1
+                        # Some drivers report measured rather than requested frequency.
+                        if [ "$cpufreq_seen" -ge "$((cpufreq_freq * 95 / 100))" ] &&
+                           [ "$cpufreq_seen" -le "$((cpufreq_freq * 105 / 100))" ]; then
+                            break
+                        fi
+                        sleep 1
+                        cpufreq_attempt=$((cpufreq_attempt + 1))
+                    done
+                    echo "requested_kHz=$cpufreq_freq observed_kHz=$cpufreq_seen"
+                    if [ "$cpufreq_attempt" -ge 5 ]; then
+                        echo "Requested frequency not observed, policy may be limited by driver/thermal constraints"
+                        exit 1
+                    fi
+                    cpufreq_exercised=$((cpufreq_exercised + 1))
+                done
+                [ "$cpufreq_exercised" -gt 0 ] || exit 4
+                echo "Validated $cpufreq_exercised frequency requests within original limits"
+                exit 0
+            fi
+            ;;
+    esac
+    echo "Discrete userspace control unavailable, validating governor controls only"
+    for cpufreq_target in $cpufreq_governors; do
+        [ "$cpufreq_target" != "$cpufreq_governor" ] || continue
+        [ "$cpufreq_target" != userspace ] || continue
+        cpufreq_changed=1
+        cpufreq_write "$cpufreq_policy/scaling_governor" "$cpufreq_target" || exit 1
+        if [ "$cpufreq_mode" = load ]; then
+            run_pinned_cpu_workload "$cpufreq_cpu" 2 || exit 1
+            cpufreq_seen=$(cat "$cpufreq_policy/scaling_cur_freq") || exit 1
+            is_unsigned_number "$cpufreq_seen" || exit 1
+            [ "$cpufreq_seen" -gt 0 ] || exit 1
+            echo "Governor workload observed_kHz=$cpufreq_seen, exact transition coverage is unavailable"
+        fi
+        echo "Governor transition validated: $cpufreq_governor -> $cpufreq_target"
+        cpufreq_exercised=$((cpufreq_exercised + 1))
+    done
+    [ "$cpufreq_exercised" -gt 0 ] || exit 4
+)
