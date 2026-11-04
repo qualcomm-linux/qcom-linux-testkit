@@ -973,3 +973,31 @@ Use it as the only test definition after the image's normal deploy/boot actions.
 The additional checkpoint recordings can themselves warm the audio graph.
 Compare these results with the original nightly job, and treat ordering and time
 since boot as hypotheses until the failure is reproduced under controlled changes.
+
+## Capture summaries in full nightly runs
+
+Every recording attempt writes `<client-log>.capture-summary` and prints it to
+stdout, including successful attempts. It contains the final WAV validation,
+available capture-progress measurements, and existing PipeWire service snapshots
+before and after capture. It also retains a bounded selection and count of ACDB
+calibration errors from the captured operation-window journal. Missing optional
+server evidence remains a diagnostic limitation. No additional service query,
+reset, package installation or sleep is introduced by the summary.
+
+Signal warnings and observed calibration errors are explicitly logged as WARN.
+A basic-integrity PASS establishes an acceptable WAV and recorder result, not
+acoustic quality or a clean calibration database. The configured validation
+policy still determines the result. No minimum-duration or signal threshold is
+relaxed, and calibration messages alone do not establish a failed capture.
+
+Use the existing full `Runner/plans/meta-qcom-nightly_config2.yaml` at the pinned
+testkit revision to preserve nightly workload order. Compare per-attempt summaries
+with the audio-only sequence plan. For direct execution, for example:
+
+```sh
+./run.sh --backend pipewire --source mic --config-name record_config5 --record-seconds 5s --loops 3
+```
+
+ALSA and PulseAudio attempts print their WAV summary without assuming that
+PipeWire services or journal tools exist. Existing detailed failure artifacts
+remain available for failed attempts.
