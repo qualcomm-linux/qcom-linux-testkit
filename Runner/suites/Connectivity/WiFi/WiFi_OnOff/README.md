@@ -132,3 +132,6 @@ The test fails when:
 - This test does not connect to an access point.
 - Use `WiFi_Dynamic_IP` or `WiFi_Manual_IP` to validate association, DHCP, and external connectivity.
 - The test logs extra diagnostics when no interface appears or an interface toggle operation fails.
+
+Kernel premerge uses image-only dependency checks. Wi-Fi driver config checks
+follow runtime-bound/aliased families, not sibling modules or old log names.
