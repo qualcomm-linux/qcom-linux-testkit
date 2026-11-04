@@ -37,128 +37,84 @@ fi
 . "$TOOLS/functestlib.sh"
 
 TESTNAME="UFS_Validation"
-RES_FILE="./$TESTNAME.res"
-test_path=$(find_test_case_by_name "$TESTNAME")
-cd "$test_path" || exit 1
-
-log_info "--------------------------------------------------"
-log_info "------------- Starting $TESTNAME Test ------------"
-
-check_dependencies dd grep cut head tail udevadm
-
-MANDATORY_CONFIGS="CONFIG_SCSI_UFSHCD CONFIG_SCSI_UFS_QCOM"
-OPTIONAL_CONFIGS="CONFIG_SCSI_UFSHCD_PLATFORM CONFIG_SCSI_UFSHCD_PCI CONFIG_SCSI_UFS_CDNS_PLATFORM CONFIG_SCSI_UFS_HISI CONFIG_SCSI_UFS_EXYNOS CONFIG_SCSI_UFS_ROCKCHIP CONFIG_SCSI_UFS_BSG"
-
-log_info "Checking mandatory kernel configs for UFS..."
-if ! check_kernel_config "$MANDATORY_CONFIGS" 2>/dev/null; then
-    log_skip "Missing mandatory UFS kernel configs: $MANDATORY_CONFIGS"
-    echo "$TESTNAME SKIP" > "$RES_FILE"
-    exit 0
+RES_FILE="$PWD/$TESTNAME.res"
+test_result_init "$TESTNAME" "$RES_FILE" || exit 1
+# shellcheck disable=SC2034 # Consumed by check_dependencies.
+CHECK_DEPS_RECOVER=0
+if ! check_dependencies dd readlink awk mktemp wc cat grep; then
+    test_result_finish SKIP "Image lacks utilities required for safe UFS I/O"
 fi
-
-log_info "Checking optional kernel configs for UFS..."
-missing_optional=""
-for cfg in $OPTIONAL_CONFIGS; do
-    cfg_value=$(kernel_config_value "$cfg" 2>/dev/null || true)
-    case "$cfg_value" in
-        "$cfg=y"|"$cfg=m")
-            log_info "[OPTIONAL] $cfg_value"
+RESULT_DIR=$(mktemp -d "$PWD/ufs-validation.XXXXXX") || test_result_finish FAIL "Cannot create UFS evidence directory in CWD"
+trap 'managed_timeout_cancel_bounded 2; rm -f "$RESULT_DIR/ufs_test.img"' 0
+trap 'test_result_finish FAIL "UFS validation interrupted"' HUP INT TERM
+log_info "Checking optional UFS kernel configuration, runtime binding determines applicability"
+for ufs_config in CONFIG_SCSI_UFSHCD_PLATFORM CONFIG_SCSI_UFSHCD_PCI CONFIG_SCSI_UFS_CDNS_PLATFORM CONFIG_SCSI_UFS_HISI CONFIG_SCSI_UFS_EXYNOS CONFIG_SCSI_UFS_ROCKCHIP CONFIG_SCSI_UFS_BSG; do
+    ufs_config_value=$(kernel_config_value "$ufs_config" 2>/dev/null || true)
+    case "$ufs_config_value" in
+        "$ufs_config=y"|"$ufs_config=m")
+            log_info "[OPTIONAL] $ufs_config_value"
             ;;
-        "$cfg=n")
-            log_info "[OPTIONAL] $cfg is not enabled"
-            missing_optional="$missing_optional $cfg"
+        "$ufs_config=n")
+            log_info "[OPTIONAL] $ufs_config is not enabled"
             ;;
         *)
-            log_info "[OPTIONAL] $cfg is not reported by the running kernel configuration"
-            missing_optional="$missing_optional $cfg"
+            log_info "[OPTIONAL] $ufs_config is not reported by the running kernel configuration"
             ;;
     esac
 done
-if [ -n "$missing_optional" ]; then
-    log_info "Optional configs not present but continuing:$missing_optional"
-fi
-
-check_dt_nodes "/sys/bus/platform/devices/*ufs*" || {
-    echo "$TESTNAME SKIP" > "$RES_FILE"
-    exit 0
-}
-
 block_dev=$(detect_ufs_partition_block)
 if [ -z "$block_dev" ]; then
-    log_skip "No UFS block device found."
-    echo "$TESTNAME SKIP" > "$RES_FILE"
-    exit 0
+    scan_dmesg_errors "$RESULT_DIR" 'ufs|ufshcd' 'deferred probe|EPROBE_DEFER' || true
+    if [ -s "$RESULT_DIR/dmesg_errors.log" ]; then
+        test_result_finish FAIL "No UFS block device registered and UFS kernel errors were captured in $RESULT_DIR"
+    fi
+    test_result_finish SKIP "No block device with a bound UFS host found in sysfs"
 fi
-log_info "Detected UFS block: $block_dev"
-
-if command -v findmnt >/dev/null 2>&1; then
-    rootfs_dev=$(findmnt -n -o SOURCE /)
+ufs_sectors=$(cat "/sys/class/block/${block_dev##*/}/size")
+case "$ufs_sectors" in
+    ''|*[!0-9]*|0)
+        test_result_finish FAIL "UFS block $block_dev has no valid nonzero sector count"
+        ;;
+esac
+ufs_read_count=65536
+if [ "$ufs_sectors" -lt "$ufs_read_count" ]; then
+    ufs_read_count="$ufs_sectors"
+fi
+LC_ALL=C
+export LC_ALL
+log_info "Runtime UFS block: $block_dev, evidence: $RESULT_DIR"
+# Raw device access is read-only, including when UFS contains the root filesystem.
+if run_with_managed_timeout 60 "$RESULT_DIR" ufs-read \
+    dd if="$block_dev" of=/dev/null bs=512 count="$ufs_read_count" >"$RESULT_DIR/read.log" 2>&1 &&
+   [ "$(awk '$2 == "records" && $3 == "in" {print $1; exit}' "$RESULT_DIR/read.log")" = "$ufs_read_count+0" ]; then
+    test_result_record PASS "Read-only UFS block I/O completed on $block_dev"
 else
-    log_warn "findmnt not available, using fallback rootfs detection"
-    rootfs_dev=$(awk '$2 == "/" { print $1 }' /proc/mounts)
+    test_result_record FAIL "UFS block read failed or timed out on $block_dev"
 fi
-
-resolved_block=$(readlink -f "$block_dev" 2>/dev/null)
-resolved_rootfs=$(readlink -f "$rootfs_dev" 2>/dev/null)
-
-if [ -n "$resolved_block" ] && [ -n "$resolved_rootfs" ] && [ "$resolved_block" = "$resolved_rootfs" ]; then
-    log_warn "Detected block ($resolved_block) is the root filesystem. Skipping read test."
-    echo "$TESTNAME SKIP" > "$RES_FILE"
-    exit 0
-fi
-
-log_info "Running basic read test on $block_dev (non-rootfs)..."
-if echo | dd of=/dev/null iflag=direct 2>/dev/null; then
-    DD_CMD="dd if=$block_dev of=/dev/null bs=1M count=32 iflag=direct"
-else
-    log_warn "'iflag=direct' not supported by dd. Falling back to standard dd."
-    DD_CMD="dd if=$block_dev of=/dev/null bs=1M count=32"
-fi
-
-if $DD_CMD >/dev/null 2>&1; then
-    log_pass "UFS read test succeeded"
-else
-    log_fail "UFS read test failed"
-    log_info "Try manually: $DD_CMD"
-    echo "$TESTNAME FAIL" > "$RES_FILE"
-    exit 1
-fi
-
-log_info "Running I/O stress test (64MB read+write on tmpfile)..."
-tmpfile="$test_path/ufs_test.img"
-
-if echo | dd of=/dev/null conv=fsync 2>/dev/null; then
-    DD_WRITE="dd if=/dev/zero of=$tmpfile bs=1M count=64 conv=fsync"
-else
-    log_warn "'conv=fsync' not supported by dd. Using basic write."
-    DD_WRITE="dd if=/dev/zero of=$tmpfile bs=1M count=64"
-fi
-
-if $DD_WRITE >/dev/null 2>&1 &&
-   dd if="$tmpfile" of=/dev/null bs=1M count=64 >/dev/null 2>&1; then
-    log_pass "UFS I/O stress test passed"
-    if command -v stat >/dev/null 2>&1; then
-        stat --format="[INFO] Size: %s bytes File: %n" "$tmpfile"
+cat "$RESULT_DIR/read.log"
+if storage_path_is_ufs "$RESULT_DIR"; then
+    # No raw writes. A unique file is used only on a verified UFS filesystem.
+    if run_with_managed_timeout 60 "$RESULT_DIR" ufs-write \
+        dd if=/dev/zero of="$RESULT_DIR/ufs_test.img" bs=1048576 count=64 conv=fsync \
+        >"$RESULT_DIR/write.log" 2>&1 &&
+       [ "$(wc -c <"$RESULT_DIR/ufs_test.img")" -eq 67108864 ] &&
+       run_with_managed_timeout 60 "$RESULT_DIR" ufs-file-read \
+        dd if="$RESULT_DIR/ufs_test.img" of=/dev/null bs=1048576 count=64 \
+        >"$RESULT_DIR/file-read.log" 2>&1 &&
+       [ "$(awk '$2 == "records" && $3 == "in" {print $1; exit}' "$RESULT_DIR/file-read.log")" = '64+0' ]; then
+        test_result_record PASS "64 MiB file write and read completed on verified UFS backing"
     else
-        find "$tmpfile" -printf "[INFO] Size: %s bytes File: %p\n"
+        test_result_record FAIL "UFS file I/O failed or timed out, see $RESULT_DIR/write.log"
     fi
-    rm -f "$tmpfile"
+    cat "$RESULT_DIR/write.log"
+    if [ -f "$RESULT_DIR/file-read.log" ]; then
+        cat "$RESULT_DIR/file-read.log"
+    fi
 else
-    log_fail "UFS I/O stress test failed"
-    df -h . | sed 's/^/[INFO] /'
-    if [ -f "$tmpfile" ]; then
-        if command -v stat >/dev/null 2>&1; then
-            stat --format="[INFO] Size: %s bytes File: %n" "$tmpfile"
-        else
-            find "$tmpfile" -printf "[INFO] Size: %s bytes File: %p\n"
-        fi
-        rm -f "$tmpfile"
-    fi
-    echo "$TESTNAME FAIL" > "$RES_FILE"
-    exit 1
+    test_result_record SKIP "File write check requires CWD on a directly verified UFS filesystem, current backing is not proven UFS"
 fi
-
-scan_dmesg_errors "ufs" "$test_path"
-log_pass "$TESTNAME completed successfully"
-echo "$TESTNAME PASS" > "$RES_FILE"
-exit 0
+scan_dmesg_errors "$RESULT_DIR" 'ufs|ufshcd' 'deferred probe|EPROBE_DEFER' || true
+if [ -s "$RESULT_DIR/dmesg_errors.log" ]; then
+    test_result_record FAIL "UFS kernel errors captured in $RESULT_DIR/dmesg_errors.log"
+fi
+test_result_finish
