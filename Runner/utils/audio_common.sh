@@ -2352,10 +2352,12 @@ audio_create_run_directory() {
   printf '%s\n' "$acrd_run"
 }
 
-# audio_record_pipewire_capture <timeout> <route> <output> <log> [rate channels seconds grace completion-marker]
+# audio_record_pipewire_capture <timeout> <route> <output> <log> [rate channels seconds grace completion-marker deadline-policy]
 # Resolve and pin the route for every attempt, never change the session default.
 # With seconds supplied, use audio_record_with_progress in the volume session.
 # Otherwise preserve the existing timeout wrapper and exact recorder status.
+# Deadline policy defaults to full-duration. AudioRecord uses validate-wav to
+# defer a graceful, still-progressing deadline stop to final WAV validation.
 # Retain bounded before/after server evidence without recovery or retries.
 # Return 3 and set AUDIO_PIPEWIRE_CAPTURE_TARGET_FAILED when discovery fails,
 # so callers cannot turn a lost selected route into an unrelated ALSA fallback.
@@ -2377,6 +2379,15 @@ audio_record_pipewire_capture() {
   arpc_seconds="${7:-}"
   arpc_grace="${8:-5}"
   arpc_completion="${9:-}"
+  arpc_deadline_policy="${10:-full-duration}"
+  case "$arpc_deadline_policy" in
+    full-duration|validate-wav)
+      ;;
+    *)
+      log_fail "Invalid PipeWire capture deadline policy: $arpc_deadline_policy"
+      return 1
+      ;;
+  esac
   arpc_since="$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
   audio_record_server_diagnostics "$arpc_log.server-before" || true
   arpc_identity_mode=identity
@@ -2408,8 +2419,14 @@ audio_record_pipewire_capture() {
   arpc_command="PipeWire capture exec: pw-record -v --target '$arpc_target' rate=${arpc_rate:-default} channels=${arpc_channels:-default} output='$arpc_output' timeout=$arpc_timeout"
   if [ -n "$arpc_seconds" ]; then
     arpc_command="$arpc_command requested=$arpc_seconds start_grace=$arpc_grace capture=sample-progress"
+    if [ "$arpc_deadline_policy" = validate-wav ]; then
+      set -- --validate-at-deadline "$@"
+    fi
     if [ -n "$arpc_completion" ]; then
       set -- --until-complete "$arpc_completion" "$@"
+    fi
+    if [ "$arpc_route" != null ]; then
+      set -- --pipewire-source "$arpc_id" "$@"
     fi
     set -- audio_record_with_progress "$arpc_output" "$arpc_seconds" \
       "$arpc_grace" "$arpc_timeout" --pipewire-links "$@"
@@ -2423,30 +2440,40 @@ audio_record_pipewire_capture() {
     audio_run_with_timeout_as_test_user --require-session "$arpc_timeout" \
       "$@" >>"$arpc_log" 2>&1
     arpc_rc=$?
+  else
+    printf '%s\n' 'AUDIO_CAPTURE_VOLUME_STATUS=pending' >>"$arpc_log.volume"
+    audio_run_helper_as_test_user --require-session \
+      audio_pipewire_capture_volume_session "$arpc_id" "$arpc_serial" \
+      "$arpc_timeout" "$@" >>"$arpc_log" 2>>"$arpc_log.volume"
+    arpc_rc=$?
     audio_record_server_diagnostics "$arpc_log.server-after" "$arpc_since" || true
-    return "$arpc_rc"
+    log_file_with_label AUDIO-CAPTURE-VOLUME "$arpc_log.volume" 60
+    arpc_volume_status="$(awk -F = '/^AUDIO_CAPTURE_VOLUME_STATUS=/ { state=$2 } END { print state }' "$arpc_log.volume")"
+    case "$arpc_volume_status" in
+      complete)
+        ;;
+      *)
+        # Consumed by AudioRecord fallback policy.
+        # shellcheck disable=SC2034
+        AUDIO_PIPEWIRE_CAPTURE_TARGET_FAILED=1
+        # Consumed by AudioRecord aggregation, never hide state failures on retry.
+        # shellcheck disable=SC2034
+        AUDIO_PIPEWIRE_CAPTURE_VOLUME_FAILED=1
+        arpc_rc=4
+        ;;
+    esac
   fi
-  printf '%s\n' 'AUDIO_CAPTURE_VOLUME_STATUS=pending' >>"$arpc_log.volume"
-  audio_run_helper_as_test_user --require-session \
-    audio_pipewire_capture_volume_session "$arpc_id" "$arpc_serial" \
-    "$arpc_timeout" "$@" >>"$arpc_log" 2>>"$arpc_log.volume"
-  arpc_rc=$?
-  audio_record_server_diagnostics "$arpc_log.server-after" "$arpc_since" || true
-  log_file_with_label AUDIO-CAPTURE-VOLUME "$arpc_log.volume" 60
-  arpc_volume_status="$(awk -F = '/^AUDIO_CAPTURE_VOLUME_STATUS=/ { state=$2 } END { print state }' "$arpc_log.volume")"
-  case "$arpc_volume_status" in
-    complete)
-      ;;
-    *)
-      # Consumed by AudioRecord fallback policy.
-      # shellcheck disable=SC2034
-      AUDIO_PIPEWIRE_CAPTURE_TARGET_FAILED=1
-      # Consumed by AudioRecord aggregation, never hide state failures on retry.
-      # shellcheck disable=SC2034
-      AUDIO_PIPEWIRE_CAPTURE_VOLUME_FAILED=1
-      arpc_rc=4
-      ;;
-  esac
+  if [ "$arpc_route" = null ]; then
+    audio_record_server_diagnostics "$arpc_log.server-after" "$arpc_since" || true
+  fi
+  if [ "$arpc_rc" -eq 124 ] && [ "$arpc_deadline_policy" = validate-wav ]; then
+    arpc_progress="$(awk '
+      /^PipeWire capture exec:/ { summary="" }
+      /^AUDIO_CAPTURE collected_audio=/ { summary=$0 }
+      END { print summary }
+    ' "$arpc_log")"
+    log_warn "Capture reached its deadline while samples were still arriving, final WAV validation determines the result. $arpc_progress"
+  fi
   return "$arpc_rc"
 }
 
@@ -10021,7 +10048,8 @@ audio_record_stop_child() {
 
 # Monitor a targeted PipeWire capture in the same user session as its child.
 # Arguments: WAV path, requested seconds, startup grace, explicit timeout (0=auto),
-# optionally --pipewire-links and --until-complete <marker>, then the command.
+# optionally --pipewire-links, --pipewire-source <id> and
+# --until-complete <marker>, --validate-at-deadline, then the command.
 # A completion marker additionally keeps loopback recording through playback.
 # Its absence never extends startup, stall or total capture deadlines.
 # Logs go to stderr. Optional pw-link output goes to <WAV path>.links while
@@ -10031,7 +10059,9 @@ audio_record_stop_child() {
 # Idle progress is bounded by max(grace, 3). Explicit timeout caps the whole
 # capture, never triggers a retry, and does not reduce the requested WAV length.
 # Return 0 only after collecting the requested PCM duration and a graceful stop.
-# Return 1 for startup, stall, deadline, format or child errors. Always reap the
+# With --validate-at-deadline and no completion marker, return 124 for a
+# graceful deadline stop with recent PCM progress, requiring final WAV validation.
+# Return 1 for startup, stall, other deadline, format or child errors. Always reap the
 # owned child, allowing at most three additional seconds for WAV finalization.
 # Temporarily forwards termination signals to that child, preserving caller
 # traps on return and leaving its EXIT cleanup installed throughout.
@@ -10044,13 +10074,24 @@ audio_record_with_progress() {
     return 1
   }
   shift 4
+  arwp_validate_deadline=0
   arwp_links=0
+  arwp_source_id=""
   arwp_completion=""
   while [ "$#" -gt 0 ]; do
     case "$1" in
+      --validate-at-deadline)
+        arwp_validate_deadline=1
+        shift
+        ;;
       --pipewire-links)
         arwp_links=1
         shift
+        ;;
+      --pipewire-source)
+        [ "$#" -ge 2 ] && is_unsigned_number "$2" || return 1
+        arwp_source_id="$2"
+        shift 2
         ;;
       --until-complete)
         [ "$#" -ge 2 ] && [ -n "$2" ] || return 1
@@ -10097,6 +10138,7 @@ audio_record_with_progress() {
   arwp_reason=recorder-exited
   arwp_pid=""
   arwp_links_pid=""
+  arwp_format_pid=""
   arwp_links_start=0
   if [ "$arwp_links" -eq 1 ]; then
     if ! printf '%s\n' 'AUDIO_LINKS status=not-started reason=no-payload-yet' >"${arwp_file}.links"; then
@@ -10104,8 +10146,18 @@ audio_record_with_progress() {
       arwp_links=0
     fi
   fi
+  if [ -n "$arwp_source_id" ]; then
+    if ! printf 'AUDIO_SOURCE_FORMAT source_id=%s status=not-started reason=no-payload-yet\n' \
+        "$arwp_source_id" >"${arwp_file}.source-format"; then
+      printf '%s\n' 'AUDIO_SOURCE_FORMAT status=unavailable reason=output-not-writable' >&2
+      arwp_source_id=""
+    fi
+  fi
   arwp_saved_traps="$(trap)"
-  trap 'if [ -n "$arwp_links_pid" ]; then
+  trap 'if [ -n "$arwp_format_pid" ]; then
+    audio_record_finish_link_snapshot "$arwp_format_pid" "${arwp_file}.source-format" AUDIO_SOURCE_FORMAT
+  fi
+  if [ -n "$arwp_links_pid" ]; then
     audio_record_finish_link_snapshot "$arwp_links_pid" "${arwp_file}.links"
   fi
   if [ -n "$arwp_pid" ]; then
@@ -10123,6 +10175,12 @@ audio_record_with_progress() {
 
   while kill -0 "$arwp_pid" 2>/dev/null; do
     arwp_now="$(get_monotonic_seconds)"
+    if [ -n "$arwp_format_pid" ] &&
+       { ! kill -0 "$arwp_format_pid" 2>/dev/null ||
+         [ "$((arwp_now - arwp_format_start))" -ge 2 ]; }; then
+      audio_record_finish_link_snapshot "$arwp_format_pid" "${arwp_file}.source-format" AUDIO_SOURCE_FORMAT
+      arwp_format_pid=""
+    fi
     if [ -n "$arwp_links_pid" ] &&
        { ! kill -0 "$arwp_links_pid" 2>/dev/null ||
          [ "$((arwp_now - arwp_links_start))" -ge 2 ]; }; then
@@ -10187,6 +10245,17 @@ EOF
           if [ "$arwp_limit" -eq 0 ]; then
             arwp_deadline=$((arwp_now + arwp_window))
           fi
+          if [ -n "$arwp_source_id" ]; then
+            printf 'AUDIO_SOURCE_FORMAT source_id=%s recorder_pid=%s phase=first-payload\n' \
+              "$arwp_source_id" "$arwp_pid" >"${arwp_file}.source-format"
+            if command -v pw-cli >/dev/null 2>&1; then
+              pw-cli enum-params "$arwp_source_id" Format >>"${arwp_file}.source-format" 2>&1 &
+              arwp_format_pid=$!
+              arwp_format_start="$arwp_now"
+            else
+              printf '%s\n' 'AUDIO_SOURCE_FORMAT status=unavailable reason=pw-cli-missing' >>"${arwp_file}.source-format"
+            fi
+          fi
           if [ "$arwp_links" -eq 1 ]; then
             printf 'AUDIO_LINKS recorder_pid=%s phase=first-payload\n' "$arwp_pid" >"${arwp_file}.links"
             if command -v pw-link >/dev/null 2>&1; then
@@ -10227,6 +10296,10 @@ EOF
   done
 
   arwp_decision_time="$(get_monotonic_seconds)"
+  if [ -n "$arwp_format_pid" ]; then
+    audio_record_finish_link_snapshot "$arwp_format_pid" "${arwp_file}.source-format" AUDIO_SOURCE_FORMAT
+    arwp_format_pid=""
+  fi
   arwp_completion_state=not-required
   if [ -n "$arwp_completion" ]; then
     arwp_completion_state=missing
@@ -10258,8 +10331,19 @@ EOF
   fi
   arwp_pid=""
   arwp_status=FAIL
+  arwp_result=1
   if [ "$arwp_reason" = "requested-duration-collected" ]; then
     arwp_status=COMPLETE
+    arwp_result=0
+  elif [ "$arwp_reason" = capture-deadline ] &&
+       [ "$arwp_validate_deadline" -eq 1 ] &&
+       [ -z "$arwp_completion" ] &&
+       [ "$arwp_first" -eq 1 ] &&
+       [ "$((arwp_decision_time - arwp_last))" -lt "$arwp_idle_limit" ]; then
+    # This is an expected stop, not a successful recording. The caller must
+    # validate finalized WAV duration, format and signal before accepting it.
+    arwp_status=STOPPED
+    arwp_result=124
   fi
   printf 'AUDIO_CAPTURE status=%s reason=%s elapsed=%ss payload_bytes=%s\n' \
     "$arwp_status" "$arwp_reason" \
@@ -10284,10 +10368,11 @@ EOF
   trap - HUP INT TERM
   # This is the shell's own trap snapshot, never command or DUT-provided text.
   eval "$arwp_saved_traps"
-  [ "$arwp_status" = "COMPLETE" ]
+  return "$arwp_result"
 }
 
-# Finish only the owned, read-only pw-link child. Arguments: PID, output path.
+# Finish only an owned read-only snapshot child. Arguments: PID, output path,
+# optional label (default AUDIO_LINKS, retained for existing callers).
 # Reap completed children, kill a still-running snapshot without a grace wait.
 # Append completion/truncation status to the artifact, return 0 regardless of
 # diagnostic failure. No stdout and no effect on the recording verdict.
@@ -10304,7 +10389,7 @@ audio_record_finish_link_snapshot() {
   if [ "$arfls_status" = "complete" ] && [ "$arfls_rc" -ne 0 ]; then
     arfls_status=failed
   fi
-  printf 'AUDIO_LINKS status=%s rc=%s\n' "$arfls_status" "$arfls_rc" >>"$arfls_out" 2>/dev/null || true
+  printf '%s status=%s rc=%s\n' "${3:-AUDIO_LINKS}" "$arfls_status" "$arfls_rc" >>"$arfls_out" 2>/dev/null || true
   return 0
 }
 
@@ -10593,6 +10678,9 @@ audio_record_failure_diagnostics() {
   if [ "$arfd_backend" = "pipewire" ] && [ -f "${arfd_wav}.links" ]; then
     log_file_with_label AUDIO-RECORD-LIVE-LINKS "${arfd_wav}.links" 160
   fi
+  if [ "$arfd_backend" = "pipewire" ] && [ -f "${arfd_wav}.source-format" ]; then
+    log_file_with_label AUDIO-RECORD-LIVE-SOURCE-FORMAT "${arfd_wav}.source-format" 120
+  fi
   return 0
 }
 
@@ -10680,7 +10768,7 @@ audio_record_set_capture_paths() {
 audio_record_reset_capture_output() {
   rm -f "$record_user_out"
   if [ "${AUDIO_BACKEND:-}" = "pipewire" ]; then
-    rm -f "${record_user_out}.links"
+    rm -f "${record_user_out}.links" "${record_user_out}.source-format"
   fi
 }
 
@@ -10698,14 +10786,16 @@ audio_record_promote_capture_output() {
   fi
 
   if [ "${AUDIO_BACKEND:-}" = "pipewire" ]; then
-    rm -f "${record_out}.links"
-    if [ -f "${record_user_out}.links" ]; then
-      if ! mv "${record_user_out}.links" "${record_out}.links" ||
-         ! chown 0:0 "${record_out}.links" ||
-         ! chmod 0644 "${record_out}.links"; then
-        log_warn "Failed to preserve live PipeWire links: ${record_out}.links"
+    for arpc_artifact in links source-format; do
+      rm -f "${record_out}.$arpc_artifact"
+      if [ -f "${record_user_out}.$arpc_artifact" ]; then
+        if ! mv "${record_user_out}.$arpc_artifact" "${record_out}.$arpc_artifact" ||
+           ! chown 0:0 "${record_out}.$arpc_artifact" ||
+           ! chmod 0644 "${record_out}.$arpc_artifact"; then
+          log_warn "Failed to preserve live PipeWire $arpc_artifact: ${record_out}.$arpc_artifact"
+        fi
       fi
-    fi
+    done
   fi
 
   rm -f "$record_out"

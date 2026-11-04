@@ -886,6 +886,22 @@ The decision timestamp is separate from elapsed time spent stopping the recorder
 A slow or stalled recording still fails even when the partial WAV passes the
 minimum integrity threshold. These diagnostics do not extend capture deadlines.
 
+## Live PipeWire source format
+
+Targeted PipeWire captures retain `<recording>.wav.source-format` beside the WAV.
+At the first payload, the test queries the discovered source ID with
+`pw-cli enum-params <id> Format` in the recorder's existing user session. The
+read-only query runs alongside recording and is stopped within two polling
+intervals or when recording ends. Missing `pw-cli` only limits diagnostics.
+
+On failure, the source format and existing live links are printed to stdout.
+Compare the source's negotiated rate/channels with the requested WAV format and
+recorded byte rate to investigate slow delivery or conversion. An empty Format
+response does not prove that a requested rate is unsupported. The test retains
+the requested format and duration, and does not replace them with a known-working
+configuration. Desktop-user artifacts are promoted with the WAV and stale
+sidecars are cleared on rerun. ALSA and PulseAudio execution are unchanged.
+
 ## License
 
 SPDX-License-Identifier: BSD-3-Clause(C) Qualcomm Technologies, Inc. and/or its subsidiaries.
