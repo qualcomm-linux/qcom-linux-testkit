@@ -11,6 +11,7 @@ PROFILE_REQUIRED_CMDS="modprobe rmmod systemctl ps sed grep readlink sort awk tr
 
 PROFILE_QUIESCE_ONCE="yes"
 PROFILE_DISCOVER_CLIENT_SERVICES="yes"
+PROFILE_ALLOW_AUTOMATIC_RELOAD="yes"
 PROFILE_QUIESCE_SERVICES="adsprpcd.service cdsprpcd.service"
 PROFILE_PROC_PATTERNS="adsprpcd cdsprpcd fastrpc_shell"
 PROFILE_QUIESCE_PROC_PATTERNS="$PROFILE_PROC_PATTERNS"

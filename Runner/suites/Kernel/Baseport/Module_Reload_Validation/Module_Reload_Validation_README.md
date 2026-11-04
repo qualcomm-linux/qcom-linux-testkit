@@ -1262,3 +1262,21 @@ Failure diagnostics retain `modprobe_config.log` and print matching rules in
 open descriptors. Unsupported `modprobe --showconfig` is reported as unavailable
 evidence. Both tools are optional for these diagnostics, and no packages are
 installed. The original unload failure remains FAIL.
+
+## Automatically reloaded modules
+
+The FastRPC profile permits a kernel-observed automatic reload. A successful
+unload command must be followed by an ordered kernel remove/add pair for the
+exact selected module in the current iteration's ready observer log. The module
+must currently be loaded and still pass the normal post-load and smoke checks.
+The test retains the pair in `automatic_reload.log` and reports
+`automatic_reload=1` in `iteration_metrics.log`. It does not claim that the
+explicit load command was tested in this mode.
+
+Other profiles keep the existing persistent-absence requirement by default.
+`PROFILE_ALLOW_AUTOMATIC_RELOAD="yes"` opts in, but profiles with a post-unload
+hook or other modules required absent still use the strict unload path. Missing
+`udevadm`, incomplete events, an unsuccessful unload, failed post-load checks or
+failed smoke checks cannot produce a pass through this policy. Services remain
+isolated during the iterations and are restored through the existing cleanup.
+No global udev control, module blacklist or forced removal is used.
