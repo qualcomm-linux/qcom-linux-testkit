@@ -13,81 +13,207 @@ metadata:
 
 run:
     steps:
-        - cd Runner
-        - $PWD/suites/Kernel/Baseport/cdsp_remoteproc/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/cdsp_remoteproc/cdsp_remoteproc.res || true
-        - $PWD/suites/Kernel/Baseport/adsp_remoteproc/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/adsp_remoteproc/adsp_remoteproc.res || true
-        - $PWD/suites/Kernel/Baseport/gpdsp_remoteproc/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/gpdsp_remoteproc/gpdsp_remoteproc.res || true
-        - $PWD/suites/Kernel/Baseport/CPUFreq_Validation/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/CPUFreq_Validation/CPUFreq_Validation.res || true
-        - $PWD/suites/Kernel/Baseport/GIC/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/GIC/GIC.res || true
-        - $PWD/suites/Kernel/Baseport/hotplug/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/hotplug/hotplug.res || true
-        - $PWD/suites/Kernel/Baseport/Interrupts/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/Interrupts/Interrupts.res || true
-        - $PWD/suites/Kernel/Baseport/irq/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/irq/irq.res || true
-        - $PWD/suites/Kernel/Baseport/kaslr/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/kaslr/kaslr.res || true
-        - $PWD/suites/Kernel/Baseport/pinctrl/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/pinctrl/pinctrl.res || true
-        - $PWD/suites/Kernel/Baseport/Reboot_health_check/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/Reboot_health_check/Reboot_health_check.res || true
-        - $PWD/suites/Kernel/Baseport/remoteproc/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/remoteproc/remoteproc.res || true
-        - $PWD/suites/Kernel/Baseport/RMNET/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/RMNET/RMNET.res || true
-        - $PWD/suites/Kernel/Baseport/IPA/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/IPA/IPA.res || true
-        - $PWD/suites/Kernel/Baseport/Probe_Failure_Check/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/Probe_Failure_Check/Probe_Failure_Check.res || true
-        - $PWD/suites/Kernel/Baseport/rngtest/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/rngtest/rngtest.res || true
-        - $PWD/suites/Kernel/Baseport/smmu/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/smmu/smmu.res || true
-        - $PWD/suites/Kernel/Baseport/Storage/UFS_Validation/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/Storage/UFS_Validation/UFS_Validation.res || true
-        - $PWD/suites/Kernel/Baseport/wpss_remoteproc/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/wpss_remoteproc/wpss_remoteproc.res || true
-        - $PWD/suites/Kernel/DCVS/Freq_Scaling/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/DCVS/Freq_Scaling/Freq_Scaling.res || true
-        - $PWD/suites/Kernel/Scheduler/CPU_affinity/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Scheduler/CPU_affinity/CPU_affinity.res || true
-        - $PWD/suites/Kernel/Baseport/PCIe/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/PCIe/PCIe.res || true
-        - $PWD/suites/Kernel/Baseport/USBHost/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/USBHost/USBHost.res || true
-        - $PWD/suites/Kernel/Baseport/shmbridge/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/shmbridge/shmbridge.res || true
-        - $PWD/suites/Connectivity/Ethernet/Ethernet_Basic_Validation/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Connectivity/Ethernet/Ethernet_Basic_Validation/Ethernet_Basic_Validation.res || true
-        - $PWD/suites/Connectivity/Bluetooth/BT_FW_KMD_Service/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Connectivity/Bluetooth/BT_FW_KMD_Service/BT_FW_KMD_Service.res || true
-        - $PWD/suites/Connectivity/Bluetooth/BT_ON_OFF/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Connectivity/Bluetooth/BT_ON_OFF/BT_ON_OFF.res || true
-        - $PWD/suites/Connectivity/Bluetooth/BT_SCAN/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Connectivity/Bluetooth/BT_SCAN/BT_SCAN.res || true
-        - $PWD/suites/Connectivity/WiFi/WiFi_Firmware_Driver/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Connectivity/WiFi/WiFi_Firmware_Driver/WiFi_Firmware_Driver.res || true
-        - $PWD/suites/Connectivity/WiFi/WiFi_OnOff/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Connectivity/WiFi/WiFi_OnOff/WiFi_OnOff.res || true
-        - $PWD/suites/Kernel/Baseport/watchdog/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/watchdog/watchdog.res || true
-        - $PWD/suites/Multimedia/DSP_AudioPD/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/DSP_AudioPD/DSP_AudioPD.res || true
-        - $PWD/suites/Multimedia/OpenCV/run.sh --build-dir . --cwd . --suite all --list 0 --shuffle 0 || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/OpenCV/OpenCV.res || true
-        - $PWD/suites/Multimedia/Audio/Audio_Card_Registration/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/Audio/Audio_Card_Registration/Audio_Card_Registration.res || true
-        - $PWD/suites/Virtualization/KVM/KVM_Driver/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Virtualization/KVM/KVM_Driver/KVM_Driver.res || true
-        - $PWD/suites/Virtualization/KVM/KVM_EL2_DTB/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Virtualization/KVM/KVM_EL2_DTB/KVM_EL2_DTB.res || true
-        - $PWD/suites/Virtualization/KVM/KVM_Infra/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Virtualization/KVM/KVM_Infra/KVM_Infra.res || true
-        - $PWD/suites/Kernel/Baseport/qcom_hwrng/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/qcom_hwrng/qcom_hwrng.res || true
-        - $PWD/utils/result_parse.sh
+        - REPO_PATH=$(pwd)
+        - export REPO_PATH
+        - export CHECK_DEPS_RECOVER=0 TESTKIT_IMAGE_ONLY=1
+        - cd "$REPO_PATH/Runner/suites/Kernel/Baseport/cdsp_remoteproc" || exit 1
+        - rm -f "cdsp_remoteproc.res"
+        - ./run.sh || true
+        - >-
+            "$REPO_PATH/Runner/utils/send-to-lava.sh" "cdsp_remoteproc.res" --strict --expected-testcase-id "cdsp_remoteproc" || lava-test-case "cdsp_remoteproc_result_publication" --result fail
+        - cd "$REPO_PATH/Runner/suites/Kernel/Baseport/adsp_remoteproc" || exit 1
+        - rm -f "adsp_remoteproc.res"
+        - ./run.sh || true
+        - >-
+            "$REPO_PATH/Runner/utils/send-to-lava.sh" "adsp_remoteproc.res" --strict --expected-testcase-id "adsp_remoteproc" || lava-test-case "adsp_remoteproc_result_publication" --result fail
+        - cd "$REPO_PATH/Runner/suites/Kernel/Baseport/gpdsp_remoteproc" || exit 1
+        - rm -f "gpdsp_remoteproc.res"
+        - ./run.sh || true
+        - >-
+            "$REPO_PATH/Runner/utils/send-to-lava.sh" "gpdsp_remoteproc.res" --strict --expected-testcase-id "gpdsp_remoteproc" || lava-test-case "gpdsp_remoteproc_result_publication" --result fail
+        - cd "$REPO_PATH/Runner/suites/Kernel/Baseport/CPUFreq_Validation" || exit 1
+        - rm -f "CPUFreq_Validation.res"
+        - ./run.sh || true
+        - >-
+            "$REPO_PATH/Runner/utils/send-to-lava.sh" "CPUFreq_Validation.res" --strict --expected-testcase-id "CPUFreq_Validation" || lava-test-case "CPUFreq_Validation_result_publication" --result fail
+        - cd "$REPO_PATH/Runner/suites/Kernel/Baseport/GIC" || exit 1
+        - rm -f "GIC.res"
+        - ./run.sh || true
+        - >-
+            "$REPO_PATH/Runner/utils/send-to-lava.sh" "GIC.res" --strict --expected-testcase-id "GIC" || lava-test-case "GIC_result_publication" --result fail
+        - cd "$REPO_PATH/Runner/suites/Kernel/Baseport/hotplug" || exit 1
+        - rm -f "hotplug.res"
+        - ./run.sh || true
+        - >-
+            "$REPO_PATH/Runner/utils/send-to-lava.sh" "hotplug.res" --strict --expected-testcase-id "hotplug" || lava-test-case "hotplug_result_publication" --result fail
+        - cd "$REPO_PATH/Runner/suites/Kernel/Baseport/Interrupts" || exit 1
+        - rm -f "Interrupts.res"
+        - ./run.sh || true
+        - >-
+            "$REPO_PATH/Runner/utils/send-to-lava.sh" "Interrupts.res" --strict --expected-testcase-id "Interrupts" || lava-test-case "Interrupts_result_publication" --result fail
+        - cd "$REPO_PATH/Runner/suites/Kernel/Baseport/irq" || exit 1
+        - rm -f "irq.res"
+        - ./run.sh || true
+        - >-
+            "$REPO_PATH/Runner/utils/send-to-lava.sh" "irq.res" --strict --expected-testcase-id "irq" || lava-test-case "irq_result_publication" --result fail
+        - cd "$REPO_PATH/Runner/suites/Kernel/Baseport/kaslr" || exit 1
+        - rm -f "kaslr.res"
+        - ./run.sh || true
+        - >-
+            "$REPO_PATH/Runner/utils/send-to-lava.sh" "kaslr.res" --strict --expected-testcase-id "kaslr" || lava-test-case "kaslr_result_publication" --result fail
+        - cd "$REPO_PATH/Runner/suites/Kernel/Baseport/pinctrl" || exit 1
+        - rm -f "pinctrl.res"
+        - ./run.sh || true
+        - >-
+            "$REPO_PATH/Runner/utils/send-to-lava.sh" "pinctrl.res" --strict --expected-testcase-id "pinctrl" || lava-test-case "pinctrl_result_publication" --result fail
+        - cd "$REPO_PATH/Runner/suites/Kernel/Baseport/Reboot_health_check" || exit 1
+        - rm -f "Reboot_health_check.res"
+        - ./run.sh || true
+        - >-
+            "$REPO_PATH/Runner/utils/send-to-lava.sh" "Reboot_health_check.res" --strict --expected-testcase-id "Reboot_health_check" || lava-test-case "Reboot_health_check_result_publication" --result fail
+        - cd "$REPO_PATH/Runner/suites/Kernel/Baseport/remoteproc" || exit 1
+        - rm -f "remoteproc.res"
+        - ./run.sh || true
+        - >-
+            "$REPO_PATH/Runner/utils/send-to-lava.sh" "remoteproc.res" --strict --expected-testcase-id "remoteproc" || lava-test-case "remoteproc_result_publication" --result fail
+        - cd "$REPO_PATH/Runner/suites/Kernel/Baseport/RMNET" || exit 1
+        - rm -f "RMNET.res"
+        - ./run.sh || true
+        - >-
+            "$REPO_PATH/Runner/utils/send-to-lava.sh" "RMNET.res" --strict --expected-testcase-id "RMNET" || lava-test-case "RMNET_result_publication" --result fail
+        - cd "$REPO_PATH/Runner/suites/Kernel/Baseport/IPA" || exit 1
+        - rm -f "IPA.res"
+        - ./run.sh || true
+        - >-
+            "$REPO_PATH/Runner/utils/send-to-lava.sh" "IPA.res" --strict --expected-testcase-id "IPA" || lava-test-case "IPA_result_publication" --result fail
+        - cd "$REPO_PATH/Runner/suites/Kernel/Baseport/Probe_Failure_Check" || exit 1
+        - rm -f "Probe_Failure_Check.res"
+        - ./run.sh || true
+        - >-
+            "$REPO_PATH/Runner/utils/send-to-lava.sh" "Probe_Failure_Check.res" --strict --expected-testcase-id "Probe_Failure_Check" || lava-test-case "Probe_Failure_Check_result_publication" --result fail
+        - cd "$REPO_PATH/Runner/suites/Kernel/Baseport/rngtest" || exit 1
+        - rm -f "rngtest.res"
+        - ./run.sh || true
+        - >-
+            "$REPO_PATH/Runner/utils/send-to-lava.sh" "rngtest.res" --strict --expected-testcase-id "rngtest" || lava-test-case "rngtest_result_publication" --result fail
+        - cd "$REPO_PATH/Runner/suites/Kernel/Baseport/smmu" || exit 1
+        - rm -f "smmu.res"
+        - ./run.sh || true
+        - >-
+            "$REPO_PATH/Runner/utils/send-to-lava.sh" "smmu.res" --strict --expected-testcase-id "smmu" || lava-test-case "smmu_result_publication" --result fail
+        - cd "$REPO_PATH/Runner/suites/Kernel/Baseport/Storage/UFS_Validation" || exit 1
+        - rm -f "UFS_Validation.res"
+        - ./run.sh || true
+        - >-
+            "$REPO_PATH/Runner/utils/send-to-lava.sh" "UFS_Validation.res" --strict --expected-testcase-id "UFS_Validation" || lava-test-case "UFS_Validation_result_publication" --result fail
+        - cd "$REPO_PATH/Runner/suites/Kernel/Baseport/wpss_remoteproc" || exit 1
+        - rm -f "wpss_remoteproc.res"
+        - ./run.sh || true
+        - >-
+            "$REPO_PATH/Runner/utils/send-to-lava.sh" "wpss_remoteproc.res" --strict --expected-testcase-id "wpss_remoteproc" || lava-test-case "wpss_remoteproc_result_publication" --result fail
+        - cd "$REPO_PATH/Runner/suites/Kernel/DCVS/Freq_Scaling" || exit 1
+        - rm -f "Freq_Scaling.res"
+        - ./run.sh || true
+        - >-
+            "$REPO_PATH/Runner/utils/send-to-lava.sh" "Freq_Scaling.res" --strict --expected-testcase-id "Freq_Scaling" || lava-test-case "Freq_Scaling_result_publication" --result fail
+        - cd "$REPO_PATH/Runner/suites/Kernel/Scheduler/CPU_affinity" || exit 1
+        - rm -f "CPU_affinity.res"
+        - ./run.sh || true
+        - >-
+            "$REPO_PATH/Runner/utils/send-to-lava.sh" "CPU_affinity.res" --strict --expected-testcase-id "CPU_affinity" || lava-test-case "CPU_affinity_result_publication" --result fail
+        - cd "$REPO_PATH/Runner/suites/Kernel/Baseport/PCIe" || exit 1
+        - rm -f "PCIe.res"
+        - ./run.sh || true
+        - >-
+            "$REPO_PATH/Runner/utils/send-to-lava.sh" "PCIe.res" --strict --expected-testcase-id "PCIe" || lava-test-case "PCIe_result_publication" --result fail
+        - cd "$REPO_PATH/Runner/suites/Kernel/Baseport/USBHost" || exit 1
+        - rm -f "USBHost.res"
+        - USB_DMESG_STRICT=1 ./run.sh || true
+        - >-
+            "$REPO_PATH/Runner/utils/send-to-lava.sh" "USBHost.res" --strict --expected-testcase-id "USBHost" || lava-test-case "USBHost_result_publication" --result fail
+        - cd "$REPO_PATH/Runner/suites/Kernel/Baseport/shmbridge" || exit 1
+        - rm -f "shmbridge.res"
+        - ./run.sh || true
+        - >-
+            "$REPO_PATH/Runner/utils/send-to-lava.sh" "shmbridge.res" --strict --expected-testcase-id "shmbridge" || lava-test-case "shmbridge_result_publication" --result fail
+        - cd "$REPO_PATH/Runner/suites/Connectivity/Ethernet/Ethernet_Basic_Validation" || exit 1
+        - rm -f "Ethernet_Basic_Validation.res"
+        - ./run.sh || true
+        - >-
+            "$REPO_PATH/Runner/utils/send-to-lava.sh" "Ethernet_Basic_Validation.res" --strict --expected-testcase-id "Ethernet_Basic_Validation" || lava-test-case "Ethernet_Basic_Validation_result_publication" --result fail
+        - cd "$REPO_PATH/Runner/suites/Connectivity/Bluetooth/BT_FW_KMD_Service" || exit 1
+        - rm -f "BT_FW_KMD_Service.res"
+        - ./run.sh || true
+        - >-
+            "$REPO_PATH/Runner/utils/send-to-lava.sh" "BT_FW_KMD_Service.res" --strict --expected-testcase-id "BT_FW_KMD_Service" || lava-test-case "BT_FW_KMD_Service_result_publication" --result fail
+        - cd "$REPO_PATH/Runner/suites/Connectivity/Bluetooth/BT_ON_OFF" || exit 1
+        - rm -f "BT_ON_OFF.res"
+        - ./run.sh || true
+        - >-
+            "$REPO_PATH/Runner/utils/send-to-lava.sh" "BT_ON_OFF.res" --strict --expected-testcase-id "BT_ON_OFF" || lava-test-case "BT_ON_OFF_result_publication" --result fail
+        - cd "$REPO_PATH/Runner/suites/Connectivity/Bluetooth/BT_SCAN" || exit 1
+        - rm -f "BT_SCAN.res"
+        - ./run.sh || true
+        - >-
+            "$REPO_PATH/Runner/utils/send-to-lava.sh" "BT_SCAN.res" --strict --expected-testcase-id "BT_SCAN" || lava-test-case "BT_SCAN_result_publication" --result fail
+        - cd "$REPO_PATH/Runner/suites/Connectivity/WiFi/WiFi_Firmware_Driver" || exit 1
+        - rm -f "WiFi_Firmware_Driver.res"
+        - ./run.sh || true
+        - >-
+            "$REPO_PATH/Runner/utils/send-to-lava.sh" "WiFi_Firmware_Driver.res" --strict --expected-testcase-id "WiFi_Firmware_Driver" || lava-test-case "WiFi_Firmware_Driver_result_publication" --result fail
+        - cd "$REPO_PATH/Runner/suites/Connectivity/WiFi/WiFi_OnOff" || exit 1
+        - rm -f "WiFi_OnOff.res"
+        - ./run.sh || true
+        - >-
+            "$REPO_PATH/Runner/utils/send-to-lava.sh" "WiFi_OnOff.res" --strict --expected-testcase-id "WiFi_OnOff" || lava-test-case "WiFi_OnOff_result_publication" --result fail
+        - cd "$REPO_PATH/Runner/suites/Kernel/Baseport/watchdog" || exit 1
+        - rm -f "watchdog.res"
+        - ./run.sh || true
+        - >-
+            "$REPO_PATH/Runner/utils/send-to-lava.sh" "watchdog.res" --strict --expected-testcase-id "watchdog" || lava-test-case "watchdog_result_publication" --result fail
+        - cd "$REPO_PATH/Runner/suites/Multimedia/FastRPC_Runtime_Validation" || exit 1
+        - rm -f "FastRPC_Runtime_Validation.res"
+        - ./run.sh || true
+        - >-
+            "$REPO_PATH/Runner/utils/send-to-lava.sh" "FastRPC_Runtime_Validation.res" --strict --expected-testcase-id "FastRPC_Runtime_Validation" || lava-test-case "FastRPC_Runtime_Validation_result_publication" --result fail
+        - cd "$REPO_PATH/Runner/suites/Multimedia/DSP_AudioPD" || exit 1
+        - rm -f "DSP_AudioPD.res"
+        - ./run.sh || true
+        - >-
+            "$REPO_PATH/Runner/utils/send-to-lava.sh" "DSP_AudioPD.res" --strict --expected-testcase-id "DSP_AudioPD" || lava-test-case "DSP_AudioPD_result_publication" --result fail
+        - cd "$REPO_PATH/Runner/suites/Multimedia/OpenCV" || exit 1
+        - rm -f "OpenCV.res"
+        - ./run.sh --build-dir . --cwd . --suite all || true
+        - >-
+            "$REPO_PATH/Runner/utils/send-to-lava.sh" "OpenCV.res" --strict --expected-testcase-id "OpenCV" || lava-test-case "OpenCV_result_publication" --result fail
+        - cd "$REPO_PATH/Runner/suites/Multimedia/Audio/Audio_Card_Registration" || exit 1
+        - rm -f "Audio_Card_Registration.res"
+        - ./run.sh || true
+        - >-
+            "$REPO_PATH/Runner/utils/send-to-lava.sh" "Audio_Card_Registration.res" --strict --expected-testcase-id "Audio_Card_Registration" || lava-test-case "Audio_Card_Registration_result_publication" --result fail
+        - cd "$REPO_PATH/Runner/suites/Virtualization/KVM/KVM_Driver" || exit 1
+        - rm -f "KVM_Driver.res"
+        - ./run.sh || true
+        - >-
+            "$REPO_PATH/Runner/utils/send-to-lava.sh" "KVM_Driver.res" --strict --expected-testcase-id "KVM_Driver" || lava-test-case "KVM_Driver_result_publication" --result fail
+        - cd "$REPO_PATH/Runner/suites/Virtualization/KVM/KVM_EL2_DTB" || exit 1
+        - rm -f "KVM_EL2_DTB.res"
+        - ./run.sh || true
+        - >-
+            "$REPO_PATH/Runner/utils/send-to-lava.sh" "KVM_EL2_DTB.res" --strict --expected-testcase-id "KVM_EL2_DTB" || lava-test-case "KVM_EL2_DTB_result_publication" --result fail
+        - cd "$REPO_PATH/Runner/suites/Virtualization/KVM/KVM_Infra" || exit 1
+        - rm -f "KVM_Infra.res"
+        - ./run.sh || true
+        - >-
+            "$REPO_PATH/Runner/utils/send-to-lava.sh" "KVM_Infra.res" --strict --expected-testcase-id "KVM_Infra" || lava-test-case "KVM_Infra_result_publication" --result fail
+        - cd "$REPO_PATH/Runner/suites/Kernel/Baseport/qcom_hwrng" || exit 1
+        - rm -f "qcom_hwrng.res"
+        - ./run.sh || true
+        - >-
+            "$REPO_PATH/Runner/utils/send-to-lava.sh" "qcom_hwrng.res" --strict --expected-testcase-id "qcom_hwrng" || lava-test-case "qcom_hwrng_result_publication" --result fail
+        - cd "$REPO_PATH/Runner/suites/Virtualization/KVM/KVM_Runtime_Validation" || exit 1
+        - rm -f "KVM_Runtime_Validation.res"
+        - ./run.sh || true
+        - >-
+            "$REPO_PATH/Runner/utils/send-to-lava.sh" "KVM_Runtime_Validation.res" --strict --expected-testcase-id "KVM_Runtime_Validation" || lava-test-case "KVM_Runtime_Validation_result_publication" --result fail
+        - cd "$REPO_PATH/Runner" || exit 1
