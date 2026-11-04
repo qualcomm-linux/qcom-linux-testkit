@@ -8329,24 +8329,27 @@ detect_emmc_partition_block() {
 # Auto-detect UFS block device (via udev vendor info or path hint)
 # storage_is_ufs <sysfs-block-path>
 # Follow the block device ancestry to a bound UFS host, without udevadm.
+storage_is_ufs() (
+    storage_node=$(readlink -f "$1") || return 1
+    while [ -n "$storage_node" ] && [ "$storage_node" != / ]; do
+        storage_driver=$(readlink -f "$storage_node/driver" 2>/dev/null) || storage_driver=""
+        case "${storage_driver##*/}" in
+            ufshcd*|ufs-qcom)
+                return 0
+                ;;
+        esac
+        storage_node=${storage_node%/*}
+    done
+    return 1
+)
 
 # detect_ufs_partition_block
 # Print one runtime UFS block device. Whole devices are safe for read-only I/O.
 detect_ufs_partition_block() {
-    if command -v lsblk >/dev/null 2>&1 && command -v udevadm >/dev/null 2>&1; then
-        for part in $(lsblk -lnpo NAME,TYPE | awk '$2 == "part" {print $1}'); do
-            if udevadm info --query=all --name="$part" 2>/dev/null | grep -qi "ufs"; then
-                echo "$part"
-                return 0
-            fi
-        done
-    fi
-
-    for part in /dev/sd[a-z][0-9]*; do
-        [ -e "$part" ] || continue
-        if command -v udevadm >/dev/null 2>&1 &&
-           udevadm info --query=all --name="$part" 2>/dev/null | grep -qi "ufs"; then
-            echo "$part"
+    for ufs_block in /sys/class/block/*; do
+        [ -e "$ufs_block" ] || continue
+        if storage_is_ufs "$ufs_block" && [ -b "/dev/${ufs_block##*/}" ]; then
+            printf '/dev/%s\n' "${ufs_block##*/}"
             return 0
         fi
     done
@@ -8356,6 +8359,29 @@ detect_ufs_partition_block() {
 # storage_path_is_ufs <directory>
 # Check the deepest mount containing the resolved directory. Unknown, overlay,
 # tmpfs and stacked devices are deliberately not accepted as writable UFS proof.
+storage_path_is_ufs() (
+    storage_path=$(cd "$1" && pwd -P) || return 1
+    storage_dev=$(awk -v target="$storage_path" '
+        function decode(s) {
+            gsub(/\\040/, " ", s)
+            gsub(/\\011/, "\t", s)
+            gsub(/\\134/, "\\", s)
+            return s
+        }
+        {
+            mountpoint=decode($5)
+            if (mountpoint == "/" || target == mountpoint ||
+                index(target, mountpoint "/") == 1) {
+                if (length(mountpoint) >= longest) {
+                    longest=length(mountpoint)
+                    device=$3
+                }
+            }
+        }
+        END {print device}
+    ' /proc/self/mountinfo) || return 1
+    [ -n "$storage_dev" ] && storage_is_ufs "/sys/dev/block/$storage_dev"
+)
 
 # rng_restore_selection
 # Restore only the RNG selection changed by this test and report failure.
