@@ -911,6 +911,26 @@ gstreamer_backend_evidence_sampled() {
 }
 
 # -------------------- Single runner: gst-launch with timeout --------------------
+# gstreamer_playback_rendered <debug-log> <sink-name>
+# Print 1 only when this pipeline's named sink reports rendered buffers, else 0.
+# The caller enables basesink:5 and truncates the log before each invocation.
+# Combine this evidence with the command status, rendering alone is not PASS.
+gstreamer_playback_rendered() {
+  if [ ! -r "$1" ]; then
+    printf '0\n'
+    return
+  fi
+  LC_ALL=C awk -v sink="<$2>" '
+    index($0, sink) && /basesink/ && /rendered: [0-9]+, dropped:/ {
+      count = $0
+      sub(/^.*rendered: /, "", count)
+      sub(/,.*/, "", count)
+      if (count + 0 > 0) seen = 1
+    }
+    END { print seen + 0 }
+  ' "$1"
+}
+
 # gstreamer_run_gstlaunch_timeout <secs> <pipelineString>
 # Returns gst-launch rc.
 #
