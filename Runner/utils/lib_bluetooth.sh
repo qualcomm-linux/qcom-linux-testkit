@@ -414,6 +414,9 @@ CONFIG_EOF
 # the minimal BlueZ and Qualcomm/Atheros firmware package set is present.
 # Yocto and other image-managed distributions return unchanged.
 bt_prepare_bluetooth_stack() {
+    if [ "${TESTKIT_IMAGE_ONLY:-0}" = 1 ]; then
+        return 0
+    fi
     if command -v pkg_detect_os_id >/dev/null 2>&1; then
         bt_pbs_os_id="$(pkg_detect_os_id 2>/dev/null || echo unknown)"
     else
@@ -610,6 +613,12 @@ bt_in_whitelist() {
 # bt_scan_devices AA:..:FF # success only if that MAC is seen
 # Output: prints "MAC NAME" lines; returns 0 if any device (or MAC_ID) found.
 # shellcheck disable=SC2120
+# bt_scan_output_started <captured-output>
+# Accept positive discovery evidence from this invocation, never cached peers alone.
+bt_scan_output_started() {
+    printf '%s\n' "$1" | grep -Eq 'Discovery started|Discovering:[[:space:]]*yes|\[NEW\][[:space:]]+Device[[:space:]]'
+}
+
 bt_scan_devices_expect() {
     adapter="${BT_ADAPTER:-}"
     duration="${SCAN_SECONDS:-10}"
@@ -663,6 +672,12 @@ expect { timeout {} eof {} }
  
     # Clean CRs; sanity check for "Device " lines
     scan_clean="$(printf '%s' "${scan_raw}" | tr -d '\r')"
+    if bt_scan_output_started "$scan_clean"; then
+        BT_SCAN_EXECUTION_OK=1
+    else
+        log_warn "Bluetooth PTY scan did not confirm discovery startup"
+        return 1
+    fi
     if ! printf '%s' "${scan_clean}" | grep -q 'Device '; then
         log_warn "No 'Device ' lines found after scan. Check bluetoothctl output/locale."
         return 1
@@ -798,6 +813,13 @@ bt_scan_devices_interactive_fallback() {
         )"
     fi
  
+    if bt_scan_output_started "$fallback_out"; then
+        BT_SCAN_EXECUTION_OK=1
+    else
+        log_warn "Bluetooth interactive scan did not confirm discovery startup"
+        return 1
+    fi
+
     cache_out="$(
         bt_list_devices_raw 2>/dev/null \
             | sanitize_bt_output || true
@@ -976,6 +998,7 @@ bt_scan_devices_interactive_fallback() {
 # - Keeps positional MAC support for existing callers.
 # shellcheck disable=SC2120
 bt_scan_devices() {
+    BT_SCAN_EXECUTION_OK=0
     adapter="${BT_ADAPTER:-}"
     scan_window="${SCAN_SECONDS:-10}"
     scan_attempts="${SCAN_ATTEMPTS:-3}"
@@ -1177,7 +1200,10 @@ bt_scan_devices() {
             '
         )"
 
-        if [ -n "$found_lines" ]; then
+        if bt_scan_output_started "$live_out"; then
+            BT_SCAN_EXECUTION_OK=1
+        fi
+        if [ -n "$found_lines" ] && [ "$BT_SCAN_EXECUTION_OK" -eq 1 ]; then
             log_info "bt_scan_devices: devices seen during attempt $attempt"
             printf '%s\n' "$found_lines" | while IFS= read -r line; do
                 if [ -n "$line" ]; then
@@ -2543,9 +2569,9 @@ btgetbdaddr() {
 
     if command -v hciconfig >/dev/null 2>&1; then
         if [ -n "$dev" ]; then
-            addr="$(hciconfig -a "$dev" 2>/dev/null | awk '/BD Address:/ {print $3; exit}')"
+            addr="$(run_with_managed_timeout 3 "$PWD" bt-address hciconfig -a "$dev" 2>/dev/null | awk '/BD Address:/ {print $3; exit}')"
         else
-            addr="$(hciconfig -a 2>/dev/null        | awk '/BD Address:/ {print $3; exit}')"
+            addr="$(run_with_managed_timeout 3 "$PWD" bt-address hciconfig -a 2>/dev/null | awk '/BD Address:/ {print $3; exit}')"
         fi
         if bt_normalize_bdaddr "$addr"; then
             return 0
@@ -2559,9 +2585,9 @@ btgetbdaddr() {
             ''|*[!0-9]*)
                 ;;
             *)
-                if command -v run_with_timeout >/dev/null 2>&1; then
+                if command -v run_with_managed_timeout >/dev/null 2>&1; then
                     bt_gba_info="$(
-                        run_with_timeout 3 \
+                        run_with_managed_timeout 3 "$PWD" bt-command \
                             btmgmt --index "$bt_gba_index" info \
                             2>/dev/null || true
                     )"
@@ -2708,9 +2734,9 @@ btmgmtsetpublicaddr() {
         return 1
     fi
 
-    if command -v run_with_timeout >/dev/null 2>&1; then
+    if command -v run_with_managed_timeout >/dev/null 2>&1; then
         if ! bt_mspa_output="$(
-            run_with_timeout 10 \
+            run_with_managed_timeout 10 "$PWD" bt-command \
                 btmgmt --index "$bt_mspa_index" \
                 public-addr "$bt_mspa_addr" 2>&1
         )"; then
@@ -2865,8 +2891,8 @@ btcontrollervisible() {
     esac
  
     btctlrun() {
-        if command -v run_with_timeout >/dev/null 2>&1; then
-            run_with_timeout 2 bluetoothctl "$@" 2>/dev/null || true
+        if command -v run_with_managed_timeout >/dev/null 2>&1; then
+            run_with_managed_timeout 2 "$PWD" bt-command bluetoothctl "$@" 2>/dev/null || true
         elif command -v timeout >/dev/null 2>&1; then
             timeout 2 bluetoothctl "$@" 2>/dev/null || true
         else
@@ -2880,7 +2906,9 @@ btcontrollervisible() {
         if [ -n "$addr" ]; then
             printf '%s\n' "$out" | grep -qi "$addr" && return 0
         fi
-        printf '%s\n' "$out" | grep -q '^Controller ' && return 0
+        if [ -z "$addr" ]; then
+            printf '%s\n' "$out" | grep -q '^Controller ' && return 0
+        fi
     fi
  
     # bluetoothctl show
@@ -2889,7 +2917,9 @@ btcontrollervisible() {
         if [ -n "$addr" ]; then
             printf '%s\n' "$out" | grep -qi "$addr" && return 0
         fi
-        printf '%s\n' "$out" | grep -q '^Controller ' && return 0
+        if [ -z "$addr" ]; then
+            printf '%s\n' "$out" | grep -q '^Controller ' && return 0
+        fi
     fi
  
     return 1
@@ -3744,11 +3774,114 @@ btfwpresent() {
     return 1
 }
 
+# bt_systemd_running
+# A systemctl binary alone does not mean that systemd manages this boot.
+bt_systemd_running() {
+    [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1
+}
+
+# bt_image_daemon_path
+# Locate an image-provided daemon even when its libexec directory is not in PATH.
+bt_image_daemon_path() {
+    if command -v bluetoothd >/dev/null 2>&1; then
+        command -v bluetoothd
+        return 0
+    fi
+    for bt_daemon_candidate in /usr/libexec/bluetooth/bluetoothd /usr/lib/bluetooth/bluetoothd /usr/libexec/bluetoothd; do
+        if [ -x "$bt_daemon_candidate" ]; then
+            printf '%s\n' "$bt_daemon_candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# bt_image_runtime_available
+# Missing daemon assets are a capability gap, not a repeated startup failure.
+bt_image_runtime_available() {
+    if ! pgrep -x bluetoothd >/dev/null 2>&1 &&
+       ! bt_image_daemon_path >/dev/null; then
+        log_warn "Image provides neither a running BlueZ daemon nor a bluetoothd executable"
+        return 1
+    fi
+    if [ ! -S /run/dbus/system_bus_socket ] &&
+       ! command -v dbus-daemon >/dev/null 2>&1; then
+        log_warn "Image provides neither a system D-Bus socket nor dbus-daemon"
+        return 1
+    fi
+    return 0
+}
+
+# bt_start_image_daemons
+# One non-systemd startup attempt using image-provided D-Bus and BlueZ.
+# Reuse existing daemons, never replace their sockets or stop them on cleanup.
+bt_start_image_daemons() {
+    [ "${BT_IMAGE_START_ATTEMPTED:-0}" = 0 ] || return 1
+    BT_IMAGE_START_ATTEMPTED=1
+    BT_IMAGE_LOG_DIR=$(mktemp -d "$PWD/bluetooth-runtime.XXXXXX") || return 1
+    log_info "Non-systemd Bluetooth startup, evidence: $BT_IMAGE_LOG_DIR"
+    if [ ! -S /run/dbus/system_bus_socket ]; then
+        if ! command -v dbus-daemon >/dev/null 2>&1; then
+            log_warn "Image has no system bus socket or dbus-daemon, cannot start BlueZ"
+            return 1
+        fi
+        mkdir -p /run/dbus || return 1
+        dbus-daemon --system --nofork --nopidfile >"$BT_IMAGE_LOG_DIR/dbus.log" 2>&1 &
+        BT_OWNED_DBUS_PID=$!
+        bt_bus_wait=0
+        while [ ! -S /run/dbus/system_bus_socket ] && [ "$bt_bus_wait" -lt 5 ]; do
+            kill -0 "$BT_OWNED_DBUS_PID" 2>/dev/null || break
+            sleep 1
+            bt_bus_wait=$((bt_bus_wait + 1))
+        done
+        if [ ! -S /run/dbus/system_bus_socket ]; then
+            cat "$BT_IMAGE_LOG_DIR/dbus.log"
+            return 1
+        fi
+    fi
+    if command -v dbus-send >/dev/null 2>&1; then
+        if ! run_with_managed_timeout 5 "$BT_IMAGE_LOG_DIR" dbus-check \
+            dbus-send --system --print-reply --reply-timeout=3000 \
+            --dest=org.freedesktop.DBus / org.freedesktop.DBus.ListNames \
+            >"$BT_IMAGE_LOG_DIR/dbus-check.log" 2>&1; then
+            cat "$BT_IMAGE_LOG_DIR/dbus-check.log"
+            return 1
+        fi
+    fi
+    if pgrep -x bluetoothd >/dev/null 2>&1; then
+        log_info "Reusing the existing bluetoothd process"
+        return 0
+    fi
+    bt_image_daemon=$(bt_image_daemon_path) || bt_image_daemon=""
+    if [ -z "$bt_image_daemon" ]; then
+        log_warn "Image has no bluetoothd executable, cannot start BlueZ"
+        return 1
+    fi
+    "$bt_image_daemon" --nodetach >"$BT_IMAGE_LOG_DIR/bluetoothd.log" 2>&1 &
+    BT_OWNED_BLUEZ_PID=$!
+    return 0
+}
+
+# bt_cleanup_image_daemons
+# Stop only children launched by this runner, BlueZ before its system bus.
+bt_cleanup_image_daemons() {
+    managed_timeout_cancel_bounded 2 || true
+    for bt_owned_pid in "${BT_OWNED_BLUEZ_PID:-}" "${BT_OWNED_DBUS_PID:-}"; do
+        [ -n "$bt_owned_pid" ] || continue
+        # shellcheck disable=SC2034 # Consumed by managed_timeout_cancel_bounded.
+        MANAGED_TIMEOUT_CMD_PID="$bt_owned_pid"
+        managed_timeout_cancel_bounded 2 || true
+    done
+    BT_OWNED_BLUEZ_PID=""
+    BT_OWNED_DBUS_PID=""
+}
+
 bt_wait_ready() {
     bt_wr_max_wait="${1:-60}"
     bt_wr_sleep_step="${2:-2}"
     bt_wr_requested_adapter="${3:-${BT_ADAPTER:-}}"
     bt_wr_waited=0
+    bt_wr_started_at=$(date +%s)
     bt_wr_started_service=0
     bt_wr_adapter=""
 
@@ -3801,23 +3934,27 @@ bt_wait_ready() {
 
         if btsvcactive &&
            [ -n "$bt_wr_adapter" ] &&
-           btbdok "$bt_wr_adapter"; then
+           btbdok "$bt_wr_adapter" &&
+           btcontrollervisible "$bt_wr_adapter"; then
             BT_RUNTIME_READY_ADAPTER="$bt_wr_adapter"
             log_info "Bluetooth runtime became ready after ${bt_wr_waited}s with usable adapter $bt_wr_adapter."
             return 0
         fi
 
         if [ "$bt_wr_started_service" -eq 0 ]; then
-            if command -v systemctl >/dev/null 2>&1; then
+            if bt_systemd_running; then
                 if ! btsvcactive; then
                     log_info "Bluetooth service not active yet, attempting start."
-                    systemctl start bluetooth.service >/dev/null 2>&1 || true
+                    run_with_managed_timeout 10 "$PWD" bt-start systemctl start bluetooth.service >/dev/null 2>&1 || true
                 fi
+            else
+                bt_start_image_daemons || true
             fi
             bt_wr_started_service=1
         fi
 
-        if [ "$bt_wr_waited" -eq "$bt_wr_max_wait" ]; then
+        bt_wr_waited=$(($(date +%s) - bt_wr_started_at))
+        if [ "$bt_wr_waited" -ge "$bt_wr_max_wait" ]; then
             break
         fi
 
@@ -3828,7 +3965,7 @@ bt_wait_ready() {
         fi
 
         sleep "$bt_wr_delay"
-        bt_wr_waited=$((bt_wr_waited + bt_wr_delay))
+        bt_wr_waited=$(($(date +%s) - bt_wr_started_at))
     done
 
     if [ -n "$bt_wr_adapter" ]; then
@@ -3865,10 +4002,10 @@ bt_recover_runtime() {
         bt_rr_action=1
     fi
 
-    if command -v systemctl >/dev/null 2>&1; then
+    if bt_systemd_running; then
         log_info "Restarting bluetooth.service after the recovery attempt"
-        if command -v run_with_timeout >/dev/null 2>&1; then
-            run_with_timeout 15 \
+        if command -v run_with_managed_timeout >/dev/null 2>&1; then
+            run_with_managed_timeout 15 "$PWD" bt-command \
                 systemctl restart bluetooth.service >/dev/null 2>&1 || true
         else
             systemctl restart bluetooth.service >/dev/null 2>&1 || true
@@ -3881,7 +4018,7 @@ bt_recover_runtime() {
     fi
 
     if [ -n "$bt_rr_adapter" ] && command -v hciconfig >/dev/null 2>&1; then
-        hciconfig "$bt_rr_adapter" up >/dev/null 2>&1 || true
+        run_with_managed_timeout 5 "$PWD" bt-up hciconfig "$bt_rr_adapter" up >/dev/null 2>&1 || true
         bt_rr_action=1
     fi
 
@@ -3991,12 +4128,21 @@ bt_ensure_runtime_ready() {
 
     if [ "$bt_err_raw_addr" = "00:00:00:00:00:00" ]; then
         BT_RUNTIME_FAILURE_REASON="Bluetooth adapter $bt_err_final_adapter reports an all-zero BD address after recovery, verify Qualcomm firmware and platform BD-address provisioning, then reboot after any firmware package update"
+    elif bt_normalize_bdaddr "$bt_err_raw_addr" >/dev/null 2>&1; then
+        BT_RUNTIME_FAILURE_REASON="Bluetooth adapter $bt_err_final_adapter has a valid BD address but BlueZ/D-Bus readiness failed, inspect the daemon startup logs and system bus"
     elif [ -n "$bt_err_final_adapter" ]; then
         BT_RUNTIME_FAILURE_REASON="Bluetooth adapter $bt_err_final_adapter has no valid runtime BD address after recovery, verify Qualcomm firmware and platform BD-address provisioning"
     else
         BT_RUNTIME_FAILURE_REASON="No Bluetooth HCI adapter appeared after recovery, verify the kernel driver, firmware, and hardware description"
     fi
 
+    if [ -n "${BT_IMAGE_LOG_DIR:-}" ]; then
+        for bt_failure_log in "$BT_IMAGE_LOG_DIR"/*.log; do
+            [ -s "$bt_failure_log" ] || continue
+            log_info "Bluetooth startup evidence: $bt_failure_log"
+            cat "$bt_failure_log"
+        done
+    fi
     export BT_RUNTIME_FAILURE_REASON
     log_error "$BT_RUNTIME_FAILURE_REASON"
     return 1
@@ -4125,8 +4271,8 @@ btkmdpresent() {
 }
 
 btsvcactive() {
-    if hascmd systemctl; then
-        if systemctl is-active bluetooth.service >/dev/null 2>&1; then return 0; fi
+    if bt_systemd_running; then
+        if run_with_managed_timeout 3 "$PWD" bt-service systemctl is-active bluetooth.service >/dev/null 2>&1; then return 0; fi
     fi
     if pgrep bluetoothd >/dev/null 2>&1; then return 0; fi
     return 1
@@ -4247,6 +4393,7 @@ bt_scan_poll_on() {
 #   0 = observed Discovering=no
 #   1 = did not settle to 'no' within polling window
 bt_scan_poll_off() {
+    BT_SCAN_OFF_CONFIRMED=0
     max_wait_secs="${1:-10}"
     step_secs="${2:-1}"
 
@@ -4269,6 +4416,7 @@ bt_scan_poll_off() {
         log_info "Discovering state during scan OFF (iteration $((i + 1))/$attempts): $disc_state"
 
         if [ "$disc_state" = "no" ]; then
+            BT_SCAN_OFF_CONFIRMED=1
             return 0
         fi
         if [ "$disc_state" = "yes" ]; then
