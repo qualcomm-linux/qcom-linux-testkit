@@ -47,3 +47,7 @@ USB_DMESG_STRICT=1 ./run.sh
 ```
 Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.  
 SPDX-License-Identifier: BSD-3-Clause```
+
+Kernel premerge sets USB_DMESG_STRICT=1 to fail captured controller/PHY errors.
+Direct execution retains its existing advisory default. No connected peripheral
+SKIPs peripheral coverage separately from host-controller readiness.

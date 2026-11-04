@@ -1,71 +1,38 @@
 # CPUFreq_Validation
 
-## Overview
+Validate image-provided CPUFreq policies on Yocto, Debian, Ubuntu, CentOS and
+ramdisk systems. No packages are installed and no SoC or CPU index is assumed.
 
-The `CPUFreq_Validation` test validates the CPU frequency scaling capabilities of a system using the Linux `cpufreq` subsystem. It verifies the ability to set and reflect CPU frequencies across shared policy domains (e.g., clusters of CPUs sharing frequency control).
-
-This test is designed to be **SoC-agnostic**, supporting platforms with per-policy frequency management (e.g., Qualcomm SoCs with `policy0`, `policy4`, etc.).
-
-## Test Goals
-
-- Ensure all cpufreq policies are present and functional
-- Iterate through all available frequencies and validate correct scaling
-- Ensure that CPU governors can be set to `userspace`
-- Provide robust reporting per policy (e.g., `CPU0-3 [via policy0] = PASS`)
-- Avoid flaky failures in CI by using retries and proper checks
-
-## Prerequisites
-
-- Kernel must be built with `CONFIG_CPU_FREQ` and `CONFIG_CPU_FREQ_GOV_USERSPACE`
-- `sysfs` access to `/sys/devices/system/cpu/cpufreq/*`
-- Root privileges (to write to cpufreq entries)
-
-## Script Location
-
-```
-Runner/suites/Kernel/FunctionalArea/baseport/CPUFreq_Validation/run.sh
+```sh
+cd Runner/suites/Kernel/Baseport/CPUFreq_Validation
+./run.sh
 ```
 
-## Files
+The test selects online members of each runtime policy. Offline policies are
+skipped. When userspace frequency control is available, it exercises all distinct
+advertised frequencies within the original policy limits. It checks
+each write and polls observed frequency for up to five seconds, allowing 5%
+measurement variation. A rejected write, invalid evidence, missing selected
+policy attribute or failure to observe the requested frequency is FAIL. Thermal
+or driver limits can therefore cause a real functional failure and are not
+silently ignored.
 
-- `run.sh` - Main test script
-- `CPUFreq_Validation.res` - Summary result file with PASS/FAIL
-- `CPUFreq_Validation.log` - Full execution log (generated if logging is enabled)
+Without discrete userspace control, it exercises advertised alternative governors
+and reports governor-control coverage only. It does not claim a frequency
+transition from an inventory check. No exercisable policies or controls is SKIP,
+never an all-skipped PASS. Root or equivalent sysfs write access is required.
 
-## How It Works
+This suite validates policy controls. Use Freq_Scaling for pinned workload coverage.
 
-1. The script detects all cpufreq policies under `/sys/devices/system/cpu/cpufreq/`
-2. For each policy:
-   - Reads the list of related CPUs
-   - Attempts to set each available frequency using the `userspace` governor
-   - Verifies that the frequency was correctly applied
-3. The result is logged per policy
-4. The overall test passes only if all policies succeed
+Before mutation, it saves the governor and min/max limits, plus the current
+userspace request when applicable. It restores them on success, failure and
+catchable signals, checks restoration, and fails if restoration is incomplete.
+Limits are written in an order that avoids min exceeding max. SIGKILL or device
+power loss cannot run shell cleanup.
 
-## Example Output
-
-```
-[INFO] CPU0-3 [via policy0] = PASS
-[FAIL] CPU4-6 [via policy4] = FAIL
-[INFO] CPU7 [via policy7] = PASS
-```
-
-## Return Code
-
-- `0` — All policies passed
-- `1` — One or more policies failed
-
-## Integration in CI
-
-- Can be run standalone or via LAVA
-- Result file `CPUFreq_Validation.res` will be parsed by `result_parse.sh`
-
-## Notes
-
-- Some CPUs may share frequency domains, so per-core testing is not reliable
-- The test includes retries to reduce false failures due to transient conditions
-
-## License
+Evidence is retained in a unique directory under CWD/results/CPUFreq_Validation and printed
+to stdout. The LAVA result remains next to run.sh as CPUFreq_Validation.res. Both launch
+from Runner and direct suite-directory execution are supported. Base utilities
+sh, cat, grep, awk, date, mkdir and mktemp must come from the image.
 
 SPDX-License-Identifier: BSD-3-Clause(c) Qualcomm Technologies, Inc. and/or its subsidiaries.
-

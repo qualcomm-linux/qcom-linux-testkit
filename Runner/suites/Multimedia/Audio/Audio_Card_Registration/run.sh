@@ -178,45 +178,37 @@ fi
 TMPDIR="$LOGDIR"
 export TMPDIR
 
-if ! command -v audio_prepare_test_packages >/dev/null 2>&1; then
-    log_fail "$TESTNAME FAIL: required helper is unavailable: audio_prepare_test_packages"
-    echo "$TESTNAME FAIL" > "$RES_FILE"
-    exit 1
-fi
-
-audio_prepare_test_packages "$AUDIO_OVERLAY_REQUESTED"
-audio_prepare_rc=$?
-
-case "$audio_prepare_rc" in
-    0)
-        ;;
-    2)
-        log_skip "$TESTNAME SKIP: AudioReach kernel package changed; reboot required"
-        echo "$TESTNAME SKIP" > "$RES_FILE"
-        exit 0
-        ;;
-    3)
-        log_skip "$TESTNAME SKIP: AudioReach is not enabled for Ubuntu, rerun without --overlay to validate the base Audio stack"
-        echo "$TESTNAME SKIP" > "$RES_FILE"
-        exit 0
-        ;;
-    *)
-        log_fail "$TESTNAME FAIL: audio package preparation failed"
+# Registration uses image-provided ALSA state, not playback/record clients.
+# Preserve package preparation for existing full-rootfs invocations only.
+if [ "${TESTKIT_IMAGE_ONLY:-0}" != 1 ]; then
+    if ! command -v audio_prepare_test_packages >/dev/null 2>&1; then
+        log_fail "$TESTNAME FAIL: required helper is unavailable: audio_prepare_test_packages"
         echo "$TESTNAME FAIL" > "$RES_FILE"
         exit 1
-        ;;
-esac
+    fi
 
-if ! command -v audio_prepare_backend_client_packages >/dev/null 2>&1; then
-    log_fail "$TESTNAME FAIL: required helper is unavailable: audio_prepare_backend_client_packages"
-    echo "$TESTNAME FAIL" > "$RES_FILE"
-    exit 1
-fi
+    audio_prepare_test_packages "$AUDIO_OVERLAY_REQUESTED"
+    audio_prepare_rc=$?
 
-if ! audio_prepare_backend_client_packages alsa; then
-    log_fail "$TESTNAME FAIL: failed to prepare ALSA playback and recording clients"
-    echo "$TESTNAME FAIL" > "$RES_FILE"
-    exit 1
+    case "$audio_prepare_rc" in
+        0)
+            ;;
+        2)
+            log_skip "$TESTNAME SKIP: AudioReach kernel package changed; reboot required"
+            echo "$TESTNAME SKIP" > "$RES_FILE"
+            exit 0
+            ;;
+        3)
+            log_skip "$TESTNAME SKIP: AudioReach is not enabled for Ubuntu, rerun without --overlay to validate the base Audio stack"
+            echo "$TESTNAME SKIP" > "$RES_FILE"
+            exit 0
+            ;;
+        *)
+            log_fail "$TESTNAME FAIL: audio package preparation failed"
+            echo "$TESTNAME FAIL" > "$RES_FILE"
+            exit 1
+            ;;
+    esac
 fi
 
 # Prepare only the desktop Audio account and group membership. This ALSA-only

@@ -1,10 +1,11 @@
 #!/bin/sh
+
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause
-# Robustly find and source init_env
+# ---------- Repo env + helpers ----------
 SCRIPT_DIR="$(
-    cd "$(dirname "$0")" || exit 1
-    pwd
+  cd "$(dirname "$0")" || exit 1
+  pwd
 )"
 INIT_ENV=""
 SEARCH="$SCRIPT_DIR"
@@ -22,91 +23,62 @@ if [ -z "$INIT_ENV" ]; then
     exit 1
 fi
 
+# Only source once (idempotent)
+# NOTE: We intentionally **do not export** any new vars. They stay local to this shell.
 if [ -z "${__INIT_ENV_LOADED:-}" ]; then
     # shellcheck disable=SC1090
     . "$INIT_ENV"
+    __INIT_ENV_LOADED=1
 fi
 
-# shellcheck disable=SC1090,SC1091
+# shellcheck disable=SC1090
+. "$INIT_ENV"
+# shellcheck disable=SC1091
 . "$TOOLS/functestlib.sh"
-# shellcheck disable=SC1090,SC1091
+# shellcheck disable=SC1091
 . "$TOOLS/lib_connectivity.sh"
 
 TESTNAME="WiFi_Firmware_Driver"
-test_path="$(find_test_case_by_name "$TESTNAME")"
-cd "$test_path" || exit 1
-
-RES_FILE="./${TESTNAME}.res"
-WIFI_FW_PROBE_LOG_DIR="${WIFI_FW_PROBE_LOG_DIR:-./wifi_firmware_driver_dmesg}"
-WIFI_FW_PROBE_LOG_TAG="${WIFI_FW_PROBE_LOG_TAG:-${TESTNAME}/probe}"
-WIFI_FW_LOAD_LOG_TAG="${WIFI_FW_LOAD_LOG_TAG:-${TESTNAME}/firmware}"
-
-: >"$RES_FILE"
-
-log_info "--------------------------------------------------------------------------"
-log_info "-------------------Starting $TESTNAME Testcase----------------------------"
-log_info "=== Test Initialization ==="
-log_info "Probe log tag: $WIFI_FW_PROBE_LOG_TAG"
-log_info "Firmware log tag: $WIFI_FW_LOAD_LOG_TAG"
-
-if ! check_dependencies find grep modprobe lsmod cat stat awk; then
-    log_skip "$TESTNAME SKIP - required tools (find/grep/modprobe/lsmod/cat/stat/awk) missing"
-    echo "$TESTNAME SKIP" >"$RES_FILE"
-    exit 0
+RES_FILE="$PWD/$TESTNAME.res"
+test_result_init "$TESTNAME" "$RES_FILE" || exit 1
+# shellcheck disable=SC2034 # Consumed by check_dependencies.
+CHECK_DEPS_RECOVER=0
+if ! check_dependencies find grep cat stat awk readlink sort mktemp; then
+    test_result_finish SKIP "Image lacks utilities required for WiFi runtime discovery"
 fi
-
-if [ -f /proc/device-tree/model ]; then
-    read -r soc_model </proc/device-tree/model
-else
-    soc_model="Unknown"
-fi
-
-log_info "Detected SoC model: $soc_model"
-
-suite_rc=0
-
-log_info "=== WiFi Firmware Detection ==="
-if ! wifi_detect_firmware_info; then
-    log_skip \
-        "$TESTNAME SKIP - No readable ath12k/ath11k/ath10k WiFi firmware asset found under /lib/firmware, including .xz and .zst files"
-    echo "$TESTNAME SKIP" >"$RES_FILE"
-    exit 0
-fi
-
-log_info "Detected WiFi firmware family: $WIFI_FW_FAMILY"
-log_info "Detected firmware [$WIFI_FW_BASENAME]: $WIFI_FW_FILE (size: $WIFI_FW_SIZE bytes)"
-
-log_info "=== Family-specific Runtime Preparation ==="
-if ! wifi_handle_firmware_family "$WIFI_FW_FAMILY" "$WIFI_FW_BASENAME"; then
-    suite_rc=1
-fi
-
-log_info "=== Family-specific Module Visibility ==="
-if ! wifi_verify_family_modules "$WIFI_FW_FAMILY"; then
-    suite_rc=1
-fi
-
-log_info "=== WiFi Firmware Load Evidence ==="
-if wifi_firmware_loaded "$WIFI_FW_FAMILY" "$WIFI_FW_LOAD_LOG_TAG"; then
-    log_pass "[$WIFI_FW_LOAD_LOG_TAG] Firmware load/use evidence found."
-else
-    log_fail "[$WIFI_FW_LOAD_LOG_TAG] Firmware load/use evidence not found."
-    suite_rc=1
-fi
-
-log_info "=== WiFi Probe Check ==="
+RESULT_DIR=$(mktemp -d "$PWD/wifi-firmware.XXXXXX") || test_result_finish FAIL "Cannot create WiFi evidence directory in CWD"
+WIFI_FW_PROBE_LOG_DIR="${WIFI_FW_PROBE_LOG_DIR:-$RESULT_DIR}"
+WIFI_FW_PROBE_LOG_TAG="${WIFI_FW_PROBE_LOG_TAG:-WiFi_Firmware_Driver/probe}"
+WIFI_FW_LOAD_LOG_TAG="${WIFI_FW_LOAD_LOG_TAG:-WiFi_Firmware_Driver/firmware}"
 if wifi_has_probe_failures "$WIFI_FW_PROBE_LOG_DIR" "$WIFI_FW_PROBE_LOG_TAG"; then
-    suite_rc=1
-else
-    log_pass "[$WIFI_FW_PROBE_LOG_TAG] No WiFi probe/runtime failures detected in kernel log."
+    test_result_finish FAIL "WiFi driver probe/runtime errors captured in $RESULT_DIR"
 fi
-
-if [ "$suite_rc" -eq 0 ]; then
-    log_pass "$TESTNAME: PASS - WiFi firmware and driver validation successful."
-    echo "$TESTNAME PASS" >"$RES_FILE"
-    exit 0
+if ! wifi_families=$(wifi_runtime_families); then
+    test_result_finish FAIL "WiFi runtime discovery did not complete within its budget"
 fi
-
-log_fail "$TESTNAME: FAIL - WiFi firmware/driver validation encountered errors."
-echo "$TESTNAME FAIL" >"$RES_FILE"
-exit 1
+wifi_families=$(printf '%s\n' "$wifi_families" | sort -u)
+if [ -z "$wifi_families" ]; then
+    test_result_finish SKIP "No supported WiFi family identified from runtime drivers or device modaliases, firmware directories alone do not identify hardware"
+fi
+for wifi_family in $wifi_families; do
+    log_info "Runtime WiFi family: $wifi_family"
+    if ! wifi_detect_firmware_info "$wifi_family"; then
+        test_result_record FAIL "Runtime family $wifi_family has no readable firmware asset under /lib/firmware/$wifi_family"
+        continue
+    fi
+    log_info "Provisioned firmware: $WIFI_FW_FILE ($WIFI_FW_SIZE bytes)"
+    if ! wifi_handle_firmware_family "$wifi_family" "$WIFI_FW_BASENAME"; then
+        test_result_record FAIL "Cannot prepare runtime WiFi driver for $wifi_family"
+        continue
+    fi
+    if wifi_firmware_loaded "$wifi_family" "$WIFI_FW_LOAD_LOG_TAG" && wifi_verify_family_modules "$wifi_family"; then
+        test_result_record PASS "WiFi $wifi_family driver has a registered wireless PHY"
+    else
+        test_result_record FAIL "WiFi $wifi_family has no bound wireless PHY, inspect firmware and driver initialization"
+    fi
+done
+# Include errors from driver activation, not only those present before it.
+if wifi_has_probe_failures "$WIFI_FW_PROBE_LOG_DIR" "$WIFI_FW_PROBE_LOG_TAG"; then
+    test_result_record FAIL "WiFi probe/runtime errors found after driver validation"
+fi
+test_result_finish

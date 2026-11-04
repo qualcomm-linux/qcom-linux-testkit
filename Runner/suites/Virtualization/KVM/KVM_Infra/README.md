@@ -185,3 +185,13 @@ KVM_Driver
 KVM_EL2_DTB
 QEMU_VM_Validation
 ```
+
+## Early readiness diagnostics
+
+Before config or `/dev/kvm` gates, the runner logs kernel/architecture, DT identity,
+KVM configuration, device access and captured EL2/HYP initialization messages.
+`kvm_dmesg.log` and `kvm_errors.log` are retained with the shared kernel snapshot.
+Missing Python or QEMU still skips the corresponding functional check. Readiness
+evidence alone does not replace ioctl or QEMU validation. No tools are installed.
+
+KVM/EL2 initialization errors FAIL before optional-client SKIP gates.

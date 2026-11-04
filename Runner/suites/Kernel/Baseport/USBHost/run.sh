@@ -110,7 +110,7 @@ fi
 
 if command -v lsusb >/dev/null 2>&1; then
     log_info "USB userspace validation: collecting bounded lsusb inventory"
-    if lsusb >"$RESULT_DIR/lsusb.log" 2>&1; then
+    if run_with_managed_timeout 15 "$RESULT_DIR" lsusb lsusb >"$RESULT_DIR/lsusb.log" 2>&1; then
         log_file_with_label "LSUSB" "$RESULT_DIR/lsusb.log"
         test_result_record "PASS" "lsusb completed successfully"
     else

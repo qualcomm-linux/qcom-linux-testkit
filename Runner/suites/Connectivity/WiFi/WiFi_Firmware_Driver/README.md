@@ -9,13 +9,15 @@ This test is useful for verifying basic WiFi firmware and driver readiness befor
 ## What the test validates
 
 - Required command-line utilities are available.
-- The SoC model is detected from device tree when available.
 - WiFi firmware is found under `/lib/firmware`, including readable symlinks
   and kernel-supported `.xz` or `.zst` compressed files.
-- The WiFi firmware family is detected.
+- Each WiFi family is discovered from bound runtime drivers or matching device
+  aliases in the running kernel metadata, including DT-instantiated devices.
+  Installed firmware directories alone never select a family.
 - Family-specific runtime preparation succeeds.
-- Family-specific modules are visible.
-- Firmware load or use evidence exists in the kernel log.
+- The family has a bound driver, including built-in drivers without lsmod entries.
+- A PHY bound to that family appears within 15 seconds after preparation.
+  Generic firmware messages or a sibling radio do not prove readiness.
 - Kernel logs do not show WiFi probe/runtime failures.
 
 ## Dependencies
@@ -24,8 +26,8 @@ The target should provide:
 
 - `find`
 - `grep`
-- `modprobe`
-- `lsmod`
+- `readlink`, `sort`, `mktemp`
+- `modprobe` only when an unloaded runtime driver needs activation
 - `cat`
 - `stat`
 - `awk`
@@ -49,7 +51,7 @@ No mandatory CLI arguments are required.
 
 | Variable | Default | Description |
 |---|---|---|
-| `WIFI_FW_PROBE_LOG_DIR` | `./wifi_firmware_driver_dmesg` | Directory used for WiFi probe/runtime log evidence |
+| `WIFI_FW_PROBE_LOG_DIR` | Unique `wifi-firmware.*` directory in CWD | Directory used for WiFi probe/runtime log evidence |
 | `WIFI_FW_PROBE_LOG_TAG` | `WiFi_Firmware_Driver/probe` | Log tag used when reporting probe checks |
 | `WIFI_FW_LOAD_LOG_TAG` | `WiFi_Firmware_Driver/firmware` | Log tag used when reporting firmware load checks |
 

@@ -113,8 +113,14 @@ WARN_COUNT=0
 log_info "------------------------------------------------------------"
 log_info "Starting $TESTNAME"
 
+trap bt_cleanup_image_daemons 0
+trap 'exit 1' HUP INT TERM
 if ! bt_prepare_bluetooth_stack; then
     test_result_finish "FAIL" "$TESTNAME FAIL - Bluetooth stack preparation failed"
+fi
+
+if ! bt_systemd_running && ! bt_image_runtime_available; then
+    test_result_finish SKIP "Image lacks BlueZ or D-Bus runtime assets required for Bluetooth validation"
 fi
 
 log_info "Checking dependencies: bluetoothctl lsmod"

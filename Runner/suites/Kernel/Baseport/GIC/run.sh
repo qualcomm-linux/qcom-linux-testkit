@@ -1,11 +1,14 @@
 #!/bin/sh
-
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause
-# Robustly find and source init_env
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# ---------- Repo env + helpers ----------
+SCRIPT_DIR="$(
+  cd "$(dirname "$0")" || exit 1
+  pwd
+)"
 INIT_ENV=""
 SEARCH="$SCRIPT_DIR"
+
 while [ "$SEARCH" != "/" ]; do
     if [ -f "$SEARCH/init_env" ]; then
         INIT_ENV="$SEARCH/init_env"
@@ -19,82 +22,91 @@ if [ -z "$INIT_ENV" ]; then
     exit 1
 fi
 
-# Only source if not already loaded (idempotent)
-if [ -z "$__INIT_ENV_LOADED" ]; then
+# Only source once (idempotent)
+# NOTE: We intentionally **do not export** any new vars. They stay local to this shell.
+if [ -z "${__INIT_ENV_LOADED:-}" ]; then
     # shellcheck disable=SC1090
     . "$INIT_ENV"
+    __INIT_ENV_LOADED=1
 fi
-# Always source functestlib.sh, using $TOOLS exported by init_env
-# shellcheck disable=SC1090,SC1091
+
+# shellcheck disable=SC1090
+. "$INIT_ENV"
+# shellcheck disable=SC1091
 . "$TOOLS/functestlib.sh"
 
 TESTNAME="GIC"
-test_path=$(find_test_case_by_name "$TESTNAME")
-cd "$test_path" || exit 1
-# shellcheck disable=SC2034
-res_file="./$TESTNAME.res"
+RES_FILE="$SCRIPT_DIR/$TESTNAME.res"
+WORKLOAD_SECONDS="${GIC_WORKLOAD_SECONDS:-2}"
+RETRIES="${GIC_RETRIES:-2}"
+BUDGET_SECONDS="${GIC_TIMEOUT_SECONDS:-auto}"
+SKIP_ISOLATED=1
 
-log_info "-----------------------------------------------------------------------------------------"
-log_info "-------------------Starting $TESTNAME Testcase----------------------------"
-log_info "=== Test Initialization ==="
-
-# Function to get the timer count
-get_timer_count() {
-    grep arch_timer /proc/interrupts
+# usage
+# Describe the bounded runtime CPU selection. No side effects.
+usage() {
+    echo "Usage: $0 [--workload-seconds N] [--retries N] [--timeout auto|N] [--include-isolated]"
 }
 
-# Get the initial timer count
-echo "Initial timer count:"
-initial_count=$(get_timer_count)
-echo "$initial_count"
-
-# Wait for 2 minutes
-sleep 120
-
-# Get the timer count after 2 minutes
-echo "Timer count after 2 minutes:"
-final_count=$(get_timer_count)
-echo "$final_count"
-
-# Compare the initial and final counts
-echo "Comparing timer counts:"
-while IFS= read -r line; do
-    [ -n "$line" ] || continue
-
-    cpu=$(printf '%s\n' "$line" | awk '{print $1}')
-    initial_values=$(printf '%s\n' "$line" | awk '{for(i=2;i<=9;i++) print $i}')
-    final_values=$(printf '%s\n' "$final_count" | awk -v cpu="$cpu" '$1 == cpu {for(i=2;i<=9;i++) print $i}')
-
-    fail_test=false
-    i=0
-
-    while IFS= read -r initial_value; do
-        [ -n "$initial_value" ] || continue
-
-        final_value=$(printf '%s\n' "$final_values" | sed -n "$((i + 1))p")
-        if [ "$initial_value" -lt "$final_value" ]; then
-            echo "CPU $i: Timer count has incremented. Test PASSED"
-            log_pass "CPU $i: Timer count has incremented. Test PASSED"
-        else
-            echo "CPU $i: Timer count has not incremented. Test FAILED"
-            log_fail "CPU $i: Timer count has not incremented. Test FAILED"
-            fail_test=true
-        fi
-        i=$((i + 1))
-    done <<EOF
-$initial_values
-EOF
-
-    echo "$fail_test"
-    if [ "$fail_test" = false ]; then
-        log_pass "$TESTNAME : Test Passed"
-        echo "$TESTNAME PASS" > "$res_file"
-        exit 0
-    else
-        log_fail "$TESTNAME : Test Failed"
-        echo "$TESTNAME FAIL" > "$res_file"
-        exit 1
-    fi
-done <<EOF
-$initial_count
-EOF
+# parse_args <arguments...>
+# Validate options before starting CPU workloads. Return nonzero on invalid input.
+parse_args() {
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --help|-h)
+                usage
+                exit 0
+                ;;
+            --timeout)
+                [ "$#" -ge 2 ] || return 1
+                BUDGET_SECONDS="$2"
+                shift 2
+                ;;
+            --workload-seconds|--retries)
+                [ "$#" -ge 2 ] || return 1
+                is_unsigned_number "$2" && [ "$2" -gt 0 ] || return 1
+                case "$1" in
+                    --workload-seconds)
+                        WORKLOAD_SECONDS="$2"
+                        ;;
+                    --retries)
+                        RETRIES="$2"
+                        ;;
+                esac
+                shift 2
+                ;;
+            --include-isolated)
+                SKIP_ISOLATED=0
+                shift
+                ;;
+            *)
+                return 1
+                ;;
+        esac
+    done
+    for irq_value in "$WORKLOAD_SECONDS" "$RETRIES"; do
+        is_unsigned_number "$irq_value" && [ "$irq_value" -gt 0 ] || return 1
+    done
+    [ "$BUDGET_SECONDS" = auto ] || {
+        is_unsigned_number "$BUDGET_SECONDS" && [ "$BUDGET_SECONDS" -gt 0 ]
+    }
+}
+test_result_init "$TESTNAME" "$RES_FILE" || exit 1
+parse_args "$@" || test_result_finish FAIL "Invalid interrupt validation options"
+trap 'test_result_finish FAIL "Interrupt validation interrupted"' HUP INT TERM
+OUT_DIR=$(test_create_run_directory "$PWD/results/$TESTNAME") || test_result_finish FAIL "Cannot create evidence directory"
+validate_per_cpu_interrupt_active arch_timer "$WORKLOAD_SECONDS" "$RETRIES" "$SKIP_ISOLATED" "$BUDGET_SECONDS" >"$OUT_DIR/interrupts.log" 2>&1
+irq_rc=$?
+log_file_with_label IRQ "$OUT_DIR/interrupts.log"
+case "$irq_rc" in
+    0)
+        test_result_record PASS "Timer interrupts incremented under pinned work on $IRQ_ACTIVE_TESTED eligible CPUs"
+        ;;
+    2)
+        test_result_record SKIP "$IRQ_ACTIVE_SKIP_REASON"
+        ;;
+    *)
+        test_result_record FAIL "Active interrupt validation failed, see $OUT_DIR/interrupts.log"
+        ;;
+esac
+test_result_finish

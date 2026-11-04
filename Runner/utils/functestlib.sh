@@ -335,6 +335,9 @@ unload_kernel_module() {
 
 # --- Dependency check ---
 check_dependencies() {
+    if [ "${TESTKIT_IMAGE_ONLY:-0}" = 1 ]; then
+        CHECK_DEPS_RECOVER=0
+    fi
     # Support both:
     # check_dependencies date awk sed
     # check_dependencies "$deps" where deps="date awk sed"
@@ -674,44 +677,36 @@ wait_for_interrupt_cpu_count_increment() {
 # 0 - workload was launched and stopped
 # 1 - invalid input or workload could not be launched
 # 2 - taskset is missing
-run_pinned_cpu_workload() {
-    cpu_index="$1"
-    workload_seconds="$2"
-
-    if ! command -v taskset >/dev/null 2>&1; then
-        log_warn "taskset command is not available; cannot run pinned workload on CPU$cpu_index"
-        return 2
-    fi
-
-    if ! is_unsigned_number "$cpu_index"; then
-        log_warn "Invalid CPU index for pinned workload: ${cpu_index:-<empty>}"
-        return 1
-    fi
-
-    if ! is_unsigned_number "$workload_seconds"; then
-        log_warn "Invalid workload duration for CPU$cpu_index: ${workload_seconds:-<empty>}"
-        return 1
-    fi
-
-    if ! taskset -c "$cpu_index" sh -c 'true' >/dev/null 2>&1; then
-        log_warn "CPU$cpu_index is not schedulable with taskset"
-        return 1
-    fi
-
-    taskset -c "$cpu_index" sh -c 'while :; do :; done' >/dev/null 2>&1 &
-    busy_pid=$!
-
-    taskset -c "$cpu_index" sh -c 'while :; do sleep 1; done' >/dev/null 2>&1 &
-    sleeper_pid=$!
-
-    sleep "$workload_seconds"
-
-    kill "$busy_pid" "$sleeper_pid" >/dev/null 2>&1
-    wait "$busy_pid" >/dev/null 2>&1
-    wait "$sleeper_pid" >/dev/null 2>&1
-
-    return 0
-}
+run_pinned_cpu_workload() (
+    rpcw_cpu="$1"
+    rpcw_seconds="$2"
+    command -v taskset >/dev/null 2>&1 || exit 2
+    is_unsigned_number "$rpcw_cpu" || exit 1
+    is_unsigned_number "$rpcw_seconds" || exit 1
+    [ "$rpcw_seconds" -gt 0 ] || exit 1
+    taskset -c "$rpcw_cpu" sh -c 'true' >/dev/null 2>&1 || exit 1
+    rpcw_busy=""
+    rpcw_timer=""
+    rpcw_pid=""
+    rpcw_status=0
+    trap 'rpcw_status=$?
+        trap - 0
+        for rpcw_pid in "$rpcw_busy" "$rpcw_timer"; do
+            [ -n "$rpcw_pid" ] || continue
+            kill "$rpcw_pid" 2>/dev/null || true
+            wait "$rpcw_pid" 2>/dev/null || true
+        done
+        exit "$rpcw_status"' 0
+    trap 'exit 1' HUP INT TERM
+    taskset -c "$rpcw_cpu" sh -c 'while :; do :; done' >/dev/null 2>&1 &
+    rpcw_busy=$!
+    # A pinned timer wakeup exercises tickless CPUs too, without relying on idle ticks.
+    taskset -c "$rpcw_cpu" sleep "$rpcw_seconds" >/dev/null 2>&1 &
+    rpcw_timer=$!
+    wait "$rpcw_timer" || exit 1
+    rpcw_timer=""
+    kill -0 "$rpcw_busy" 2>/dev/null || exit 1
+)
 
 # Log CPU topology and timer/tick diagnostics.
 #
@@ -760,13 +755,18 @@ log_cpu_irq_diagnostics() {
 #
 # Return:
 # 0 - all tested CPUs passed
-# 1 - interrupt missing, no CPUs testable, or at least one tested CPU failed
-# 2 - unsupported environment, for example taskset missing
+# 1 - interrupt missing, malformed evidence, exhausted budget, or a tested CPU failed
+# 2 - unsupported environment, taskset missing or no eligible CPUs
+# Optional fifth argument bounds elapsed workload time, auto scales with CPU count.
+# Zero preserves legacy callers without a total budget.
 validate_per_cpu_interrupt_active() {
     irq_name="$1"
     workload_seconds="$2"
     retries="$3"
     skip_isolated="$4"
+    irq_budget="${5:-0}"
+    [ "$irq_budget" = auto ] || is_unsigned_number "$irq_budget" || return 1
+    irq_started=$(date +%s) || return 1
 
     IRQ_ACTIVE_TESTED=0
     IRQ_ACTIVE_PASSED=0
@@ -820,6 +820,11 @@ validate_per_cpu_interrupt_active() {
         return 1
     fi
 
+    if [ "$irq_budget" = auto ]; then
+        irq_cpu_count=$(printf '%s\n' "$online_cpus" | awk '{ count += NF } END { print count+0 }')
+        irq_budget=$((irq_cpu_count * retries * (workload_seconds + 2) + 10))
+    fi
+    log_info "Active interrupt workload budget: ${irq_budget}s"
     log_info "Online CPUs selected for active interrupt validation:"
     printf '%s\n' "$online_cpus" |
     while IFS= read -r cpu_index || [ -n "$cpu_index" ]; do
@@ -870,6 +875,13 @@ validate_per_cpu_interrupt_active() {
         cpu_pass=0
 
         while [ "$attempt" -le "$retries" ]; do
+            if [ "$irq_budget" -gt 0 ]; then
+                irq_now=$(date +%s) || return 1
+                if [ "$((irq_now - irq_started + workload_seconds))" -gt "$irq_budget" ]; then
+                    log_fail "Active interrupt validation exceeded its ${irq_budget}s budget"
+                    return 1
+                fi
+            fi
             initial_count="$(get_interrupt_cpu_count "$irq_name" "$cpu_index")"
 
             if ! is_unsigned_number "$initial_count"; then
@@ -934,8 +946,9 @@ validate_per_cpu_interrupt_active() {
     log_info "IRQ_ACTIVE_SUMMARY: tested=$IRQ_ACTIVE_TESTED passed=$IRQ_ACTIVE_PASSED failed=$IRQ_ACTIVE_FAILED skipped=$IRQ_ACTIVE_SKIPPED"
 
     if [ "$IRQ_ACTIVE_TESTED" -eq 0 ]; then
-        log_fail "No CPUs were testable for '$irq_name'"
-        return 1
+        IRQ_ACTIVE_SKIP_REASON="No online CPUs were eligible for active validation"
+        log_skip "$IRQ_ACTIVE_SKIP_REASON"
+        return 2
     fi
 
     if [ "$IRQ_ACTIVE_FAILED" -eq 0 ]; then
@@ -5607,6 +5620,7 @@ i2c_run_legacy_test() {
 pcie_collect_runtime_health() {
     pcrh_result_dir="$1"
     PCIE_RUNTIME_DEVICE_COUNT=0
+    PCIE_RUNTIME_BOUND_COUNT=0
     PCIE_RUNTIME_LINK_COUNT=0
     PCIE_RUNTIME_MSI_DEVICE_COUNT=0
     PCIE_RUNTIME_POWER_COUNT=0
@@ -5627,6 +5641,9 @@ pcie_collect_runtime_health() {
         pcrh_device_id=$(cat "$pcrh_device/device" 2>/dev/null || true)
         pcrh_class=$(cat "$pcrh_device/class" 2>/dev/null || true)
         pcrh_driver=$(platform_device_driver_name "$pcrh_device" 2>/dev/null || true)
+        if [ -n "$pcrh_driver" ]; then
+            PCIE_RUNTIME_BOUND_COUNT=$((PCIE_RUNTIME_BOUND_COUNT + 1))
+        fi
         pcrh_current_speed=$(cat "$pcrh_device/current_link_speed" 2>/dev/null || true)
         pcrh_max_speed=$(cat "$pcrh_device/max_link_speed" 2>/dev/null || true)
         pcrh_current_width=$(cat "$pcrh_device/current_link_width" 2>/dev/null || true)
@@ -7722,25 +7739,82 @@ detect_emmc_partition_block() {
 }
 
 # Auto-detect UFS block device (via udev vendor info or path hint)
-detect_ufs_partition_block() {
-    if command -v lsblk >/dev/null 2>&1 && command -v udevadm >/dev/null 2>&1; then
-        for part in $(lsblk -lnpo NAME,TYPE | awk '$2 == "part" {print $1}'); do
-            if udevadm info --query=all --name="$part" 2>/dev/null | grep -qi "ufs"; then
-                echo "$part"
+# storage_is_ufs <sysfs-block-path>
+# Follow the block device ancestry to a bound UFS host, without udevadm.
+storage_is_ufs() (
+    storage_node=$(readlink -f "$1") || return 1
+    while [ -n "$storage_node" ] && [ "$storage_node" != / ]; do
+        storage_driver=$(readlink -f "$storage_node/driver" 2>/dev/null) || storage_driver=""
+        case "${storage_driver##*/}" in
+            ufshcd*|ufs-qcom)
                 return 0
-            fi
-        done
-    fi
+                ;;
+        esac
+        storage_node=${storage_node%/*}
+    done
+    return 1
+)
 
-    for part in /dev/sd[a-z][0-9]*; do
-        [ -e "$part" ] || continue
-        if command -v udevadm >/dev/null 2>&1 &&
-           udevadm info --query=all --name="$part" 2>/dev/null | grep -qi "ufs"; then
-            echo "$part"
+# detect_ufs_partition_block
+# Print one runtime UFS block device. Whole devices are safe for read-only I/O.
+detect_ufs_partition_block() {
+    for ufs_block in /sys/class/block/*; do
+        [ -e "$ufs_block" ] || continue
+        if storage_is_ufs "$ufs_block" && [ -b "/dev/${ufs_block##*/}" ]; then
+            printf '/dev/%s\n' "${ufs_block##*/}"
             return 0
         fi
     done
     return 1
+}
+
+# storage_path_is_ufs <directory>
+# Check the deepest mount containing the resolved directory. Unknown, overlay,
+# tmpfs and stacked devices are deliberately not accepted as writable UFS proof.
+storage_path_is_ufs() (
+    storage_path=$(cd "$1" && pwd -P) || return 1
+    storage_dev=$(awk -v target="$storage_path" '
+        function decode(s) {
+            gsub(/\\040/, " ", s)
+            gsub(/\\011/, "\t", s)
+            gsub(/\\134/, "\\", s)
+            return s
+        }
+        {
+            mountpoint=decode($5)
+            if (mountpoint == "/" || target == mountpoint ||
+                index(target, mountpoint "/") == 1) {
+                if (length(mountpoint) >= longest) {
+                    longest=length(mountpoint)
+                    device=$3
+                }
+            }
+        }
+        END {print device}
+    ' /proc/self/mountinfo) || return 1
+    [ -n "$storage_dev" ] && storage_is_ufs "/sys/dev/block/$storage_dev"
+)
+
+# rng_restore_selection
+# Restore only the RNG selection changed by this test and report failure.
+rng_restore_selection() {
+    [ "${RNG_CHANGED:-0}" = 1 ] || return 0
+    if ! printf '%s\n' "$RNG_PREVIOUS" >"$RNG_CURRENT_PATH" ||
+       [ "$(cat "$RNG_CURRENT_PATH")" != "$RNG_PREVIOUS" ]; then
+        log_fail "Failed to restore RNG selection to $RNG_PREVIOUS"
+        return 1
+    fi
+    RNG_CHANGED=0
+    log_info "Restored RNG selection: $RNG_PREVIOUS"
+}
+
+# rng_cleanup
+# Cancel test-owned work before restoring RNG state on normal or signal exit.
+rng_cleanup() {
+    managed_timeout_cancel_bounded 2
+    if ! rng_restore_selection; then
+        printf '%s FAIL\n' "$TESTNAME" >"$RES_FILE"
+    fi
 }
 
 # scan_dmesg_errors OUTPUT_DIR MODULE_REGEX [EXCLUDE_REGEX]
@@ -11250,3 +11324,48 @@ cpu_hotplug_log_topology() {
         log_info "Current process Cpus_allowed_list: ${affinity:-<unavailable>}"
     fi
 }
+
+# rng_validate_entropy <source> <blocks> <maximum-failures> <out-dir> <read-seconds> <statistics-seconds>
+# Require complete entropy and statistics from the selected source. No fallback.
+rng_validate_entropy() (
+    trap 'managed_timeout_cancel_bounded 2' 0
+    trap 'exit 1' HUP INT TERM
+    rng_source="$1"
+    rng_blocks="$2"
+    rng_max_failures="$3"
+    rng_output="$4"
+    rng_read_seconds="$5"
+    rng_statistics_seconds="$6"
+    rng_bytes=$((4 + rng_blocks * 2500))
+    if run_with_managed_timeout "$rng_read_seconds" "$rng_output" entropy \
+        head -c "$rng_bytes" "$rng_source" >"$rng_output/entropy.bin" 2>"$rng_output/read.log"; then
+        rng_read_rc=0
+    else
+        rng_read_rc=$?
+    fi
+    rng_actual=$(wc -c <"$rng_output/entropy.bin")
+    log_info "RNG read: source=$rng_source bytes=$rng_actual expected=$rng_bytes exit_status=$rng_read_rc"
+    if [ "$rng_read_rc" -ne 0 ] || [ "$rng_actual" -ne "$rng_bytes" ]; then
+        cat "$rng_output/read.log"
+        return 1
+    fi
+    # shellcheck disable=SC2016 # Expand child positional arguments after launch.
+    run_with_managed_timeout "$rng_statistics_seconds" "$rng_output" statistics \
+        sh -c 'exec rngtest -c "$2" <"$1"' sh "$rng_output/entropy.bin" "$rng_blocks" \
+        >"$rng_output/rngtest.log" 2>&1
+    rng_status=$?
+    cat "$rng_output/rngtest.log"
+    rng_failures=$(awk '/^rngtest: FIPS 140-2 failures:/ {print $NF; exit}' "$rng_output/rngtest.log")
+    rng_successes=$(awk '/^rngtest: FIPS 140-2 successes:/ {print $NF; exit}' "$rng_output/rngtest.log")
+    case "$rng_failures:$rng_successes" in
+        *[!0-9:]*|:*|*:)
+            log_fail "RNG statistics are missing or malformed"
+            return 1
+            ;;
+    esac
+    if [ "$rng_status" -gt 1 ] || [ $((rng_failures + rng_successes)) -ne "$rng_blocks" ] ||
+       [ "$rng_failures" -gt "$rng_max_failures" ]; then
+        log_fail "RNG statistics incomplete or above threshold: successes=$rng_successes failures=$rng_failures exit_status=$rng_status"
+        return 1
+    fi
+)
