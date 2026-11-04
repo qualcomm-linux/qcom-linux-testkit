@@ -66,6 +66,8 @@ log_info "=== Test Initialization ==="
 
 deps_list="cat grep awk sed tr mkdir uname"
 log_info "Checking dependencies: $deps_list"
+# shellcheck disable=SC2034 # Consumed by check_dependencies.
+CHECK_DEPS_RECOVER=0
 if ! check_dependencies "$deps_list"; then
     log_skip "$TESTNAME SKIP - missing one or more dependencies: $deps_list"
     echo "$TESTNAME SKIP" >"$res_file"
@@ -77,6 +79,11 @@ if command -v detect_platform >/dev/null 2>&1; then
     log_info "Platform Details: machine='${PLATFORM_MACHINE:-unknown}' target='${PLATFORM_TARGET:-unknown}' kernel='${PLATFORM_KERNEL:-}' arch='${PLATFORM_ARCH:-}'"
 else
     log_info "Platform Details: kernel='$(uname -r 2>/dev/null || echo unknown)' arch='$(uname -m 2>/dev/null || echo unknown)'"
+fi
+
+if ! kvm_log_readiness "$DMESG_DIR"; then
+    printf '%s FAIL\n' "$TESTNAME" >"$res_file"
+    exit 0
 fi
 
 log_info "=== KVM Kernel Config Validation ==="
