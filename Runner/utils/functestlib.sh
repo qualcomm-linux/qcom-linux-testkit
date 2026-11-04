@@ -335,6 +335,9 @@ unload_kernel_module() {
 
 # --- Dependency check ---
 check_dependencies() {
+    if [ "${TESTKIT_IMAGE_ONLY:-0}" = 1 ]; then
+        CHECK_DEPS_RECOVER=0
+    fi
     # Support both:
     # check_dependencies date awk sed
     # check_dependencies "$deps" where deps="date awk sed"
@@ -8324,6 +8327,11 @@ detect_emmc_partition_block() {
 }
 
 # Auto-detect UFS block device (via udev vendor info or path hint)
+# storage_is_ufs <sysfs-block-path>
+# Follow the block device ancestry to a bound UFS host, without udevadm.
+
+# detect_ufs_partition_block
+# Print one runtime UFS block device. Whole devices are safe for read-only I/O.
 detect_ufs_partition_block() {
     if command -v lsblk >/dev/null 2>&1 && command -v udevadm >/dev/null 2>&1; then
         for part in $(lsblk -lnpo NAME,TYPE | awk '$2 == "part" {print $1}'); do
@@ -8344,6 +8352,16 @@ detect_ufs_partition_block() {
     done
     return 1
 }
+
+# storage_path_is_ufs <directory>
+# Check the deepest mount containing the resolved directory. Unknown, overlay,
+# tmpfs and stacked devices are deliberately not accepted as writable UFS proof.
+
+# rng_restore_selection
+# Restore only the RNG selection changed by this test and report failure.
+
+# rng_cleanup
+# Cancel test-owned work before restoring RNG state on normal or signal exit.
 
 # scan_dmesg_errors OUTPUT_DIR MODULE_REGEX [EXCLUDE_REGEX]
 # Capture the kernel log once and report non-benign errors for selected modules.
@@ -11852,3 +11870,6 @@ cpu_hotplug_log_topology() {
         log_info "Current process Cpus_allowed_list: ${affinity:-<unavailable>}"
     fi
 }
+
+# rng_validate_entropy <source> <blocks> <maximum-failures> <out-dir> <read-seconds> <statistics-seconds>
+# Require complete entropy and statistics from the selected source. No fallback.

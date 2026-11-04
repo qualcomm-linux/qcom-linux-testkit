@@ -32,8 +32,9 @@
 RESULT_FILE="${1:-}"
 STRICT=0
 LEGACY_TESTCASE_ID=""
+EXPECTED_TESTCASE_ID=""
 INVALID_RESULTS=0
-SIGNAL_FILE="${TMPDIR:-/tmp}/lava_signals_$$.log"
+SIGNAL_FILE=""
 PRINTK_SAVED=""
 PRINTK_CHANGED=0
 
@@ -53,6 +54,15 @@ parse_args() {
                     return 1
                 fi
                 LEGACY_TESTCASE_ID="$2"
+                shift 2
+                ;;
+            --expected-testcase-id)
+                if [ "$#" -lt 2 ] || [ -z "$2" ]; then
+                    echo "[ERROR] --expected-testcase-id requires a testcase name" >&2
+                    return 1
+                fi
+                EXPECTED_TESTCASE_ID="$2"
+                STRICT=1
                 shift 2
                 ;;
             *)
@@ -124,20 +134,22 @@ restore_kernel_console() {
 
 cleanup() {
     restore_kernel_console
-    rm -f "$SIGNAL_FILE"
+    if [ -n "$SIGNAL_FILE" ]; then
+        rm -f "$SIGNAL_FILE"
+    fi
 }
 
 trap cleanup EXIT HUP INT TERM
 
-# Remove any stale same-PID file before use. The EXIT trap is kept as backup,
-# and the file is also removed explicitly after signal emission.
-rm -f "$SIGNAL_FILE"
 
 if [ -z "$RESULT_FILE" ]; then
     echo "[WARNING] Result file argument missing" >&2
     [ "$STRICT" -eq 1 ] && exit 1
     exit 0
 fi
+
+# Keep the publication buffer under the invocation CWD, with no shared PID name.
+SIGNAL_FILE=$(mktemp "$PWD/lava-signals.XXXXXX") || exit 1
 
 # Collect validated signals in a buffer first.
 #
@@ -194,7 +206,8 @@ if [ -f "$RESULT_FILE" ]; then
 
         if [ "$STRICT" -eq 1 ]; then
             if [ "$#" -ne 2 ] || [ "$testcase_clean" != "$testcase" ] ||
-               [ "$result" = UNKNOWN ]; then
+               [ "$result" = UNKNOWN ] ||
+               { [ -n "$EXPECTED_TESTCASE_ID" ] && [ "$testcase" != "$EXPECTED_TESTCASE_ID" ]; }; then
                 echo "[WARNING] Invalid strict result: $line" >&2
                 INVALID_RESULTS=1
                 continue
