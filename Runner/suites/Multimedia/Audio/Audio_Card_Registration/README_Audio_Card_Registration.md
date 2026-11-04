@@ -392,3 +392,10 @@ On Qualcomm boards, this test is useful for identifying early audio bring-up iss
 - `/dev/snd` node creation problems
 
 This test should remain lightweight and non-destructive. It should not attempt to recover the audio subsystem by restarting services or remote processors.
+
+## Kernel and ramdisk execution
+
+The kbdev plan sets `TESTKIT_IMAGE_ONLY=1` to bypass package preparation.
+Registration uses image-provided ALSA cards, control/PCM nodes and topology
+evidence. Playback and recording clients are not prerequisites for registration.
+This does not add playback or capture coverage, and it does not start PipeWire.
