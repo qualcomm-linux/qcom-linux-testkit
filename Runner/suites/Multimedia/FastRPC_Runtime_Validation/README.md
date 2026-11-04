@@ -6,6 +6,8 @@ FastRPC character endpoints and retained kernel errors. It reuses the shared
 bounded QRTR topology helper, with qrtr-lookup or its existing optional Python
 fallback. Missing endpoints or optional query providers SKIP, present unusable
 endpoints, query failures and captured driver errors FAIL.
+An absent FastRPC endpoint keeps the overall result SKIP even when a QRTR-only
+query succeeds. Kernel or query failures still take precedence over that SKIP.
 
 Evidence remains in CWD results/FastRPC_Runtime_Validation/run-*. This is
 readiness, not a DSP transaction or AudioPD functional test. Existing remoteproc
