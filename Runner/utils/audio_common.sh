@@ -10055,8 +10055,11 @@ audio_record_stop_child() {
 # Logs go to stderr. Optional pw-link output goes to <WAV path>.links while
 # recording, after the first payload. The diagnostic child is killed/reaped
 # within two polling intervals or when capture ends, without extending deadlines.
-# Auto mode allows requested+grace for startup, then requested+grace for capture.
-# Idle progress is bounded by max(grace, 3). Explicit timeout caps the whole
+# Auto mode bounds startup to requested+grace and total time to twice that window.
+# AudioRecord opt-in validation retains the total budget after first payload,
+# stopping as soon as requested samples arrive. Other callers keep separate
+# startup and capture windows. Idle progress is bounded by max(grace, 3).
+# Explicit timeout caps the whole
 # capture, never triggers a retry, and does not reduce the requested WAV length.
 # Return 0 only after collecting the requested PCM duration and a graceful stop.
 # With --validate-at-deadline and no completion marker, return 124 for a
@@ -10118,6 +10121,13 @@ audio_record_with_progress() {
   done
 
   arwp_window=$((arwp_seconds + arwp_grace))
+  arwp_budget_policy=separate-windows
+  if [ "$arwp_limit" -eq 0 ] && [ "$arwp_validate_deadline" -eq 1 ] &&
+     [ -z "$arwp_completion" ]; then
+    # Keep unused startup allowance inside the original absolute limit.
+    # First payload is not proof that buffered/converting capture is at rate.
+    arwp_budget_policy=shared-total
+  fi
   arwp_idle_limit="$arwp_grace"
   if [ "$arwp_idle_limit" -lt 3 ]; then
     arwp_idle_limit=3
@@ -10166,6 +10176,8 @@ audio_record_with_progress() {
   exit 1' HUP INT TERM
   printf 'AUDIO_CAPTURE requested=%ss startup_limit=%ss idle_limit=%ss total_limit=%ss\n' \
     "$arwp_seconds" "$arwp_window" "$arwp_idle_limit" "$((arwp_deadline - arwp_start))" >&2
+  printf 'AUDIO_CAPTURE budget_policy=%s explicit_timeout=%ss\n' \
+    "$arwp_budget_policy" "$arwp_limit" >&2
   "$@" &
   arwp_pid=$!
   arwp_child_start="$(awk '{sub(/^.*\) /, ""); print $20}' "/proc/$arwp_pid/stat" 2>/dev/null || true)"
@@ -10242,7 +10254,7 @@ EOF
           arwp_first=1
           arwp_first_after=$((arwp_now - arwp_start))
           printf 'AUDIO_CAPTURE first_payload_after=%ss\n' "$((arwp_now - arwp_start))" >&2
-          if [ "$arwp_limit" -eq 0 ]; then
+          if [ "$arwp_limit" -eq 0 ] && [ "$arwp_budget_policy" = separate-windows ]; then
             arwp_deadline=$((arwp_now + arwp_window))
           fi
           if [ -n "$arwp_source_id" ]; then
