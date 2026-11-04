@@ -1,0 +1,16 @@
+metadata:
+    format: Lava-Test Test Definition 1.0
+    name: FastRPC_Runtime_Validation
+    description: FastRPC runtime readiness using image tools
+    maintainer:
+        - smuppand@qualcomm.com
+    os:
+        - openembedded
+    scope:
+        - functional
+run:
+    steps:
+        - REPO_PATH=$(pwd)
+        - cd "$REPO_PATH/Runner/suites/Multimedia/FastRPC_Runtime_Validation"
+        - ./run.sh
+        - '"$REPO_PATH/Runner/utils/send-to-lava.sh" "FastRPC_Runtime_Validation.res"'
