@@ -7,6 +7,8 @@ MRV_LAST_CMD_ELAPSED="0"
 MRV_LAST_TIMEOUT_DIR=""
 MRV_PROFILE_REASON=""
 MRV_MODULE_MONITOR_PID=""
+MRV_MODULE_MONITOR_READY=0
+MRV_MODULE_EVENT_LOG=""
 
 # mrv_stop_module_monitor
 # Stop and reap only this test's optional udevadm observer. No result changes.
@@ -31,8 +33,11 @@ mrv_stop_module_monitor() {
 # Optional udevadm adds evidence only, never a new applicability requirement.
 mrv_start_module_monitor() {
   mrv_stop_module_monitor
+  MRV_MODULE_MONITOR_READY=0
+  MRV_MODULE_EVENT_LOG=""
   [ "${PROFILE_DISCOVER_CLIENT_SERVICES:-no}" = yes ] || return 0
   mrv_monitor_log="$1/module_events.log"
+  MRV_MODULE_EVENT_LOG="$mrv_monitor_log"
   if ! command -v udevadm >/dev/null 2>&1; then
     printf 'Module event observation unavailable, udevadm is not installed\n' >"$mrv_monitor_log"
     return 0
@@ -43,6 +48,7 @@ mrv_start_module_monitor() {
   while kill -0 "$MRV_MODULE_MONITOR_PID" 2>/dev/null &&
         [ "$mrv_monitor_wait" -lt 3 ]; do
     if grep -q 'KERNEL -' "$mrv_monitor_log"; then
+      MRV_MODULE_MONITOR_READY=1
       return 0
     fi
     sleep 1
@@ -79,6 +85,8 @@ mrv_reset_profile_vars() {
   PROFILE_QUIESCE_DEVICE_PATTERNS=""
   PROFILE_QUIESCE_ONCE="no"
   PROFILE_DISCOVER_CLIENT_SERVICES="no"
+  PROFILE_ALLOW_AUTOMATIC_RELOAD="no"
+  MRV_AUTOMATIC_RELOAD=0
   MRV_PROFILE_QUIESCED="0"
   MRV_MODULE_STATE_LOG=""
   MRV_LAST_STATE_DIR=""
@@ -1802,6 +1810,15 @@ module_reload_profile_finalize() {
 mrv_profile_check() {
   requested_mode="$1"
 
+  case "${PROFILE_ALLOW_AUTOMATIC_RELOAD:-no}" in
+    yes|no)
+      ;;
+    *)
+      log_error "PROFILE_ALLOW_AUTOMATIC_RELOAD must be yes or no"
+      return 1
+      ;;
+  esac
+
   if [ -z "$PROFILE_NAME" ] || [ -z "$MODULE_NAME" ]; then
     MRV_PROFILE_REASON="profile missing PROFILE_NAME or MODULE_NAME"
     return 2
@@ -1891,9 +1908,71 @@ mrv_validate_module_list_state() {
   return 0
 }
 
-# Validate module state after unload completes.
+# mrv_module_reload_events <event-log> <module>
+# Print the ordered kernel remove/add pair for exactly this module, returning 0.
+# Return 1 for absent, incomplete or reversed evidence. Never accept udev echoes.
+mrv_module_reload_events() (
+  [ -r "$1" ] || exit 1
+  mrme_module="$(mrv_module_lsmod_name "$2")"
+  LC_ALL=C awk -v path="/module/$mrme_module" '
+    NF == 4 && $1 ~ /^KERNEL\[[0-9]+\.[0-9]+\]$/ &&
+    $3 == path && $4 == "(module)" {
+      stamp=$1
+      sub(/^KERNEL\[/, "", stamp)
+      sub(/\]$/, "", stamp)
+      if ($2 == "remove") {
+        removed=$0
+        remove_time=stamp + 0
+        added=""
+      } else if ($2 == "add" && removed != "" && stamp + 0 > remove_time) {
+        added=$0
+      }
+    }
+    END {
+      if (removed == "" || added == "") exit 1
+      print removed
+      print added
+    }
+  ' "$1"
+)
+
+# mrv_accept_automatic_reload
+# Opt-in profiles may validate a witnessed single-module lifecycle instead of a
+# persistent unloaded interval. Require a fresh ready observer and current load.
+# Profiles needing other modules absent or a post-unload hook keep strict checks.
+# Return 0 and retain proof only for a complete cycle. No module/service actions.
+mrv_accept_automatic_reload() {
+  [ "${PROFILE_ALLOW_AUTOMATIC_RELOAD:-no}" = yes ] || return 1
+  [ "${MRV_MODULE_MONITOR_READY:-0}" -eq 1 ] || return 1
+  [ -n "${MRV_MODULE_EVENT_LOG:-}" ] || return 1
+  if mrv_profile_override_defined profile_post_unload; then
+    return 1
+  fi
+  mrv_auto_target="$(mrv_module_lsmod_name "$MODULE_NAME")"
+  for mrv_auto_expected in $PROFILE_EXPECT_ABSENT_AFTER_UNLOAD; do
+    [ "$(mrv_module_lsmod_name "$mrv_auto_expected")" = "$mrv_auto_target" ] || return 1
+  done
+  mrv_module_loaded "$MODULE_NAME" || return 1
+  if ! mrv_module_reload_events "$MRV_MODULE_EVENT_LOG" "$MODULE_NAME" \
+      >"${MRV_MODULE_EVENT_LOG%/*}/automatic_reload.log"; then
+    return 1
+  fi
+  MRV_AUTOMATIC_RELOAD=1
+  log_info "[$PROFILE_NAME] kernel remove/add events confirm automatic reload, validating the reloaded module"
+  log_file_with_label MODULE-RELOAD "${MRV_MODULE_EVENT_LOG%/*}/automatic_reload.log" 2
+  return 0
+}
+
+# Validate an unloaded state or an explicitly permitted, witnessed reload cycle.
 mrv_post_unload_validate() {
+  MRV_AUTOMATIC_RELOAD=0
+  if mrv_accept_automatic_reload; then
+    return 0
+  fi
   if ! mrv_wait_module_state absent "$MODULE_NAME" "$TIMEOUT_SETTLE"; then
+    if mrv_accept_automatic_reload; then
+      return 0
+    fi
     log_fail "[$PROFILE_NAME] module still present after unload settle timeout"
     return 1
   fi
@@ -1932,7 +2011,11 @@ mrv_run_iteration() {
   mkdir -p "$iter_dir"
   # A rerun must not report an old load command or a snapshot from another
   # iteration when the current attempt fails before reaching that stage.
-  rm -f "$preload_log" "$unload_log" "$load_log"
+  rm -f "$preload_log" "$unload_log" "$load_log" \
+    "$iter_dir/module_events.log" "$iter_dir/automatic_reload.log"
+  MRV_MODULE_MONITOR_READY=0
+  MRV_MODULE_EVENT_LOG=""
+  MRV_AUTOMATIC_RELOAD=0
   MRV_LAST_STATE_DIR=""
   MRV_MODULE_STATE_LOG="$iter_dir/module_observations.log"
   : >"$MRV_MODULE_STATE_LOG"
@@ -2006,12 +2089,18 @@ mrv_run_iteration() {
     return 1
   fi
 
-  log_info "[$PROFILE_NAME] iter $iter/$ITERATIONS exec: $MODULE_LOAD_CMD"
-  MRV_LAST_TIMEOUT_DIR="$iter_dir/load_timeout"
-  mrv_exec_with_timeout "$TIMEOUT_LOAD" "$load_log" "$MODULE_LOAD_CMD"
-  load_rc=$?
-  load_elapsed="$MRV_LAST_CMD_ELAPSED"
-  log_info "[$PROFILE_NAME] iter $iter/$ITERATIONS load exit_status=$load_rc elapsed_polls=$load_elapsed"
+  if [ "$MRV_AUTOMATIC_RELOAD" -eq 1 ]; then
+    printf 'LOAD_MODE: automatic\nExplicit load command not run, kernel remove/add evidence retained in automatic_reload.log\n' >"$load_log"
+    load_rc=0
+    log_info "[$PROFILE_NAME] iter $iter/$ITERATIONS load mode: observed automatic reload"
+  else
+    log_info "[$PROFILE_NAME] iter $iter/$ITERATIONS exec: $MODULE_LOAD_CMD"
+    MRV_LAST_TIMEOUT_DIR="$iter_dir/load_timeout"
+    mrv_exec_with_timeout "$TIMEOUT_LOAD" "$load_log" "$MODULE_LOAD_CMD"
+    load_rc=$?
+    load_elapsed="$MRV_LAST_CMD_ELAPSED"
+    log_info "[$PROFILE_NAME] iter $iter/$ITERATIONS load exit_status=$load_rc elapsed_polls=$load_elapsed"
+  fi
 
   if [ "$load_rc" -eq 124 ]; then
     log_fail "[$PROFILE_NAME] iter $iter/$ITERATIONS load timed out after ${load_elapsed}s (pid=$MRV_LAST_CMD_PID)"
@@ -2057,6 +2146,7 @@ mrv_run_iteration() {
     printf 'iter=%s\n' "$iter"
     printf 'unload_elapsed=%s\n' "$unload_elapsed"
     printf 'load_elapsed=%s\n' "$load_elapsed"
+    printf 'automatic_reload=%s\n' "$MRV_AUTOMATIC_RELOAD"
   } > "$iter_dir/iteration_metrics.log"
 
   log_pass "[$PROFILE_NAME] iteration $iter/$ITERATIONS passed"
