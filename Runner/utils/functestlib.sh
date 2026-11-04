@@ -5620,6 +5620,7 @@ i2c_run_legacy_test() {
 pcie_collect_runtime_health() {
     pcrh_result_dir="$1"
     PCIE_RUNTIME_DEVICE_COUNT=0
+    PCIE_RUNTIME_BOUND_COUNT=0
     PCIE_RUNTIME_LINK_COUNT=0
     PCIE_RUNTIME_MSI_DEVICE_COUNT=0
     PCIE_RUNTIME_POWER_COUNT=0
@@ -5640,6 +5641,9 @@ pcie_collect_runtime_health() {
         pcrh_device_id=$(cat "$pcrh_device/device" 2>/dev/null || true)
         pcrh_class=$(cat "$pcrh_device/class" 2>/dev/null || true)
         pcrh_driver=$(platform_device_driver_name "$pcrh_device" 2>/dev/null || true)
+        if [ -n "$pcrh_driver" ]; then
+            PCIE_RUNTIME_BOUND_COUNT=$((PCIE_RUNTIME_BOUND_COUNT + 1))
+        fi
         pcrh_current_speed=$(cat "$pcrh_device/current_link_speed" 2>/dev/null || true)
         pcrh_max_speed=$(cat "$pcrh_device/max_link_speed" 2>/dev/null || true)
         pcrh_current_width=$(cat "$pcrh_device/current_link_width" 2>/dev/null || true)
