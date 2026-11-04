@@ -1235,7 +1235,7 @@ auto_secs_for() {
 
 # Validate the final capture selected by the existing backend/retry flow.
 # Legacy backend fallbacks use size only as a retry hint. PipeWire requires
-# sample-progress completion, and every backend must pass final WAV validation.
+# bounded sample progress, and every backend must pass final WAV validation.
 audio_record_validate_final_output() {
   recording_valid=0
   validation_expected_duration="$secs"
@@ -1341,7 +1341,8 @@ if [ "$USE_CONFIG_DISCOVERY" = "true" ]; then
     channels="$(printf '%s' "$params" | awk '{print $2}')"
 
     total=$((total + 1))
-    logf="$LOGDIR/${case_name}.log"
+    case_log="$LOGDIR/${case_name}.log"
+    logf="$case_log"
     : > "$logf"
     export AUDIO_LOGCTX="$logf"
 
@@ -1377,7 +1378,10 @@ if [ "$USE_CONFIG_DISCOVERY" = "true" ]; then
 
       log_info "[$case_name] loop $i/$LOOPS start=$iso rate=${rate}Hz channels=$channels backend=$AUDIO_BACKEND $loop_hdr"
 
-      audio_record_set_capture_paths "$case_name"
+      audio_record_set_capture_paths "$case_name" "$i" "$LOOPS"
+      logf="${record_out%.wav}.log"
+      : > "$logf"
+      export AUDIO_LOGCTX="$logf"
       audio_record_reset_capture_output
       start_mono="$(get_monotonic_seconds)"
       start_wall="$(date +%s 2>/dev/null || echo 0)"
@@ -1386,7 +1390,7 @@ if [ "$USE_CONFIG_DISCOVERY" = "true" ]; then
 
       if [ "$AUDIO_BACKEND" = "pipewire" ]; then
         audio_record_pipewire_capture "$TIMEOUT" "$SRC_CHOICE" "$record_user_out" "$logf" \
-          "$rate" "$channels" "$secs" "$AUDIO_RECORD_START_GRACE"
+          "$rate" "$channels" "$secs" "$AUDIO_RECORD_START_GRACE" "" validate-wav
         rc=$?
         bytes="$(audio_record_capture_size)"
       else
@@ -1478,7 +1482,7 @@ if [ "$USE_CONFIG_DISCOVERY" = "true" ]; then
               audio_record_set_recovered_backend_management
             fi
 
-            audio_record_set_capture_paths "$case_name"
+            audio_record_set_capture_paths "$case_name" "$i" "$LOOPS"
             audio_record_reset_capture_output
             log_info "[$case_name] retry: parecord --rate=$rate --channels=$channels --file-format=wav \"$record_user_out\""
             audio_run_with_timeout_as_test_user --require-session "$effective_timeout" parecord --rate="$rate" --channels="$channels" --file-format=wav "$record_user_out" >> "$logf" 2>&1
@@ -1551,17 +1555,21 @@ if [ "$USE_CONFIG_DISCOVERY" = "true" ]; then
         audio_record_failure_diagnostics "$logf" "$AUDIO_BACKEND" "$SRC_ID"
       fi
 
+      if [ "$logf" != "$case_log" ]; then
+        cat "$logf" >> "$case_log"
+      fi
       i=$((i + 1))
     done
+    log_info "[$case_name] validated loops: $ok_runs/$LOOPS"
 
     # Aggregate result for this config
     status="FAIL"
-    if [ "$ok_runs" -ge 1 ] &&
+    if [ "$ok_runs" -gt 0 ] && [ "$ok_runs" -eq "$LOOPS" ] &&
        [ "${AUDIO_PIPEWIRE_CAPTURE_VOLUME_FAILED:-0}" -eq 0 ]; then
       status="PASS"
     fi
 
-    append_junit "$case_name" "$last_elapsed" "$status" "$logf"
+    append_junit "$case_name" "$last_elapsed" "$status" "$case_log"
 
     case "$status" in
       PASS)
@@ -1585,7 +1593,8 @@ else
   for dur in $DURATIONS; do
     case_name="record_${dur}"
     total=$((total + 1))
-    logf="$LOGDIR/${case_name}.log"
+    case_log="$LOGDIR/${case_name}.log"
+    logf="$case_log"
     : > "$logf"
     export AUDIO_LOGCTX="$logf"
 
@@ -1624,7 +1633,10 @@ else
 
       log_info "[$case_name] loop $i/$LOOPS start=$iso secs=$secs backend=$AUDIO_BACKEND $loop_hdr"
 
-      audio_record_set_capture_paths "$case_name"
+      audio_record_set_capture_paths "$case_name" "$i" "$LOOPS"
+      logf="${record_out%.wav}.log"
+      : > "$logf"
+      export AUDIO_LOGCTX="$logf"
       audio_record_reset_capture_output
       start_mono="$(get_monotonic_seconds)"
       start_wall="$(date +%s 2>/dev/null || echo 0)"
@@ -1633,7 +1645,7 @@ else
 
       if [ "$AUDIO_BACKEND" = "pipewire" ]; then
         audio_record_pipewire_capture "$TIMEOUT" "$SRC_CHOICE" "$record_user_out" "$logf" \
-          "" "" "$secs" "$AUDIO_RECORD_START_GRACE"
+          "" "" "$secs" "$AUDIO_RECORD_START_GRACE" "" validate-wav
         rc=$?
         bytes="$(audio_record_capture_size)"
       else
@@ -1709,7 +1721,7 @@ else
               audio_record_set_recovered_backend_management
             fi
 
-            audio_record_set_capture_paths "$case_name"
+            audio_record_set_capture_paths "$case_name" "$i" "$LOOPS"
             audio_record_reset_capture_output
             log_info "[$case_name] retry: parecord --file-format=wav \"$record_user_out\""
             audio_run_with_timeout_as_test_user --require-session "$effective_timeout" parecord --file-format=wav "$record_user_out" >> "$logf" 2>&1
@@ -1782,17 +1794,21 @@ else
         audio_record_failure_diagnostics "$logf" "$AUDIO_BACKEND" "$SRC_ID"
       fi
 
+      if [ "$logf" != "$case_log" ]; then
+        cat "$logf" >> "$case_log"
+      fi
       i=$((i + 1))
     done
+    log_info "[$case_name] validated loops: $ok_runs/$LOOPS"
 
     # Aggregate result for this duration
     status="FAIL"
-    if [ "$ok_runs" -ge 1 ] &&
+    if [ "$ok_runs" -gt 0 ] && [ "$ok_runs" -eq "$LOOPS" ] &&
        [ "${AUDIO_PIPEWIRE_CAPTURE_VOLUME_FAILED:-0}" -eq 0 ]; then
       status="PASS"
     fi
 
-    append_junit "$case_name" "$last_elapsed" "$status" "$logf"
+    append_junit "$case_name" "$last_elapsed" "$status" "$case_log"
 
     case "$status" in
       PASS)

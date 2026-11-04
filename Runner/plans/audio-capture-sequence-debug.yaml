@@ -1,0 +1,190 @@
+# Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+# SPDX-License-Identifier: BSD-3-Clause
+metadata:
+  format: Lava-Test Test Definition 1.0
+  name: audio-capture-sequence-debug
+  description: Compare repeated capture before and after the nightly audio playback and record sequence in one boot.
+  os:
+  - linux
+  scope:
+  - functional
+params:
+  AUDIO_BACKEND: pipewire
+  SOURCE_CHOICE: mic
+  SINK_CHOICE: speakers
+  TARGET_RECORD_CONFIG: record_config5
+  RECORD_SECONDS: 5s
+  RECORD_LOOPS: 3
+  AUDIO_CLIPS_ARCHIVE: /Lava_binaries/AudioClips.tar.gz
+  AUDIO_CLIPS_PATH: ''
+run:
+  steps:
+  - REPO_PATH="$PWD"
+  - . "$REPO_PATH/Runner/utils/functestlib.sh"
+  - |-
+    if [ -z "$AUDIO_CLIPS_PATH" ]; then
+        AUDIO_CLIPS_PATH="$REPO_PATH/audio-capture-sequence-assets/AudioClips"
+        mkdir -p "$REPO_PATH/audio-capture-sequence-assets" || exit 1
+        if ! tar -xzf "$AUDIO_CLIPS_ARCHIVE" -C "$REPO_PATH/audio-capture-sequence-assets"; then
+            lava-test-case AudioSequence_assets --result fail
+            exit 1
+        fi
+    fi
+    if [ ! -d "$AUDIO_CLIPS_PATH" ]; then
+        log_fail "Missing audio clips directory: $AUDIO_CLIPS_PATH"
+        lava-test-case AudioSequence_assets --result fail
+        exit 1
+    fi
+    chmod -R a+rX "$AUDIO_CLIPS_PATH" || exit 1
+    lava-test-case AudioSequence_assets --result pass
+  - cd "$REPO_PATH/Runner/suites/Multimedia/Audio/AudioRecord" || exit 1
+  - export TMPDIR="$PWD"
+  - rm -f "AudioRecord_Before.res"
+  - ./run.sh --backend "${AUDIO_BACKEND}" --source "${SOURCE_CHOICE}" --config-name "${TARGET_RECORD_CONFIG}" --record-seconds "${RECORD_SECONDS}" --loops "${RECORD_LOOPS}" --timeout 0 --start-grace 5 --strict 0 --res-suffix "Before" --lava-testcase-id "AudioRecord_Before" || true
+  - '"$REPO_PATH/Runner/utils/send-to-lava.sh" "AudioRecord_Before.res" --strict || lava-test-case AudioRecord_Before_result_publication --result fail'
+  - |-
+    find "$PWD/results/AudioRecord_Before" -type f     \( -name 'record_*.log' -o -name '*.links' -o -name '*.source-format'     -o -name '*.server-before' -o -name '*.server-after' \) -print |
+        sort |
+        while IFS= read -r artifact; do
+            case "$artifact" in
+                *.log)
+                    if [ -f "${artifact%.log}.loop-1.log" ]; then
+                        continue
+                    fi
+                    ;;
+            esac
+            log_info "Audio sequence artifact: $artifact"
+            case "$artifact" in
+                *.server-before|*.server-after)
+                    awk '/ActiveState=|SubState=|MainPID=|NRestarts=|default.clock|clock.rate|Error\[|failed|No calibration|graph_open|service scope/' "$artifact" >"$artifact.sequence-summary"
+                    log_file_with_label AUDIO-SEQUENCE "$artifact.sequence-summary" 160
+                    ;;
+                *)
+                    log_file_with_label AUDIO-SEQUENCE "$artifact" 120
+                    ;;
+            esac
+        done
+  - cd "$REPO_PATH/Runner/suites/Multimedia/Audio/AudioPlayback" || exit 1
+  - export TMPDIR="$PWD"
+  - rm -f "AudioPlayback_Sequence1.res"
+  - ./run.sh --backend "${AUDIO_BACKEND}" --sink "${SINK_CHOICE}" --clip-name "playback_config1" --loops 1 --timeout 10s --audio-clips-path "$AUDIO_CLIPS_PATH" --res-suffix "Sequence1" --lava-testcase-id "AudioPlayback_Sequence1" || true
+  - '"$REPO_PATH/Runner/utils/send-to-lava.sh" "AudioPlayback_Sequence1.res" --strict || lava-test-case AudioPlayback_Sequence1_result_publication --result fail'
+  - cd "$REPO_PATH/Runner/suites/Multimedia/Audio/AudioPlayback" || exit 1
+  - export TMPDIR="$PWD"
+  - rm -f "AudioPlayback_Sequence2.res"
+  - ./run.sh --backend "${AUDIO_BACKEND}" --sink "${SINK_CHOICE}" --clip-name "playback_config2" --loops 1 --timeout 10s --audio-clips-path "$AUDIO_CLIPS_PATH" --res-suffix "Sequence2" --lava-testcase-id "AudioPlayback_Sequence2" || true
+  - '"$REPO_PATH/Runner/utils/send-to-lava.sh" "AudioPlayback_Sequence2.res" --strict || lava-test-case AudioPlayback_Sequence2_result_publication --result fail'
+  - cd "$REPO_PATH/Runner/suites/Multimedia/Audio/AudioPlayback" || exit 1
+  - export TMPDIR="$PWD"
+  - rm -f "AudioPlayback_Sequence3.res"
+  - ./run.sh --backend "${AUDIO_BACKEND}" --sink "${SINK_CHOICE}" --clip-name "playback_config3" --loops 1 --timeout 10s --audio-clips-path "$AUDIO_CLIPS_PATH" --res-suffix "Sequence3" --lava-testcase-id "AudioPlayback_Sequence3" || true
+  - '"$REPO_PATH/Runner/utils/send-to-lava.sh" "AudioPlayback_Sequence3.res" --strict || lava-test-case AudioPlayback_Sequence3_result_publication --result fail'
+  - cd "$REPO_PATH/Runner/suites/Multimedia/Audio/AudioPlayback" || exit 1
+  - export TMPDIR="$PWD"
+  - rm -f "AudioPlayback_Sequence4.res"
+  - ./run.sh --backend "${AUDIO_BACKEND}" --sink "${SINK_CHOICE}" --clip-name "playback_config4" --loops 1 --timeout 10s --audio-clips-path "$AUDIO_CLIPS_PATH" --res-suffix "Sequence4" --lava-testcase-id "AudioPlayback_Sequence4" || true
+  - '"$REPO_PATH/Runner/utils/send-to-lava.sh" "AudioPlayback_Sequence4.res" --strict || lava-test-case AudioPlayback_Sequence4_result_publication --result fail'
+  - cd "$REPO_PATH/Runner/suites/Multimedia/Audio/AudioPlayback" || exit 1
+  - export TMPDIR="$PWD"
+  - rm -f "AudioPlayback_Sequence5.res"
+  - ./run.sh --backend "${AUDIO_BACKEND}" --sink "${SINK_CHOICE}" --clip-name "playback_config5" --loops 1 --timeout 10s --audio-clips-path "$AUDIO_CLIPS_PATH" --res-suffix "Sequence5" --lava-testcase-id "AudioPlayback_Sequence5" || true
+  - '"$REPO_PATH/Runner/utils/send-to-lava.sh" "AudioPlayback_Sequence5.res" --strict || lava-test-case AudioPlayback_Sequence5_result_publication --result fail'
+  - cd "$REPO_PATH/Runner/suites/Multimedia/Audio/AudioPlayback" || exit 1
+  - export TMPDIR="$PWD"
+  - rm -f "AudioPlayback_Sequence6.res"
+  - ./run.sh --backend "${AUDIO_BACKEND}" --sink "${SINK_CHOICE}" --clip-name "playback_config6" --loops 1 --timeout 10s --audio-clips-path "$AUDIO_CLIPS_PATH" --res-suffix "Sequence6" --lava-testcase-id "AudioPlayback_Sequence6" || true
+  - '"$REPO_PATH/Runner/utils/send-to-lava.sh" "AudioPlayback_Sequence6.res" --strict || lava-test-case AudioPlayback_Sequence6_result_publication --result fail'
+  - cd "$REPO_PATH/Runner/suites/Multimedia/Audio/AudioPlayback" || exit 1
+  - export TMPDIR="$PWD"
+  - rm -f "AudioPlayback_Sequence7.res"
+  - ./run.sh --backend "${AUDIO_BACKEND}" --sink "${SINK_CHOICE}" --clip-name "playback_config7" --loops 1 --timeout 10s --audio-clips-path "$AUDIO_CLIPS_PATH" --res-suffix "Sequence7" --lava-testcase-id "AudioPlayback_Sequence7" || true
+  - '"$REPO_PATH/Runner/utils/send-to-lava.sh" "AudioPlayback_Sequence7.res" --strict || lava-test-case AudioPlayback_Sequence7_result_publication --result fail'
+  - cd "$REPO_PATH/Runner/suites/Multimedia/Audio/AudioPlayback" || exit 1
+  - export TMPDIR="$PWD"
+  - rm -f "AudioPlayback_Sequence8.res"
+  - ./run.sh --backend "${AUDIO_BACKEND}" --sink "${SINK_CHOICE}" --clip-name "playback_config8" --loops 1 --timeout 10s --audio-clips-path "$AUDIO_CLIPS_PATH" --res-suffix "Sequence8" --lava-testcase-id "AudioPlayback_Sequence8" || true
+  - '"$REPO_PATH/Runner/utils/send-to-lava.sh" "AudioPlayback_Sequence8.res" --strict || lava-test-case AudioPlayback_Sequence8_result_publication --result fail'
+  - cd "$REPO_PATH/Runner/suites/Multimedia/Audio/AudioPlayback" || exit 1
+  - export TMPDIR="$PWD"
+  - rm -f "AudioPlayback_Sequence9.res"
+  - ./run.sh --backend "${AUDIO_BACKEND}" --sink "${SINK_CHOICE}" --clip-name "playback_config9" --loops 1 --timeout 10s --audio-clips-path "$AUDIO_CLIPS_PATH" --res-suffix "Sequence9" --lava-testcase-id "AudioPlayback_Sequence9" || true
+  - '"$REPO_PATH/Runner/utils/send-to-lava.sh" "AudioPlayback_Sequence9.res" --strict || lava-test-case AudioPlayback_Sequence9_result_publication --result fail'
+  - cd "$REPO_PATH/Runner/suites/Multimedia/Audio/AudioPlayback" || exit 1
+  - export TMPDIR="$PWD"
+  - rm -f "AudioPlayback_Sequence10.res"
+  - ./run.sh --backend "${AUDIO_BACKEND}" --sink "${SINK_CHOICE}" --clip-name "playback_config10" --loops 1 --timeout 10s --audio-clips-path "$AUDIO_CLIPS_PATH" --res-suffix "Sequence10" --lava-testcase-id "AudioPlayback_Sequence10" || true
+  - '"$REPO_PATH/Runner/utils/send-to-lava.sh" "AudioPlayback_Sequence10.res" --strict || lava-test-case AudioPlayback_Sequence10_result_publication --result fail'
+  - cd "$REPO_PATH/Runner/suites/Multimedia/Audio/AudioRecord" || exit 1
+  - export TMPDIR="$PWD"
+  - rm -f "AudioRecord_AfterPlayback.res"
+  - ./run.sh --backend "${AUDIO_BACKEND}" --source "${SOURCE_CHOICE}" --config-name "${TARGET_RECORD_CONFIG}" --record-seconds "${RECORD_SECONDS}" --loops "${RECORD_LOOPS}" --timeout 0 --start-grace 5 --strict 0 --res-suffix "AfterPlayback" --lava-testcase-id "AudioRecord_AfterPlayback" || true
+  - '"$REPO_PATH/Runner/utils/send-to-lava.sh" "AudioRecord_AfterPlayback.res" --strict || lava-test-case AudioRecord_AfterPlayback_result_publication --result fail'
+  - |-
+    find "$PWD/results/AudioRecord_AfterPlayback" -type f     \( -name 'record_*.log' -o -name '*.links' -o -name '*.source-format'     -o -name '*.server-before' -o -name '*.server-after' \) -print |
+        sort |
+        while IFS= read -r artifact; do
+            case "$artifact" in
+                *.log)
+                    if [ -f "${artifact%.log}.loop-1.log" ]; then
+                        continue
+                    fi
+                    ;;
+            esac
+            log_info "Audio sequence artifact: $artifact"
+            case "$artifact" in
+                *.server-before|*.server-after)
+                    awk '/ActiveState=|SubState=|MainPID=|NRestarts=|default.clock|clock.rate|Error\[|failed|No calibration|graph_open|service scope/' "$artifact" >"$artifact.sequence-summary"
+                    log_file_with_label AUDIO-SEQUENCE "$artifact.sequence-summary" 160
+                    ;;
+                *)
+                    log_file_with_label AUDIO-SEQUENCE "$artifact" 120
+                    ;;
+            esac
+        done
+  - cd "$REPO_PATH/Runner/suites/Multimedia/Audio/AudioRecord" || exit 1
+  - export TMPDIR="$PWD"
+  - rm -f "AudioRecord_Predecessor1.res"
+  - ./run.sh --backend "${AUDIO_BACKEND}" --source "${SOURCE_CHOICE}" --config-name "record_config1" --record-seconds "${RECORD_SECONDS}" --loops "1" --timeout 0 --start-grace 5 --strict 0 --res-suffix "Predecessor1" --lava-testcase-id "AudioRecord_Predecessor1" || true
+  - '"$REPO_PATH/Runner/utils/send-to-lava.sh" "AudioRecord_Predecessor1.res" --strict || lava-test-case AudioRecord_Predecessor1_result_publication --result fail'
+  - cd "$REPO_PATH/Runner/suites/Multimedia/Audio/AudioRecord" || exit 1
+  - export TMPDIR="$PWD"
+  - rm -f "AudioRecord_Predecessor2.res"
+  - ./run.sh --backend "${AUDIO_BACKEND}" --source "${SOURCE_CHOICE}" --config-name "record_config2" --record-seconds "${RECORD_SECONDS}" --loops "1" --timeout 0 --start-grace 5 --strict 0 --res-suffix "Predecessor2" --lava-testcase-id "AudioRecord_Predecessor2" || true
+  - '"$REPO_PATH/Runner/utils/send-to-lava.sh" "AudioRecord_Predecessor2.res" --strict || lava-test-case AudioRecord_Predecessor2_result_publication --result fail'
+  - cd "$REPO_PATH/Runner/suites/Multimedia/Audio/AudioRecord" || exit 1
+  - export TMPDIR="$PWD"
+  - rm -f "AudioRecord_Predecessor3.res"
+  - ./run.sh --backend "${AUDIO_BACKEND}" --source "${SOURCE_CHOICE}" --config-name "record_config3" --record-seconds "${RECORD_SECONDS}" --loops "1" --timeout 0 --start-grace 5 --strict 0 --res-suffix "Predecessor3" --lava-testcase-id "AudioRecord_Predecessor3" || true
+  - '"$REPO_PATH/Runner/utils/send-to-lava.sh" "AudioRecord_Predecessor3.res" --strict || lava-test-case AudioRecord_Predecessor3_result_publication --result fail'
+  - cd "$REPO_PATH/Runner/suites/Multimedia/Audio/AudioRecord" || exit 1
+  - export TMPDIR="$PWD"
+  - rm -f "AudioRecord_Predecessor4.res"
+  - ./run.sh --backend "${AUDIO_BACKEND}" --source "${SOURCE_CHOICE}" --config-name "record_config4" --record-seconds "${RECORD_SECONDS}" --loops "1" --timeout 0 --start-grace 5 --strict 0 --res-suffix "Predecessor4" --lava-testcase-id "AudioRecord_Predecessor4" || true
+  - '"$REPO_PATH/Runner/utils/send-to-lava.sh" "AudioRecord_Predecessor4.res" --strict || lava-test-case AudioRecord_Predecessor4_result_publication --result fail'
+  - cd "$REPO_PATH/Runner/suites/Multimedia/Audio/AudioRecord" || exit 1
+  - export TMPDIR="$PWD"
+  - rm -f "AudioRecord_AfterRecord.res"
+  - ./run.sh --backend "${AUDIO_BACKEND}" --source "${SOURCE_CHOICE}" --config-name "${TARGET_RECORD_CONFIG}" --record-seconds "${RECORD_SECONDS}" --loops "${RECORD_LOOPS}" --timeout 0 --start-grace 5 --strict 0 --res-suffix "AfterRecord" --lava-testcase-id "AudioRecord_AfterRecord" || true
+  - '"$REPO_PATH/Runner/utils/send-to-lava.sh" "AudioRecord_AfterRecord.res" --strict || lava-test-case AudioRecord_AfterRecord_result_publication --result fail'
+  - |-
+    find "$PWD/results/AudioRecord_AfterRecord" -type f     \( -name 'record_*.log' -o -name '*.links' -o -name '*.source-format'     -o -name '*.server-before' -o -name '*.server-after' \) -print |
+        sort |
+        while IFS= read -r artifact; do
+            case "$artifact" in
+                *.log)
+                    if [ -f "${artifact%.log}.loop-1.log" ]; then
+                        continue
+                    fi
+                    ;;
+            esac
+            log_info "Audio sequence artifact: $artifact"
+            case "$artifact" in
+                *.server-before|*.server-after)
+                    awk '/ActiveState=|SubState=|MainPID=|NRestarts=|default.clock|clock.rate|Error\[|failed|No calibration|graph_open|service scope/' "$artifact" >"$artifact.sequence-summary"
+                    log_file_with_label AUDIO-SEQUENCE "$artifact.sequence-summary" 160
+                    ;;
+                *)
+                    log_file_with_label AUDIO-SEQUENCE "$artifact" 120
+                    ;;
+            esac
+        done

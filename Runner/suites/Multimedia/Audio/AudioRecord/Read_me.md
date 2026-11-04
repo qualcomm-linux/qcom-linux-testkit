@@ -628,8 +628,13 @@ extra startup grace or retries. Startup and idle checks still apply. It does not
 lower PipeWire's requested sample duration. Set it high enough for startup and
 the requested capture. Termination allows up to three additional seconds to
 finalize the WAV, then kills and reaps only the test-owned recorder. Forced kill,
-early recorder exit, startup failure, stall, and incomplete capture are FAIL.
-Final WAV format, duration and content validation remains mandatory. This
+early recorder exit, startup failure and stall are FAIL. If samples are still
+arriving at the deadline and the recorder stops gracefully, the monitor returns
+an expected watchdog status. Final WAV validation then decides the result using
+the existing `AUDIO_RECORD_MIN_DURATION_RATIO` (default `0.70`), format and signal
+checks. For a five-second request, a valid 3.5-second or longer WAV can pass after
+this expected stop. A shorter WAV still fails. The full five seconds remains the
+capture goal, and an explicit timeout does not lower the validation target. This
 monitor uses image-provided shell tools and does not require Python or systemd.
 
 ALSA and PulseAudio retain their existing capture, timeout and retry behavior.
@@ -883,8 +888,23 @@ requested duration, expected byte rate, observed byte rate including startup,
 first payload time, last growth time, idle interval and effective deadline.
 Completion-marker state is included when the recording path requires one.
 The decision timestamp is separate from elapsed time spent stopping the recorder.
-A slow or stalled recording still fails even when the partial WAV passes the
-minimum integrity threshold. These diagnostics do not extend capture deadlines.
+A still-progressing recording stopped at the deadline emits `status=STOPPED`,
+not PASS. A stdout warning includes the collected duration and byte-rate summary,
+and final WAV validation determines the result. Stalled or broken recordings
+remain FAIL even when their partial WAV passes content checks. These diagnostics
+do not extend capture deadlines. This expected-stop policy applies to AudioRecord
+on both base and overlay PipeWire stacks, including Yocto, Debian, Ubuntu and
+CentOS. AudioLoopback retains its full-duration and playback-completion checks.
+
+For example, repeat the same runtime-selected microphone configuration:
+
+```sh
+./run.sh --backend pipewire --source mic --config-name record_config7 --record-seconds 5s --loops 2
+```
+
+Inspect the warning and final testcase result together. A WAV content PASS alone
+does not override a recorder error, volume restoration failure or another suite
+failure.
 
 ## Live PipeWire source format
 
@@ -905,3 +925,51 @@ sidecars are cleared on rerun. ALSA and PulseAudio execution are unchanged.
 ## License
 
 SPDX-License-Identifier: BSD-3-Clause(C) Qualcomm Technologies, Inc. and/or its subsidiaries.
+
+## Repeated recording validation
+
+`--loops N` (or `LOOPS=N`) runs N validations of each selected configuration or
+legacy duration. Every loop must pass. A later successful recording cannot hide
+an earlier recording failure. LAVA still receives one aggregate result per
+invocation, and stdout reports `validated loops: passed/requested`.
+
+With multiple loops, each attempt retains its own WAV, client log, volume/route
+logs, server snapshots and available live PipeWire sidecars. For example,
+`record_32KHz_2ch.loop-1.wav` and `record_32KHz_2ch.loop-1.log` belong to the first
+attempt. The existing `record_32KHz_2ch.log` combines the attempt client logs for
+case-level review. Single-loop artifact names are unchanged. Desktop-user WAVs
+are promoted to the same per-loop final paths, and all paths stay under the
+current invocation's results directory.
+
+```sh
+./run.sh --backend pipewire --source mic --config-name record_config5 --record-seconds 5s --loops 3
+./run.sh --backend alsa --source mic --durations short --record-seconds 5s --loops 3
+```
+
+A sequence of PASS, FAIL, PASS produces an aggregate FAIL on every backend.
+Successful repetition does not prove that prior-test state or intermittent
+capture delays have been resolved. For a LAVA comparison within one boot, use
+[the audio capture sequence plan](../../../../plans/audio-capture-sequence-debug.yaml)
+and retain its before/after results and diagnostics.
+
+### LAVA sequence comparison
+
+`audio-capture-sequence-debug.yaml` runs the selected recording configuration
+before playback, after the ten nightly playback invocations, and after the four
+preceding record configurations. Each checkpoint runs three loops by default.
+The three results are `AudioRecord_Before`, `AudioRecord_AfterPlayback` and
+`AudioRecord_AfterRecord`. Predecessor tests publish their own results so a failed
+setup or workload remains visible. The plan prints bounded client, source-format,
+link and server-state evidence even for successful checkpoint captures.
+
+Job parameters are `AUDIO_BACKEND` (default `pipewire`), `SOURCE_CHOICE` (`mic`),
+`SINK_CHOICE` (`speakers`), `TARGET_RECORD_CONFIG` (`record_config5`),
+`RECORD_SECONDS` (`5s`) and `RECORD_LOOPS` (`3`). Provide `AUDIO_CLIPS_PATH` for
+an existing clips directory, or `AUDIO_CLIPS_ARCHIVE` for an image-provided archive
+(default `/Lava_binaries/AudioClips.tar.gz`). Archive extraction stays below the
+plan invocation directory. The plan installs no tools and downloads no clips.
+Use it as the only test definition after the image's normal deploy/boot actions.
+
+The additional checkpoint recordings can themselves warm the audio graph.
+Compare these results with the original nightly job, and treat ordering and time
+since boot as hypotheses until the failure is reproduced under controlled changes.
