@@ -78,4 +78,7 @@ case "$qrtr_status" in
         test_result_record FAIL "QRTR runtime query failed"
         ;;
 esac
+if [ "$endpoint_count" -eq 0 ] && [ "$TEST_RESULT_FAIL_COUNT" -eq 0 ]; then
+    test_result_finish SKIP "No FastRPC endpoint was available, QRTR-only evidence is insufficient for FastRPC readiness"
+fi
 test_result_finish
