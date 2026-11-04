@@ -5,14 +5,13 @@ metadata:
     maintainer:
         - vnarapar@qti.qualcomm.com
     os:
-        - openembedded
+        - linux
     scope:
         - functional
-    devices:
-        - rb3gen2
 
 run:
     steps:
-        - cd Runner
-        - $PWD/suites/Kernel/Baseport/GIC/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/GIC/GIC.res || true
+        - REPO_PATH=$PWD
+        - cd Runner/suites/Kernel/Baseport/GIC
+        - ./run.sh || true
+        - $REPO_PATH/Runner/utils/send-to-lava.sh GIC.res
