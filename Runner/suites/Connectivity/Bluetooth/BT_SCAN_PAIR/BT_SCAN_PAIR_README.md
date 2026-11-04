@@ -130,3 +130,23 @@ When a whitelist is specified (CLI or `BT_WHITELIST_ENV`), only devices whose MA
 ## License
 
 SPDX-License-Identifier: BSD-3-Clause© Qualcomm Technologies, Inc. and/or its subsidiaries.
+
+## Running without systemd
+
+An installed systemctl binary does not imply a running systemd manager. On a
+non-systemd boot, the test reuses healthy image-provided D-Bus/BlueZ or makes
+one daemon startup attempt. Missing daemon assets produce SKIP. A failed startup
+or an unusable declared controller remains FAIL. The test never applies a zero
+Bluetooth address.
+
+Only daemon processes started by this invocation are stopped during cleanup.
+Existing daemons and sockets are retained. Startup logs are stored in a unique
+`bluetooth-runtime.*` directory in CWD and printed if readiness fails. The kbdev
+plan sets `TESTKIT_IMAGE_ONLY=1` to disable package installation and recovery.
+
+A scan must confirm discovery startup or a live discovery event before cached
+peers can establish success. Command failure or no startup evidence FAILs.
+BT_SCAN with no explicit target SKIPs when discovery succeeds but no peer is
+available. An explicit missing target remains FAIL. Unknown scan-off state is
+reported as incomplete cleanup evidence, never confirmed PASS. Use a controlled
+discoverable peer for repeatable reception/pairing validation.

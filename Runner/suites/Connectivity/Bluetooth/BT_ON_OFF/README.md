@@ -72,3 +72,16 @@ The packaged definition exposes these parameters:
 - `BT_RUNTIME_RECOVERY_ATTEMPTS`
 
 The result is written to `BT_ON_OFF.res` and sent to LAVA as `BT_ON_OFF`.
+
+## Running without systemd
+
+An installed systemctl binary does not imply a running systemd manager. On a
+non-systemd boot, the test reuses healthy image-provided D-Bus/BlueZ or makes
+one daemon startup attempt. Missing daemon assets produce SKIP. A failed startup
+or an unusable declared controller remains FAIL. The test never applies a zero
+Bluetooth address.
+
+Only daemon processes started by this invocation are stopped during cleanup.
+Existing daemons and sockets are retained. Startup logs are stored in a unique
+`bluetooth-runtime.*` directory in CWD and printed if readiness fails. The kbdev
+plan sets `TESTKIT_IMAGE_ONLY=1` to disable package installation and recovery.
