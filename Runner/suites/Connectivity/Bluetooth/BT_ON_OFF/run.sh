@@ -148,8 +148,14 @@ test_result_init "$TESTNAME" "$RES_FILE" || exit 1
 log_info "------------------------------------------------------------"
 log_info "Starting $TESTNAME Testcase"
 log_info "Config: BT_POWER_CYCLE_DELAY=${BT_POWER_CYCLE_DELAY}s BT_POWER_ON_ATTEMPTS=$BT_POWER_ON_ATTEMPTS BT_POWER_ON_RETRY_DELAY=${BT_POWER_ON_RETRY_DELAY}s BT_RESTART_SERVICE_ON_RETRY=$BT_RESTART_SERVICE_ON_RETRY"
+trap bt_cleanup_image_daemons 0
+trap 'exit 1' HUP INT TERM
 if ! bt_prepare_bluetooth_stack; then
     test_result_finish "FAIL" "$TESTNAME FAIL - Bluetooth stack preparation failed"
+fi
+
+if ! bt_systemd_running && ! bt_image_runtime_available; then
+    test_result_finish SKIP "Image lacks BlueZ or D-Bus runtime assets required for Bluetooth validation"
 fi
 
 log_info "Checking dependency: bluetoothctl"

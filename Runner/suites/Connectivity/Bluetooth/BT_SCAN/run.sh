@@ -134,8 +134,14 @@ test_result_init "$TESTNAME" "$RES_FILE" || exit 1
 
 log_info "------------------------------------------------------------"
 log_info "Starting $TESTNAME Testcase"
+trap bt_cleanup_image_daemons 0
+trap 'exit 1' HUP INT TERM
 if ! bt_prepare_bluetooth_stack; then
     test_result_finish "FAIL" "$TESTNAME FAIL - Bluetooth stack preparation failed"
+fi
+
+if ! bt_systemd_running && ! bt_image_runtime_available; then
+    test_result_finish SKIP "Image lacks BlueZ or D-Bus runtime assets required for Bluetooth validation"
 fi
 
 log_info "Checking dependencies: bluetoothctl pgrep"
@@ -278,7 +284,10 @@ else
         log_fail "No Bluetooth devices discovered after scan attempts."
     fi
 
-    test_result_finish "FAIL" "Bluetooth scan did not discover the required device"
+    if [ -z "$TARGET_MAC" ] && [ "${BT_SCAN_EXECUTION_OK:-0}" -eq 1 ]; then
+        test_result_finish SKIP "Discovery started but no discoverable peer was found, provide a controlled Bluetooth fixture"
+    fi
+    test_result_finish "FAIL" "Bluetooth scan did not discover the required device or confirm discovery startup"
 fi
 
 # -----------------------------
@@ -293,7 +302,11 @@ fi
 # Use lib helper to avoid repetitive log spam and handle 'unknown' cleanly.
 if bt_scan_poll_off 10 1; then
     # On minimal/ramdisk images bt_scan_poll_off may treat persistent 'unknown' as non-fatal.
-    test_result_record "PASS" "Scan OFF cleanup completed"
+    if [ "${BT_SCAN_OFF_CONFIRMED:-0}" -eq 1 ]; then
+        test_result_record "PASS" "Scan OFF cleanup completed"
+    else
+        test_result_record SKIP "Scan OFF state unavailable, cleanup attempted without confirmed state"
+    fi
 else
     # If you keep bt_scan_poll_off strict, this may still warn; not a test failure.
     log_warn "Scan OFF cleanup did not confirm Discovering=no (non-fatal)."
