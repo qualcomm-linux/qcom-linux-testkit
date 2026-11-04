@@ -10646,6 +10646,88 @@ audio_check_stream_server_errors() {
   fi
 }
 
+# audio_record_attempt_summary <recorder-log> <backend> <WAV-validation-summary>
+# Print compact current-attempt evidence on PASS and FAIL without new DUT probes.
+# Preserve capture timing, server snapshots and operation-window calibration
+# messages for full nightly comparisons. Diagnostics do not change verdicts.
+audio_record_attempt_summary() (
+  aras_log="$1"
+  aras_backend="$2"
+  aras_validation="$3"
+  aras_out="$aras_log.capture-summary"
+  if ! {
+    printf 'backend=%s\n%s\n' "$aras_backend" "$aras_validation"
+    if [ -r "$aras_log" ]; then
+      awk '
+        /^PipeWire capture exec:/ { progress="" }
+        /^AUDIO_CAPTURE / { progress=progress $0 "\n" }
+        END { printf "%s", progress }
+      ' "$aras_log"
+    fi
+    if [ "$aras_backend" = pipewire ]; then
+      for aras_phase in before after; do
+        printf '\n---- server-%s ----\n' "$aras_phase"
+        if [ ! -r "$aras_log.server-$aras_phase" ]; then
+          printf '%s\n' 'Server snapshot unavailable'
+          continue
+        fi
+        awk '
+          /^(Id|ActiveState|SubState|MainPID|NRestarts)=/ { print }
+          /default.clock.rate|service scope:/ { print }
+          /^---- capture-window journal, last [0-9]+ entries ----$/ {
+            journal=1
+            next
+          }
+          journal {
+            line=tolower($0)
+            if (line ~ /journal unavailable|no journal files were found|permission denied/) {
+              unavailable=1
+            }
+            if (line ~ /acdb/ && line ~ /error\[|no calibration/) {
+              calibration++
+              # Keep at most six distinct messages, ignoring journal timestamps.
+              message=$0
+              sub(/^.*ACDB - /, "ACDB - ", message)
+              if (!seen[message]++ && shown < 6) {
+                print message
+                shown++
+              }
+            }
+          }
+          END {
+            if (journal) {
+              printf "AUDIO_SERVER_WINDOW calibration_messages=%d journal=%s\n",
+                calibration, unavailable ? "incomplete" : "captured"
+            }
+          }
+        ' "$aras_log.server-$aras_phase"
+      done
+    fi
+  } >"$aras_out"; then
+    log_warn "Could not write capture summary: $aras_out"
+    return 0
+  fi
+  log_file_with_label AUDIO-RECORD-SUMMARY "$aras_out" 100
+  case "$aras_validation" in
+    *" warnings="*)
+      aras_warnings="${aras_validation#* warnings=}"
+      aras_warnings="${aras_warnings%% *}"
+      case "$aras_warnings" in
+        ""|none|unavailable)
+          ;;
+        *)
+          log_warn "Recording signal diagnostics: $aras_warnings. See $aras_out, the final result follows the selected validation policy"
+          ;;
+      esac
+      ;;
+  esac
+  if [ "$aras_backend" = pipewire ] &&
+     grep -Eq '^AUDIO_SERVER_WINDOW calibration_messages=[1-9][0-9]* ' "$aras_out"; then
+    log_warn "Audio server reported calibration errors during capture. See $aras_out, these messages alone do not identify the cause of a capture failure"
+  fi
+  return 0
+)
+
 # Preserve bounded failure context beside the recorder log and replay to stdout.
 # Arguments: recorder log, backend, selected source, optional WAV path.
 # Existing callers default to record_out. No backend state changes.
