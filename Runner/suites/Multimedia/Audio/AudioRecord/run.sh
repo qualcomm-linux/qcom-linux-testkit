@@ -1181,7 +1181,7 @@ if [ "$dur_s" -gt 0 ] 2>/dev/null; then
   log_info "Watchdog/timeout: explicit override=${TIMEOUT}"
 else
   if [ "$AUDIO_BACKEND" = "pipewire" ]; then
-    log_info "Watchdog/timeout: sample-progress capture, separate startup and capture windows of requested duration plus start_grace=${AUDIO_RECORD_START_GRACE}s"
+    log_info "Watchdog/timeout: sample-progress capture, startup bounded by requested duration plus start_grace=${AUDIO_RECORD_START_GRACE}s, total budget is twice that window and retained while samples arrive"
   else
     log_info "Watchdog/timeout: automatic per case, requested duration plus start_grace=${AUDIO_RECORD_START_GRACE}s"
   fi

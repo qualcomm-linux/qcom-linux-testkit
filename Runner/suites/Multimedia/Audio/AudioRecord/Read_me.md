@@ -616,12 +616,26 @@ before capture retains its existing automatic-backend policy.
 
 With `TIMEOUT=0`, PipeWire allows requested duration plus
 `AUDIO_RECORD_START_GRACE` (default five seconds) for the first WAV payload.
-Once payload arrives, a separate window of the same length permits collection
-of the requested audio duration. For a five-second capture with default grace,
-startup is bounded to ten seconds and capture to another ten seconds. A healthy
-stream stops as soon as five seconds of PCM have arrived. No payload progress
-for `max(start-grace, 3)` seconds fails the capture. Slow trickle progress cannot
-extend the capture window. These limits include file-buffering delays.
+Once payload arrives, AudioRecord retains the original total budget of
+`2 * (requested duration + start grace)` rather than shortening it to a separate
+capture window. For `--record-seconds 5s --start-grace 5`, the first payload must
+arrive within ten seconds and recording is bounded to twenty seconds total.
+Recording stops as soon as five seconds of PCM are present. A fast startup leaves
+more time for a buffered or converting stream to deliver those samples, without
+increasing the existing absolute budget. A missing header or missing initial
+payload still fails at the startup limit. No-progress stalls still fail after
+`max(start grace, 3)` seconds. The budget never renews on each growth event.
+These limits include file-buffering delays, and graceful finalization is allowed
+up to three additional seconds.
+
+This changes only AudioRecord automatic PipeWire capture, on both base and
+overlay stacks. Shared-helper callers without the opt-in validation policy and
+captures with a playback-completion marker retain their existing separate-window
+behavior. AudioLoopback, ALSA and PulseAudio capture timing is unchanged.
+Slow delivery remains visible in `AUDIO_CAPTURE` timing and byte-rate summaries.
+Successful functional capture does not prove real-time throughput or calibration
+health. Actual WAV duration, format, signal and recorder failures remain subject
+to the existing validation policy.
 
 An explicit `--timeout` / `TIMEOUT` replaces the total capture deadline, without
 extra startup grace or retries. Startup and idle checks still apply. It does not
