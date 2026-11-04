@@ -10087,6 +10087,9 @@ audio_record_with_progress() {
     arwp_deadline=$((arwp_start + arwp_limit))
   fi
   arwp_first=0
+  arwp_first_after=not-seen
+  arwp_goal=0
+  arwp_byte_rate=0
   arwp_last="$arwp_start"
   arwp_payload=0
   arwp_previous=0
@@ -10179,6 +10182,7 @@ EOF
       if [ "$arwp_payload" -gt "$arwp_previous" ]; then
         if [ "$arwp_first" -eq 0 ]; then
           arwp_first=1
+          arwp_first_after=$((arwp_now - arwp_start))
           printf 'AUDIO_CAPTURE first_payload_after=%ss\n' "$((arwp_now - arwp_start))" >&2
           if [ "$arwp_limit" -eq 0 ]; then
             arwp_deadline=$((arwp_now + arwp_window))
@@ -10222,6 +10226,14 @@ EOF
     sleep 1
   done
 
+  arwp_decision_time="$(get_monotonic_seconds)"
+  arwp_completion_state=not-required
+  if [ -n "$arwp_completion" ]; then
+    arwp_completion_state=missing
+    if [ -f "$arwp_completion" ]; then
+      arwp_completion_state=present
+    fi
+  fi
   if [ -n "$arwp_links_pid" ]; then
     audio_record_finish_link_snapshot "$arwp_links_pid" "${arwp_file}.links"
     arwp_links_pid=""
@@ -10252,6 +10264,23 @@ EOF
   printf 'AUDIO_CAPTURE status=%s reason=%s elapsed=%ss payload_bytes=%s\n' \
     "$arwp_status" "$arwp_reason" \
     "$(($(get_monotonic_seconds) - arwp_start))" "$arwp_payload" >&2
+  printf 'AUDIO_CAPTURE decision_after=%ss first_payload_after=%s last_growth_after=%ss idle=%ss deadline_after=%ss completion=%s\n' \
+    "$((arwp_decision_time - arwp_start))" "$arwp_first_after" \
+    "$((arwp_last - arwp_start))" "$((arwp_decision_time - arwp_last))" \
+    "$((arwp_deadline - arwp_start))" "$arwp_completion_state" >&2
+  LC_ALL=C awk -v payload="$arwp_payload" -v goal="$arwp_goal" \
+    -v rate="$arwp_byte_rate" -v elapsed="$((arwp_decision_time - arwp_start))" '
+    BEGIN {
+      if (rate > 0 && goal > 0) {
+        printf "AUDIO_CAPTURE collected_audio=%.3fs requested_audio=%.3fs goal_bytes=%.0f expected_bytes_per_second=%.0f", payload / rate, goal / rate, goal, rate
+        if (elapsed > 0)
+          printf " observed_bytes_per_second=%.1f (includes startup)", payload / elapsed
+        printf "\n"
+      } else {
+        print "AUDIO_CAPTURE audio_duration=unknown reason=no-valid-pcm-header"
+      }
+    }
+  ' >&2
   trap - HUP INT TERM
   # This is the shell's own trap snapshot, never command or DUT-provided text.
   eval "$arwp_saved_traps"

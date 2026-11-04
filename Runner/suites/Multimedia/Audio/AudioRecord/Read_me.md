@@ -876,6 +876,16 @@ The LAVA definitions already launch from the suite directory. A CWD permission
 or artifact-creation error must be corrected before rerunning, it is not proof
 that audio hardware is absent.
 
+## Capture deadline diagnostics
+
+`AUDIO_CAPTURE` stdout diagnostics include the last observed payload duration,
+requested duration, expected byte rate, observed byte rate including startup,
+first payload time, last growth time, idle interval and effective deadline.
+Completion-marker state is included when the recording path requires one.
+The decision timestamp is separate from elapsed time spent stopping the recorder.
+A slow or stalled recording still fails even when the partial WAV passes the
+minimum integrity threshold. These diagnostics do not extend capture deadlines.
+
 ## License
 
 SPDX-License-Identifier: BSD-3-Clause(C) Qualcomm Technologies, Inc. and/or its subsidiaries.
