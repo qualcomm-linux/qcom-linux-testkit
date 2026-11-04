@@ -1,0 +1,16 @@
+metadata:
+    format: Lava-Test Test Definition 1.0
+    name: KVM_Runtime_Validation
+    description: KVM runtime readiness using image tools
+    maintainer:
+        - smuppand@qualcomm.com
+    os:
+        - openembedded
+    scope:
+        - functional
+run:
+    steps:
+        - REPO_PATH=$(pwd)
+        - cd "$REPO_PATH/Runner/suites/Virtualization/KVM/KVM_Runtime_Validation"
+        - ./run.sh
+        - '"$REPO_PATH/Runner/utils/send-to-lava.sh" "KVM_Runtime_Validation.res"'
