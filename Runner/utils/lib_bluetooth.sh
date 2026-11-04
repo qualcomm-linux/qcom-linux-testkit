@@ -4393,6 +4393,7 @@ bt_scan_poll_on() {
 #   0 = observed Discovering=no
 #   1 = did not settle to 'no' within polling window
 bt_scan_poll_off() {
+    # shellcheck disable=SC2034 # Read by suite callers reporting cleanup evidence.
     BT_SCAN_OFF_CONFIRMED=0
     max_wait_secs="${1:-10}"
     step_secs="${2:-1}"
@@ -4416,6 +4417,7 @@ bt_scan_poll_off() {
         log_info "Discovering state during scan OFF (iteration $((i + 1))/$attempts): $disc_state"
 
         if [ "$disc_state" = "no" ]; then
+            # shellcheck disable=SC2034 # Read by suite callers reporting cleanup evidence.
             BT_SCAN_OFF_CONFIRMED=1
             return 0
         fi
