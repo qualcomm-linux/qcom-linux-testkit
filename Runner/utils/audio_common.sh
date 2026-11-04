@@ -10751,9 +10751,14 @@ audio_record_set_recovered_backend_management() {
   export AUDIO_SYSTEMD_MANAGED
 }
 
-# Resolve the root-owned final WAV and the desktop-user scratch WAV for one case.
+# Resolve final and desktop-user scratch WAV paths for one case.
+# Optional arguments: loop number and total loops. Multi-loop captures retain
+# separate artifacts, while single-loop callers keep their existing paths.
 audio_record_set_capture_paths() {
   arcsp_case_name="$1"
+  if [ "${3:-1}" -gt 1 ]; then
+    arcsp_case_name="${arcsp_case_name}.loop-${2}"
+  fi
 
   record_out="$LOGDIR/${arcsp_case_name}.wav"
 
