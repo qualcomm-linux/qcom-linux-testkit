@@ -3389,6 +3389,14 @@ run_with_bounded_timeout() {
             BOUNDED_TIMEOUT_EXPIRED=1
             printf '[TIMEOUT] command exceeded %ss, pid=%s: %s\n' \
                 "$rbt_seconds" "$BOUNDED_TIMEOUT_PID" "$*" >&2
+            if [ -n "${BOUNDED_TIMEOUT_DIAGNOSTIC_FILE:-}" ]; then
+                if ! bounded_timeout_capture_process_state \
+                    "$BOUNDED_TIMEOUT_PID" \
+                    "$BOUNDED_TIMEOUT_DIAGNOSTIC_FILE"; then
+                    printf '[WARN] process state capture incomplete, artifact=%s\n' \
+                        "$BOUNDED_TIMEOUT_DIAGNOSTIC_FILE" >&2
+                fi
+            fi
             bounded_timeout_cancel || return 125
             return 124
         fi
@@ -3399,6 +3407,113 @@ run_with_bounded_timeout() {
     rbt_status=$?
     BOUNDED_TIMEOUT_PID=""
     return "$rbt_status"
+}
+
+# bounded_timeout_capture_process_state PID FILE
+# Retain Linux process status, wait state, syscall, stack, mappings and fdinfo.
+# The single awk reader has a two-second deadline plus bounded cancellation.
+# Stdout: none. Return 0 for a completed snapshot, 1 for unavailable evidence.
+# Side effects: replace FILE. Capture cannot overwrite the caller's PID state.
+bounded_timeout_capture_process_state() {
+    [ "$#" -eq 2 ] || return 1
+    btps_pid="$1"
+    btps_file="$2"
+    case "$btps_pid" in
+        ''|*[!0-9]*)
+            return 1
+            ;;
+    esac
+    printf 'Process state before termination, pid=%s\n' "$btps_pid" \
+        >"$btps_file" || return 1
+    if ! command -v awk >/dev/null 2>&1; then
+        printf 'Process reader unavailable, awk is not installed\n' >>"$btps_file"
+        return 1
+    fi
+
+    set --
+    for btps_path in \
+        /proc/version \
+        /etc/os-release \
+        "/proc/$btps_pid/status" \
+        "/proc/$btps_pid/stat" \
+        "/proc/$btps_pid/wchan" \
+        "/proc/$btps_pid/syscall" \
+        "/proc/$btps_pid/stack" \
+        "/proc/$btps_pid/maps" \
+        /proc/"$btps_pid"/fdinfo/*; do
+        if [ -r "$btps_path" ]; then
+            set -- "$@" "$btps_path"
+        else
+            printf 'Process evidence unavailable: %s\n' "$btps_path" >>"$btps_file"
+        fi
+    done
+    if [ "$#" -eq 0 ]; then
+        printf 'Process may have exited before capture, or procfs is unavailable\n' \
+            >>"$btps_file"
+        return 1
+    fi
+
+    (
+        # Isolate ownership and disable capture recursion for the reader.
+        BOUNDED_TIMEOUT_PID=""
+        # shellcheck disable=SC2030  # Reader isolation is intentional, parent state must survive.
+        BOUNDED_TIMEOUT_DIAGNOSTIC_FILE=""
+        run_with_bounded_timeout 2 awk '
+            BEGIN {
+                for (entry = 1; entry < ARGC; entry++) {
+                    path = ARGV[entry]
+                    printf "\n--- %s ---\n", path
+                    lines = 0
+                    while ((status = (getline line < path)) > 0) {
+                        lines++
+                        if (lines > 160) {
+                            print "Remaining lines omitted"
+                            break
+                        }
+                        print line
+                    }
+                    if (status < 0) {
+                        print "Process evidence unavailable or access restricted"
+                    }
+                    close(path)
+                }
+                exit 0
+            }
+        ' "$@"
+        btps_reader_rc=$?
+        if [ -n "${BOUNDED_TIMEOUT_PID:-}" ]; then
+            printf 'Diagnostic reader still present after cancellation, pid=%s\n' \
+                "$BOUNDED_TIMEOUT_PID" >&2
+        fi
+        exit "$btps_reader_rc"
+    ) >>"$btps_file" 2>&1
+    btps_capture_rc=$?
+    printf '[INFO] pre-termination process state retained in %s\n' "$btps_file" >&2
+    [ "$btps_capture_rc" -eq 0 ]
+}
+
+# run_with_bounded_timeout_capture SECONDS FILE COMMAND [ARG...]
+# Opt into a bounded process snapshot before the owned command is terminated.
+# Stdout: command output. Returns the same status as run_with_bounded_timeout.
+# Side effects: reset FILE and retain timeout evidence there. Unavailable
+# diagnostics do not change execution status. Existing caller state is restored.
+run_with_bounded_timeout_capture() {
+    [ "$#" -ge 3 ] || return 125
+    rbtc_seconds="$1"
+    rbtc_file="$2"
+    [ -n "$rbtc_file" ] || return 125
+    shift 2
+    # shellcheck disable=SC2031  # Reader subshell must not change this caller state.
+    rbtc_previous_file="${BOUNDED_TIMEOUT_DIAGNOSTIC_FILE:-}"
+    BOUNDED_TIMEOUT_DIAGNOSTIC_FILE="$rbtc_file"
+    if ! printf '%s' "" >"$rbtc_file"; then
+        printf '[WARN] process diagnostic file unavailable: %s\n' "$rbtc_file" >&2
+        BOUNDED_TIMEOUT_DIAGNOSTIC_FILE=""
+    fi
+    run_with_bounded_timeout "$rbtc_seconds" "$@"
+    rbtc_status=$?
+    BOUNDED_TIMEOUT_DIAGNOSTIC_FILE="$rbtc_previous_file"
+    return "$rbtc_status"
 }
 
 # Purpose: Run a command with a timeout and capture stdout and stderr.
