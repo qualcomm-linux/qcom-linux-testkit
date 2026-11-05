@@ -7,7 +7,7 @@
 # Print the supported KMSCube command-line options.
 usage() {
     cat <<EOF
-Usage: ${0##*/} [--base|--overlay|--auto] [--timeout SECONDS] [--help]
+Usage: ${0##*/} [--base|--overlay|--auto] [--timeout SECONDS] [--no-stdbuf] [--help]
 
 Run the KMSCube DRM/GBM validation.
 
@@ -16,12 +16,13 @@ Options:
   --overlay          Use the Qualcomm graphics overlay on supported desktop distros.
   --auto             Preserve and validate the currently active graphics stack.
   --timeout SECONDS  Set execution deadline for either build, default: 60.
+  --no-stdbuf        Bypass optional line buffering for runtime diagnosis.
   -h, --help         Show this help text and exit without changing target state.
 EOF
 }
 
 # parse_args ARG...
-# Parse graphics-mode and timeout options into runner globals.
+# Parse graphics-mode, timeout and diagnostic buffering options into runner globals.
 parse_args() {
     while [ "$#" -gt 0 ]; do
         case "$1" in
@@ -33,6 +34,9 @@ parse_args() {
                 ;;
             --auto)
                 REQUESTED_GRAPHICS_MODE="auto"
+                ;;
+            --no-stdbuf)
+                KMSCUBE_USE_STDBUF=0
                 ;;
             --timeout)
                 shift
@@ -71,6 +75,7 @@ parse_args() {
 
 REQUESTED_GRAPHICS_MODE="default"
 KMSCUBE_TIMEOUT=60
+KMSCUBE_USE_STDBUF=1
 SHOW_HELP=0
 PARSE_ERROR=""
 
@@ -143,6 +148,8 @@ LOG_FILE="./${TESTNAME}_run.log"
 PROCESS_LOG="./${TESTNAME}_process_state.log"
 FAILURE_LOG="./${TESTNAME}_failure_markers.log"
 CAPABILITY_LOG="./${TESTNAME}_capabilities.log"
+DISPLAY_RUNTIME_LOG="./${TESTNAME}_display_runtime.log"
+WESTON_START_LOG="./${TESTNAME}_weston_restore.log"
 
 if [ "$PARSE_RC" -ne 0 ]; then
     rm -f "$RES_FILE"
@@ -191,6 +198,7 @@ GPU_OVERLAY_GBM_PACKAGE="${GPU_OVERLAY_GBM_PACKAGE:-}"
 DISPLAY_MANAGER_SERVICE="${DISPLAY_MANAGER_SERVICE:-display-manager.service}"
 DISPLAY_MANAGER_STATE_FILE="$test_path/.${TESTNAME}-display-manager.$$.state"
 weston_stopped_by_test=0
+DISPLAY_RESTORE_COMPLETED=0
 
 rm -f \
     "$RES_FILE" \
@@ -198,6 +206,9 @@ rm -f \
     "$PROCESS_LOG" \
     "$FAILURE_LOG" \
     "$CAPABILITY_LOG" \
+    "$DISPLAY_RUNTIME_LOG" \
+    "$WESTON_START_LOG" \
+    "$WESTON_START_LOG.launch" \
     "$DISPLAY_MANAGER_STATE_FILE"
 
 BOUNDED_TIMEOUT_PID=""
@@ -210,17 +221,34 @@ if ! bounded_timeout_cancel; then
     printf "%s\n" "$TESTNAME FAIL" >"$RES_FILE"
     exit 1
 fi
+if [ "${DISPLAY_RESTORE_COMPLETED:-0}" -eq 0 ]; then
+    if [ "${weston_stopped_by_test:-0}" -eq 1 ] &&
+       command -v weston_restore_runtime >/dev/null 2>&1; then
+        if ! weston_restore_runtime 15 "$WESTON_START_LOG" >>"$DISPLAY_RUNTIME_LOG" 2>&1; then
+            log_error "Weston restoration failed during cleanup, see $DISPLAY_RUNTIME_LOG"
+            if [ "$cleanup_status" -eq 0 ]; then
+                cleanup_status=1
+            fi
+        fi
+    fi
+    if command -v display_restore_service_from_state >/dev/null 2>&1; then
+        if ! display_restore_service_from_state "$DISPLAY_MANAGER_STATE_FILE" >>"$DISPLAY_RUNTIME_LOG" 2>&1; then
+            log_error "Display-manager restoration failed during cleanup, state=$DISPLAY_MANAGER_STATE_FILE"
+            if [ "$cleanup_status" -eq 0 ]; then
+                cleanup_status=1
+            fi
+        fi
+    fi
+    if [ -s "$DISPLAY_RUNTIME_LOG" ]; then
+        if command -v weston_log_runtime_snapshot >/dev/null 2>&1; then
+            weston_log_runtime_snapshot "$TESTNAME: after cleanup restoration" >>"$DISPLAY_RUNTIME_LOG" 2>&1 || true
+        fi
+        cat "$DISPLAY_RUNTIME_LOG"
+    fi
+fi
 if [ "$cleanup_status" -ne 0 ]; then
     printf "%s\n" "$TESTNAME FAIL" >"$RES_FILE"
 fi
-if [ "${weston_stopped_by_test:-0}" -eq 1 ] &&
-   command -v weston_restore_runtime >/dev/null 2>&1; then
-    weston_restore_runtime 15 >/dev/null 2>&1 || true
-fi
-if command -v display_restore_service_from_state >/dev/null 2>&1; then
-    display_restore_service_from_state "$DISPLAY_MANAGER_STATE_FILE" >/dev/null 2>&1 || true
-fi
-rm -f "$DISPLAY_MANAGER_STATE_FILE"
 exit "$cleanup_status"
 ' 0
 trap 'exit 129' HUP
@@ -544,6 +572,9 @@ fi
 # --- Release DRM master ------------------------------------------------------
 if weston_is_running; then
     log_info "Weston is running, stopping it so kmscube can acquire DRM master"
+    if command -v weston_log_runtime_snapshot >/dev/null 2>&1; then
+        weston_log_runtime_snapshot "$TESTNAME: before DRM release" >>"$DISPLAY_RUNTIME_LOG" 2>&1 || true
+    fi
 
     if weston_stop >/dev/null 2>&1; then
         weston_stopped_by_test=1
@@ -589,7 +620,10 @@ if [ "$KMSCUBE_SUPPORTS_COUNT" -eq 1 ]; then
     KMSCUBE_EXECUTION_MODE="finite-count"
 fi
 
-if command -v stdbuf >/dev/null 2>&1; then
+if [ "$KMSCUBE_USE_STDBUF" -eq 0 ]; then
+    set -- "$KMSCUBE_BIN"
+    log_info "Bypassing stdbuf by request, KMSCube output uses native buffering"
+elif command -v stdbuf >/dev/null 2>&1; then
     set -- stdbuf -oL -eL "$KMSCUBE_BIN"
     log_info "Using stdbuf to retain KMSCube output if execution stalls"
 else
@@ -618,6 +652,7 @@ else
 fi
 
 log_info "KMSCube deadline=${KMSCUBE_TIMEOUT}s, count=${FRAME_COUNT} frames, output=$LOG_FILE"
+log_info "KMSCube command: $*"
 run_with_bounded_timeout_capture \
     "$KMSCUBE_TIMEOUT" "$PROCESS_LOG" "$@" >"$LOG_FILE" 2>&1
 rc=$?
@@ -697,7 +732,7 @@ restore_failed=0
 if [ "$weston_stopped_by_test" -eq 1 ]; then
     log_info "Restoring Weston after $TESTNAME completion"
 
-    if weston_restore_runtime 15; then
+    if weston_restore_runtime 15 "$WESTON_START_LOG" >>"$DISPLAY_RUNTIME_LOG" 2>&1; then
         weston_stopped_by_test=0
     else
         restore_failed=1
@@ -705,8 +740,16 @@ if [ "$weston_stopped_by_test" -eq 1 ]; then
     fi
 fi
 
-if ! display_restore_service_from_state "$DISPLAY_MANAGER_STATE_FILE"; then
+if ! display_restore_service_from_state "$DISPLAY_MANAGER_STATE_FILE" >>"$DISPLAY_RUNTIME_LOG" 2>&1; then
     restore_failed=1
+fi
+DISPLAY_RESTORE_COMPLETED=1
+if [ -s "$DISPLAY_RUNTIME_LOG" ]; then
+    if command -v weston_log_runtime_snapshot >/dev/null 2>&1; then
+        weston_log_runtime_snapshot "$TESTNAME: after restoration" >>"$DISPLAY_RUNTIME_LOG" 2>&1 || true
+    fi
+    log_info "Display restoration diagnostics: $DISPLAY_RUNTIME_LOG"
+    cat "$DISPLAY_RUNTIME_LOG"
 fi
 
 # --- Verdict -----------------------------------------------------------------
@@ -746,9 +789,12 @@ elif [ -z "$VERDICT_FAILURE" ]; then
     fi
 fi
 
-if [ "$restore_failed" -ne 0 ] &&
-   [ -z "$VERDICT_FAILURE" ]; then
-    VERDICT_FAILURE="display runtime restore failed after $KMSCUBE_EXECUTION_MODE execution"
+if [ "$restore_failed" -ne 0 ]; then
+    if [ -n "$VERDICT_FAILURE" ]; then
+        VERDICT_FAILURE="$VERDICT_FAILURE, display runtime restore also failed, see $DISPLAY_RUNTIME_LOG"
+    else
+        VERDICT_FAILURE="display runtime restore failed after $KMSCUBE_EXECUTION_MODE execution, see $DISPLAY_RUNTIME_LOG"
+    fi
 fi
 
 if [ -n "$VERDICT_FAILURE" ]; then

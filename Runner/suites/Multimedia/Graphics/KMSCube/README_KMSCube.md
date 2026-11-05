@@ -115,6 +115,7 @@ Direct runner usage:
 ./run.sh --overlay
 ./run.sh --auto
 ./run.sh --timeout 90
+./run.sh --auto --timeout 60 --no-stdbuf
 ./run.sh --help
 ```
 
@@ -167,7 +168,14 @@ child still cannot stop, the test reports FAIL and withholds display restoration
 to avoid competing DRM ownership. Inspect the reported PID and retained
 `.KMSCube-display-manager.*.state` file before recovering the display runtime.
 Otherwise, display-manager or Weston state stopped by the suite is restored
-before the final result. Interrupting the runner also stops its child before
+before the final result. Weston restoration first checks socket/service startup
+for three seconds, then uses the existing startup fallback and the full
+15-second final readiness wait. An intermediate miss is informational. The
+fallback outcome and final readiness are reported. Rendering and restoration
+failures are both retained in the final FAIL reason, and the EXIT handler does
+not silently repeat a restoration already attempted during normal completion.
+A failed display-manager restoration retains its state file for diagnosis.
+Interrupting the runner also stops its child before
 restoration and records FAIL. Help probes have a five-second deadline, and an
 expired probe is FAIL rather than being classified as a continuous build.
 The existing timeout helper used by other suites is unchanged.
@@ -175,10 +183,68 @@ The existing timeout helper used by other suites is unchanged.
 Logs and display-state files are written under the invocation working directory.
 Run from the suite directory for the usual artifact paths. If `stdbuf` is
 available, output is line-buffered in both modes. Without it, a forcibly stopped
-application may leave an incomplete log. The complete available run log is
+application may leave an incomplete log. `--no-stdbuf` explicitly bypasses that
+wrapper for diagnosis, without changing the frame threshold, deadline or result
+checks. It has no environment-variable equivalent. A continuous build with
+buffered output may fail the initialization-evidence check after termination.
+The complete available run log is
 printed on failure. `-h` and `--help` print usage and exit without changing
 package, GPU, display-manager, or Weston state. Unknown arguments are reported
 as FAIL.
+
+### Ubuntu hang diagnosis
+
+Compare buffering on the same prepared graphics stack and connected display.
+Run from this suite directory after any requested overlay reboot:
+
+```sh
+runner="$(pwd -P)/run.sh"
+mkdir -p kmscube-ubuntu-diagnostics/default kmscube-ubuntu-diagnostics/native
+git rev-parse HEAD >kmscube-ubuntu-diagnostics/testkit-head.txt
+uname -a >kmscube-ubuntu-diagnostics/kernel.txt
+command -v kmscube stdbuf >kmscube-ubuntu-diagnostics/commands.txt
+(
+    cd kmscube-ubuntu-diagnostics/default || exit 1
+    "$runner" --overlay --timeout 60 >stdout.log 2>&1
+    printf '%s\n' "$?" >exit.status
+    cp "$(dirname "$runner")/KMSCube.res" .
+)
+(
+    cd kmscube-ubuntu-diagnostics/native || exit 1
+    "$runner" --overlay --timeout 60 --no-stdbuf >stdout.log 2>&1
+    printf '%s\n' "$?" >exit.status
+    cp "$(dirname "$runner")/KMSCube.res" .
+)
+```
+
+Retain both directories, including stdout, run logs, process snapshots,
+capability output and display-restoration logs. Repeat the pair if the outcomes
+differ. A finite run that renders the requested frames but stays alive is still
+FAIL. A futex wait identifies a blocked userspace operation, its lock owner
+requires a userspace backtrace.
+
+If `gdb` is already available, use a second terminal while the stalled child is
+still alive and before its deadline. Identify the PID belonging to this run:
+
+```sh
+pgrep -x kmscube
+ps -o pid,ppid,stat,wchan,args -C kmscube
+```
+
+Then replace `PID` with that PID and save the backtrace in the matching run
+directory. Attaching a debugger temporarily pauses the application, so use this
+as a separate diagnostic run:
+
+```sh
+gdb -q -batch -p PID \
+    -ex 'set pagination off' \
+    -ex 'thread apply all bt' \
+    -ex 'detach' \
+    -ex 'quit' >userspace-backtrace.log 2>&1
+```
+
+Do not install a debugger just to run the test. The buffering comparison and
+automatic process snapshots remain usable when it is unavailable.
 
 #### Sample output:
 ```
@@ -216,6 +282,13 @@ sh-5.2#
 - Output markers are retained in `KMSCube_failure_markers.log` and the complete
   command output remains in `KMSCube_run.log`.
 - Capability-probe output is retained in `KMSCube_capabilities.log`.
+- `KMSCube_display_runtime.log` retains Weston process arguments, the discovered
+  socket before DRM release and after restoration, startup fallback output and
+  the final readiness result. It is also printed to stdout. Restoration uses
+  the existing services and generic startup fallback, an arbitrary manually
+  launched Weston command is not saved and replayed.
+- A direct Weston fallback writes `KMSCube_weston_restore.log` and
+  `KMSCube_weston_restore.log.launch` in CWD instead of using a shared `/tmp` log.
 - Timeout process evidence is retained in `KMSCube_process_state.log` under the
   invocation directory and printed to stdout for failed runs. A normal finite
   completion leaves this file empty.
