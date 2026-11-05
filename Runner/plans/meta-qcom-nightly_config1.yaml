@@ -501,4 +501,4 @@ run:
           "$REPO_PATH/Runner/utils/send-to-lava.sh" "Module_Reload_Validation.res" --strict || lava-test-case Module_Reload_Validation_result_publication --result fail
         - cd "$REPO_PATH/Runner"
         - >-
-          "$REPO_PATH/Runner/utils/result_parse.sh"
+          "$REPO_PATH/Runner/utils/result_parse.sh" || lava-test-case meta-qcom-nightly_config1_result_summary --result fail

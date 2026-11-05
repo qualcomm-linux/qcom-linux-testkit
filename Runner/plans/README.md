@@ -10,6 +10,13 @@ it immediately afterwards. A missing, empty or malformed result produces a
 separate `<testcase>_result_publication` failure, while later tests continue.
 An ordinary test FAIL or SKIP remains a test result, not a publication failure.
 
+At the end, the existing result parser checks the retained result files. A
+nonzero parser exit publishes `meta-qcom-nightly_config1_result_summary` or
+`meta-qcom-nightly_config2_result_summary` as FAIL through `lava-test-case`,
+then allows LAVA to finalize the run normally. Individual testcase failures
+remain published. A successful parser does not add a summary testcase.
+The parser's exit behavior is unchanged for other plans and direct callers.
+
 The existing result sender supports opt-in validation:
 
 ```sh
