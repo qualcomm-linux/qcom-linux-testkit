@@ -16,20 +16,31 @@ Graphics scripts automates the validation of Graphics OpenGL ES 2.0 capabilities
 
 ## Prerequisites
 
-Ensure the following components are present in the target image:
+The following components are required or used by the test:
 
 - kmscube (Binary Available in /usr/bin) - this test app can be compiled from https://gitlab.freedesktop.org/mesa/kmscube
 - modetest from libdrm-tests, optional on CentOS
 - Weston should be killed while running KMSCube Test
 - Write access to root filesystem (for environment setup)
 
-On every supported OS, `kmscube` must already be executable in `PATH`.
-After argument and platform-applicability checks, the runner checks this
-prerequisite before graphics package preparation, GPU boot-policy changes or
-stopping the display runtime. If it is absent, the result is SKIP, with no
-attempt to install `kmscube` or run a rendering test. This avoids reporting a
-package-installation FAIL followed by a testcase SKIP. Provision the binary in
-the image, or add its existing installation directory to `PATH`, then rerun:
+After argument and platform-applicability checks, the runner checks `kmscube`
+before graphics package preparation, GPU boot-policy changes or stopping the
+display runtime. An executable already in `PATH` is reused. On Debian and
+Ubuntu Desktop, a missing command is recovered through `check_dependencies()`
+and the existing package provider's `kmscube` mapping. This restores the
+installation path removed by commit `414648b` for these distros. Recovery is
+the same for base, overlay and auto modes that pass the platform checks.
+
+Package-provider installation and recovery opt-outs remain authoritative.
+`CHECK_DEPS_RECOVER=0` disables this application recovery explicitly. If recovery
+is disabled or cannot provide the executable, the result is SKIP and graphics
+preparation and rendering are not attempted. Retain the package-provider output
+to distinguish disabled installation, an unavailable package and installation
+failure.
+
+Yocto and other distros retain the image-provided `kmscube`
+requirement. Provision the binary in those images, or add an existing
+installation directory to `PATH`, then rerun:
 
 ```sh
 command -v kmscube
@@ -43,10 +54,18 @@ PATH="/opt/graphics/bin:$PATH" ./run.sh --overlay --timeout 60
 ```
 
 Use `--base` for an intentionally selected Mesa stack or `--auto` to preserve
-the active stack. Neither mode bypasses the application prerequisite. The
-existing finite-frame and continuous-run validation remains unchanged when
-the application is present. The graphics-stack and `modetest` preparation
-policies below are separate from the image-provided `kmscube` requirement.
+the active stack. Ubuntu Desktop retains its overlay-only graphics policy,
+and Ubuntu Server skips before application recovery because it is headless.
+The finite-frame and continuous-run validation remains unchanged when the
+application is present. The graphics-stack and `modetest` preparation policies
+below are separate from this application prerequisite.
+
+For Debian/Ubuntu ramdisk validation or any run requiring image-provided tools,
+disable recovery explicitly:
+
+```sh
+CHECK_DEPS_RECOVER=0 ./run.sh --overlay --timeout 60
+```
 
 Yocto uses image-provided components. On Debian, Ubuntu, RHEL, and Fedora, a
 missing `modetest` command is recovered through the shared package provider

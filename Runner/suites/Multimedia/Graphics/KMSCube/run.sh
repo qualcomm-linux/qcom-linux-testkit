@@ -306,13 +306,24 @@ fi
 
 log_info "Graphics mode, requested=$REQUESTED_GRAPHICS_MODE os=$OS_ID"
 
-# Require the test application before preparing packages, GPU boot policy or
-# display ownership. Missing image content is not a rendering failure.
-if ! CHECK_DEPS_RECOVER=0 CHECK_DEPS_NO_EXIT=1 check_dependencies kmscube; then
+# Recover the established Debian/Ubuntu application prerequisite before GPU
+# preparation. Other images retain their existing image-provided tool policy.
+# Honor caller opt-outs and the shared package provider's installation policy.
+KMSCUBE_DEPS_RECOVER=0
+case "$OS_ID" in
+    debian|ubuntu)
+        KMSCUBE_DEPS_RECOVER="${CHECK_DEPS_RECOVER:-1}"
+        ;;
+esac
+
+log_info "KMSCube prerequisite, os=$OS_ID package_recovery=$KMSCUBE_DEPS_RECOVER"
+if ! CHECK_DEPS_RECOVER="$KMSCUBE_DEPS_RECOVER" \
+    CHECK_DEPS_NO_EXIT=1 check_dependencies kmscube; then
     test_result_finish "SKIP" \
-        "$TESTNAME SKIP - kmscube is not executable in PATH on os=$OS_ID, provision it in the image or add its installed directory to PATH, graphics preparation and rendering were not attempted"
+        "$TESTNAME SKIP - kmscube remains unavailable in PATH on os=$OS_ID, package_recovery=$KMSCUBE_DEPS_RECOVER, check package-provider diagnostics or provision the executable, graphics preparation and rendering were not attempted"
 fi
 
+hash -r 2>/dev/null || true
 KMSCUBE_BIN="$(command -v kmscube 2>/dev/null || true)"
 log_info "Using kmscube: $KMSCUBE_BIN"
 
