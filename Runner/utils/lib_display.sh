@@ -1016,67 +1016,84 @@ weston_runtime_socket_exists() {
 # Wait until Weston is usable by requiring both process presence and socket availability.
 # Returns 0 when ready, 1 after timeout seconds if Weston does not become ready.
 weston_wait_ready() {
-    timeout="${1:-15}"
-    i=0
+    wwr_timeout="${1:-15}"
+    wwr_elapsed=0
 
-    while [ "$i" -lt "$timeout" ]; do
-        weston_proc_ready=1
-        weston_sock_ready=1
+    while [ "$wwr_elapsed" -lt "$wwr_timeout" ]; do
+        wwr_proc_ready=1
+        wwr_sock_ready=1
 
         if command -v weston_is_running >/dev/null 2>&1; then
             if weston_is_running >/dev/null 2>&1; then
-                weston_proc_ready=0
+                wwr_proc_ready=0
             fi
         else
             if command -v pgrep >/dev/null 2>&1; then
                 if pgrep -x weston >/dev/null 2>&1; then
-                    weston_proc_ready=0
+                    wwr_proc_ready=0
                 fi
             fi
         fi
 
         if weston_runtime_socket_exists; then
-            weston_sock_ready=0
+            wwr_sock_ready=0
         fi
 
-        if [ "$weston_proc_ready" -eq 0 ] && [ "$weston_sock_ready" -eq 0 ]; then
+        if [ "$wwr_proc_ready" -eq 0 ] && [ "$wwr_sock_ready" -eq 0 ]; then
             return 0
         fi
 
-        i=$((i + 1))
+        wwr_elapsed=$((wwr_elapsed + 1))
         sleep 1
     done
 
-    log_warn "weston_wait_ready: Weston did not become ready within ${timeout}s"
+    log_warn "weston_wait_ready: Weston did not become ready within ${wwr_timeout}s"
     return 1
 }
 
 # Restore Weston runtime after a DRM-exclusive test stopped it.
 # Starts socket/service first, then falls back to weston_start, and waits until ready.
+# Arguments: readiness timeout (default 15), optional direct-start log override.
+# Existing callers retain weston_start's default log path.
+# Returns 0 only when both a Weston process and a Wayland socket are present.
 weston_restore_runtime() {
-    timeout="${1:-15}"
- 
+    wrr_wait_secs="${1:-15}"
+    wrr_start_log="${2:-}"
+
     if command -v weston_is_running >/dev/null 2>&1; then
         if weston_is_running >/dev/null 2>&1 && weston_runtime_socket_exists; then
+            log_info "Reusing ready Weston runtime"
             return 0
         fi
     fi
- 
+
     if command -v systemctl >/dev/null 2>&1; then
+        log_info "Attempting Weston socket and service restoration"
         systemctl start weston.socket >/dev/null 2>&1 || true
         systemctl start weston.service >/dev/null 2>&1 || \
         systemctl start weston@root.service >/dev/null 2>&1 || true
     fi
- 
-    if weston_wait_ready 3; then
+
+    # This is an intermediate check. Report a final failure only after fallback.
+    if weston_wait_ready 3 >/dev/null 2>&1; then
+        log_pass "Weston runtime restored through socket or service startup"
         return 0
     fi
- 
+
+    log_info "Initial Weston readiness check incomplete, trying startup fallback"
     if command -v weston_start >/dev/null 2>&1; then
-        weston_start >/dev/null 2>&1 || true
+        if ! weston_start "$wrr_start_log"; then
+            log_warn "Weston startup fallback did not report success, checking final readiness"
+        fi
     fi
- 
-    weston_wait_ready "$timeout"
+
+    if weston_wait_ready "$wrr_wait_secs"; then
+        log_pass "Weston runtime restored after startup fallback"
+        return 0
+    fi
+
+    log_error "Weston restoration failed after the final ${wrr_wait_secs}s readiness wait, startup log=${wrr_start_log:-/tmp/weston.self.log}"
+    return 1
 }
 
 # Remove stale Wayland socket files only when Weston is not running.
@@ -2751,6 +2768,7 @@ weston_log_runtime_snapshot() {
     wlr_label="$1"
     wlr_pids=""
     wlr_state=""
+    wlr_socket=""
 
     log_info "----- Weston runtime snapshot, ${wlr_label} -----"
 
@@ -2798,6 +2816,10 @@ weston_log_runtime_snapshot() {
     fi
 
     log_info "Env now, XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-<unset>} WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-<unset>}"
+    if command -v weston_preferred_socket >/dev/null 2>&1; then
+        wlr_socket="$(weston_preferred_socket 2>/dev/null || true)"
+        log_info "Discovered Weston socket, ${wlr_socket:-<none>}"
+    fi
     log_info "----- End Weston runtime snapshot, ${wlr_label} -----"
 }
 

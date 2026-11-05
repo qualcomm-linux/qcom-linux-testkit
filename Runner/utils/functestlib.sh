@@ -2139,8 +2139,10 @@ weston_stop() {
     return 1
 }
 
-# Start weston with correct env if not running
+# Start weston with correct env if not running.
+# Optional $1 selects the direct-start log, existing callers keep the default.
 weston_start() {
+    ws_start_log="${1:-/tmp/weston.self.log}"
     if weston_is_running; then
         log_info "Weston already running"
         return 0
@@ -2193,8 +2195,12 @@ weston_start() {
         return 1
     fi
 
-    log_info "Spawning Weston directly, log file is /tmp/weston.self.log"
-    ( nohup weston --log=/tmp/weston.self.log >/dev/null 2>&1 & ) || true
+    log_info "Spawning Weston directly, log file is $ws_start_log"
+    if [ -n "${1:-}" ]; then
+        ( nohup weston --log="$ws_start_log" >"$ws_start_log.launch" 2>&1 & ) || true
+    else
+        ( nohup weston --log="$ws_start_log" >/dev/null 2>&1 & ) || true
+    fi
 
     tries=0
     while [ "$tries" -lt 8 ]; do
@@ -2210,11 +2216,14 @@ weston_start() {
         tries=$((tries + 1))
     done
 
-    if [ -f /tmp/weston.self.log ]; then
+    if [ -f "$ws_start_log" ]; then
         log_warn "Weston spawn failed, last log lines follow"
-        tail -n 20 /tmp/weston.self.log 2>/dev/null | sed 's/^/[weston.log] /' || true
+        tail -n 20 "$ws_start_log" 2>/dev/null | sed 's/^/[weston.log] /' || true
     else
         log_warn "Weston spawn failed, no log file present"
+    fi
+    if [ -n "${1:-}" ] && [ -f "$ws_start_log.launch" ]; then
+        tail -n 20 "$ws_start_log.launch" 2>/dev/null | sed 's/^/[weston-launch] /' || true
     fi
     return 1
 }
@@ -2287,7 +2296,7 @@ wayland_choose_or_start() {
     sock="$(wayland_pick_socket || true)"
     if [ -z "$sock" ]; then
         log_info "No Wayland socket found; attempting to start Weston…"
-        weston_start || log_warn "weston_start() did not succeed."
+        weston_start "" || log_warn "weston_start() did not succeed."
         # Re-scan a few times
         n=0
         while [ $n -lt 5 ] && [ -z "$sock" ]; do
@@ -2522,7 +2531,7 @@ weston_pick_env_or_start() {
     unset WAYLAND_DISPLAY
  
     log_info "$ctx: Starting Weston..."
-    weston_start
+    weston_start ""
  
     # 3) Wait up to ~10 seconds for any Wayland socket to appear.
     i=0
