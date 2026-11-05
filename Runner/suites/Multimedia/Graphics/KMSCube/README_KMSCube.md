@@ -117,6 +117,10 @@ package, run continuously under the managed timeout. For those builds, reaching
 the timeout is the expected controlled completion, and retained EGL plus OpenGL
 initialization output is required for PASS.
 
+`eglinfo` is an optional renderer preflight. When it is absent, the runner
+reports WARN and continues with the actual KMSCube rendering validation.
+When it is available, the existing CPU/software-renderer gate still applies.
+
 `--timeout SECONDS` sets the execution deadline for **both** builds, defaulting
 to 60 seconds. A finite build must finish and report at least `FRAME_COUNT - 1`
 frames before that deadline. A finite timeout is FAIL, even when initialization
@@ -126,7 +130,20 @@ succeeded. For slower targets, increase the deadline without reducing coverage:
 ./run.sh --auto --timeout 120
 ```
 
-After expiry, the runner allows two seconds for TERM and two for KILL. If the
+Before terminating an expired run, the runner captures the process status,
+kernel wait channel, syscall, kernel stack, memory mappings and file-descriptor
+information in `KMSCube_process_state.log`. Kernel and OS metadata are included.
+The reader has a two-second deadline and bounded cancellation, which can add up
+to six seconds before KMSCube termination begins. Missing procfs entries or
+restricted access are recorded without changing the rendering verdict.
+
+A finite timeout remains FAIL even if the reported frame count reached the
+minimum. The failure reason includes both the reported count and the threshold,
+so completed rendering can be distinguished from a process that did not exit.
+On failure, the retained process snapshot is also printed to stdout. Continuous
+runs retain the same snapshot at their expected controlled timeout.
+
+After capture, the runner allows two seconds for TERM and two for KILL. If the
 child still cannot stop, the test reports FAIL and withholds display restoration
 to avoid competing DRM ownership. Inspect the reported PID and retained
 `.KMSCube-display-manager.*.state` file before recovering the display runtime.
@@ -180,6 +197,9 @@ sh-5.2#
 - Output markers are retained in `KMSCube_failure_markers.log` and the complete
   command output remains in `KMSCube_run.log`.
 - Capability-probe output is retained in `KMSCube_capabilities.log`.
+- Timeout process evidence is retained in `KMSCube_process_state.log` under the
+  invocation directory and printed to stdout for failed runs. A normal finite
+  completion leaves this file empty.
 - Temporary display-manager state is kept in the invocation working directory
   and removed after restoration, not stored under `/tmp`.
 

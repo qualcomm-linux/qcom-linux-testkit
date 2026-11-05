@@ -140,6 +140,7 @@ if [ ! -w "$test_path" ]; then
 fi
 
 LOG_FILE="./${TESTNAME}_run.log"
+PROCESS_LOG="./${TESTNAME}_process_state.log"
 FAILURE_LOG="./${TESTNAME}_failure_markers.log"
 CAPABILITY_LOG="./${TESTNAME}_capabilities.log"
 
@@ -194,6 +195,7 @@ weston_stopped_by_test=0
 rm -f \
     "$RES_FILE" \
     "$LOG_FILE" \
+    "$PROCESS_LOG" \
     "$FAILURE_LOG" \
     "$CAPABILITY_LOG" \
     "$DISPLAY_MANAGER_STATE_FILE"
@@ -475,8 +477,8 @@ if [ ! -e "$1" ]; then
     exit 0
 fi
 
-if ! command -v run_with_bounded_timeout >/dev/null 2>&1; then
-    log_fail "$TESTNAME FAIL - required timeout helper is unavailable: run_with_bounded_timeout"
+if ! command -v run_with_bounded_timeout_capture >/dev/null 2>&1; then
+    log_fail "$TESTNAME FAIL - required timeout helper is unavailable: run_with_bounded_timeout_capture"
     echo "$TESTNAME FAIL" >"$RES_FILE"
     exit 0
 fi
@@ -514,7 +516,9 @@ fi
 log_info "KMSCube capability output retained in $CAPABILITY_LOG"
 
 # --- GPU acceleration gating -------------------------------------------------
-if command -v display_is_cpu_renderer >/dev/null 2>&1; then
+if ! command -v "${EGLINFO:-eglinfo}" >/dev/null 2>&1; then
+    log_warn "Optional EGL renderer probe unavailable, command=${EGLINFO:-eglinfo}, actual KMSCube rendering will validate the runtime"
+elif command -v display_is_cpu_renderer >/dev/null 2>&1; then
     if display_is_cpu_renderer gbm; then
         log_skip "$TESTNAME SKIP - CPU/software renderer detected on GBM"
         echo "$TESTNAME SKIP" >"$RES_FILE"
@@ -603,13 +607,18 @@ else
 fi
 
 log_info "KMSCube deadline=${KMSCUBE_TIMEOUT}s, count=${FRAME_COUNT} frames, output=$LOG_FILE"
-run_with_bounded_timeout "$KMSCUBE_TIMEOUT" "$@" >"$LOG_FILE" 2>&1
+run_with_bounded_timeout_capture \
+    "$KMSCUBE_TIMEOUT" "$PROCESS_LOG" "$@" >"$LOG_FILE" 2>&1
 rc=$?
 
 # Do not restore a compositor while an unkillable child still owns DRM.
 if [ -n "${BOUNDED_TIMEOUT_PID:-}" ]; then
     log_fail "$TESTNAME FAIL - KMSCube cleanup incomplete, pid=$BOUNDED_TIMEOUT_PID, see $LOG_FILE"
     cat "$LOG_FILE"
+    if [ -s "$PROCESS_LOG" ]; then
+        log_info "Pre-termination process diagnostics: $PROCESS_LOG"
+        cat "$PROCESS_LOG"
+    fi
     printf '%s\n' "$TESTNAME FAIL" >"$RES_FILE"
     exit 1
 fi
@@ -695,7 +704,7 @@ VERDICT_FAILURE="$POSTPROCESS_FAILURE"
 if [ -z "$VERDICT_FAILURE" ] &&
    [ "$KMSCUBE_SUPPORTS_COUNT" -eq 1 ]; then
     if [ "$rc" -eq 124 ] && [ "$BOUNDED_TIMEOUT_EXPIRED" -eq 1 ]; then
-        VERDICT_FAILURE="finite --count=${FRAME_COUNT} did not complete within ${KMSCUBE_TIMEOUT}s"
+        VERDICT_FAILURE="finite --count=${FRAME_COUNT} did not complete within ${KMSCUBE_TIMEOUT}s, rendered=${FRAMES_RENDERED:-unknown} minimum=${EXPECTED_MIN}, process did not exit"
     elif [ "$rc" -ne 0 ]; then
         VERDICT_FAILURE="finite --count execution failed with rc=$rc"
     elif [ "$FAILURE_MARKER_COUNT" -gt 0 ]; then
@@ -734,6 +743,10 @@ fi
 if [ -n "$VERDICT_FAILURE" ]; then
     log_fail "$TESTNAME : FAIL ($VERDICT_FAILURE), see $LOG_FILE"
     cat "$LOG_FILE"
+    if [ -s "$PROCESS_LOG" ]; then
+        log_info "Pre-termination process diagnostics: $PROCESS_LOG"
+        cat "$PROCESS_LOG"
+    fi
     echo "$TESTNAME FAIL" >"$RES_FILE"
     exit 1
 fi
