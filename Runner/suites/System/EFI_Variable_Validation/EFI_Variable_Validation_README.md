@@ -41,6 +41,17 @@ The test then reads the variable back and validates:
 - payload bytes:
   - `01 77 01 00 00 00 00 00`
 
+The `efivar` command uses `GUID-Name`, while the efivarfs node uses
+`Name-GUID`. Diagnostics resolve the node from the selected variable rather
+than treating the command's name as a filesystem name.
+
+On a write or readback failure, the test logs node metadata and retains raw
+read diagnostics in `efi_trial_boot_status_raw.log`. When image-provided `od`
+is available, it reads at most 256 bytes with a five-second watchdog and logs
+the read status. These bytes include the four-byte attributes header before
+the payload. The raw output is also printed to stdout. Missing `od` only
+limits diagnostics, it does not change the mandatory validation result.
+
 ### 2. `OsIndicationsSupported`
 
 The test reads:
@@ -79,6 +90,34 @@ It also stores temporary command output in:
 
 - `efi_vars.list`
 - `efi_var_write.log`
+- `efi_trial_boot_status_before_write.log`
 - `efi_trial_boot_status_print.log`
+- `efi_trial_boot_status_raw.log` on write or readback failure
 - `efi_os_indications_supported_print.log`
 - `efi_trial_boot_status.bin`
+
+All artifacts and watchdog temporary files stay in the suite's current
+working directory. The test does not install diagnostic tools or change
+device permissions.
+
+## Run directly
+
+On Yocto, Debian, Ubuntu or CentOS with the required image-provided tools:
+
+```sh
+cd Runner/suites/System/EFI_Variable_Validation
+./run.sh
+cat EFI_Variable_Validation.res
+```
+
+If a write or readback fails, retain the command logs and inspect the raw
+diagnostics:
+
+```sh
+cat efi_var_write.log
+cat efi_trial_boot_status_print.log
+cat efi_trial_boot_status_raw.log
+```
+
+A successful raw read does not override a failed `efivar` readback. It helps
+distinguish a userspace read problem from a kernel or firmware read failure.

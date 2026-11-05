@@ -53,6 +53,7 @@ EFI_TRIAL_PRINT_LOG="./efi_trial_boot_status_print.log"
 EFI_IND_PRINT_LOG="./efi_os_indications_supported_print.log"
 EFI_DATA_FILE="./efi_trial_boot_status.bin"
 EFI_REMOUNT_LOG="./efi_efivarfs_remount.log"
+EFI_RAW_LOG="./efi_trial_boot_status_raw.log"
 
 rm -f "$RES_FILE" \
       "$EFI_LIST_LOG" \
@@ -61,7 +62,8 @@ rm -f "$RES_FILE" \
       "$EFI_TRIAL_PRINT_LOG" \
       "$EFI_IND_PRINT_LOG" \
       "$EFI_DATA_FILE" \
-      "$EFI_REMOUNT_LOG"
+      "$EFI_REMOUNT_LOG" \
+      "$EFI_RAW_LOG"
 
 CONFIGS="
 CONFIG_EFI=y
@@ -92,32 +94,6 @@ efi_log_efivarfs_mount_state() {
     log_info "efivarfs mount options: $efi_mount_opts"
 }
 
-efi_log_variable_file_state() {
-    efi_var_file="$EFIVARFS_PATH/$OS_TRIAL_BOOT_STATUS_VAR"
-
-    if [ -e "$efi_var_file" ]; then
-        log_info "efivarfs node exists: $efi_var_file"
-
-        if command -v print_path_meta >/dev/null 2>&1; then
-            print_path_meta "$efi_var_file" 2>/dev/null |
-                while IFS= read -r line || [ -n "$line" ]; do
-                    [ -n "$line" ] || continue
-                    log_info "[efivarfs-node] $line"
-                done
-        fi
-
-        if command -v lsattr >/dev/null 2>&1; then
-            lsattr "$efi_var_file" 2>/dev/null |
-                while IFS= read -r line || [ -n "$line" ]; do
-                    [ -n "$line" ] || continue
-                    log_info "[efivarfs-attr] $line"
-                done
-        fi
-    else
-        log_info "efivarfs node does not exist yet: $efi_var_file"
-    fi
-}
-
 efi_log_recent_kernel_messages() {
     log_info "Recent EFI/efivar kernel messages:"
 
@@ -141,7 +117,7 @@ efi_log_existing_trial_boot_status() {
         system_log_file_excerpt "efivar-before-write" "$EFI_TRIAL_BEFORE_PRINT_LOG" 60
     fi
 
-    efi_log_variable_file_state
+    efi_log_variable_file_state "$OS_TRIAL_BOOT_STATUS_VAR"
 }
 
 efi_install_restore_trap
@@ -230,7 +206,7 @@ log_info "Writing EFI variable, ${OS_TRIAL_BOOT_STATUS_VAR}"
 if ! efivar -n "$OS_TRIAL_BOOT_STATUS_VAR" -f "$EFI_DATA_FILE" -w > "$EFI_WRITE_LOG" 2>&1; then
     system_log_file_excerpt "efivar-write" "$EFI_WRITE_LOG" 80
     efi_log_efivarfs_mount_state
-    efi_log_variable_file_state
+    efi_log_variable_file_state "$OS_TRIAL_BOOT_STATUS_VAR" "$EFI_RAW_LOG"
     efi_log_recent_kernel_messages
 
     system_write_result_and_exit "FAIL" "Write failed for ${OS_TRIAL_BOOT_STATUS_VAR}"
@@ -240,7 +216,7 @@ log_pass "Write succeeded for ${OS_TRIAL_BOOT_STATUS_VAR}"
 log_info "Printing EFI variable, ${OS_TRIAL_BOOT_STATUS_VAR}"
 if ! efivar -n "$OS_TRIAL_BOOT_STATUS_VAR" -p > "$EFI_TRIAL_PRINT_LOG" 2>&1; then
     system_log_file_excerpt "efivar-trial-print" "$EFI_TRIAL_PRINT_LOG" 80
-    efi_log_variable_file_state
+    efi_log_variable_file_state "$OS_TRIAL_BOOT_STATUS_VAR" "$EFI_RAW_LOG"
     efi_log_recent_kernel_messages
     system_write_result_and_exit "FAIL" "Print failed for ${OS_TRIAL_BOOT_STATUS_VAR}"
 fi
