@@ -2139,8 +2139,10 @@ weston_stop() {
     return 1
 }
 
-# Start weston with correct env if not running
+# Start weston with correct env if not running.
+# Optional $1 selects the direct-start log, existing callers keep the default.
 weston_start() {
+    ws_start_log="${1:-/tmp/weston.self.log}"
     if weston_is_running; then
         log_info "Weston already running"
         return 0
@@ -2193,8 +2195,12 @@ weston_start() {
         return 1
     fi
 
-    log_info "Spawning Weston directly, log file is /tmp/weston.self.log"
-    ( nohup weston --log=/tmp/weston.self.log >/dev/null 2>&1 & ) || true
+    log_info "Spawning Weston directly, log file is $ws_start_log"
+    if [ -n "${1:-}" ]; then
+        ( nohup weston --log="$ws_start_log" >"$ws_start_log.launch" 2>&1 & ) || true
+    else
+        ( nohup weston --log="$ws_start_log" >/dev/null 2>&1 & ) || true
+    fi
 
     tries=0
     while [ "$tries" -lt 8 ]; do
@@ -2210,11 +2216,14 @@ weston_start() {
         tries=$((tries + 1))
     done
 
-    if [ -f /tmp/weston.self.log ]; then
+    if [ -f "$ws_start_log" ]; then
         log_warn "Weston spawn failed, last log lines follow"
-        tail -n 20 /tmp/weston.self.log 2>/dev/null | sed 's/^/[weston.log] /' || true
+        tail -n 20 "$ws_start_log" 2>/dev/null | sed 's/^/[weston.log] /' || true
     else
         log_warn "Weston spawn failed, no log file present"
+    fi
+    if [ -n "${1:-}" ] && [ -f "$ws_start_log.launch" ]; then
+        tail -n 20 "$ws_start_log.launch" 2>/dev/null | sed 's/^/[weston-launch] /' || true
     fi
     return 1
 }
@@ -2287,7 +2296,7 @@ wayland_choose_or_start() {
     sock="$(wayland_pick_socket || true)"
     if [ -z "$sock" ]; then
         log_info "No Wayland socket found; attempting to start Weston…"
-        weston_start || log_warn "weston_start() did not succeed."
+        weston_start "" || log_warn "weston_start() did not succeed."
         # Re-scan a few times
         n=0
         while [ $n -lt 5 ] && [ -z "$sock" ]; do
@@ -2522,7 +2531,7 @@ weston_pick_env_or_start() {
     unset WAYLAND_DISPLAY
  
     log_info "$ctx: Starting Weston..."
-    weston_start
+    weston_start ""
  
     # 3) Wait up to ~10 seconds for any Wayland socket to appear.
     i=0
@@ -3306,6 +3315,214 @@ managed_timeout_cancel_bounded() {
     fi
 
     return "$mtcb_rc"
+}
+
+# bounded_timeout_pid_running PID
+# Check an owned child, treating an exited Linux zombie as ready to reap.
+bounded_timeout_pid_running() {
+    kill -0 "$1" 2>/dev/null || return 1
+    if [ -r "/proc/$1/status" ]; then
+        while read -r btp_key btp_value; do
+            if [ "$btp_key" = "State:" ]; then
+                case "$btp_value" in
+                    Z*|X*)
+                        return 1
+                        ;;
+                esac
+                break
+            fi
+        done <"/proc/$1/status"
+    fi
+    return 0
+}
+
+# bounded_timeout_cancel
+# Stop only the child owned by run_with_bounded_timeout, TERM then KILL.
+# Allow two seconds per signal. Never wait for a still-running child.
+# Return 1 and retain BOUNDED_TIMEOUT_PID if the child survives cleanup.
+bounded_timeout_cancel() {
+    [ -n "${BOUNDED_TIMEOUT_PID:-}" ] || return 0
+    for btc_signal in TERM KILL; do
+        if bounded_timeout_pid_running "$BOUNDED_TIMEOUT_PID"; then
+            kill -"$btc_signal" "$BOUNDED_TIMEOUT_PID" 2>/dev/null || true
+        fi
+        btc_waited=0
+        while bounded_timeout_pid_running "$BOUNDED_TIMEOUT_PID" &&
+              [ "$btc_waited" -lt 2 ]; do
+            sleep 1
+            btc_waited=$((btc_waited + 1))
+        done
+        if ! bounded_timeout_pid_running "$BOUNDED_TIMEOUT_PID"; then
+            wait "$BOUNDED_TIMEOUT_PID" 2>/dev/null || true
+            BOUNDED_TIMEOUT_PID=""
+            return 0
+        fi
+    done
+    printf '[ERROR] child pid=%s survived TERM/KILL, inspect its kernel wait state before restoring services\n' \
+        "$BOUNDED_TIMEOUT_PID" >&2
+    return 1
+}
+
+# run_with_bounded_timeout SECONDS COMMAND [ARG...]
+# Opt-in deadline for a single executable, without an unbounded wait after KILL.
+# Preserve stdin and the process group. The command must not daemonize or spawn
+# workers requiring group cleanup. Call directly, not in command substitution.
+# Callers must invoke bounded_timeout_cancel from their exit/signal cleanup
+# before restoring resources. Existing managed-timeout consumers are unchanged.
+# Return command status, 124 on expiry, or 125 on invalid input/cleanup failure.
+# BOUNDED_TIMEOUT_PID remains set when cleanup fails. Poll at one-second intervals.
+# BOUNDED_TIMEOUT_EXPIRED distinguishes our deadline from a command exiting 124.
+run_with_bounded_timeout() {
+    BOUNDED_TIMEOUT_EXPIRED=0
+    rbt_seconds="${1:-}"
+    case "$rbt_seconds" in
+        ''|*[!0-9]*|0*)
+            return 125
+            ;;
+    esac
+    [ "${#rbt_seconds}" -le 9 ] || return 125
+    shift
+    [ "$#" -gt 0 ] || return 125
+    # Do not lose ownership of a previous child that could not be stopped.
+    [ -z "${BOUNDED_TIMEOUT_PID:-}" ] || return 125
+    # POSIX asynchronous lists may replace stdin with /dev/null before applying
+    # child redirections. Save it in the parent, then restore the caller's fd 3.
+    {
+        "$@" <&3 3<&- &
+        BOUNDED_TIMEOUT_PID=$!
+    } 3<&0
+    rbt_elapsed=0
+    while bounded_timeout_pid_running "$BOUNDED_TIMEOUT_PID"; do
+        if [ "$rbt_elapsed" -ge "$rbt_seconds" ]; then
+            # shellcheck disable=SC2034  # Public result consumed by the caller.
+            BOUNDED_TIMEOUT_EXPIRED=1
+            printf '[TIMEOUT] command exceeded %ss, pid=%s: %s\n' \
+                "$rbt_seconds" "$BOUNDED_TIMEOUT_PID" "$*" >&2
+            if [ -n "${BOUNDED_TIMEOUT_DIAGNOSTIC_FILE:-}" ]; then
+                if ! bounded_timeout_capture_process_state \
+                    "$BOUNDED_TIMEOUT_PID" \
+                    "$BOUNDED_TIMEOUT_DIAGNOSTIC_FILE"; then
+                    printf '[WARN] process state capture incomplete, artifact=%s\n' \
+                        "$BOUNDED_TIMEOUT_DIAGNOSTIC_FILE" >&2
+                fi
+            fi
+            bounded_timeout_cancel || return 125
+            return 124
+        fi
+        sleep 1
+        rbt_elapsed=$((rbt_elapsed + 1))
+    done
+    wait "$BOUNDED_TIMEOUT_PID"
+    rbt_status=$?
+    BOUNDED_TIMEOUT_PID=""
+    return "$rbt_status"
+}
+
+# bounded_timeout_capture_process_state PID FILE
+# Retain Linux process status, wait state, syscall, stack, mappings and fdinfo.
+# The single awk reader has a two-second deadline plus bounded cancellation.
+# Stdout: none. Return 0 for a completed snapshot, 1 for unavailable evidence.
+# Side effects: replace FILE. Capture cannot overwrite the caller's PID state.
+bounded_timeout_capture_process_state() {
+    [ "$#" -eq 2 ] || return 1
+    btps_pid="$1"
+    btps_file="$2"
+    case "$btps_pid" in
+        ''|*[!0-9]*)
+            return 1
+            ;;
+    esac
+    printf 'Process state before termination, pid=%s\n' "$btps_pid" \
+        >"$btps_file" || return 1
+    if ! command -v awk >/dev/null 2>&1; then
+        printf 'Process reader unavailable, awk is not installed\n' >>"$btps_file"
+        return 1
+    fi
+
+    set --
+    for btps_path in \
+        /proc/version \
+        /etc/os-release \
+        "/proc/$btps_pid/status" \
+        "/proc/$btps_pid/stat" \
+        "/proc/$btps_pid/wchan" \
+        "/proc/$btps_pid/syscall" \
+        "/proc/$btps_pid/stack" \
+        "/proc/$btps_pid/maps" \
+        /proc/"$btps_pid"/fdinfo/*; do
+        if [ -r "$btps_path" ]; then
+            set -- "$@" "$btps_path"
+        else
+            printf 'Process evidence unavailable: %s\n' "$btps_path" >>"$btps_file"
+        fi
+    done
+    if [ "$#" -eq 0 ]; then
+        printf 'Process may have exited before capture, or procfs is unavailable\n' \
+            >>"$btps_file"
+        return 1
+    fi
+
+    (
+        # Isolate ownership and disable capture recursion for the reader.
+        BOUNDED_TIMEOUT_PID=""
+        # shellcheck disable=SC2030  # Reader isolation is intentional, parent state must survive.
+        BOUNDED_TIMEOUT_DIAGNOSTIC_FILE=""
+        run_with_bounded_timeout 2 awk '
+            BEGIN {
+                for (entry = 1; entry < ARGC; entry++) {
+                    path = ARGV[entry]
+                    printf "\n--- %s ---\n", path
+                    lines = 0
+                    while ((status = (getline line < path)) > 0) {
+                        lines++
+                        if (lines > 160) {
+                            print "Remaining lines omitted"
+                            break
+                        }
+                        print line
+                    }
+                    if (status < 0) {
+                        print "Process evidence unavailable or access restricted"
+                    }
+                    close(path)
+                }
+                exit 0
+            }
+        ' "$@"
+        btps_reader_rc=$?
+        if [ -n "${BOUNDED_TIMEOUT_PID:-}" ]; then
+            printf 'Diagnostic reader still present after cancellation, pid=%s\n' \
+                "$BOUNDED_TIMEOUT_PID" >&2
+        fi
+        exit "$btps_reader_rc"
+    ) >>"$btps_file" 2>&1
+    btps_capture_rc=$?
+    printf '[INFO] pre-termination process state retained in %s\n' "$btps_file" >&2
+    [ "$btps_capture_rc" -eq 0 ]
+}
+
+# run_with_bounded_timeout_capture SECONDS FILE COMMAND [ARG...]
+# Opt into a bounded process snapshot before the owned command is terminated.
+# Stdout: command output. Returns the same status as run_with_bounded_timeout.
+# Side effects: reset FILE and retain timeout evidence there. Unavailable
+# diagnostics do not change execution status. Existing caller state is restored.
+run_with_bounded_timeout_capture() {
+    [ "$#" -ge 3 ] || return 125
+    rbtc_seconds="$1"
+    rbtc_file="$2"
+    [ -n "$rbtc_file" ] || return 125
+    shift 2
+    # shellcheck disable=SC2031  # Reader subshell must not change this caller state.
+    rbtc_previous_file="${BOUNDED_TIMEOUT_DIAGNOSTIC_FILE:-}"
+    BOUNDED_TIMEOUT_DIAGNOSTIC_FILE="$rbtc_file"
+    if ! printf '%s' "" >"$rbtc_file"; then
+        printf '[WARN] process diagnostic file unavailable: %s\n' "$rbtc_file" >&2
+        BOUNDED_TIMEOUT_DIAGNOSTIC_FILE=""
+    fi
+    run_with_bounded_timeout "$rbtc_seconds" "$@"
+    rbtc_status=$?
+    BOUNDED_TIMEOUT_DIAGNOSTIC_FILE="$rbtc_previous_file"
+    return "$rbtc_status"
 }
 
 # Purpose: Run a command with a timeout and capture stdout and stderr.

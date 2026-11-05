@@ -16,20 +16,31 @@ Graphics scripts automates the validation of Graphics OpenGL ES 2.0 capabilities
 
 ## Prerequisites
 
-Ensure the following components are present in the target image:
+The following components are required or used by the test:
 
 - kmscube (Binary Available in /usr/bin) - this test app can be compiled from https://gitlab.freedesktop.org/mesa/kmscube
 - modetest from libdrm-tests, optional on CentOS
 - Weston should be killed while running KMSCube Test
 - Write access to root filesystem (for environment setup)
 
-On every supported OS, `kmscube` must already be executable in `PATH`.
-After argument and platform-applicability checks, the runner checks this
-prerequisite before graphics package preparation, GPU boot-policy changes or
-stopping the display runtime. If it is absent, the result is SKIP, with no
-attempt to install `kmscube` or run a rendering test. This avoids reporting a
-package-installation FAIL followed by a testcase SKIP. Provision the binary in
-the image, or add its existing installation directory to `PATH`, then rerun:
+After argument and platform-applicability checks, the runner checks `kmscube`
+before graphics package preparation, GPU boot-policy changes or stopping the
+display runtime. An executable already in `PATH` is reused. On Debian and
+Ubuntu Desktop, a missing command is recovered through `check_dependencies()`
+and the existing package provider's `kmscube` mapping. This restores the
+installation path removed by commit `414648b` for these distros. Recovery is
+the same for base, overlay and auto modes that pass the platform checks.
+
+Package-provider installation and recovery opt-outs remain authoritative.
+`CHECK_DEPS_RECOVER=0` disables this application recovery explicitly. If recovery
+is disabled or cannot provide the executable, the result is SKIP and graphics
+preparation and rendering are not attempted. Retain the package-provider output
+to distinguish disabled installation, an unavailable package and installation
+failure.
+
+Yocto and other distros retain the image-provided `kmscube`
+requirement. Provision the binary in those images, or add an existing
+installation directory to `PATH`, then rerun:
 
 ```sh
 command -v kmscube
@@ -43,10 +54,18 @@ PATH="/opt/graphics/bin:$PATH" ./run.sh --overlay --timeout 60
 ```
 
 Use `--base` for an intentionally selected Mesa stack or `--auto` to preserve
-the active stack. Neither mode bypasses the application prerequisite. The
-existing finite-frame and continuous-run validation remains unchanged when
-the application is present. The graphics-stack and `modetest` preparation
-policies below are separate from the image-provided `kmscube` requirement.
+the active stack. Ubuntu Desktop retains its overlay-only graphics policy,
+and Ubuntu Server skips before application recovery because it is headless.
+The finite-frame and continuous-run validation remains unchanged when the
+application is present. The graphics-stack and `modetest` preparation policies
+below are separate from this application prerequisite.
+
+For Debian/Ubuntu ramdisk validation or any run requiring image-provided tools,
+disable recovery explicitly:
+
+```sh
+CHECK_DEPS_RECOVER=0 ./run.sh --overlay --timeout 60
+```
 
 Yocto uses image-provided components. On Debian, Ubuntu, RHEL, and Fedora, a
 missing `modetest` command is recovered through the shared package provider
@@ -96,6 +115,7 @@ Direct runner usage:
 ./run.sh --overlay
 ./run.sh --auto
 ./run.sh --timeout 90
+./run.sh --auto --timeout 60 --no-stdbuf
 ./run.sh --help
 ```
 
@@ -110,18 +130,121 @@ Qualcomm overlay.
 
 The suite detects the capabilities of the installed `kmscube` instead of
 assuming one package implementation. A build advertising `--count` runs in the
-foreground with `--count=999`, preserving the DRM/page-flip behavior of the
-Yocto implementation. Its exit status and rendered-frame summary are both
+same process group with `--count=999` and a bounded deadline. The count is
+in frames, not seconds, and the default remains unchanged for Yocto. Its exit status and rendered-frame summary are both
 validated. Standard builds without `--count`, including the common Debian
 package, run continuously under the managed timeout. For those builds, reaching
 the timeout is the expected controlled completion, and retained EGL plus OpenGL
 initialization output is required for PASS.
 
-`--timeout SECONDS` changes the continuous-build runtime from its 60-second
-default. Display-manager or Weston state stopped by the suite is restored before
-the final result. `-h` and `--help` print usage and exit without changing
+`eglinfo` is an optional renderer preflight. When it is absent, the runner
+reports WARN and continues with the actual KMSCube rendering validation.
+When it is available, the existing CPU/software-renderer gate still applies.
+
+`--timeout SECONDS` sets the execution deadline for **both** builds, defaulting
+to 60 seconds. A finite build must finish and report at least `FRAME_COUNT - 1`
+frames before that deadline. A finite timeout is FAIL, even when initialization
+succeeded. For slower targets, increase the deadline without reducing coverage:
+
+```sh
+./run.sh --auto --timeout 120
+```
+
+Before terminating an expired run, the runner captures the process status,
+kernel wait channel, syscall, kernel stack, memory mappings and file-descriptor
+information in `KMSCube_process_state.log`. Kernel and OS metadata are included.
+The reader has a two-second deadline and bounded cancellation, which can add up
+to six seconds before KMSCube termination begins. Missing procfs entries or
+restricted access are recorded without changing the rendering verdict.
+
+A finite timeout remains FAIL even if the reported frame count reached the
+minimum. The failure reason includes both the reported count and the threshold,
+so completed rendering can be distinguished from a process that did not exit.
+On failure, the retained process snapshot is also printed to stdout. Continuous
+runs retain the same snapshot at their expected controlled timeout.
+
+After capture, the runner allows two seconds for TERM and two for KILL. If the
+child still cannot stop, the test reports FAIL and withholds display restoration
+to avoid competing DRM ownership. Inspect the reported PID and retained
+`.KMSCube-display-manager.*.state` file before recovering the display runtime.
+Otherwise, display-manager or Weston state stopped by the suite is restored
+before the final result. Weston restoration first checks socket/service startup
+for three seconds, then uses the existing startup fallback and the full
+15-second final readiness wait. An intermediate miss is informational. The
+fallback outcome and final readiness are reported. Rendering and restoration
+failures are both retained in the final FAIL reason, and the EXIT handler does
+not silently repeat a restoration already attempted during normal completion.
+A failed display-manager restoration retains its state file for diagnosis.
+Interrupting the runner also stops its child before
+restoration and records FAIL. Help probes have a five-second deadline, and an
+expired probe is FAIL rather than being classified as a continuous build.
+The existing timeout helper used by other suites is unchanged.
+
+Logs and display-state files are written under the invocation working directory.
+Run from the suite directory for the usual artifact paths. If `stdbuf` is
+available, output is line-buffered in both modes. Without it, a forcibly stopped
+application may leave an incomplete log. `--no-stdbuf` explicitly bypasses that
+wrapper for diagnosis, without changing the frame threshold, deadline or result
+checks. It has no environment-variable equivalent. A continuous build with
+buffered output may fail the initialization-evidence check after termination.
+The complete available run log is
+printed on failure. `-h` and `--help` print usage and exit without changing
 package, GPU, display-manager, or Weston state. Unknown arguments are reported
 as FAIL.
+
+### Ubuntu hang diagnosis
+
+Compare buffering on the same prepared graphics stack and connected display.
+Run from this suite directory after any requested overlay reboot:
+
+```sh
+runner="$(pwd -P)/run.sh"
+mkdir -p kmscube-ubuntu-diagnostics/default kmscube-ubuntu-diagnostics/native
+git rev-parse HEAD >kmscube-ubuntu-diagnostics/testkit-head.txt
+uname -a >kmscube-ubuntu-diagnostics/kernel.txt
+command -v kmscube stdbuf >kmscube-ubuntu-diagnostics/commands.txt
+(
+    cd kmscube-ubuntu-diagnostics/default || exit 1
+    "$runner" --overlay --timeout 60 >stdout.log 2>&1
+    printf '%s\n' "$?" >exit.status
+    cp "$(dirname "$runner")/KMSCube.res" .
+)
+(
+    cd kmscube-ubuntu-diagnostics/native || exit 1
+    "$runner" --overlay --timeout 60 --no-stdbuf >stdout.log 2>&1
+    printf '%s\n' "$?" >exit.status
+    cp "$(dirname "$runner")/KMSCube.res" .
+)
+```
+
+Retain both directories, including stdout, run logs, process snapshots,
+capability output and display-restoration logs. Repeat the pair if the outcomes
+differ. A finite run that renders the requested frames but stays alive is still
+FAIL. A futex wait identifies a blocked userspace operation, its lock owner
+requires a userspace backtrace.
+
+If `gdb` is already available, use a second terminal while the stalled child is
+still alive and before its deadline. Identify the PID belonging to this run:
+
+```sh
+pgrep -x kmscube
+ps -o pid,ppid,stat,wchan,args -C kmscube
+```
+
+Then replace `PID` with that PID and save the backtrace in the matching run
+directory. Attaching a debugger temporarily pauses the application, so use this
+as a separate diagnostic run:
+
+```sh
+gdb -q -batch -p PID \
+    -ex 'set pagination off' \
+    -ex 'thread apply all bt' \
+    -ex 'detach' \
+    -ex 'quit' >userspace-backtrace.log 2>&1
+```
+
+Do not install a debugger just to run the test. The buffering comparison and
+automatic process snapshots remain usable when it is unavailable.
 
 #### Sample output:
 ```
@@ -159,7 +282,17 @@ sh-5.2#
 - Output markers are retained in `KMSCube_failure_markers.log` and the complete
   command output remains in `KMSCube_run.log`.
 - Capability-probe output is retained in `KMSCube_capabilities.log`.
-- Temporary display-manager state is kept in the testcase working directory
+- `KMSCube_display_runtime.log` retains Weston process arguments, the discovered
+  socket before DRM release and after restoration, startup fallback output and
+  the final readiness result. It is also printed to stdout. Restoration uses
+  the existing services and generic startup fallback, an arbitrary manually
+  launched Weston command is not saved and replayed.
+- A direct Weston fallback writes `KMSCube_weston_restore.log` and
+  `KMSCube_weston_restore.log.launch` in CWD instead of using a shared `/tmp` log.
+- Timeout process evidence is retained in `KMSCube_process_state.log` under the
+  invocation directory and printed to stdout for failed runs. A normal finite
+  completion leaves this file empty.
+- Temporary display-manager state is kept in the invocation working directory
   and removed after restoration, not stored under `/tmp`.
 
 ## CentOS Stream 10 base preparation
