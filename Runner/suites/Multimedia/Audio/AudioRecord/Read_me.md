@@ -962,31 +962,7 @@ current invocation's results directory.
 
 A sequence of PASS, FAIL, PASS produces an aggregate FAIL on every backend.
 Successful repetition does not prove that prior-test state or intermittent
-capture delays have been resolved. For a LAVA comparison within one boot, use
-[the audio capture sequence plan](../../../../plans/audio-capture-sequence-debug.yaml)
-and retain its before/after results and diagnostics.
-
-### LAVA sequence comparison
-
-`audio-capture-sequence-debug.yaml` runs the selected recording configuration
-before playback, after the ten nightly playback invocations, and after the four
-preceding record configurations. Each checkpoint runs three loops by default.
-The three results are `AudioRecord_Before`, `AudioRecord_AfterPlayback` and
-`AudioRecord_AfterRecord`. Predecessor tests publish their own results so a failed
-setup or workload remains visible. The plan prints bounded client, source-format,
-link and server-state evidence even for successful checkpoint captures.
-
-Job parameters are `AUDIO_BACKEND` (default `pipewire`), `SOURCE_CHOICE` (`mic`),
-`SINK_CHOICE` (`speakers`), `TARGET_RECORD_CONFIG` (`record_config5`),
-`RECORD_SECONDS` (`5s`) and `RECORD_LOOPS` (`3`). Provide `AUDIO_CLIPS_PATH` for
-an existing clips directory, or `AUDIO_CLIPS_ARCHIVE` for an image-provided archive
-(default `/Lava_binaries/AudioClips.tar.gz`). Archive extraction stays below the
-plan invocation directory. The plan installs no tools and downloads no clips.
-Use it as the only test definition after the image's normal deploy/boot actions.
-
-The additional checkpoint recordings can themselves warm the audio graph.
-Compare these results with the original nightly job, and treat ordering and time
-since boot as hypotheses until the failure is reproduced under controlled changes.
+capture delays have been resolved.
 
 ## Capture summaries in full nightly runs
 
@@ -1005,8 +981,8 @@ policy still determines the result. No minimum-duration or signal threshold is
 relaxed, and calibration messages alone do not establish a failed capture.
 
 Use the existing full `Runner/plans/meta-qcom-nightly_config2.yaml` at the pinned
-testkit revision to preserve nightly workload order. Compare per-attempt summaries
-with the audio-only sequence plan. For direct execution, for example:
+testkit revision to preserve nightly workload order. Compare per-attempt
+summaries from that workload. For direct execution, for example:
 
 ```sh
 ./run.sh --backend pipewire --source mic --config-name record_config5 --record-seconds 5s --loops 3
