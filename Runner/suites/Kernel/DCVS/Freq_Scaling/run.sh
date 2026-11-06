@@ -1,10 +1,14 @@
 #!/bin/sh
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause
-# Robustly find and source init_env
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# ---------- Repo env + helpers ----------
+SCRIPT_DIR="$(
+  cd "$(dirname "$0")" || exit 1
+  pwd
+)"
 INIT_ENV=""
 SEARCH="$SCRIPT_DIR"
+
 while [ "$SEARCH" != "/" ]; do
     if [ -f "$SEARCH/init_env" ]; then
         INIT_ENV="$SEARCH/init_env"
@@ -12,82 +16,76 @@ while [ "$SEARCH" != "/" ]; do
     fi
     SEARCH=$(dirname "$SEARCH")
 done
- 
+
 if [ -z "$INIT_ENV" ]; then
     echo "[ERROR] Could not find init_env (starting at $SCRIPT_DIR)" >&2
     exit 1
 fi
- 
-# Only source if not already loaded (idempotent)
-if [ -z "$__INIT_ENV_LOADED" ]; then
+
+# Only source once (idempotent)
+# NOTE: We intentionally **do not export** any new vars. They stay local to this shell.
+if [ -z "${__INIT_ENV_LOADED:-}" ]; then
     # shellcheck disable=SC1090
     . "$INIT_ENV"
+    __INIT_ENV_LOADED=1
 fi
-# Always source functestlib.sh, using $TOOLS exported by init_env
-# shellcheck disable=SC1090,SC1091
+
+# shellcheck disable=SC1090
+. "$INIT_ENV"
+# shellcheck disable=SC1091
 . "$TOOLS/functestlib.sh"
+# shellcheck disable=SC1091
+. "$TOOLS/lib_performance.sh"
 
 TESTNAME="Freq_Scaling"
-test_path=$(find_test_case_by_name "$TESTNAME")
-cd "$test_path" || exit 1
-# shellcheck disable=SC2034
-res_file="./$TESTNAME.res"
+RES_FILE="$SCRIPT_DIR/$TESTNAME.res"
+test_result_init "$TESTNAME" "$RES_FILE" || exit 1
+trap 'test_result_finish FAIL "CPUFreq interrupted, inspect policy restoration logs"' HUP INT TERM
 
-log_info "-------------------------------------------------"
-log_info "----------- Starting $TESTNAME Test -------------"
-
-check_dependencies zcat grep
-
-CONFIGS="CONFIG_CPU_FREQ CONFIG_CPU_FREQ_GOV_SCHEDUTIL CONFIG_CPU_FREQ_GOV_PERFORMANCE"
-check_kernel_config "$CONFIGS" || {
-    log_fail "Kernel config validation failed."
-    echo "$TESTNAME FAIL" > "$res_file"
-    exit 1
+# usage
+# Print supported invocation, no mutation.
+usage() {
+    echo "Usage: $0 [--help]"
 }
 
-miss=0
-
-for cpu_dir in /sys/devices/system/cpu/cpu[0-8]*; do
-    CPUFREQ_PATH="$cpu_dir/cpufreq"
-    if [ -d "$CPUFREQ_PATH" ]; then
-        cpu_name="${cpu_dir##*/}"
-        log_pass "$cpu_name has cpufreq interface"
-    else
-        miss=1
-    fi
+# parse_args <arguments...>
+# Reject unsupported options before policy mutation.
+parse_args() {
+    case "${1:-}" in
+        --help|-h)
+            usage
+            exit 0
+            ;;
+        "")
+            ;;
+        *)
+            test_result_finish FAIL "Unsupported CPUFreq option: $1"
+            ;;
+    esac
+}
+parse_args "$@"
+OUT_DIR=$(test_create_run_directory "$PWD/results/$TESTNAME") || test_result_finish FAIL "Cannot create evidence directory in $PWD"
+log_info "CPUFreq evidence: $OUT_DIR"
+for policy_dir in /sys/devices/system/cpu/cpufreq/policy*; do
+    [ -d "$policy_dir" ] || continue
+    policy_name=${policy_dir##*/}
+    mkdir "$OUT_DIR/$policy_name" || test_result_finish FAIL "Cannot create policy evidence"
+    cpufreq_validate_policy "$policy_dir" "$OUT_DIR/$policy_name" load >"$OUT_DIR/$policy_name/validation.log" 2>&1
+    policy_rc=$?
+    cat "$OUT_DIR/$policy_name/validation.log"
+    case "$policy_rc" in
+        0)
+            test_result_record PASS "$policy_name supported controls validated and restored"
+            ;;
+        4)
+            test_result_record SKIP "$policy_name has no eligible online CPU or supported control within its original limits"
+            ;;
+        *)
+            test_result_record FAIL "$policy_name control or restoration failed, see $OUT_DIR/$policy_name"
+            ;;
+    esac
 done
-
-if [ "$miss" -eq 1 ]; then
-    echo "CPUFreq interface not found. Test Failed"
-    echo "$TESTNAME FAIL" > "$res_file"
-    exit 1
+if [ "$TEST_RESULT_PASS_COUNT" -eq 0 ] && [ "$TEST_RESULT_FAIL_COUNT" -eq 0 ]; then
+    test_result_record SKIP "No exercisable CPUFreq policy, image must expose writable cpufreq controls"
 fi
-
-log_info "Reading scaling governor..."
-GOVERNOR=$(cat "$CPUFREQ_PATH"/scaling_governor)
-log_info "Current governor: $GOVERNOR"
-
-log_info "Reading min/max frequencies"
-MIN_FREQ=$(cat "$CPUFREQ_PATH"/cpuinfo_min_freq)
-MAX_FREQ=$(cat "$CPUFREQ_PATH"/cpuinfo_max_freq)
-log_info "CPU frequency range: $MIN_FREQ - $MAX_FREQ"
-
-log_info "Triggering frequency update via governor"
-dd if=/dev/urandom of=/dev/null bs=1M count=1000 &
-LOAD_PID=$!
-sleep 2
-
-CURRENT_FREQ=$(cat "$CPUFREQ_PATH"/scaling_cur_freq)
-log_info "Observed frequency under load: $CURRENT_FREQ"
-
-kill $LOAD_PID
-
-if [ "$CURRENT_FREQ" -gt "$MIN_FREQ" ]; then
-    log_pass "DCVS scaling appears functional. Test Passed"
-    echo "$TESTNAME PASS" > "$res_file"
-    exit 0
-else
-    log_fail "DCVS did not scale as expected. Test Failed"
-    echo "$TESTNAME FAIL" > "$res_file"
-    exit 1
-fi
+test_result_finish

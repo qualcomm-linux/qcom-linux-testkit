@@ -45,7 +45,7 @@ At a high level, the test:
 6. Selects a sink (optional `--sink`, optional `--null-sink`)
 7. Constructs a **multi-line** `gst-launch-1.0` playback pipeline
 8. Runs the pipeline for the requested duration (watchdog timeout)
-9. Applies **post-validation evidence** (streaming/path activity) and emits PASS/FAIL/SKIP
+9. Checks retained rendered-buffer evidence from the selected sink and emits PASS/FAIL/SKIP
 10. Collects best-effort diagnostics:
     - mixer dump
     - dmesg scan
@@ -55,14 +55,14 @@ At a high level, the test:
 ## PASS / FAIL / SKIP criteria
 
 ### PASS
-- `gst-launch-1.0` either:
-  - exits `0`, or
-  - is killed by watchdog timeout (`124` or `143`) **when a duration timeout is used**
-- **AND** evidence indicates the audio path was active, such as:
-  - PipeWire stream RUNNING, or
-  - PulseAudio stream/sink-input exists, or
-  - ALSA PCM substream RUNNING, or
-  - ASoC DAPM path shows `On` (fallback heuristic)
+- `gst-launch-1.0` exits `0`, or reaches the requested duration and shuts
+  down after SIGINT without requiring SIGKILL.
+- The named audio sink reports at least one rendered buffer in this attempt's
+  GStreamer log. `basesink:5` logging captures this evidence before EOS teardown,
+  so a completed clip does not fail because the device is already idle.
+- Other active streams and stale logs do not count. The log is cleared before
+  every backend attempt. This validates buffer delivery to the selected sink,
+  not acoustic output. `--null-sink` continues to validate software playback.
 
 ### FAIL
 - A backend was attempted and the run did not meet PASS criteria (e.g., immediate pipeline failure, no evidence of activity)
@@ -195,7 +195,7 @@ Help:
   - Prefer null/dummy sink if available (useful for silent CI runs)
 
 - `--gst-debug <level>`
-  - Sets `GST_DEBUG=<level>` (single numeric level)
+  - Sets the general debug level, with `basesink:5` enabled for playback evidence
   - Values:
     - `1` ERROR
     - `2` WARNING

@@ -30,9 +30,40 @@
 # original console loglevel.
 
 RESULT_FILE="${1:-}"
+STRICT=0
+LEGACY_TESTCASE_ID=""
+INVALID_RESULTS=0
 SIGNAL_FILE="${TMPDIR:-/tmp}/lava_signals_$$.log"
 PRINTK_SAVED=""
 PRINTK_CHANGED=0
+
+# parse_args
+# Parse optional publication checks without changing legacy callers.
+parse_args() {
+    [ "$#" -gt 0 ] && shift
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --strict)
+                STRICT=1
+                shift
+                ;;
+            --legacy-testcase-id)
+                if [ "$#" -lt 2 ] || [ -z "$2" ]; then
+                    echo "[ERROR] --legacy-testcase-id requires a testcase name" >&2
+                    return 1
+                fi
+                LEGACY_TESTCASE_ID="$2"
+                shift 2
+                ;;
+            *)
+                echo "[ERROR] Unknown publication option: $1" >&2
+                return 1
+                ;;
+        esac
+    done
+}
+
+parse_args "$@" || exit 1
 
 valid_result() {
     case "$1" in
@@ -104,6 +135,7 @@ rm -f "$SIGNAL_FILE"
 
 if [ -z "$RESULT_FILE" ]; then
     echo "[WARNING] Result file argument missing" >&2
+    [ "$STRICT" -eq 1 ] && exit 1
     exit 0
 fi
 
@@ -121,8 +153,10 @@ if [ -f "$RESULT_FILE" ]; then
         # last token = result
         #
         # Intentional word splitting is used here to parse token fields.
+        set -f
         # shellcheck disable=SC2086
         set -- $line
+        set +f
 
         [ "$#" -gt 0 ] || continue
 
@@ -132,8 +166,13 @@ if [ -f "$RESULT_FILE" ]; then
                 ;;
         esac
 
+        if [ "$#" -eq 1 ] && [ -n "$LEGACY_TESTCASE_ID" ]; then
+            set -- "$LEGACY_TESTCASE_ID" "$1"
+        fi
+
         if [ "$#" -lt 2 ]; then
             echo "[WARNING] Ignoring malformed result line: $line" >&2
+            INVALID_RESULTS=1
             continue
         fi
 
@@ -149,7 +188,17 @@ if [ -f "$RESULT_FILE" ]; then
 
         if [ -z "$testcase_clean" ]; then
             echo "[WARNING] Ignoring result line with invalid testcase id: $line" >&2
+            INVALID_RESULTS=1
             continue
+        fi
+
+        if [ "$STRICT" -eq 1 ]; then
+            if [ "$#" -ne 2 ] || [ "$testcase_clean" != "$testcase" ] ||
+               [ "$result" = UNKNOWN ]; then
+                echo "[WARNING] Invalid strict result: $line" >&2
+                INVALID_RESULTS=1
+                continue
+            fi
         fi
 
         if valid_result "$result"; then
@@ -157,10 +206,17 @@ if [ -f "$RESULT_FILE" ]; then
                 "$testcase_clean" "$result" >> "$SIGNAL_FILE"
         else
             echo "[WARNING] Ignoring result line with invalid result: $line" >&2
+            INVALID_RESULTS=1
         fi
     done < "$RESULT_FILE"
 else
     echo "[WARNING] Result file missing: $RESULT_FILE" >&2
+fi
+
+if [ "$STRICT" -eq 1 ] &&
+   { [ "$INVALID_RESULTS" -ne 0 ] || [ ! -s "$SIGNAL_FILE" ]; }; then
+    echo "[ERROR] No complete valid result set to publish from $RESULT_FILE" >&2
+    exit 1
 fi
 
 # Emit signals with the smallest possible critical section.

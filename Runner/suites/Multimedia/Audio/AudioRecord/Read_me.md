@@ -616,20 +616,39 @@ before capture retains its existing automatic-backend policy.
 
 With `TIMEOUT=0`, PipeWire allows requested duration plus
 `AUDIO_RECORD_START_GRACE` (default five seconds) for the first WAV payload.
-Once payload arrives, a separate window of the same length permits collection
-of the requested audio duration. For a five-second capture with default grace,
-startup is bounded to ten seconds and capture to another ten seconds. A healthy
-stream stops as soon as five seconds of PCM have arrived. No payload progress
-for `max(start-grace, 3)` seconds fails the capture. Slow trickle progress cannot
-extend the capture window. These limits include file-buffering delays.
+Once payload arrives, AudioRecord retains the original total budget of
+`2 * (requested duration + start grace)` rather than shortening it to a separate
+capture window. For `--record-seconds 5s --start-grace 5`, the first payload must
+arrive within ten seconds and recording is bounded to twenty seconds total.
+Recording stops as soon as five seconds of PCM are present. A fast startup leaves
+more time for a buffered or converting stream to deliver those samples, without
+increasing the existing absolute budget. A missing header or missing initial
+payload still fails at the startup limit. No-progress stalls still fail after
+`max(start grace, 3)` seconds. The budget never renews on each growth event.
+These limits include file-buffering delays, and graceful finalization is allowed
+up to three additional seconds.
+
+This changes only AudioRecord automatic PipeWire capture, on both base and
+overlay stacks. Shared-helper callers without the opt-in validation policy and
+captures with a playback-completion marker retain their existing separate-window
+behavior. AudioLoopback, ALSA and PulseAudio capture timing is unchanged.
+Slow delivery remains visible in `AUDIO_CAPTURE` timing and byte-rate summaries.
+Successful functional capture does not prove real-time throughput or calibration
+health. Actual WAV duration, format, signal and recorder failures remain subject
+to the existing validation policy.
 
 An explicit `--timeout` / `TIMEOUT` replaces the total capture deadline, without
 extra startup grace or retries. Startup and idle checks still apply. It does not
 lower PipeWire's requested sample duration. Set it high enough for startup and
 the requested capture. Termination allows up to three additional seconds to
 finalize the WAV, then kills and reaps only the test-owned recorder. Forced kill,
-early recorder exit, startup failure, stall, and incomplete capture are FAIL.
-Final WAV format, duration and content validation remains mandatory. This
+early recorder exit, startup failure and stall are FAIL. If samples are still
+arriving at the deadline and the recorder stops gracefully, the monitor returns
+an expected watchdog status. Final WAV validation then decides the result using
+the existing `AUDIO_RECORD_MIN_DURATION_RATIO` (default `0.70`), format and signal
+checks. For a five-second request, a valid 3.5-second or longer WAV can pass after
+this expected stop. A shorter WAV still fails. The full five seconds remains the
+capture goal, and an explicit timeout does not lower the validation target. This
 monitor uses image-provided shell tools and does not require Python or systemd.
 
 ALSA and PulseAudio retain their existing capture, timeout and retry behavior.
@@ -876,6 +895,99 @@ The LAVA definitions already launch from the suite directory. A CWD permission
 or artifact-creation error must be corrected before rerunning, it is not proof
 that audio hardware is absent.
 
+## Capture deadline diagnostics
+
+`AUDIO_CAPTURE` stdout diagnostics include the last observed payload duration,
+requested duration, expected byte rate, observed byte rate including startup,
+first payload time, last growth time, idle interval and effective deadline.
+Completion-marker state is included when the recording path requires one.
+The decision timestamp is separate from elapsed time spent stopping the recorder.
+A still-progressing recording stopped at the deadline emits `status=STOPPED`,
+not PASS. A stdout warning includes the collected duration and byte-rate summary,
+and final WAV validation determines the result. Stalled or broken recordings
+remain FAIL even when their partial WAV passes content checks. These diagnostics
+do not extend capture deadlines. This expected-stop policy applies to AudioRecord
+on both base and overlay PipeWire stacks, including Yocto, Debian, Ubuntu and
+CentOS. AudioLoopback retains its full-duration and playback-completion checks.
+
+For example, repeat the same runtime-selected microphone configuration:
+
+```sh
+./run.sh --backend pipewire --source mic --config-name record_config7 --record-seconds 5s --loops 2
+```
+
+Inspect the warning and final testcase result together. A WAV content PASS alone
+does not override a recorder error, volume restoration failure or another suite
+failure.
+
+## Live PipeWire source format
+
+Targeted PipeWire captures retain `<recording>.wav.source-format` beside the WAV.
+At the first payload, the test queries the discovered source ID with
+`pw-cli enum-params <id> Format` in the recorder's existing user session. The
+read-only query runs alongside recording and is stopped within two polling
+intervals or when recording ends. Missing `pw-cli` only limits diagnostics.
+
+On failure, the source format and existing live links are printed to stdout.
+Compare the source's negotiated rate/channels with the requested WAV format and
+recorded byte rate to investigate slow delivery or conversion. An empty Format
+response does not prove that a requested rate is unsupported. The test retains
+the requested format and duration, and does not replace them with a known-working
+configuration. Desktop-user artifacts are promoted with the WAV and stale
+sidecars are cleared on rerun. ALSA and PulseAudio execution are unchanged.
+
 ## License
 
 SPDX-License-Identifier: BSD-3-Clause(C) Qualcomm Technologies, Inc. and/or its subsidiaries.
+
+## Repeated recording validation
+
+`--loops N` (or `LOOPS=N`) runs N validations of each selected configuration or
+legacy duration. Every loop must pass. A later successful recording cannot hide
+an earlier recording failure. LAVA still receives one aggregate result per
+invocation, and stdout reports `validated loops: passed/requested`.
+
+With multiple loops, each attempt retains its own WAV, client log, volume/route
+logs, server snapshots and available live PipeWire sidecars. For example,
+`record_32KHz_2ch.loop-1.wav` and `record_32KHz_2ch.loop-1.log` belong to the first
+attempt. The existing `record_32KHz_2ch.log` combines the attempt client logs for
+case-level review. Single-loop artifact names are unchanged. Desktop-user WAVs
+are promoted to the same per-loop final paths, and all paths stay under the
+current invocation's results directory.
+
+```sh
+./run.sh --backend pipewire --source mic --config-name record_config5 --record-seconds 5s --loops 3
+./run.sh --backend alsa --source mic --durations short --record-seconds 5s --loops 3
+```
+
+A sequence of PASS, FAIL, PASS produces an aggregate FAIL on every backend.
+Successful repetition does not prove that prior-test state or intermittent
+capture delays have been resolved.
+
+## Capture summaries in full nightly runs
+
+Every recording attempt writes `<client-log>.capture-summary` and prints it to
+stdout, including successful attempts. It contains the final WAV validation,
+available capture-progress measurements, and existing PipeWire service snapshots
+before and after capture. It also retains a bounded selection and count of ACDB
+calibration errors from the captured operation-window journal. Missing optional
+server evidence remains a diagnostic limitation. No additional service query,
+reset, package installation or sleep is introduced by the summary.
+
+Signal warnings and observed calibration errors are explicitly logged as WARN.
+A basic-integrity PASS establishes an acceptable WAV and recorder result, not
+acoustic quality or a clean calibration database. The configured validation
+policy still determines the result. No minimum-duration or signal threshold is
+relaxed, and calibration messages alone do not establish a failed capture.
+
+Use the existing full `Runner/plans/meta-qcom-nightly_config2.yaml` at the pinned
+testkit revision to preserve nightly workload order. Compare per-attempt
+summaries from that workload. For direct execution, for example:
+
+```sh
+./run.sh --backend pipewire --source mic --config-name record_config5 --record-seconds 5s --loops 3
+```
+
+ALSA and PulseAudio attempts print their WAV summary without assuming that
+PipeWire services or journal tools exist. Existing detailed failure artifacts
+remain available for failed attempts.

@@ -1,11 +1,14 @@
 #!/bin/sh
-
 # Copyright (c) Qualcomm Technologies, Inc.
 # SPDX-License-Identifier: BSD-3-Clause
-# Robustly find and source init_env
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# ---------- Repo env + helpers ----------
+SCRIPT_DIR="$(
+  cd "$(dirname "$0")" || exit 1
+  pwd
+)"
 INIT_ENV=""
 SEARCH="$SCRIPT_DIR"
+
 while [ "$SEARCH" != "/" ]; do
     if [ -f "$SEARCH/init_env" ]; then
         INIT_ENV="$SEARCH/init_env"
@@ -19,86 +22,63 @@ if [ -z "$INIT_ENV" ]; then
     exit 1
 fi
 
-# Only source if not already loaded (idempotent)
-if [ -z "$__INIT_ENV_LOADED" ]; then
+# Only source once (idempotent)
+# NOTE: We intentionally **do not export** any new vars. They stay local to this shell.
+if [ -z "${__INIT_ENV_LOADED:-}" ]; then
     # shellcheck disable=SC1090
     . "$INIT_ENV"
+    __INIT_ENV_LOADED=1
 fi
 
-# Always source functestlib.sh, using $TOOLS exported by init_env
-# shellcheck disable=SC1090,SC1091
+# shellcheck disable=SC1090
+. "$INIT_ENV"
+# shellcheck disable=SC1091
 . "$TOOLS/functestlib.sh"
+# shellcheck disable=SC1091
+. "$TOOLS/coresight_common.sh"
 
 TESTNAME="etm_trace"
-test_path=$(find_test_case_by_name "$TESTNAME")
-cd "$test_path" || exit 1
-res_file="./$TESTNAME.res"
+RES_FILE="$SCRIPT_DIR/$TESTNAME.res"
+test_result_init "$TESTNAME" "$RES_FILE" || exit 1
 
-log_info "-----------------------------------------------------------------------------------------"
-log_info "-------------------Starting $TESTNAME Testcase----------------------------"
-log_info "=== Test Initialization ==="
- 
-pass=true
- 
-# Step 1: Check required kernel config
-required_configs="CONFIG_CORESIGHT_SOURCE_ETM4X"
-check_kernel_config "$required_configs" || {
-    log_skip "$TESTNAME : Required kernel config missing"
-    echo "$TESTNAME SKIP" > "$res_file"
-    exit 0
+# usage
+# Describe the automatic route selection.
+usage() {
+    echo "Usage: $0 [--help], automatically captures one available CPU trace route"
 }
- 
-# Step 2: Enable CoreSight sink
-log_info "Enabling CoreSight sink (tmc_etr0)..."
-echo 1 > /sys/bus/coresight/devices/tmc_etr0/enable_sink
-if [ "$(cat /sys/bus/coresight/devices/tmc_etr0/enable_sink)" -eq 1 ]; then
-    log_info "Sink enabled successfully."
-else
-    log_fail "Failed to enable sink."
-    pass=false
-fi
- 
-# Step 3: Enable CoreSight source
-log_info "Enabling CoreSight source (etm0)..."
-echo 1 > /sys/bus/coresight/devices/etm0/enable_source
-if [ "$(cat /sys/bus/coresight/devices/etm0/enable_source)" -eq 1 ]; then
-    log_info "Source enabled successfully."
-else
-    log_fail "Failed to enable source."
-    pass=false
-fi
- 
-# Step 4: Capture trace data
-TRACE_FILE="/tmp/qdss.bin"
-log_info "Capturing trace data to $TRACE_FILE..."
-if cat /dev/tmc_etr0 > "$TRACE_FILE"; then
-    log_info "Trace data captured successfully."
-else
-    log_fail "Failed to capture trace data."
-    pass=false
-fi
- 
-# Step 5: Validate trace output
-if [ -s "$TRACE_FILE" ]; then
-    log_info "Trace file is not empty."
-else
-    log_fail "Trace file is empty."
-    pass=false
-fi
- 
-# Final result and cleanup
-if $pass; then
-    log_pass "$TESTNAME : Test Passed"
-    echo "$TESTNAME PASS" > "$res_file"
-    rm -f "$TRACE_FILE"
-    log_info "-------------------Completed $TESTNAME Testcase----------------------------"
-    exit 0
-else
-    log_fail "$TESTNAME : Test Failed"
-    echo "$TESTNAME FAIL" > "$res_file"
-    rm -f "$TRACE_FILE"
-    log_info "-------------------Completed $TESTNAME Testcase----------------------------"
-    exit 1
-fi
- 
 
+# parse_args <arguments...>
+# Reject unknown options before touching CoreSight controls.
+parse_args() {
+    case "${1:-}" in
+        --help|-h)
+            usage
+            exit 0
+            ;;
+        "")
+            ;;
+        *)
+            test_result_finish FAIL "Unknown CoreSight option: $1"
+            ;;
+    esac
+}
+parse_args "$@"
+command -v taskset >/dev/null 2>&1 || test_result_finish SKIP "taskset absent, cannot exercise the selected CPU trace source"
+[ -d /sys/bus/coresight/devices ] || test_result_finish SKIP "No runtime CoreSight bus, image/DT must expose a CPU source and capture sink"
+OUT_DIR=$(test_create_run_directory "$PWD/results/$TESTNAME") || test_result_finish FAIL "Cannot create evidence directory in $PWD"
+trap 'test_result_finish FAIL "CoreSight interrupted, inspect restoration evidence in $OUT_DIR"' HUP INT TERM
+coresight_capture /sys/bus/coresight/devices /dev "$OUT_DIR" >"$OUT_DIR/capture.log" 2>&1
+capture_rc=$?
+cat "$OUT_DIR/capture.log"
+case "$capture_rc" in
+    0)
+        test_result_record PASS "Fresh CoreSight trace captured and controls restored, $OUT_DIR"
+        ;;
+    4)
+        test_result_record SKIP "No available idle CPU trace route, see $OUT_DIR/capture.log"
+        ;;
+    *)
+        test_result_record FAIL "CoreSight capture or restoration failed, see $OUT_DIR/capture.log"
+        ;;
+esac
+test_result_finish

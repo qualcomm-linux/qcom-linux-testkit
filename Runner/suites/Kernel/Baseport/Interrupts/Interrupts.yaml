@@ -5,18 +5,17 @@ metadata:
     maintainer:
         - vnarapar@qti.qualcomm.com
     os:
-        - openembedded
+        - linux
     scope:
         - functional
-    devices:
-        - rb3gen2
 
 params:
-    INTERRUPTS_WAIT_TIMEOUT_S: "30"
+    INTERRUPTS_WAIT_TIMEOUT_S: "auto"
     INTERRUPTS_POLL_INTERVAL_S: "2"
 
 run:
     steps:
-        - cd Runner
-        - INTERRUPTS_WAIT_TIMEOUT_S="${INTERRUPTS_WAIT_TIMEOUT_S}" INTERRUPTS_POLL_INTERVAL_S="${INTERRUPTS_POLL_INTERVAL_S}" $PWD/suites/Kernel/Baseport/Interrupts/run.sh || true
-        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/Interrupts/Interrupts.res || true
+        - REPO_PATH=$PWD
+        - cd Runner/suites/Kernel/Baseport/Interrupts
+        - INTERRUPTS_WAIT_TIMEOUT_S="${INTERRUPTS_WAIT_TIMEOUT_S}" INTERRUPTS_POLL_INTERVAL_S="${INTERRUPTS_POLL_INTERVAL_S}" ./run.sh || true
+        - $REPO_PATH/Runner/utils/send-to-lava.sh Interrupts.res

@@ -2,10 +2,14 @@
 
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause
-# Robustly find and source init_env
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# ---------- Repo env + helpers ----------
+SCRIPT_DIR="$(
+  cd "$(dirname "$0")" || exit 1
+  pwd
+)"
 INIT_ENV=""
 SEARCH="$SCRIPT_DIR"
+
 while [ "$SEARCH" != "/" ]; do
     if [ -f "$SEARCH/init_env" ]; then
         INIT_ENV="$SEARCH/init_env"
@@ -19,20 +23,23 @@ if [ -z "$INIT_ENV" ]; then
     exit 1
 fi
 
-# Only source if not already loaded
-if [ -z "$__INIT_ENV_LOADED" ]; then
+# Only source once (idempotent)
+# NOTE: We intentionally **do not export** any new vars. They stay local to this shell.
+if [ -z "${__INIT_ENV_LOADED:-}" ]; then
     # shellcheck disable=SC1090
     . "$INIT_ENV"
+    __INIT_ENV_LOADED=1
 fi
 
-# Always source functestlib.sh
-# shellcheck disable=SC1090,SC1091
+# shellcheck disable=SC1090
+. "$INIT_ENV"
+# shellcheck disable=SC1091
 . "$TOOLS/functestlib.sh"
 
 TESTNAME="UFS_Validation"
+RES_FILE="./$TESTNAME.res"
 test_path=$(find_test_case_by_name "$TESTNAME")
 cd "$test_path" || exit 1
-res_file="./$TESTNAME.res"
 
 log_info "--------------------------------------------------"
 log_info "------------- Starting $TESTNAME Test ------------"
@@ -45,29 +52,41 @@ OPTIONAL_CONFIGS="CONFIG_SCSI_UFSHCD_PLATFORM CONFIG_SCSI_UFSHCD_PCI CONFIG_SCSI
 log_info "Checking mandatory kernel configs for UFS..."
 if ! check_kernel_config "$MANDATORY_CONFIGS" 2>/dev/null; then
     log_skip "Missing mandatory UFS kernel configs: $MANDATORY_CONFIGS"
-    echo "$TESTNAME SKIP" > "$res_file"
+    echo "$TESTNAME SKIP" > "$RES_FILE"
     exit 0
 fi
 
 log_info "Checking optional kernel configs for UFS..."
 missing_optional=""
 for cfg in $OPTIONAL_CONFIGS; do
-    if ! check_kernel_config "$cfg" 2>/dev/null; then
-        log_info "[OPTIONAL] $cfg is not enabled"
-        missing_optional="$missing_optional $cfg"
-    fi
+    cfg_value=$(kernel_config_value "$cfg" 2>/dev/null || true)
+    case "$cfg_value" in
+        "$cfg=y"|"$cfg=m")
+            log_info "[OPTIONAL] $cfg_value"
+            ;;
+        "$cfg=n")
+            log_info "[OPTIONAL] $cfg is not enabled"
+            missing_optional="$missing_optional $cfg"
+            ;;
+        *)
+            log_info "[OPTIONAL] $cfg is not reported by the running kernel configuration"
+            missing_optional="$missing_optional $cfg"
+            ;;
+    esac
 done
-[ -n "$missing_optional" ] && log_info "Optional configs not present but continuing:$missing_optional"
+if [ -n "$missing_optional" ]; then
+    log_info "Optional configs not present but continuing:$missing_optional"
+fi
 
 check_dt_nodes "/sys/bus/platform/devices/*ufs*" || {
-    echo "$TESTNAME SKIP" > "$res_file"
+    echo "$TESTNAME SKIP" > "$RES_FILE"
     exit 0
 }
 
 block_dev=$(detect_ufs_partition_block)
 if [ -z "$block_dev" ]; then
     log_skip "No UFS block device found."
-    echo "$TESTNAME SKIP" > "$res_file"
+    echo "$TESTNAME SKIP" > "$RES_FILE"
     exit 0
 fi
 log_info "Detected UFS block: $block_dev"
@@ -84,7 +103,7 @@ resolved_rootfs=$(readlink -f "$rootfs_dev" 2>/dev/null)
 
 if [ -n "$resolved_block" ] && [ -n "$resolved_rootfs" ] && [ "$resolved_block" = "$resolved_rootfs" ]; then
     log_warn "Detected block ($resolved_block) is the root filesystem. Skipping read test."
-    echo "$TESTNAME SKIP" > "$res_file"
+    echo "$TESTNAME SKIP" > "$RES_FILE"
     exit 0
 fi
 
@@ -101,7 +120,7 @@ if $DD_CMD >/dev/null 2>&1; then
 else
     log_fail "UFS read test failed"
     log_info "Try manually: $DD_CMD"
-    echo "$TESTNAME FAIL" > "$res_file"
+    echo "$TESTNAME FAIL" > "$RES_FILE"
     exit 1
 fi
 
@@ -135,11 +154,11 @@ else
         fi
         rm -f "$tmpfile"
     fi
-    echo "$TESTNAME FAIL" > "$res_file"
+    echo "$TESTNAME FAIL" > "$RES_FILE"
     exit 1
 fi
 
 scan_dmesg_errors "ufs" "$test_path"
 log_pass "$TESTNAME completed successfully"
-echo "$TESTNAME PASS" > "$res_file"
+echo "$TESTNAME PASS" > "$RES_FILE"
 exit 0

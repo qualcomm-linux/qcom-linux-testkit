@@ -142,6 +142,95 @@ system_require_grep_in_file() {
 # EFI variable validation helpers
 # ---------------------------------------------------------------------------
 
+# efi_variable_file_path <GUID-Name>
+# Return the Name-GUID efivarfs path. Preserve hyphens in variable names and
+# keep diagnostics on stderr for command-substitution callers.
+efi_variable_file_path() {
+    evfp_variable="$1"
+
+    case "$evfp_variable" in
+        ????????-????-????-????-????????????-?*)
+            ;;
+        *)
+            printf '%s\n' "Expected an EFI variable in GUID-Name format" >&2
+            return 1
+            ;;
+    esac
+
+    evfp_name="${evfp_variable#????????-????-????-????-????????????-}"
+    evfp_guid="${evfp_variable%"-$evfp_name"}"
+    case "$evfp_guid" in
+        *[!0-9a-fA-F-]*)
+            printf '%s\n' "Invalid EFI variable GUID: $evfp_guid" >&2
+            return 1
+            ;;
+    esac
+    case "$evfp_name" in
+        */*)
+            printf '%s\n' "EFI variable names cannot contain a path separator" >&2
+            return 1
+            ;;
+    esac
+
+    printf '%s/%s-%s\n' "${EFIVARFS_PATH%/}" "$evfp_name" "$evfp_guid"
+}
+
+# efi_log_variable_file_state <GUID-Name> [raw-log]
+# Log the actual efivarfs node and optional bounded raw read, including the
+# four attribute bytes. Diagnostic failures never replace the suite verdict.
+efi_log_variable_file_state() {
+    elvfs_variable="$1"
+    elvfs_raw_log="${2:-}"
+    elvfs_file="$(efi_variable_file_path "$elvfs_variable")" || return 0
+
+    if [ -e "$elvfs_file" ]; then
+        log_info "efivarfs node exists: $elvfs_file"
+
+        if command -v print_path_meta >/dev/null 2>&1; then
+            print_path_meta "$elvfs_file" 2>/dev/null |
+                while IFS= read -r elvfs_line || [ -n "$elvfs_line" ]; do
+                    [ -n "$elvfs_line" ] || continue
+                    log_info "[efivarfs-node] $elvfs_line"
+                done
+        fi
+
+        if command -v lsattr >/dev/null 2>&1; then
+            lsattr "$elvfs_file" 2>/dev/null |
+                while IFS= read -r elvfs_line || [ -n "$elvfs_line" ]; do
+                    [ -n "$elvfs_line" ] || continue
+                    log_info "[efivarfs-attr] $elvfs_line"
+                done
+        fi
+    else
+        log_info "efivarfs node is absent: $elvfs_file"
+    fi
+
+    [ -n "$elvfs_raw_log" ] || return 0
+    if ! printf 'variable=%s\nnode=%s\n' \
+            "$elvfs_variable" "$elvfs_file" > "$elvfs_raw_log"; then
+        log_warn "Could not retain EFI raw diagnostics: $elvfs_raw_log"
+        return 0
+    fi
+
+    if [ ! -e "$elvfs_file" ]; then
+        printf '%s\n' "raw_read=unavailable, efivarfs node is absent" >> "$elvfs_raw_log"
+    elif ! command -v od >/dev/null 2>&1; then
+        printf '%s\n' "raw_read=unavailable, optional od tool is missing" >> "$elvfs_raw_log"
+    else
+        printf '%s\n' "Raw bytes include four attribute bytes, capped at 256 bytes:" >> "$elvfs_raw_log"
+        if run_with_managed_timeout 5 . efi-variable-raw \
+                od -An -tx1 -v -N 256 "$elvfs_file" >> "$elvfs_raw_log" 2>&1; then
+            elvfs_raw_status=0
+        else
+            elvfs_raw_status=$?
+        fi
+        printf 'raw_read_exit_status=%s\n' "$elvfs_raw_status" >> "$elvfs_raw_log"
+    fi
+
+    system_log_file_excerpt "efivarfs-raw" "$elvfs_raw_log" 40
+    return 0
+}
+
 # Prepare OsTrialBootStatus payload.
 # Expected payload:
 # 01 77 01 00 00 00 00 00

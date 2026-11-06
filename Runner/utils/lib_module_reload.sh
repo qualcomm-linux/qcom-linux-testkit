@@ -6,6 +6,58 @@ MRV_LAST_CMD_PID=""
 MRV_LAST_CMD_ELAPSED="0"
 MRV_LAST_TIMEOUT_DIR=""
 MRV_PROFILE_REASON=""
+MRV_MODULE_MONITOR_PID=""
+MRV_MODULE_MONITOR_READY=0
+MRV_MODULE_EVENT_LOG=""
+
+# mrv_stop_module_monitor
+# Stop and reap only this test's optional udevadm observer. No result changes.
+mrv_stop_module_monitor() {
+  [ -n "$MRV_MODULE_MONITOR_PID" ] || return 0
+  kill -TERM "$MRV_MODULE_MONITOR_PID" 2>/dev/null || true
+  mrv_monitor_wait=0
+  while kill -0 "$MRV_MODULE_MONITOR_PID" 2>/dev/null &&
+        [ "$mrv_monitor_wait" -lt 2 ]; do
+    sleep 1
+    mrv_monitor_wait=$((mrv_monitor_wait + 1))
+  done
+  if kill -0 "$MRV_MODULE_MONITOR_PID" 2>/dev/null; then
+    kill -KILL "$MRV_MODULE_MONITOR_PID" 2>/dev/null || true
+  fi
+  wait "$MRV_MODULE_MONITOR_PID" 2>/dev/null || true
+  MRV_MODULE_MONITOR_PID=""
+}
+
+# mrv_start_module_monitor <iteration-directory>
+# Observe module events across unload and settle for supervised-client profiles.
+# Optional udevadm adds evidence only, never a new applicability requirement.
+mrv_start_module_monitor() {
+  mrv_stop_module_monitor
+  MRV_MODULE_MONITOR_READY=0
+  MRV_MODULE_EVENT_LOG=""
+  [ "${PROFILE_DISCOVER_CLIENT_SERVICES:-no}" = yes ] || return 0
+  mrv_monitor_log="$1/module_events.log"
+  MRV_MODULE_EVENT_LOG="$mrv_monitor_log"
+  if ! command -v udevadm >/dev/null 2>&1; then
+    printf 'Module event observation unavailable, udevadm is not installed\n' >"$mrv_monitor_log"
+    return 0
+  fi
+  udevadm monitor --kernel --subsystem-match=module >"$mrv_monitor_log" 2>&1 &
+  MRV_MODULE_MONITOR_PID=$!
+  mrv_monitor_wait=0
+  while kill -0 "$MRV_MODULE_MONITOR_PID" 2>/dev/null &&
+        [ "$mrv_monitor_wait" -lt 3 ]; do
+    if grep -q 'KERNEL -' "$mrv_monitor_log"; then
+      MRV_MODULE_MONITOR_READY=1
+      return 0
+    fi
+    sleep 1
+    mrv_monitor_wait=$((mrv_monitor_wait + 1))
+  done
+  log_info "[$PROFILE_NAME] module event observer readiness not confirmed, see $mrv_monitor_log"
+  mrv_stop_module_monitor
+  return 0
+}
 
 # Reset all profile-provided variables before sourcing a profile.
 mrv_reset_profile_vars() {
@@ -32,7 +84,12 @@ mrv_reset_profile_vars() {
   PROFILE_QUIESCE_PROC_PATTERNS=""
   PROFILE_QUIESCE_DEVICE_PATTERNS=""
   PROFILE_QUIESCE_ONCE="no"
+  PROFILE_DISCOVER_CLIENT_SERVICES="no"
+  PROFILE_ALLOW_AUTOMATIC_RELOAD="no"
+  MRV_AUTOMATIC_RELOAD=0
   MRV_PROFILE_QUIESCED="0"
+  MRV_MODULE_STATE_LOG=""
+  MRV_LAST_STATE_DIR=""
 }
 
 # Convert module names to the form used by lsmod and /proc/modules.
@@ -216,6 +273,8 @@ mrv_module_builtin() {
 }
 
 # Wait until a module reaches the requested state: present or absent.
+# Arguments: state, module, settle seconds. Optionally append observations to
+# MRV_MODULE_STATE_LOG. Return zero only when the requested state is observed.
 mrv_wait_module_state() {
   want="$1"
   name="$2"
@@ -223,14 +282,17 @@ mrv_wait_module_state() {
   elapsed=0
 
   while [ "$elapsed" -lt "$timeout_s" ] 2>/dev/null; do
-    if [ "$want" = "present" ]; then
-      if mrv_module_loaded "$name"; then
-        return 0
-      fi
+    if mrv_module_loaded "$name"; then
+      mrv_observed=present
     else
-      if ! mrv_module_loaded "$name"; then
-        return 0
-      fi
+      mrv_observed=absent
+    fi
+    if [ -n "${MRV_MODULE_STATE_LOG:-}" ]; then
+      printf 'module=%s expected=%s observed=%s poll=%s\n' \
+        "$name" "$want" "$mrv_observed" "$elapsed" >>"$MRV_MODULE_STATE_LOG"
+    fi
+    if [ "$want" = "$mrv_observed" ]; then
+      return 0
     fi
     sleep 1
     elapsed=$((elapsed + 1))
@@ -279,11 +341,15 @@ mrv_capture_patterns() {
 }
 
 # Capture status and recent logs for profile services.
-mrv_capture_services() {
+# Arguments: space-separated units, output file. Bound manager queries and
+# retain their status without changing the reload result or caller variables.
+mrv_capture_services() (
   services="$1"
   outfile="$2"
 
   : > "$outfile"
+  trap 'managed_timeout_cancel_bounded 2' 0
+  trap 'exit 1' HUP INT TERM
 
   if [ -z "$services" ]; then
     printf 'No profile services defined\n' >> "$outfile"
@@ -298,20 +364,67 @@ mrv_capture_services() {
   # Intentional word splitting: services are space-separated profile data.
   # shellcheck disable=SC2086
   set -- $services
-  for svc in "$@"; do
-    printf '===== %s =====\n' "$svc" >> "$outfile"
-    systemctl status "$svc" --no-pager >> "$outfile" 2>&1 || true
-    if command -v journalctl >/dev/null 2>&1; then
-      printf '\n----- journalctl -u %s -----\n' "$svc" >> "$outfile"
-      journalctl -u "$svc" --no-pager -n 200 >> "$outfile" 2>&1 || true
+  run_with_managed_timeout 8 "${outfile%/*}" service-status \
+    systemctl status --no-pager -- "$@" >>"$outfile" 2>&1
+  printf 'service_status_exit_status=%s\n' "$?" >>"$outfile"
+  if command -v journalctl >/dev/null 2>&1; then
+    set --
+    for svc in $services; do
+      set -- "$@" "--unit=$svc"
+    done
+    run_with_managed_timeout 8 "${outfile%/*}" service-journal \
+      journalctl -b --no-pager -n 200 "$@" >>"$outfile" 2>&1
+    printf 'service_journal_exit_status=%s\n' "$?" >>"$outfile"
+  fi
+  exit 0
+)
+
+# mrv_capture_module_runtime <output-file>
+# Save current module presence, refcount, initialization state and holders.
+# Diagnostic-only, no stdout or mutation. Missing kernel files are recorded.
+mrv_capture_module_runtime() (
+  mrm_file="$1"
+  mrm_name=$(mrv_module_lsmod_name "$MODULE_NAME")
+  {
+    printf 'module=%s\n' "$mrm_name"
+    if [ -r /proc/modules ]; then
+      awk -v mod="$mrm_name" '
+        $1 == mod { print "proc_modules=" $0; found=1 }
+        END { if (!found) print "proc_modules=absent" }
+      ' /proc/modules
+    else
+      printf 'proc_modules=unavailable\n'
     fi
-  done
-}
+    for mrm_property in refcnt initstate taint; do
+      if [ -r "/sys/module/$mrm_name/$mrm_property" ]; then
+        printf '%s=' "$mrm_property"
+        cat "/sys/module/$mrm_name/$mrm_property"
+      else
+        printf '%s=unavailable\n' "$mrm_property"
+      fi
+    done
+    for mrm_holder in /sys/module/"$mrm_name"/holders/*; do
+      [ -e "$mrm_holder" ] || continue
+      printf 'holder=%s\n' "${mrm_holder##*/}"
+    done
+  } >"$mrm_file" 2>&1
+)
 
 # Capture module, process, service, sysfs, and device state for evidence.
+# Accept an output directory and remember the latest snapshot for reporting.
 mrv_capture_module_state() {
+  MRV_LAST_STATE_DIR="$1"
+  mrv_write_module_state "$1"
+}
+
+# mrv_write_module_state <output-directory>
+# Keep diagnostic helper variables in a subshell so snapshots cannot overwrite
+# the reload command's state. Write artifacts without changing the test verdict.
+mrv_write_module_state() (
   outdir="$1"
   mkdir -p "$outdir"
+  trap 'managed_timeout_cancel_bounded 2' 0
+  trap 'exit 1' HUP INT TERM
 
   {
     printf 'profile=%s\n' "${PROFILE_NAME:-unknown}"
@@ -339,7 +452,10 @@ mrv_capture_module_state() {
 
   modinfo "$MODULE_NAME" > "$outdir/modinfo.log" 2>&1 || true
   ps -ef > "$outdir/ps.log" 2>&1 || true
-  dmesg > "$outdir/dmesg.log" 2>&1 || true
+  scan_dmesg_errors "$outdir" "$sys_mod" "" >"$outdir/kernel_scan.log" 2>&1 || true
+  # Preserve the existing artifact name used by iteration diffs and operators.
+  cp "$outdir/dmesg_snapshot.log" "$outdir/dmesg.log" 2>/dev/null || true
+  mrv_capture_module_runtime "$outdir/module_runtime.log" || true
 
   if [ -d "/sys/module/$sys_mod" ]; then
     find "/sys/module/$sys_mod" -maxdepth 3 -print > "$outdir/sys_module_tree.log" 2>&1 || true
@@ -355,9 +471,11 @@ mrv_capture_module_state() {
   mrv_capture_patterns "$PROFILE_SYSFS_PATTERNS" "$outdir/profile_sysfs.log"
 
   if command -v journalctl >/dev/null 2>&1; then
-    journalctl -b --no-pager -n 300 > "$outdir/journal.log" 2>&1 || true
+    run_with_managed_timeout 8 "$outdir" module-journal \
+      journalctl -b --no-pager -n 300 >"$outdir/journal.log" 2>&1
+    printf 'collection_exit_status=%s\n' "$?" >>"$outdir/journal.log"
   fi
-}
+)
 
 # Capture /proc evidence for a command that timed out.
 mrv_capture_pid_timeout_snapshot() {
@@ -423,8 +541,110 @@ mrv_exec_with_timeout() {
   wait "$cmd_pid"
   rc=$?
   MRV_LAST_CMD_ELAPSED="$elapsed"
+  printf 'EXIT_STATUS: %s\nELAPSED_POLLS: %s\n' "$rc" "$elapsed" >>"$logfile"
   return "$rc"
 }
+
+# mrv_report_iteration_failure <iteration-directory>
+# Replay retained command/state evidence and collect read-only client state
+# before restoration. External client queries use managed timeouts. Return
+# zero even if optional evidence is unavailable, preserving the original FAIL.
+mrv_report_iteration_failure() (
+  mrfi_dir="$1"
+  mrfi_out="$mrfi_dir/failure_diagnostics"
+  mkdir -p "$mrfi_out" || exit 0
+  trap 'managed_timeout_cancel_bounded 2' 0
+  trap 'exit 1' HUP INT TERM
+  log_info "[$PROFILE_NAME] failure evidence before restoration: $mrfi_out"
+  mrv_capture_module_runtime "$mrfi_out/module_runtime.log" || true
+  printf 'Module configuration evidence unavailable, modprobe is not installed\n' >"$mrfi_out/module_config.log"
+  : >"$mrfi_out/modprobe_config.log"
+  if command -v modprobe >/dev/null 2>&1; then
+    run_with_managed_timeout 8 "$mrfi_out" modprobe-config \
+      modprobe --showconfig >"$mrfi_out/modprobe_config.log" 2>&1
+    mrfi_config_rc=$?
+    LC_ALL=C awk -v module="$MODULE_NAME" '
+      BEGIN { gsub(/-/, "_", module) }
+      {
+        for (field = 2; field <= NF; field++) {
+          value = $field
+          gsub(/-/, "_", value)
+          if (value == module) { print; break }
+        }
+      }
+    ' "$mrfi_out/modprobe_config.log" >"$mrfi_out/module_config.log"
+    printf 'modprobe_showconfig_exit_status=%s (nonzero means configuration evidence unavailable)\n' \
+      "$mrfi_config_rc" >>"$mrfi_out/module_config.log"
+  fi
+  : >"$mrfi_out/open_fds.log"
+  printf 'Device-user scan not requested, no profile device patterns\n' >"$mrfi_out/open_fds_scan.log"
+
+  mrfi_saved=$(module_reload_restore_services_file)
+  {
+    printf '%s\n' "${PROFILE_SERVICES:-} ${PROFILE_QUIESCE_SERVICES:-}"
+    if [ -r "$mrfi_saved" ]; then
+      awk '{print $1}' "$mrfi_saved"
+    fi
+    if [ -r "$mrfi_dir/client_services.txt" ]; then
+      cat "$mrfi_dir/client_services.txt"
+    fi
+  } | awk '{for (i=1;i<=NF;i++) if (!seen[$i]++) print $i}' >"$mrfi_out/services.list"
+  if command -v systemctl >/dev/null 2>&1 && [ -s "$mrfi_out/services.list" ]; then
+    set --
+    while IFS= read -r mrfi_service; do
+      set -- "$@" "$mrfi_service"
+    done <"$mrfi_out/services.list"
+    run_with_managed_timeout 8 "$mrfi_out" service-state \
+      systemctl show --no-pager \
+      --property=Id,LoadState,ActiveState,SubState,UnitFileState,MainPID,ControlGroup \
+      -- "$@" >"$mrfi_out/services.log" 2>&1
+    mrfi_rc=$?
+    printf 'collection_exit_status=%s\n' "$mrfi_rc" >>"$mrfi_out/services.log"
+  else
+    printf 'Service evidence unavailable, no systemctl or no discovered services\n' >"$mrfi_out/services.log"
+  fi
+
+  if [ -n "${PROFILE_DEVICE_PATTERNS:-}" ]; then
+    # Positional arguments are expanded by the child shell after exec.
+    # shellcheck disable=SC2016
+    run_with_managed_timeout 8 "$mrfi_out" open-device-users \
+      sh -c '
+        . "$1/functestlib.sh"
+        . "$1/lib_module_reload.sh"
+        module_reload_scan_open_fds_by_path_patterns "$2" "$3"
+      ' sh "$TOOLS" "$PROFILE_DEVICE_PATTERNS" "$mrfi_out/open_fds.log" \
+      >"$mrfi_out/open_fds_scan.log" 2>&1
+    mrfi_rc=$?
+    # The shared scanner returns 1 when no matching descriptors are found.
+    printf 'collection_exit_status=%s (0=users found, 1=no matches, 124=timeout)\n' \
+      "$mrfi_rc" >>"$mrfi_out/open_fds_scan.log"
+  fi
+
+  for mrfi_file in "$mrfi_dir/preload.log" "$mrfi_dir/unload.log" \
+    "$mrfi_dir/load.log" "$mrfi_dir/module_observations.log" \
+    "$mrfi_dir/module_events.log" "$mrfi_out/module_config.log" \
+    "$mrfi_out/module_runtime.log" "$mrfi_saved" \
+    "$mrfi_saved.runtime_masks" "$mrfi_saved.stopped" \
+    "$mrfi_out/services.log" "$mrfi_out/open_fds.log" "$mrfi_out/open_fds_scan.log"; do
+    [ -r "$mrfi_file" ] || continue
+    log_info "[$PROFILE_NAME] diagnostic artifact: $mrfi_file"
+    log_file_with_label MODULE-RELOAD "$mrfi_file" 80
+  done
+  # Replay existing snapshots, do not rescan the kernel log during reporting.
+  if [ -n "${MRV_LAST_STATE_DIR:-}" ] && [ -d "$MRV_LAST_STATE_DIR" ]; then
+    log_info "[$PROFILE_NAME] latest snapshot: $MRV_LAST_STATE_DIR"
+    for mrfi_name in module_runtime.log holders.log dmesg_errors.log kernel_scan.log; do
+      log_file_with_label MODULE-RELOAD-SNAPSHOT "$MRV_LAST_STATE_DIR/$mrfi_name" 40
+    done
+    if [ -r "$MRV_LAST_STATE_DIR/dmesg_snapshot.log" ]; then
+      grep -iF -- "$MODULE_NAME" "$MRV_LAST_STATE_DIR/dmesg_snapshot.log" \
+        >"$mrfi_out/module_kernel_messages.log" || true
+      tail -n 80 "$mrfi_out/module_kernel_messages.log" >"$mrfi_out/module_kernel_tail.log"
+      log_file_with_label MODULE-RELOAD-KERNEL "$mrfi_out/module_kernel_tail.log" 80
+    fi
+  fi
+  exit 0
+)
 
 # Capture hang evidence after unload/load timeout.
 mrv_capture_hang_evidence() {
@@ -439,7 +659,10 @@ mrv_capture_hang_evidence() {
       printf 'Triggered sysrq-t and sysrq-w\n' > "$outdir/sysrq_actions.log"
       echo t > /proc/sysrq-trigger 2>/dev/null || true
       echo w > /proc/sysrq-trigger 2>/dev/null || true
-      dmesg > "$outdir/dmesg_after_sysrq.log" 2>&1 || true
+      (
+        scan_dmesg_errors "$outdir/after_sysrq" "$MODULE_NAME" "" || true
+      ) >"$outdir/sysrq_kernel_scan.log" 2>&1
+      cp "$outdir/after_sysrq/dmesg_snapshot.log" "$outdir/dmesg_after_sysrq.log" 2>/dev/null || true
     fi
   fi
 
@@ -514,6 +737,10 @@ module_reload_restore_services_file() {
 # We store the previous ActiveState so final restore can avoid starting services
 # that were already inactive before this test touched them.
 module_reload_record_restore_services() {
+  if [ "${PROFILE_DISCOVER_CLIENT_SERVICES:-no}" = "yes" ]; then
+    module_reload_record_client_services "$@"
+    return $?
+  fi
   services="$1"
   restore_file="$(module_reload_restore_services_file)"
   restore_dir="$(dirname "$restore_file")"
@@ -537,6 +764,75 @@ module_reload_record_restore_services() {
   return 0
 }
 
+# module_reload_client_service_known <unit>
+# Verify a loadable or masked system unit. Missing unit names are not services.
+# No stdout, return 0 only for a known service.
+module_reload_client_service_known() {
+  case "$(module_reload_service_state_value "$1" LoadState)" in
+    loaded|masked)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+# module_reload_snapshot_client_services <output-file>
+# Capture loaded service states before module preload can activate clients.
+# Retain raw systemd evidence alongside the parsed baseline, fail on bad output.
+module_reload_snapshot_client_services() (
+  mrcs_file="$1"
+  trap 'managed_timeout_cancel_bounded 2' 0
+  trap 'exit 1' HUP INT TERM
+  if ! run_with_managed_timeout 10 "${mrcs_file%/*}" client-service-snapshot \
+      env LC_ALL=C systemctl list-units \
+      --type=service --all --no-legend --plain --no-pager >"$mrcs_file.raw" 2>"$mrcs_file.stderr"; then
+    log_error "Cannot snapshot initial client service state, see $mrcs_file.stderr"
+    exit 1
+  fi
+  LC_ALL=C awk '
+    NF == 0 { next }
+    $1 ~ /[.]service$/ && $3 ~ /^(active|inactive|failed|activating|deactivating|reloading|maintenance)$/ {
+      print $1, $3
+      next
+    }
+    { invalid=1 }
+    END { exit invalid }
+  ' "$mrcs_file.raw" >"$mrcs_file"
+)
+
+# module_reload_record_client_services
+# Manage runtime-only masks and original state for dynamically discovered clients.
+# Arguments match the legacy service helper. Return nonzero on failure.
+module_reload_record_client_services() (
+  mrrs_services="$1"
+  mrrs_file="$(module_reload_restore_services_file)"
+  mkdir -p "$(dirname "$mrrs_file")" || exit 1
+  for mrrs_service in $mrrs_services; do
+    module_reload_client_service_known "$mrrs_service" || continue
+    if [ -f "$mrrs_file" ] && awk -v svc="$mrrs_service" '$1 == svc { found=1 } END { exit !found }' "$mrrs_file"; then
+      continue
+    fi
+    mrrs_active=$(module_reload_service_state_value "$mrrs_service" ActiveState)
+    if [ -n "${MRV_CLIENT_SERVICE_BASELINE:-}" ]; then
+      [ -r "$MRV_CLIENT_SERVICE_BASELINE" ] || exit 1
+      mrrs_active=$(awk -v svc="$mrrs_service" '
+        $1 == svc { print $2; found=1; exit }
+        END { if (!found) print "inactive" }
+      ' "$MRV_CLIENT_SERVICE_BASELINE") || exit 1
+    fi
+    mrrs_mask=$(module_reload_service_state_value "$mrrs_service" UnitFileState)
+    # Transient services can have an empty UnitFileState.
+    case "$mrrs_active" in
+      active|inactive|failed|activating|deactivating|reloading)
+        ;;
+      *)
+        exit 1
+        ;;
+    esac
+    printf '%s %s %s\n' "$mrrs_service" "$mrrs_active" "${mrrs_mask:-transient}" >>"$mrrs_file" || exit 1
+  done
+)
+
 # Restore every service previously stopped/masked by the module reload test.
 #
 # This is best-effort and should not fail the test. It unblocks the target after
@@ -545,6 +841,10 @@ module_reload_record_restore_services() {
 # Services that were active before quiesce are started again. Services that were
 # inactive before quiesce are only unmasked/reset, not force-started.
 module_reload_restore_recorded_services() {
+  if [ -f "$(module_reload_restore_services_file)" ] && awk 'NF >= 3 { found=1 } END { exit !found }' "$(module_reload_restore_services_file)"; then
+    module_reload_restore_client_services "$@"
+    return $?
+  fi
   log_tag="${1:-module-reload}"
   restore_file="$(module_reload_restore_services_file)"
  
@@ -579,6 +879,56 @@ module_reload_restore_recorded_services() {
   rm -f "$restore_file" 2>/dev/null || true
   return 0
 }
+
+# module_reload_restore_client_services
+# Manage runtime-only masks and original state for dynamically discovered clients.
+# Arguments match the legacy service helper. Return nonzero on failure.
+module_reload_restore_client_services() (
+  mrr_tag="${1:-module-reload}"
+  mrr_file="$(module_reload_restore_services_file)"
+  [ -f "$mrr_file" ] || exit 0
+  mrr_failed=0
+  while IFS=' ' read -r mrr_service mrr_state mrr_mask; do
+    [ -n "$mrr_service" ] || continue
+    log_info "[$mrr_tag] restore: $mrr_service active=$mrr_state mask=${mrr_mask:-unknown}"
+    case "$mrr_mask" in
+      masked|masked-runtime)
+        # No mask was added by this invocation.
+        ;;
+      '')
+        log_error "[$mrr_tag] incomplete saved service state for $mrr_service"
+        mrr_failed=1
+        continue
+        ;;
+      *)
+        if [ -f "$mrr_file.runtime_masks" ] && grep -Fxq "$mrr_service" "$mrr_file.runtime_masks"; then
+          if ! module_reload_run_cmd_quiet_timeout 5 systemctl unmask --runtime "$mrr_service"; then
+            mrr_failed=1
+            continue
+          fi
+        fi
+        ;;
+    esac
+    case "$mrr_state" in
+      active|activating|reloading)
+        # A mask failure can abort before any stop. Do not restart untouched units.
+        if [ ! -f "$mrr_file.stopped" ] || ! grep -Fxq "$mrr_service" "$mrr_file.stopped"; then
+          continue
+        fi
+        if ! module_reload_run_cmd_quiet_timeout 15 systemctl start "$mrr_service" ||
+           ! module_reload_wait_services_active "$mrr_service" 15; then
+          mrr_failed=1
+        fi
+        ;;
+    esac
+  done <"$mrr_file"
+  if [ "$mrr_failed" -eq 0 ]; then
+    rm -f "$mrr_file" "$mrr_file.runtime_masks" "$mrr_file.stopped" || exit 1
+  else
+    log_error "[$mrr_tag] service restoration incomplete, retained $mrr_file"
+  fi
+  exit "$mrr_failed"
+)
 
 # List process IDs whose command line contains a pattern.
 module_reload_list_pids_by_pattern() {
@@ -839,6 +1189,10 @@ module_reload_start_services() {
 
 # Stop, mask, and kill known services and matching processes.
 module_reload_stop_mask_kill_services() {
+  if [ "${PROFILE_DISCOVER_CLIENT_SERVICES:-no}" = "yes" ]; then
+    module_reload_stop_client_services "$@"
+    return $?
+  fi
   services="$1"
   proc_patterns="$2"
   timeout_s="${3:-20}"
@@ -891,6 +1245,62 @@ module_reload_stop_mask_kill_services() {
  
   return 0
 }
+
+# module_reload_stop_client_services
+# Manage runtime-only masks and original state for dynamically discovered clients.
+# Arguments match the legacy service helper. Return nonzero on failure.
+module_reload_stop_client_services() (
+  mrsk_services=$(printf '%s\n' "$1" | awk '{
+    for (i=1; i<=NF; i++) if (!seen[$i]++) print $i
+  }')
+  mrsk_procs="$2"
+  mrsk_timeout="${3:-20}"
+  mrsk_tag="${4:-module-reload}"
+  if ! command -v systemctl >/dev/null 2>&1 || [ ! -d /run/systemd/system ]; then
+    log_error "[$mrsk_tag] cannot safely quiesce supervised clients without a running systemd manager"
+    exit 1
+  fi
+  module_reload_record_restore_services "$mrsk_services" || exit 1
+  # Block activation before stopping clients, otherwise Restart= or dependencies
+  # can bring them back during the unload window. Never change persistent masks.
+  for mrsk_service in $mrsk_services; do
+    module_reload_client_service_known "$mrsk_service" || continue
+    mrsk_mask=$(module_reload_service_state_value "$mrsk_service" UnitFileState)
+    case "$mrsk_mask" in
+      masked|masked-runtime)
+        if [ "$(module_reload_service_state_value "$mrsk_service" ActiveState)" != inactive ]; then
+          log_error "[$mrsk_tag] cannot stop an active/failed pre-masked service without changing its original mask"
+          exit 1
+        fi
+        ;;
+      *)
+        printf '%s\n' "$mrsk_service" >>"$(module_reload_restore_services_file).runtime_masks" || exit 1
+        if ! module_reload_run_cmd_quiet_timeout 5 systemctl mask --runtime "$mrsk_service" ||
+            [ "$(module_reload_service_state_value "$mrsk_service" LoadState)" != masked ]; then
+          log_error "[$mrsk_tag] cannot prevent activation of $mrsk_service"
+          exit 1
+        fi
+        ;;
+    esac
+  done
+  for mrsk_service in $mrsk_services; do
+    module_reload_client_service_known "$mrsk_service" || continue
+    printf '%s\n' "$mrsk_service" >>"$(module_reload_restore_services_file).stopped" || exit 1
+    log_info "[$mrsk_tag] quiesce: stopping $mrsk_service"
+    module_reload_run_cmd_quiet_timeout "$mrsk_timeout" systemctl stop "$mrsk_service" || exit 1
+    module_reload_run_cmd_quiet_timeout 5 systemctl kill --kill-who=all "$mrsk_service" || true
+  done
+  for mrsk_pattern in $mrsk_procs; do
+    module_reload_signal_pattern "$mrsk_pattern" TERM "$mrsk_tag"
+  done
+  if ! module_reload_wait_no_procs_patterns "$mrsk_procs" 5; then
+    for mrsk_pattern in $mrsk_procs; do
+      module_reload_signal_pattern "$mrsk_pattern" KILL "$mrsk_tag"
+    done
+  fi
+  module_reload_wait_services_inactive "$mrsk_services" "$mrsk_timeout" || exit 1
+  module_reload_wait_no_procs_patterns "$mrsk_procs" 2
+)
 
 # Restore known services after a profile finishes.
 module_reload_restore_services() {
@@ -1036,6 +1446,46 @@ module_reload_kill_open_fd_users_by_path_patterns() {
   return 0
 }
 
+# module_reload_client_services <process-patterns> <device-patterns> <evidence-dir>
+# Print verified system-service owners of matching clients. No service mutation.
+# Retain PID/FD evidence and return nonzero when collection fails.
+module_reload_client_services() (
+  mrc_procs="$1"
+  mrc_devs="$2"
+  mrc_dir="$3"
+  mkdir -p "$mrc_dir" || exit 1
+  : >"$mrc_dir/client_pids.txt" || exit 1
+  for mrc_pattern in $mrc_procs; do
+    module_reload_list_pids_by_pattern "$mrc_pattern" >>"$mrc_dir/client_pids.txt"
+  done
+  module_reload_scan_open_fds_by_path_patterns "$mrc_devs" "$mrc_dir/client_fds.log" || true
+  sed -n 's/^pid=\([0-9][0-9]*\) .*/\1/p' "$mrc_dir/client_fds.log" >>"$mrc_dir/client_pids.txt"
+  sort -u "$mrc_dir/client_pids.txt" >"$mrc_dir/client_pids.sorted" || exit 1
+  : >"$mrc_dir/client_services.txt" || exit 1
+  while IFS= read -r mrc_pid; do
+    case "$mrc_pid" in
+      ''|*[!0-9]*)
+        continue
+        ;;
+    esac
+    [ -r "/proc/$mrc_pid/cgroup" ] || continue
+    # Pick the deepest service, never a whole user manager or session scope.
+    mrc_unit=$(awk -F/ '{ for (i=NF;i>0;i--) if ($i ~ /\.service$/) { print $i; exit } }' "/proc/$mrc_pid/cgroup")
+    case "$mrc_unit" in
+      ''|user@*|*[!A-Za-z0-9_.@:\\-]*)
+        continue
+        ;;
+    esac
+    mrc_group=$(module_reload_service_state_value "$mrc_unit" ControlGroup)
+    [ -n "$mrc_group" ] || continue
+    # A matching system unit must own the actual cgroup, not just share a name.
+    if awk -F: -v group="$mrc_group" '$3 == group || index($3, group "/") == 1 { found=1 } END { exit !found }' "/proc/$mrc_pid/cgroup"; then
+      printf '%s\n' "$mrc_unit" >>"$mrc_dir/client_services.txt"
+    fi
+  done <"$mrc_dir/client_pids.sorted"
+  sort -u "$mrc_dir/client_services.txt"
+)
+
 # Generic quiesce helper for services, process patterns, and open device users.
 module_reload_profile_quiesce_resources() {
   log_tag="${1:-$PROFILE_NAME}"
@@ -1046,12 +1496,17 @@ module_reload_profile_quiesce_resources() {
   procs="${PROFILE_QUIESCE_PROC_PATTERNS:-$PROFILE_PROC_PATTERNS}"
   devs="${PROFILE_QUIESCE_DEVICE_PATTERNS:-$PROFILE_DEVICE_PATTERNS}"
 
+  if [ "${PROFILE_DISCOVER_CLIENT_SERVICES:-no}" = "yes" ]; then
+    discovered_services=$(module_reload_client_services "$procs" "$devs" "$iter_dir") || return 1
+    services="$services $discovered_services"
+  fi
   module_reload_log_service_process_summary "$services" "$procs" "$log_tag"
 
   if [ -n "$services" ] || [ -n "$procs" ]; then
     if ! module_reload_stop_mask_kill_services "$services" "$procs" "$timeout_s" "$log_tag"; then
       log_warn "[$log_tag] service/process quiesce did not fully complete"
       module_reload_log_service_process_summary "$services" "$procs" "$log_tag"
+      return 1
     fi
   fi
 
@@ -1069,6 +1524,11 @@ module_reload_profile_quiesce_resources() {
   fi
 
   sleep 2
+  if [ "${PROFILE_DISCOVER_CLIENT_SERVICES:-no}" = "yes" ] &&
+     module_reload_scan_open_fds_by_path_patterns "$devs" "$iter_dir/open_fds_after_quiesce.log"; then
+    log_error "[$log_tag] device users reappeared before unload"
+    return 1
+  fi
   return 0
 }
 
@@ -1287,19 +1747,52 @@ module_reload_profile_smoke() {
   return 0
 }
 
+# module_reload_restore_client_module <profile-root>
+# Restore the original modular state for the opt-in client-isolation profile.
+# Keep clients quiesced until module recovery completes. Return nonzero on error.
+module_reload_restore_client_module() {
+  mrcm_root="$1"
+  case "${MRV_INITIAL_MODULE_PRESENT:-}" in
+    1)
+      if ! mrv_module_loaded "$MODULE_NAME"; then
+        log_info "[$PROFILE_NAME] restoring initially loaded module $MODULE_NAME"
+        mrv_exec_with_timeout "$TIMEOUT_LOAD" "$mrcm_root/restore_load.log" "$MODULE_LOAD_CMD" || return 1
+        mrv_post_load_validate || return 1
+      fi
+      ;;
+    0)
+      if mrv_module_loaded "$MODULE_NAME"; then
+        module_reload_profile_quiesce_resources "$PROFILE_NAME" "$mrcm_root" 20 || return 1
+        log_info "[$PROFILE_NAME] removing module loaded by this test: $MODULE_NAME"
+        mrv_exec_with_timeout "$TIMEOUT_UNLOAD" "$mrcm_root/restore_unload.log" "$MODULE_UNLOAD_CMD" || return 1
+        mrv_post_unload_validate || return 1
+      fi
+      ;;
+  esac
+  return 0
+}
+
 # Dispatch optional finalize hook or restore services that were managed.
 module_reload_profile_finalize() {
+  mrv_stop_module_monitor
   profile_root="$1"
+  if [ "${PROFILE_DISCOVER_CLIENT_SERVICES:-no}" = "yes" ]; then
+    if ! module_reload_restore_client_module "$profile_root"; then
+      log_error "[$PROFILE_NAME] original module state could not be restored"
+      module_reload_restore_recorded_services "$PROFILE_NAME" || true
+      return 1
+    fi
+  fi
   : "${profile_root:=}"
  
   if mrv_profile_override_defined profile_finalize; then
     profile_finalize "$profile_root"
     profile_finalize_rc=$?
-    module_reload_restore_recorded_services "$PROFILE_NAME"
+    module_reload_restore_recorded_services "$PROFILE_NAME" || return 1
     return "$profile_finalize_rc"
   fi
  
-  module_reload_restore_recorded_services "$PROFILE_NAME"
+  module_reload_restore_recorded_services "$PROFILE_NAME" || return 1
  
   if ! command -v systemctl >/dev/null 2>&1; then
     return 0
@@ -1316,6 +1809,15 @@ module_reload_profile_finalize() {
 # Validate the profile after it is sourced and before iterations run.
 mrv_profile_check() {
   requested_mode="$1"
+
+  case "${PROFILE_ALLOW_AUTOMATIC_RELOAD:-no}" in
+    yes|no)
+      ;;
+    *)
+      log_error "PROFILE_ALLOW_AUTOMATIC_RELOAD must be yes or no"
+      return 1
+      ;;
+  esac
 
   if [ -z "$PROFILE_NAME" ] || [ -z "$MODULE_NAME" ]; then
     MRV_PROFILE_REASON="profile missing PROFILE_NAME or MODULE_NAME"
@@ -1406,9 +1908,71 @@ mrv_validate_module_list_state() {
   return 0
 }
 
-# Validate module state after unload completes.
+# mrv_module_reload_events <event-log> <module>
+# Print the ordered kernel remove/add pair for exactly this module, returning 0.
+# Return 1 for absent, incomplete or reversed evidence. Never accept udev echoes.
+mrv_module_reload_events() (
+  [ -r "$1" ] || exit 1
+  mrme_module="$(mrv_module_lsmod_name "$2")"
+  LC_ALL=C awk -v path="/module/$mrme_module" '
+    NF == 4 && $1 ~ /^KERNEL\[[0-9]+\.[0-9]+\]$/ &&
+    $3 == path && $4 == "(module)" {
+      stamp=$1
+      sub(/^KERNEL\[/, "", stamp)
+      sub(/\]$/, "", stamp)
+      if ($2 == "remove") {
+        removed=$0
+        remove_time=stamp + 0
+        added=""
+      } else if ($2 == "add" && removed != "" && stamp + 0 > remove_time) {
+        added=$0
+      }
+    }
+    END {
+      if (removed == "" || added == "") exit 1
+      print removed
+      print added
+    }
+  ' "$1"
+)
+
+# mrv_accept_automatic_reload
+# Opt-in profiles may validate a witnessed single-module lifecycle instead of a
+# persistent unloaded interval. Require a fresh ready observer and current load.
+# Profiles needing other modules absent or a post-unload hook keep strict checks.
+# Return 0 and retain proof only for a complete cycle. No module/service actions.
+mrv_accept_automatic_reload() {
+  [ "${PROFILE_ALLOW_AUTOMATIC_RELOAD:-no}" = yes ] || return 1
+  [ "${MRV_MODULE_MONITOR_READY:-0}" -eq 1 ] || return 1
+  [ -n "${MRV_MODULE_EVENT_LOG:-}" ] || return 1
+  if mrv_profile_override_defined profile_post_unload; then
+    return 1
+  fi
+  mrv_auto_target="$(mrv_module_lsmod_name "$MODULE_NAME")"
+  for mrv_auto_expected in $PROFILE_EXPECT_ABSENT_AFTER_UNLOAD; do
+    [ "$(mrv_module_lsmod_name "$mrv_auto_expected")" = "$mrv_auto_target" ] || return 1
+  done
+  mrv_module_loaded "$MODULE_NAME" || return 1
+  if ! mrv_module_reload_events "$MRV_MODULE_EVENT_LOG" "$MODULE_NAME" \
+      >"${MRV_MODULE_EVENT_LOG%/*}/automatic_reload.log"; then
+    return 1
+  fi
+  MRV_AUTOMATIC_RELOAD=1
+  log_info "[$PROFILE_NAME] kernel remove/add events confirm automatic reload, validating the reloaded module"
+  log_file_with_label MODULE-RELOAD "${MRV_MODULE_EVENT_LOG%/*}/automatic_reload.log" 2
+  return 0
+}
+
+# Validate an unloaded state or an explicitly permitted, witnessed reload cycle.
 mrv_post_unload_validate() {
+  MRV_AUTOMATIC_RELOAD=0
+  if mrv_accept_automatic_reload; then
+    return 0
+  fi
   if ! mrv_wait_module_state absent "$MODULE_NAME" "$TIMEOUT_SETTLE"; then
+    if mrv_accept_automatic_reload; then
+      return 0
+    fi
     log_fail "[$PROFILE_NAME] module still present after unload settle timeout"
     return 1
   fi
@@ -1445,6 +2009,16 @@ mrv_run_iteration() {
   load_elapsed=0
 
   mkdir -p "$iter_dir"
+  # A rerun must not report an old load command or a snapshot from another
+  # iteration when the current attempt fails before reaching that stage.
+  rm -f "$preload_log" "$unload_log" "$load_log" \
+    "$iter_dir/module_events.log" "$iter_dir/automatic_reload.log"
+  MRV_MODULE_MONITOR_READY=0
+  MRV_MODULE_EVENT_LOG=""
+  MRV_AUTOMATIC_RELOAD=0
+  MRV_LAST_STATE_DIR=""
+  MRV_MODULE_STATE_LOG="$iter_dir/module_observations.log"
+  : >"$MRV_MODULE_STATE_LOG"
 
   if ! mrv_module_loaded "$MODULE_NAME"; then
     log_info "[$PROFILE_NAME] module not loaded before iteration $iter, creating baseline loaded state"
@@ -1475,12 +2049,15 @@ mrv_run_iteration() {
   fi
 
   log_info "[$PROFILE_NAME] iter $iter/$ITERATIONS exec: $MODULE_UNLOAD_CMD"
+  mrv_start_module_monitor "$iter_dir"
   MRV_LAST_TIMEOUT_DIR="$iter_dir/unload_timeout"
   mrv_exec_with_timeout "$TIMEOUT_UNLOAD" "$unload_log" "$MODULE_UNLOAD_CMD"
   unload_rc=$?
   unload_elapsed="$MRV_LAST_CMD_ELAPSED"
+  log_info "[$PROFILE_NAME] iter $iter/$ITERATIONS unload exit_status=$unload_rc elapsed_polls=$unload_elapsed"
 
   if [ "$unload_rc" -eq 124 ]; then
+    mrv_stop_module_monitor
     log_fail "[$PROFILE_NAME] iter $iter/$ITERATIONS unload timed out after ${unload_elapsed}s (pid=$MRV_LAST_CMD_PID)"
     log_info "[$PROFILE_NAME] unload timeout log: $unload_log"
     log_info "[$PROFILE_NAME] collecting hang evidence in: $iter_dir/hang_evidence"
@@ -1490,6 +2067,7 @@ mrv_run_iteration() {
   fi
 
   if [ "$unload_rc" -ne 0 ]; then
+    mrv_stop_module_monitor
     log_fail "[$PROFILE_NAME] iter $iter/$ITERATIONS unload failed (rc=$unload_rc)"
     log_info "[$PROFILE_NAME] unload log: $unload_log"
     mrv_capture_module_state "$iter_dir/unload_failure_state"
@@ -1497,11 +2075,13 @@ mrv_run_iteration() {
   fi
 
   if ! mrv_post_unload_validate; then
+    mrv_stop_module_monitor
     log_fail "[$PROFILE_NAME] iter $iter/$ITERATIONS post-unload validation failed"
     mrv_capture_module_state "$iter_dir/post_unload_invalid_state"
     return 1
   fi
 
+  mrv_stop_module_monitor
   mrv_capture_module_state "$iter_dir/post_unload_state"
 
   if ! module_reload_profile_post_unload "$iter_dir"; then
@@ -1509,11 +2089,18 @@ mrv_run_iteration() {
     return 1
   fi
 
-  log_info "[$PROFILE_NAME] iter $iter/$ITERATIONS exec: $MODULE_LOAD_CMD"
-  MRV_LAST_TIMEOUT_DIR="$iter_dir/load_timeout"
-  mrv_exec_with_timeout "$TIMEOUT_LOAD" "$load_log" "$MODULE_LOAD_CMD"
-  load_rc=$?
-  load_elapsed="$MRV_LAST_CMD_ELAPSED"
+  if [ "$MRV_AUTOMATIC_RELOAD" -eq 1 ]; then
+    printf 'LOAD_MODE: automatic\nExplicit load command not run, kernel remove/add evidence retained in automatic_reload.log\n' >"$load_log"
+    load_rc=0
+    log_info "[$PROFILE_NAME] iter $iter/$ITERATIONS load mode: observed automatic reload"
+  else
+    log_info "[$PROFILE_NAME] iter $iter/$ITERATIONS exec: $MODULE_LOAD_CMD"
+    MRV_LAST_TIMEOUT_DIR="$iter_dir/load_timeout"
+    mrv_exec_with_timeout "$TIMEOUT_LOAD" "$load_log" "$MODULE_LOAD_CMD"
+    load_rc=$?
+    load_elapsed="$MRV_LAST_CMD_ELAPSED"
+    log_info "[$PROFILE_NAME] iter $iter/$ITERATIONS load exit_status=$load_rc elapsed_polls=$load_elapsed"
+  fi
 
   if [ "$load_rc" -eq 124 ]; then
     log_fail "[$PROFILE_NAME] iter $iter/$ITERATIONS load timed out after ${load_elapsed}s (pid=$MRV_LAST_CMD_PID)"
@@ -1559,6 +2146,7 @@ mrv_run_iteration() {
     printf 'iter=%s\n' "$iter"
     printf 'unload_elapsed=%s\n' "$unload_elapsed"
     printf 'load_elapsed=%s\n' "$load_elapsed"
+    printf 'automatic_reload=%s\n' "$MRV_AUTOMATIC_RELOAD"
   } > "$iter_dir/iteration_metrics.log"
 
   log_pass "[$PROFILE_NAME] iteration $iter/$ITERATIONS passed"
@@ -1596,6 +2184,30 @@ mrv_run_one_profile() (
     printf 'mode=%s\n' "$PROFILE_SELECTED_MODE"
   } > "$profile_root/profile_info.txt"
 
+  if [ "${PROFILE_DISCOVER_CLIENT_SERVICES:-no}" = "yes" ]; then
+    if [ ! -d /run/systemd/system ]; then
+      log_skip "[$PROFILE_NAME] supervised-client isolation requires a running systemd manager"
+      exit 2
+    fi
+    module_reload_restore_recorded_services "$PROFILE_NAME-pending" || exit 1
+    MRV_INITIAL_MODULE_PRESENT=0
+    if mrv_module_loaded "$MODULE_NAME"; then
+      MRV_INITIAL_MODULE_PRESENT=1
+    fi
+    printf 'initial_module_present=%s\n' "$MRV_INITIAL_MODULE_PRESENT" >"$profile_root/original_module_state.txt" || exit 1
+    MRV_CLIENT_FINALIZED=0
+    mrv_client_rc=0
+    trap 'mrv_client_rc=$?
+      trap - 0
+      if [ "$MRV_CLIENT_FINALIZED" -ne 1 ]; then
+        module_reload_profile_finalize "$profile_root" || mrv_client_rc=1
+      fi
+      exit "$mrv_client_rc"' 0
+    trap 'exit 1' HUP INT TERM
+    MRV_CLIENT_SERVICE_BASELINE="$profile_root/client_services.initial"
+    module_reload_snapshot_client_services "$MRV_CLIENT_SERVICE_BASELINE" || exit 1
+  fi
+
   log_info "[$PROFILE_NAME] module=$MODULE_NAME mode=$PROFILE_SELECTED_MODE iterations=$ITERATIONS"
 
   if ! module_reload_profile_prepare "$profile_root"; then
@@ -1606,7 +2218,10 @@ mrv_run_one_profile() (
   iter=1
   while [ "$iter" -le "$ITERATIONS" ] 2>/dev/null; do
     if ! mrv_run_iteration "$iter"; then
-      module_reload_profile_finalize "$profile_root" >/dev/null 2>&1 || true
+      mrv_report_iteration_failure "$RESULT_ROOT/$PROFILE_NAME/iter_$(printf '%02d' "$iter")" || true
+      if module_reload_profile_finalize "$profile_root"; then
+        MRV_CLIENT_FINALIZED=1
+      fi
       exit 1
     fi
     iter=$((iter + 1))
@@ -1616,6 +2231,7 @@ mrv_run_one_profile() (
     log_fail "[$PROFILE_NAME] finalize stage failed"
     exit 1
   fi
+  MRV_CLIENT_FINALIZED=1
 
   exit 0
 )

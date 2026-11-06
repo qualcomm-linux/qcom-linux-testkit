@@ -1539,7 +1539,11 @@ if [ "$USE_CLIP_DISCOVERY" = "true" ]; then
         ok_runs=$((ok_runs + 1))
       elif [ "$rc" -ne 0 ] && { [ "$pw_ev" -eq 1 ] || [ "$pa_ev" -eq 1 ] || [ "$alsa_ev" -eq 1 ] || [ "$asoc_ev" -eq 1 ]; }; then
         log_info "AUDIO_VALIDATION scope=playback-runtime policy=execution-evidence status=PASS case=$case_name backend=$AUDIO_BACKEND rc=$rc elapsed_s=$last_elapsed reason=runtime-stream-evidence"
-        log_warn "[$case_name] nonzero rc=$rc but evidence indicates playback - PASS"
+        if [ "$rc" -eq 124 ] && [ "$dur_s" -gt 0 ] && [ "$last_elapsed" -ge "$min_ok" ]; then
+          log_info "[$case_name] Configured playback limit reached (${TIMEOUT}), stream activity observed. Full clip completion was not required"
+        else
+          log_warn "[$case_name] nonzero rc=$rc but evidence indicates playback - PASS"
+        fi
         ok_runs=$((ok_runs + 1))
       else
         log_info "AUDIO_VALIDATION scope=playback-runtime policy=execution-evidence status=FAIL case=$case_name backend=$AUDIO_BACKEND rc=$rc elapsed_s=$last_elapsed"
@@ -1715,7 +1719,11 @@ else
           ok_runs=$((ok_runs + 1))
         elif [ "$rc" -ne 0 ] && { [ "$pw_ev" -eq 1 ] || [ "$pa_ev" -eq 1 ] || [ "$alsa_ev" -eq 1 ] || [ "$asoc_ev" -eq 1 ]; }; then
           log_info "AUDIO_VALIDATION scope=playback-runtime policy=execution-evidence status=PASS case=$case_name backend=$AUDIO_BACKEND rc=$rc elapsed_s=$last_elapsed reason=runtime-stream-evidence"
-          log_warn "[$case_name] nonzero rc=$rc but evidence indicates playback - PASS"
+          if [ "$rc" -eq 124 ] && [ "$dur_s" -gt 0 ] && [ "$last_elapsed" -ge "$min_ok" ]; then
+            log_info "[$case_name] Configured playback limit reached (${TIMEOUT}), stream activity observed. Full clip completion was not required"
+          else
+            log_warn "[$case_name] nonzero rc=$rc but evidence indicates playback - PASS"
+          fi
           ok_runs=$((ok_runs + 1))
         else
           log_info "AUDIO_VALIDATION scope=playback-runtime policy=execution-evidence status=FAIL case=$case_name backend=$AUDIO_BACKEND rc=$rc elapsed_s=$last_elapsed"
