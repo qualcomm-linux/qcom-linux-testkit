@@ -1,0 +1,16 @@
+metadata:
+  name: Remoteproc_Lifecycle_Validation
+  format: Lava-Test Test Definition 1.0
+  description: Runtime lifecycle expectations and retained evidence of recovered remoteproc crashes.
+  os:
+  - linux
+  scope:
+  - functional
+params:
+  OPTIONS: ''
+run:
+  steps:
+  - REPO_PATH=$PWD
+  - cd Runner/suites/Kernel/Baseport/Remoteproc_Lifecycle_Validation
+  - ./run.sh $OPTIONS
+  - $REPO_PATH/Runner/utils/send-to-lava.sh Remoteproc_Lifecycle_Validation.res
