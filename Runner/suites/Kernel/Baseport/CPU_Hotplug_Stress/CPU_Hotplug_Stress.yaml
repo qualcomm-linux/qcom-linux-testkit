@@ -1,0 +1,16 @@
+metadata:
+  name: CPU_Hotplug_Stress
+  format: Lava-Test Test Definition 1.0
+  description: Repeated secondary-CPU hotplug, optional batch and concurrent phases, with online-mask restoration.
+  os:
+  - linux
+  scope:
+  - functional
+params:
+  OPTIONS: ''
+run:
+  steps:
+  - REPO_PATH=$PWD
+  - cd Runner/suites/Kernel/Baseport/CPU_Hotplug_Stress
+  - ./run.sh $OPTIONS
+  - $REPO_PATH/Runner/utils/send-to-lava.sh CPU_Hotplug_Stress.res

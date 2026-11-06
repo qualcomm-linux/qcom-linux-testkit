@@ -7116,7 +7116,8 @@ wait_remoteproc_state() {
     done
 }
 
-# Stop remoteproc
+# stop_remoteproc <path> [timeout-seconds]
+# Stop remoteproc and wait for offline, preserving the legacy six-second default.
 stop_remoteproc() {
     rproc_path="$1"
  
@@ -7134,10 +7135,11 @@ stop_remoteproc() {
     fi
  
     printf 'stop\n' >"$statef" 2>/dev/null || return 1
-    wait_remoteproc_state "$path" offline 6
+    wait_remoteproc_state "$path" offline "${2:-6}"
 }
  
-# Start remoteproc
+# start_remoteproc <path> [timeout-seconds]
+# Start remoteproc and wait for running, preserving the legacy six-second default.
 start_remoteproc() {
     rproc_path="$1"
  
@@ -7154,7 +7156,7 @@ start_remoteproc() {
     fi
  
     printf 'start\n' >"$statef" 2>/dev/null || return 1
-    wait_remoteproc_state "$path" running 6
+    wait_remoteproc_state "$path" running "${2:-6}"
 }
 # Validate remoteproc running state with retries and logging
 validate_remoteproc_running() {
