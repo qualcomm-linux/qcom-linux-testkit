@@ -1,0 +1,16 @@
+metadata:
+  name: OPTEE_Regression_Validation
+  format: Lava-Test Test Definition 1.0
+  description: Opt-in reviewed OP-TEE mutex, crypto, multi-session and basic OS regressions beyond native smoke.
+  os:
+  - linux
+  scope:
+  - functional
+params:
+  OPTIONS: ''
+run:
+  steps:
+  - REPO_PATH=$PWD
+  - cd Runner/suites/Kernel/Baseport/OPTEE_Regression_Validation
+  - ./run.sh $OPTIONS
+  - $REPO_PATH/Runner/utils/send-to-lava.sh OPTEE_Regression_Validation.res
