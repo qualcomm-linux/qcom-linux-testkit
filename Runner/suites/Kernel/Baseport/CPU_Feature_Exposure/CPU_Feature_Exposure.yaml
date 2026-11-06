@@ -1,0 +1,16 @@
+metadata:
+  name: CPU_Feature_Exposure
+  format: Lava-Test Test Definition 1.0
+  description: Per-CPU EL0/KVM feature exposure, PAC key and guest controls, and vector consistency.
+  os:
+  - linux
+  scope:
+  - functional
+params:
+  OPTIONS: ''
+run:
+  steps:
+  - REPO_PATH=$PWD
+  - cd Runner/suites/Kernel/Baseport/CPU_Feature_Exposure
+  - ./run.sh $OPTIONS
+  - $REPO_PATH/Runner/utils/send-to-lava.sh CPU_Feature_Exposure.res

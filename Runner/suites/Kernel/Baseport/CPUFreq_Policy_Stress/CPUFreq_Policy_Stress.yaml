@@ -1,0 +1,16 @@
+metadata:
+  name: CPUFreq_Policy_Stress
+  format: Lava-Test Test Definition 1.0
+  description: Repeated policy frequency feedback, peer-policy coordination and pinned workload timing.
+  os:
+  - linux
+  scope:
+  - functional
+params:
+  OPTIONS: ''
+run:
+  steps:
+  - REPO_PATH=$PWD
+  - cd Runner/suites/Kernel/Baseport/CPUFreq_Policy_Stress
+  - ./run.sh $OPTIONS
+  - $REPO_PATH/Runner/utils/send-to-lava.sh CPUFreq_Policy_Stress.res
