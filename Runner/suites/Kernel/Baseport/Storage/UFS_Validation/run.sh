@@ -37,7 +37,7 @@ fi
 . "$TOOLS/functestlib.sh"
 
 TESTNAME="UFS_Validation"
-RES_FILE="$PWD/$TESTNAME.res"
+RES_FILE="$SCRIPT_DIR/$TESTNAME.res"
 test_result_init "$TESTNAME" "$RES_FILE" || exit 1
 # shellcheck disable=SC2034 # Consumed by check_dependencies.
 CHECK_DEPS_RECOVER=0

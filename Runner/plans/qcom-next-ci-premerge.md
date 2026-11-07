@@ -10,6 +10,11 @@ launch and publishes with `send-to-lava.sh --strict`. Missing, empty or malforme
 results produce a `<suite>_result_publication` failure. The LAVA definition must
 start at the repository root. Job boot/retry policy remains in LAVA.
 
+Existing suites keep their result files beside `run.sh`, so older plans that
+launch from Runner still consume the current result. Evidence and scratch files
+remain in the invocation CWD. IRQ, Bluetooth and Wi-Fi duration budgets use the
+shared monotonic clock, independent of RTC or network time corrections.
+
 Coverage notes:
 
 - Boot health reports the real kernel, PID 1 and root mount, then validates root

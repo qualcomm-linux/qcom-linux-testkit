@@ -39,7 +39,7 @@ fi
 . "$TOOLS/lib_connectivity.sh"
 
 TESTNAME="WiFi_Firmware_Driver"
-RES_FILE="$PWD/$TESTNAME.res"
+RES_FILE="$SCRIPT_DIR/$TESTNAME.res"
 test_result_init "$TESTNAME" "$RES_FILE" || exit 1
 # shellcheck disable=SC2034 # Consumed by check_dependencies.
 CHECK_DEPS_RECOVER=0

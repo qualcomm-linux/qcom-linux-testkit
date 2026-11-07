@@ -16,7 +16,9 @@ short reads, timeouts and failed restoration are FAIL. Missing `rngtest` or no
 registered Qualcomm provider is SKIP. A registered provider without a readable
 `/dev/hwrng` is FAIL.
 
-`qcom_hwrng.res` and a unique `qcom_hwrng.*` evidence directory are written in CWD.
+`qcom_hwrng.res` remains beside `run.sh` and replaces the previous result on
+each invocation, including launches from Runner. A unique `qcom_hwrng.*`
+evidence directory is written in CWD.
 The directory retains entropy bytes, read errors and statistics for diagnosis.
 A kernel abort or uninterruptible driver operation still requires platform triage.
 
