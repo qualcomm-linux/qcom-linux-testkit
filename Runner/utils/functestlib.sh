@@ -7298,6 +7298,186 @@ wait_remoteproc_state() {
     done
 }
 
+# wait_remoteproc_boot_ready <sysfs-path> <timeout-s> <poll-s> <output-dir> [discovery-state]
+# Passively wait for a discovered processor to run, retaining observed crashes.
+# Inputs: live sysfs, bounded decimal seconds and a dedicated artifact directory.
+# Output: state transitions and kernel evidence on stderr, artifacts in output-dir.
+# Returns: 0 for running without observed crash evidence, 1 for failed readiness,
+# 2 for invalid input or unavailable diagnostics storage. No start/stop writes.
+# Subshell scope protects callers from globals used by existing shared helpers.
+wait_remoteproc_boot_ready() (
+    br_path="$1"
+    br_timeout="$2"
+    br_poll="$3"
+    br_out="$4"
+    br_discovery="${5:-unknown}"
+
+    case "$br_timeout" in
+        ''|*[!0-9]*|0[0-9]*)
+            log_error "Boot-readiness seconds must be decimal integers without leading zeros"
+            return 2
+            ;;
+    esac
+    if [ "${#br_timeout}" -gt 5 ] || [ "$br_timeout" -gt 86400 ]; then
+        log_error "Boot-readiness seconds must not exceed 86400"
+        return 2
+    fi
+    if ! awk -v poll="$br_poll" 'BEGIN {
+        exit !(length(poll) <= 16 && poll ~ /^[0-9]+([.][0-9]+)?$/ && poll > 0 && poll <= 86400)
+    }'; then
+        log_error "Boot-readiness poll interval must be positive decimal seconds up to 86400"
+        return 2
+    fi
+    if ! mkdir -p "$br_out" || ! : >"$br_out/readiness.log"; then
+        log_error "Cannot write DSP boot-readiness diagnostics: $br_out"
+        return 2
+    fi
+
+    br_id="$(basename "$br_path")"
+    br_controller=""
+    if [ -e "$br_path/device" ]; then
+        br_controller="$(readlink -f "$br_path/device" 2>/dev/null || true)"
+    fi
+    if [ -z "$br_controller" ]; then
+        br_resolved="$(readlink -f "$br_path" 2>/dev/null || true)"
+        case "$br_resolved" in
+            */remoteproc/remoteproc*)
+                br_controller="${br_resolved%/remoteproc/*}"
+                ;;
+        esac
+    fi
+    br_controller="${br_controller##*/}"
+    br_start="$(get_monotonic_seconds)"
+    br_initial="$(get_remoteproc_state "$br_path")" || br_initial="unknown"
+    br_initial="${br_initial:-unknown}"
+    br_state="$br_initial"
+    br_last="$br_initial"
+    br_crashed=0
+    br_reason="deadline-expired"
+    br_access="unknown"
+    case "$br_discovery" in
+        crashed)
+            br_crashed=1
+            ;;
+    esac
+    case "$br_initial" in
+        crashed)
+            br_crashed=1
+            ;;
+    esac
+    printf 'instance=%s controller=%s discovery=%s initial=%s deadline=%ss poll=%ss\n' \
+        "$br_id" "${br_controller:-unknown}" "$br_discovery" "$br_initial" \
+        "$br_timeout" "$br_poll" >>"$br_out/readiness.log"
+
+    # Capture boot history before waiting so recovery or ring-buffer turnover
+    # cannot erase evidence already available at entry.
+    scan_dmesg_errors "$br_out/initial" 'remoteproc|qcom.*pas|qcom_q6v5' 'not a crash|non-fatal' || true
+    br_access="$DMESG_ACCESS_STATUS"
+    while :; do
+        br_state="$(get_remoteproc_state "$br_path")" || br_state="unknown"
+        br_state="${br_state:-unknown}"
+        br_now="$(get_monotonic_seconds)"
+        br_elapsed=$((br_now - br_start))
+        if [ "$br_state" != "$br_last" ]; then
+            printf 'transition=%s->%s elapsed=%ss\n' \
+                "$br_last" "$br_state" "$br_elapsed" >>"$br_out/readiness.log"
+            br_last="$br_state"
+        fi
+        case "$br_state" in
+            crashed)
+                br_crashed=1
+                ;;
+            running)
+                br_reason="ready"
+                break
+                ;;
+            unknown)
+                br_reason="state-unreadable"
+                break
+                ;;
+        esac
+        if [ "$br_elapsed" -ge "$br_timeout" ]; then
+            break
+        fi
+        br_sleep="$(awk -v remaining="$((br_timeout - br_elapsed))" -v poll="$br_poll" '
+            BEGIN { print poll < remaining ? poll : remaining }
+        ')"
+        if ! sleep "$br_sleep"; then
+            br_reason="poll-sleep-failed"
+            break
+        fi
+    done
+
+    set -- "$br_out/initial/dmesg_snapshot.log"
+    if [ "$br_state" != "$br_initial" ] || [ "$br_reason" != "ready" ]; then
+        scan_dmesg_errors "$br_out/final" 'remoteproc|qcom.*pas|qcom_q6v5' 'not a crash|non-fatal' || true
+        br_access="$br_access/$DMESG_ACCESS_STATUS"
+        set -- "$@" "$br_out/final/dmesg_snapshot.log"
+    fi
+    # Match literal, whole runtime identities, not SoC addresses or sibling IDs.
+    # Fatal reason lines can be tagged with the platform controller rather than
+    # the remoteproc class name, so both sysfs-derived identities are checked.
+    if ! awk -v instance="$br_id" -v controller="$br_controller" '
+        function tagged(line, token, offset, part, pos, before, after) {
+            if (token == "") return 0
+            offset = 1
+            while (offset <= length(line)) {
+                part = substr(line, offset)
+                pos = index(part, token)
+                if (!pos) return 0
+                pos += offset - 1
+                before = pos > 1 ? substr(line, pos - 1, 1) : ""
+                after = substr(line, pos + length(token), 1)
+                if (before !~ /[[:alnum:]_.-]/ && after !~ /[[:alnum:]_.-]/) return 1
+                offset = pos + length(token)
+            }
+            return 0
+        }
+        {
+            line = tolower($0)
+            if (line ~ /not a crash|non-fatal|nonfatal/) next
+            if (!tagged($0, instance) && !tagged($0, controller)) next
+            if (line ~ /(^|[^[:alnum:]_-])fatal([^[:alnum:]_-]|$)|crashed|crash detected|detected.*crash|handling crash|watchdog (bite|received|interrupt)|panic|oops/) {
+                print
+            }
+        }
+    ' "$@" >"$br_out/fatal_errors.log"; then
+        br_reason="kernel-evidence-read-failed"
+    fi
+    if [ -s "$br_out/fatal_errors.log" ]; then
+        br_crashed=1
+    fi
+    br_elapsed=$(($(get_monotonic_seconds) - br_start))
+    br_outcome="FAIL"
+    br_class="startup-not-ready"
+    if [ "$br_crashed" -eq 1 ]; then
+        br_class="crash-not-recovered"
+        if [ "$br_state" = "running" ]; then
+            br_class="crash-recovered"
+        fi
+    elif [ "$br_reason" = "ready" ]; then
+        br_outcome="PASS"
+        br_class="already-running"
+        if [ "$br_initial" != "running" ]; then
+            br_class="startup-delay"
+        fi
+    fi
+    printf 'final=%s elapsed=%ss classification=%s reason=%s crash_observed=%s kernel_access=%s result=%s\n' \
+        "$br_state" "$br_elapsed" "$br_class" "$br_reason" "$br_crashed" \
+        "$br_access" "$br_outcome" >>"$br_out/readiness.log"
+    if [ -r "$br_path/trace" ]; then
+        cp "$br_path/trace" "$br_out/trace.log" 2>/dev/null || true
+    fi
+    log_file_with_label DSP-BOOT "$br_out/readiness.log"
+    if [ -s "$br_out/fatal_errors.log" ]; then
+        log_file_with_label DSP-FATAL "$br_out/fatal_errors.log"
+    fi
+    if [ "$br_access" != "available" ] && [ "$br_access" != "available/available" ]; then
+        log_warn "$br_id: kernel crash history is incomplete, provide readable boot kernel logs"
+    fi
+    [ "$br_outcome" = "PASS" ]
+) >&2
+
 # Stop remoteproc
 stop_remoteproc() {
     rproc_path="$1"
