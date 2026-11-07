@@ -242,3 +242,10 @@ A typical YAML invokes the wrapper like:
 ```sh
 sigwaittest --help
 ```
+
+
+See [shared runtime validation](../README.md) for background workload health,
+cleanup, RT_CPUS/BG_CPUS selection and retained diagnostics.
+
+The LAVA `.res` file remains next to `run.sh`. Default workload logs,
+background evidence and temporary files use the invocation CWD.

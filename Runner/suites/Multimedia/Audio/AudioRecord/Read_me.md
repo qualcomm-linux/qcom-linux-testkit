@@ -991,3 +991,15 @@ summaries from that workload. For direct execution, for example:
 ALSA and PulseAudio attempts print their WAV summary without assuming that
 PipeWire services or journal tools exist. Existing detailed failure artifacts
 remain available for failed attempts.
+
+## Runtime topology selection
+
+Base audio validates image-provided topology only when the active DT declares
+a q6apm dependency. Selection uses the registered ALSA card driver when present,
+then an exact matching sound-card DT binding directory. This is a discovery
+hint, the DT compatible and actual ALSA driver name can differ. Firmware symlinks that
+resolve to the same asset do not create an ambiguity. Distinct unresolved assets,
+an empty file, or the actual driver's missing topology still fail. The registered
+card check continues to validate the kernel's exact driver/model firmware name.
+No SoC mapping, topology copy, download or package-policy change is introduced.
+Direct-codec and overlay paths retain their existing applicability checks.

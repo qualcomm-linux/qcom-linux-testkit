@@ -11,67 +11,44 @@ INIT_ENV=""
 SEARCH="$SCRIPT_DIR"
 
 while [ "$SEARCH" != "/" ]; do
-  if [ -f "$SEARCH/init_env" ]; then
-    INIT_ENV="$SEARCH/init_env"
-    break
-  fi
-  SEARCH=$(dirname "$SEARCH")
+    if [ -f "$SEARCH/init_env" ]; then
+        INIT_ENV="$SEARCH/init_env"
+        break
+    fi
+    SEARCH=$(dirname "$SEARCH")
 done
 
 if [ -z "$INIT_ENV" ]; then
-  echo "[ERROR] Could not find init_env (starting at $SCRIPT_DIR)" >&2
-  exit 1
+    echo "[ERROR] Could not find init_env (starting at $SCRIPT_DIR)" >&2
+    exit 1
 fi
 
 # Only source once (idempotent)
 # NOTE: We intentionally **do not export** any new vars. They stay local to this shell.
 if [ -z "${__INIT_ENV_LOADED:-}" ]; then
-  # shellcheck disable=SC1090
-  . "$INIT_ENV"
-  __INIT_ENV_LOADED=1
+    # shellcheck disable=SC1090
+    . "$INIT_ENV"
+    __INIT_ENV_LOADED=1
 fi
 
-# Keep combined suppression for consistency across repo
-# shellcheck disable=SC1090,SC1091
+# shellcheck disable=SC1090
+. "$INIT_ENV"
+# shellcheck disable=SC1091
 . "$TOOLS/functestlib.sh"
 
 TESTNAME="Probe_Failure_Check"
-RESULT_FILE="$TESTNAME.res"
-LOG_FILE="probe_failures.log"
+RES_FILE="$SCRIPT_DIR/$TESTNAME.res"
+test_result_init "$TESTNAME" "$RES_FILE" || exit 1
+if ! CHECK_DEPS_NO_EXIT=1 check_dependencies cat grep wc tr id cp sed date mktemp head; then
+    test_result_finish SKIP "Probe inventory tools are absent from the image"
+fi
+OUT_DIR=$(test_create_run_directory "$PWD/results/$TESTNAME") ||
+    test_result_finish FAIL "Cannot create probe diagnostics under CWD=$PWD"
 
-# Move into testcase directory (so .res and logs land in the right place)
-test_path=$(find_test_case_by_name "$TESTNAME")
-cd "$test_path" || exit 1
-
-log_info "----------------------------------------------------------------------------"
-log_info "------------------- Starting $TESTNAME Testcase ----------------------------"
-
-rm -f "$RESULT_FILE" "$LOG_FILE"
+scan_dmesg_errors "$OUT_DIR" '.*' \
+    'dummy regulator|supply [^ ]+ not found|using dummy regulator' || true
+LOG_FILE="$OUT_DIR/probe_failures.log"
 : >"$LOG_FILE"
-
-# --- Get kernel log snapshot ---
-if command -v get_kernel_log >/dev/null 2>&1; then
-  KERNEL_LOG="$(get_kernel_log 2>/dev/null)"
-else
-  log_warn "'get_kernel_log' not found, falling back to 'dmesg -T'"
-  KERNEL_LOG="$(dmesg -T 2>/dev/null)"
-fi
-
-# --- SKIP when unable to collect kernel logs ---
-if [ -z "$KERNEL_LOG" ]; then
-  if command -v log_skip >/dev/null 2>&1; then
-    log_skip "$TESTNAME : Unable to collect kernel logs, skipping probe failure check"
-  else
-    log_warn "$TESTNAME : Unable to collect kernel logs, treating as SKIP"
-  fi
-  echo "$TESTNAME SKIP" >"$RESULT_FILE"
-  rm -f "$LOG_FILE"
-  exit 0
-fi
-
-# --- Probe / firmware / bind failure patterns ---
-# Intentionally broad but targeted at realistic driver init / teardown problems.
-# Built as a concatenation of single-quoted segments to avoid stray backslashes.
 FAIL_PATTERN='(failed to (probe|instantiate)|'\
 'probe of .* failed|probe with driver .* failed|deferred probe timeout, ignoring dependency|'\
 'Direct firmware load .* failed|tplg firmware loading .* failed|ASoC error|'\
@@ -81,67 +58,28 @@ FAIL_PATTERN='(failed to (probe|instantiate)|'\
 'platform device_add failed|Cannot register component|bind failed|'\
 'lookup_component error|failed to add machine driver)'
 
-# Pull out matched lines
-MATCHES=$(printf '%s\n' "$KERNEL_LOG" | grep -Ei "$FAIL_PATTERN" || true)
 
-# --- Optional: report devices still in deferred-probe list (debugfs) ---
+if [ "${DMESG_ACCESS_STATUS:-unavailable}" = "available" ]; then
+    grep -Ei "$FAIL_PATTERN" "$OUT_DIR/dmesg_snapshot.log" >"$LOG_FILE" || true
+else
+    test_result_record SKIP "Kernel probe log unavailable, inspect $OUT_DIR/dmesg_access.log"
+fi
+
 DEFERRED_FILE="/sys/kernel/debug/devices_deferred"
 if [ -r "$DEFERRED_FILE" ]; then
-  DEFERRED_CONTENT=$(cat "$DEFERRED_FILE" 2>/dev/null || true)
-  if [ -n "$DEFERRED_CONTENT" ]; then
-    log_warn "Devices still listed in $DEFERRED_FILE (deferred probe not resolved):"
-    printf '%s\n' "$DEFERRED_CONTENT" >>"$LOG_FILE"
-    printf '%s\n' "$DEFERRED_CONTENT" | while IFS= read -r line; do
-      [ -n "$line" ] || continue
-      log_warn "DEFERRED: $line"
-    done
-  else
-    log_info "No entries in $DEFERRED_FILE (no outstanding deferred probes)."
-  fi
+    if ! cat "$DEFERRED_FILE" >"$OUT_DIR/devices_deferred.log"; then
+        test_result_record FAIL "Cannot read the runtime deferred-probe list"
+    elif [ -s "$OUT_DIR/devices_deferred.log" ]; then
+        log_file_with_label DEFERRED-PROBE "$OUT_DIR/devices_deferred.log"
+        test_result_record FAIL "DT devices still have unresolved probe suppliers, inspect $OUT_DIR/devices_deferred.log"
+    fi
 else
-  log_info "$DEFERRED_FILE not available (no deferred-probe debugfs support)."
+    log_info "Deferred-probe debugfs evidence is unavailable, retaining the kernel-log check"
 fi
-
-# --- Evaluate matches and report to CI ---
-if [ -n "$MATCHES" ]; then
-  # Save full match set to log file for post-mortem
-  printf '%s\n' "$MATCHES" >>"$LOG_FILE"
-
-  MATCH_COUNT=$(printf '%s\n' "$MATCHES" | wc -l | awk '{print $1}')
-  # Extract the latest leading [timestamp] if present, e.g. "[ 10.471969]"
-  LATEST_TS=$(
-    printf '%s\n' "$MATCHES" \
-      | sed -n 's/^\(\[[^]]*]\).*/\1/p' \
-      | tail -n 1
-  )
-
-  log_fail "$TESTNAME : Kernel probe/unprobe/firmware-related errors found (see $LOG_FILE)"
-  log_info "Total matched lines: $MATCH_COUNT"
-  if [ -n "$LATEST_TS" ]; then
-    log_info "Latest timestamp among matches: $LATEST_TS"
-  else
-    log_info "Latest timestamp among matches: Not Available"
-  fi
-
-  # Print a few representative lines to stdout for CI log visibility
-  printf '%s\n' "$MATCHES" | head -n 10 | while IFS= read -r line; do
-    [ -n "$line" ] || continue
-    echo "CI-HINT: $line"
-  done
-
-  # Dump entire LOG_FILE for easy inspection in LAVA logs
-  if [ -s "$LOG_FILE" ]; then
-    echo "================ $LOG_FILE (full contents) ================"
-    cat "$LOG_FILE"
-    echo "================ end of $LOG_FILE ========================="
-  fi
-
-  echo "$TESTNAME FAIL" >"$RESULT_FILE"
-  # Convention: exit 0, result is driven by .res file
-  exit 0
+if [ -s "$LOG_FILE" ]; then
+    log_file_with_label PROBE-ERROR "$LOG_FILE"
+    test_result_record FAIL "Kernel probe or firmware-load errors detected, inspect $LOG_FILE and the image firmware/DT"
+elif [ "${DMESG_ACCESS_STATUS:-unavailable}" = "available" ]; then
+    test_result_record PASS "No probe, firmware or bind failure found in the captured kernel log"
 fi
-
-log_pass "$TESTNAME : No probe/firmware/bind errors found in kernel log snapshot"
-echo "$TESTNAME PASS" >"$RESULT_FILE"
-rm -f "$LOG_FILE"
-exit 0
+test_result_finish

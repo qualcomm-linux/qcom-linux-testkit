@@ -185,3 +185,10 @@ The wrapper expects:
 
 - Keep changes aligned with existing qcom-linux-testkit conventions.
 - For CI, use the `.res` file as the authoritative result.
+
+
+See [shared runtime validation](../README.md) for background workload health,
+cleanup, RT_CPUS/BG_CPUS selection and retained diagnostics.
+
+The LAVA `.res` file remains next to `run.sh`. Default workload logs,
+background evidence and temporary files use the invocation CWD.

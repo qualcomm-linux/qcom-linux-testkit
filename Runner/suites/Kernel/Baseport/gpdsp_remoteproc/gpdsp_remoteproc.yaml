@@ -8,6 +8,7 @@ metadata:
     - functional
 
 params:
+  BOOT_TO: 10 # passive boot-readiness deadline per instance (s)
   STOP_TO: 10  # remoteproc stop timeout (s)
   START_TO: 10 # remoteproc start timeout (s)
   POLL_I: 1 # state poll interval (s)
@@ -16,6 +17,6 @@ run:
   steps:
     - REPO_PATH=$PWD
     - cd Runner/suites/Kernel/Baseport/gpdsp_remoteproc
-    - ./run.sh || true
+    - ./run.sh --boot-to "$BOOT_TO" || true
     - $REPO_PATH/Runner/utils/send-to-lava.sh gpdsp_remoteproc.res
 

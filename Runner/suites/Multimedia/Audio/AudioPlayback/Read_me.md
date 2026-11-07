@@ -910,3 +910,15 @@ playback limit and does not claim the entire clip completed. For example:
 A clip longer than ten seconds is intentionally bounded in this example.
 Unexpected exits retain their warnings. Automatic clip-duration timeouts,
 backend selection, runtime evidence and result classification are unchanged.
+
+## Runtime topology selection
+
+Base audio validates image-provided topology only when the active DT declares
+a q6apm dependency. Selection uses the registered ALSA card driver when present,
+then an exact matching sound-card DT binding directory. This is a discovery
+hint, the DT compatible and actual ALSA driver name can differ. Firmware symlinks that
+resolve to the same asset do not create an ambiguity. Distinct unresolved assets,
+an empty file, or the actual driver's missing topology still fail. The registered
+card check continues to validate the kernel's exact driver/model firmware name.
+No SoC mapping, topology copy, download or package-policy change is introduced.
+Direct-codec and overlay paths retain their existing applicability checks.

@@ -1,0 +1,18 @@
+metadata:
+  name: kernel-selftests
+  format: Lava-Test Test Definition 1.0
+  description: Run allowlisted image-provided kernel selftests with bounded execution
+    and retained results.
+  os:
+  - linux
+  scope:
+  - functional
+params:
+  SELFTEST_DIR: ''
+  TIMEOUT: '300'
+run:
+  steps:
+  - REPO_PATH=$PWD
+  - cd Runner/suites/Kernel/Baseport/Kernel_Selftests
+  - ./run.sh --selftest-dir "${SELFTEST_DIR}" --timeout "${TIMEOUT}" || true
+  - $REPO_PATH/Runner/utils/send-to-lava.sh Kernel_Selftests.res

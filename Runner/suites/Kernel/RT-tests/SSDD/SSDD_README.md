@@ -200,3 +200,10 @@ A matching YAML would typically expose:
 ## Summary
 
 **SSDD** is a useful RT stress test for validating `ptrace` single-step behavior under concurrent tracer/tracee activity. In qcom-linux-testkit it should be wrapped exactly like the other RT tests: structured logs, JSON parsing, deterministic result files, and LAVA-friendly summary handling.
+
+
+See [shared runtime validation](../README.md) for background workload health,
+cleanup, RT_CPUS/BG_CPUS selection and retained diagnostics.
+
+The LAVA `.res` file remains next to `run.sh`. Default workload logs,
+background evidence and temporary files use the invocation CWD.

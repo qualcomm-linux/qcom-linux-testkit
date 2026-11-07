@@ -9,6 +9,8 @@ metadata:
     - preempt-rt
 
 params:
+  RT_CPUS: ""
+  BG_CPUS: ""
   DURATION: "30s"
   BACKGROUND_CMD: ""
   ITERATIONS: "1"
@@ -34,5 +36,5 @@ run:
   steps:
     - REPO_PATH=$PWD
     - cd Runner/suites/Kernel/RT-tests/SignalTest
-    - ./run.sh --duration "${DURATION}" --iterations "${ITERATIONS}" --background-cmd "${BACKGROUND_CMD}" --prio "${PRIO}" --threads "${THREADS}" --quiet "${QUIET}" --affinity "${AFFINITY}" --affinity-cpu "${AFFINITY_CPU}" --mlockall "${MLOCKALL}" --breaktrace-us "${BREAKTRACE_US}" --loops "${LOOPS}" --sig-verbose "${SIG_VERBOSE}" --binary "${BINARY}" --out "${OUT_DIR}" --progress-every "${PROGRESS_EVERY}" --heartbeat-sec "${HEARTBEAT_SEC}" $( [ "${VERBOSE}" = "1" ] && echo "--verbose" ) || true
+    - RT_CPUS="${RT_CPUS}" BG_CPUS="${BG_CPUS}" ./run.sh --duration "${DURATION}" --iterations "${ITERATIONS}" --background-cmd "${BACKGROUND_CMD}" --prio "${PRIO}" --threads "${THREADS}" --quiet "${QUIET}" --affinity "${AFFINITY}" --affinity-cpu "${AFFINITY_CPU}" --mlockall "${MLOCKALL}" --breaktrace-us "${BREAKTRACE_US}" --loops "${LOOPS}" --sig-verbose "${SIG_VERBOSE}" --binary "${BINARY}" --out "${OUT_DIR}" --progress-every "${PROGRESS_EVERY}" --heartbeat-sec "${HEARTBEAT_SEC}" $( [ "${VERBOSE}" = "1" ] && echo "--verbose" ) || true
     - $REPO_PATH/Runner/utils/send-to-lava.sh SignalTest.res
