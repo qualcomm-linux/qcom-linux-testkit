@@ -326,11 +326,36 @@ Run one binary with extra args:
 - **No binaries discovered** → check `PATH` and `--build-dir`.
 - **Zero tests executed** → your `--filter` (or env filter) may exclude all tests.
 - **Missing testdata** → export `OPENCV_TEST_DATA_PATH` explicitly.
-- **Timeout fails** → ensure `timeout` is installed or drop `--timeout`.
+- **Timeout fails** → inspect the retained run log and choose a bound suitable for the workload. The shared timeout helper does not require a standalone `timeout` executable.
 
 ---
+
+## Listing and execution budgets
+
+`--list` and `--shuffle` retain their flag-only forms. Optional `0` or `1` values
+are also accepted. `--list 0 --shuffle 0` executes without listing or shuffling.
+Listing-only invocations report SKIP, never a functional PASS. An aggregate run
+where every selected binary skips also reports SKIP.
+
+`--timeout SECONDS` bounds one executable. `--suite-timeout SECONDS` bounds all
+selected binaries together and caps each command by the remaining total budget.
+Both require positive integers. Exhaustion records FAIL, and starts no further
+workload. These are CLI-only options, no new environment variable is required.
+Bounded runs reuse the managed timeout helper, with private-session cleanup when
+`setsid` is supplied. Existing direct untimed execution remains available.
+
+```sh
+./run.sh --bin opencv_test_core --list
+./run.sh --bin opencv_test_core --list 0 --shuffle 0 --timeout 120
+./run.sh --suite all --timeout 120 --suite-timeout 1200
+```
+
+The premerge plan uses the last command's bounds so enumeration does not replace
+actual coverage and the suite has its own budget within the LAVA action.
+Default logs, summary and temporary discovery files stay under `$PWD/logs`.
+The existing `LOG_DIR` override is retained. `OpenCV.res` stays beside `run.sh`.
+
 
 ## License
 
 BSD-3-Clause (same as the script).
-

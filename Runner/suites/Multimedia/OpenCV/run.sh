@@ -35,11 +35,13 @@ fi
 . "$TOOLS/functestlib.sh"
 
 TESTNAME="OpenCV"
-LOG_DIR="${LOG_DIR:-$SCRIPT_DIR/logs}"
-mkdir -p "$LOG_DIR" >/dev/null 2>&1 || true
 RES_FILE="$SCRIPT_DIR/$TESTNAME.res"
-SUMMARY_FILE="$SCRIPT_DIR/$TESTNAME.summary"
-RESLIST_FILE="$SCRIPT_DIR/${TESTNAME}.reslist"
+test_result_init "$TESTNAME" "$RES_FILE" || exit 1
+LOG_DIR="${LOG_DIR:-$PWD/logs}"
+mkdir -p "$LOG_DIR" || test_result_finish FAIL "Cannot create OpenCV logs at $LOG_DIR"
+LOG_DIR=$(CDPATH='' cd "$LOG_DIR" && pwd -P) || test_result_finish FAIL "Cannot resolve OpenCV log directory"
+SUMMARY_FILE="$LOG_DIR/$TESTNAME.summary"
+RESLIST_FILE="$LOG_DIR/${TESTNAME}.reslist"
 : > "$RESLIST_FILE"
 : > "$SUMMARY_FILE"
 
@@ -56,6 +58,7 @@ CWD="." # --cwd
 TESTDATA_PATH="" # --testdata
 EXTRA_ARGS="" # --args "..."
 TIMEOUT_SECS="" # --timeout N
+SUITE_TIMEOUT_SECS="" # --suite-timeout N
 SUITE="all" # --suite accuracy|performance|all
 LIST_ONLY=0 # --list
 REPEAT="" # --repeat N
@@ -73,15 +76,16 @@ Usage: $0 [options]
   --suite <name> accuracy | performance | all (default: all)
   --filter <pattern> gtest filter for all runs (default from env or "-tracking_GOTURN.GOTURN/*")
   --repeat <N> gtest repeat count
-  --shuffle Enable gtest shuffle
+  --shuffle [0|1] Enable shuffle, or explicitly disable it with 0
   --seed <N> gtest random seed
   --cwd <path> Working directory for test execution (default: .)
   --testdata <path> Export OPENCV_TEST_DATA_PATH to this dir
   --args "<args>" Extra args added to all test binaries
-  --timeout <sec> Kill a run if it exceeds <sec> (needs \`timeout\`)
+  --timeout <sec> Bound one run using the shared managed timeout helper
   --perf-args "<args>" Extra args appended to all opencv_perf_* runs
   --perf-to-tests Also append --perf-args to opencv_test_* runs
-  --list List tests (per-binary) and exit (treated as PASS)
+  --list [0|1] List tests without execution (SKIP), or disable listing with 0
+  --suite-timeout <sec> Bound all selected binaries together (default: no total bound)
   -h|--help Show this help
 
 Env honored:
@@ -89,27 +93,95 @@ Env honored:
 EOF
 }
 
-while [ $# -gt 0 ]; do
-    case "$1" in
-        --bin) BIN_PATH="$2"; shift 2 ;;
-	--bin-list) BIN_LIST="$2"; shift 2 ;;
-        --build-dir) BUILD_DIR="$2"; shift 2 ;;
-        --suite) SUITE="$2"; shift 2 ;;
-        --filter) CLI_FILTER="$2"; shift 2 ;;
-        --repeat) REPEAT="$2"; shift 2 ;;
-        --shuffle) SHUFFLE=1; shift 1 ;;
-        --seed) SEED="$2"; shift 2 ;;
-        --cwd) CWD="$2"; shift 2 ;;
-        --testdata) TESTDATA_PATH="$2"; shift 2 ;;
-        --args) EXTRA_ARGS="$2"; shift 2 ;;
-        --timeout) TIMEOUT_SECS="$2"; shift 2 ;;
-        --perf-args) PERF_ARGS="$2"; shift 2 ;;
-        --perf-to-tests) PERF_TO_TESTS=1; shift 1 ;;
-        --list) LIST_ONLY=1; shift 1 ;;
-        -h|--help) print_usage; exit 0 ;;
-        *) log_warn "Unknown arg: $1"; shift 1 ;;
-    esac
+# parse_args <arguments>
+# Preserve flag-only forms and accept explicit boolean values from CI plans.
+parse_args() {
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --list|--shuffle)
+                cv_flag="$1"
+                cv_enabled=1
+                shift
+                case "${1:-}" in
+                    0|1)
+                        cv_enabled="$1"
+                        shift
+                        ;;
+                esac
+                if [ "$cv_flag" = "--list" ]; then
+                    LIST_ONLY="$cv_enabled"
+                else
+                    SHUFFLE="$cv_enabled"
+                fi
+                ;;
+            --bin|--bin-list|--build-dir|--suite|--filter|--repeat|--seed|--cwd|--testdata|--args|--timeout|--suite-timeout|--perf-args)
+                [ "$#" -ge 2 ] || test_result_finish FAIL "Missing value for $1"
+                case "$1" in
+                    --bin)
+                        BIN_PATH="$2"
+                        ;;
+                    --bin-list)
+                        BIN_LIST="$2"
+                        ;;
+                    --build-dir)
+                        BUILD_DIR="$2"
+                        ;;
+                    --suite)
+                        SUITE="$2"
+                        ;;
+                    --filter)
+                        CLI_FILTER="$2"
+                        ;;
+                    --repeat)
+                        REPEAT="$2"
+                        ;;
+                    --seed)
+                        SEED="$2"
+                        ;;
+                    --cwd)
+                        CWD="$2"
+                        ;;
+                    --testdata)
+                        TESTDATA_PATH="$2"
+                        ;;
+                    --args)
+                        EXTRA_ARGS="$2"
+                        ;;
+                    --timeout)
+                        TIMEOUT_SECS="$2"
+                        ;;
+                    --suite-timeout)
+                        SUITE_TIMEOUT_SECS="$2"
+                        ;;
+                    --perf-args)
+                        PERF_ARGS="$2"
+                        ;;
+                esac
+                shift 2
+                ;;
+            --perf-to-tests)
+                PERF_TO_TESTS=1
+                shift
+                ;;
+            -h|--help)
+                print_usage
+                exit 0
+                ;;
+            *)
+                log_warn "Unknown arg: $1"
+                shift
+                ;;
+        esac
+    done
+}
+parse_args "$@"
+for cv_bound in "$TIMEOUT_SECS" "$SUITE_TIMEOUT_SECS"; do
+    [ -n "$cv_bound" ] || continue
+    if ! is_unsigned_number "$cv_bound" || [ "$cv_bound" -eq 0 ]; then
+        test_result_finish FAIL "OpenCV timeout must be a positive integer, received '$cv_bound'"
+    fi
 done
+SUITE_STARTED=$(get_monotonic_seconds)
 
 # ----- PATH enrichment so check_dependencies can see build dir binaries -----
 case ":$PATH:" in
@@ -156,14 +228,6 @@ if [ -z "$PERF_ARGS" ]; then
     PERF_ARGS="--perf_impl=plain --perf_min_samples=10 --perf_force_samples=10 --perf_verify_sanity --skip_unstable=1"
 fi
 
-# ----- timeout handling via run_with_timeout (from functestlib.sh) -----
-if [ -n "$TIMEOUT_SECS" ]; then
-    if ! command -v run_with_timeout >/dev/null 2>&1; then
-        log_warn "run_with_timeout() not available; ignoring --timeout"
-        TIMEOUT_SECS=""
-    fi
-fi
-
 # ----- helpers -----
 resolve_bin() {
     bn="$1"
@@ -198,6 +262,20 @@ run_one() {
         append_summary "$bin_short" "SKIP" "-"
         return 2
     }
+
+    effective_timeout="$TIMEOUT_SECS"
+    if [ -n "$SUITE_TIMEOUT_SECS" ]; then
+        remaining=$((SUITE_TIMEOUT_SECS - $(get_monotonic_seconds) + SUITE_STARTED))
+        if [ "$remaining" -le 0 ]; then
+            log_fail "$bin_short : suite execution budget exhausted, no new workload was started"
+            printf '%s FAIL\n' "$bin_short" >>"$RESLIST_FILE"
+            append_summary "$bin_short" "FAIL" "not-started-budget-exhausted"
+            return 1
+        fi
+        if [ -z "$effective_timeout" ] || [ "$remaining" -lt "$effective_timeout" ]; then
+            effective_timeout="$remaining"
+        fi
+    fi
 
     # Build argument list
     ts="$(date +%Y%m%d-%H%M%S)"
@@ -246,8 +324,8 @@ run_one() {
     fi
 
     cmd="$bin_path $gargs"
-    if [ -n "$TIMEOUT_SECS" ]; then
-        log_info "Cmd : $cmd (via run_with_timeout $TIMEOUT_SECS)"
+    if [ -n "$effective_timeout" ]; then
+        log_info "Cmd : $cmd (via managed timeout $effective_timeout)"
     else
         log_info "Cmd : $cmd"
     fi
@@ -255,8 +333,13 @@ run_one() {
 
     (
         cd "$CWD" || exit 2
-        if [ -n "$TIMEOUT_SECS" ]; then
-            run_with_timeout "$TIMEOUT_SECS" sh -c "$cmd"
+        if [ -n "$effective_timeout" ]; then
+            cv_use_session=0
+            if command -v setsid >/dev/null 2>&1; then
+                cv_use_session=1
+            fi
+            MANAGED_TIMEOUT_USE_SESSION="$cv_use_session" \
+                run_with_managed_timeout "$effective_timeout" "$LOG_DIR" OpenCV sh -c "exec $cmd"
         else
             # shellcheck disable=SC2086
             sh -c "$cmd"
@@ -267,11 +350,22 @@ run_one() {
 
     case "$rc" in
         124|137|143)
-            if [ -n "$TIMEOUT_SECS" ]; then
+            if [ -n "$effective_timeout" ]; then
                 timed_out=1
             fi
             ;;
     esac
+
+    if [ "$rc" -eq 0 ]; then
+        case " $gargs " in
+            *" --gtest_list_tests "*|*" --gtest_list_tests=1 "*|*" --gtest_list_tests=true "*)
+                log_skip "$bin_short : listing only, no functional tests executed"
+                printf '%s SKIP\n' "$bin_short" >>"$RESLIST_FILE"
+                append_summary "$bin_short" "SKIP" "$run_log"
+                return 2
+                ;;
+        esac
+    fi
 
     if [ "$rc" -eq 0 ] && parse_zero_tests_as_skip "$run_log"; then
         log_skip "$bin_short : No tests executed — SKIP"
@@ -290,7 +384,7 @@ run_one() {
     fi
 
     if [ "$timed_out" -eq 1 ]; then
-        log_fail "$bin_short : FAIL/TIMEOUT after ${TIMEOUT_SECS}s (exit=$rc). See: $run_log"
+        log_fail "$bin_short : FAIL/TIMEOUT after ${effective_timeout}s (exit=$rc). See: $run_log"
     else
         log_fail "$bin_short : FAIL (exit=$rc). See: $run_log"
     fi
@@ -303,7 +397,7 @@ run_one() {
 
 discover_bins() {
     # Emit newline-separated base names for opencv_test_* and opencv_perf_* discovered
-    tmp_all="$(mktemp "/tmp/${TESTNAME}_bins.XXXXXX")"
+    tmp_all="$(mktemp "$LOG_DIR/${TESTNAME}_bins.XXXXXX")"
     : > "$tmp_all"
 
     # Search BUILD_DIR and BUILD_DIR/bin first
@@ -426,7 +520,7 @@ case "$SUITE" in
 esac
 
 # ----- discover first (we will also use this list for dependency check) -----
-DISC_TMP="$(mktemp "/tmp/${TESTNAME}_discover.XXXXXX")"
+DISC_TMP="$(mktemp "$LOG_DIR/${TESTNAME}_discover.XXXXXX")"
 discover_bins > "$DISC_TMP"
 
 if [ ! -s "$DISC_TMP" ]; then
@@ -495,8 +589,8 @@ if [ "$FAIL" -gt 0 ]; then
     echo "$TESTNAME FAIL" > "$RES_FILE"
     exit 1
 fi
-if [ "$PASS" -gt 0 ] || [ "$SKIP" -gt 0 ]; then
-    # Treat "some ran (pass/skip) and no failures" as PASS overall
+if [ "$PASS" -gt 0 ]; then
+    # A functional PASS requires at least one executed, successful binary.
     echo "$TESTNAME PASS" > "$RES_FILE"
     exit 0
 fi

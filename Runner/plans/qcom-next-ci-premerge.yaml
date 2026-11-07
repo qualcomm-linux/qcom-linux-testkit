@@ -78,7 +78,7 @@ run:
         - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/watchdog/watchdog.res || true
         - $PWD/suites/Multimedia/DSP_AudioPD/run.sh || true
         - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/DSP_AudioPD/DSP_AudioPD.res || true
-        - $PWD/suites/Multimedia/OpenCV/run.sh --build-dir . --cwd . --suite all --list 0 --shuffle 0 || true
+        - $PWD/suites/Multimedia/OpenCV/run.sh --build-dir . --cwd . --suite all --timeout 120 --suite-timeout 1200 || true
         - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/OpenCV/OpenCV.res || true
         - $PWD/suites/Multimedia/Audio/Audio_Card_Registration/run.sh || true
         - $PWD/utils/send-to-lava.sh $PWD/suites/Multimedia/Audio/Audio_Card_Registration/Audio_Card_Registration.res || true
