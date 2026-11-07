@@ -16,6 +16,8 @@ SKIPs, actual attachment and captured initialization/translation failures FAIL.
 Group inventory is readiness coverage, it does not exercise DMA traffic.
 Evidence is retained under CWD `results/smmu/run-*`, including groups.tsv,
 masters.tsv, dmesg_snapshot.log, dmesg_errors.log and iommu_errors.log.
+`smmu.res` remains beside `run.sh` and replaces the previous result for both
+Runner-directory launches and direct suite-directory execution.
 
 Public reference: the kernel's drivers/iommu/of_iommu.c configures a device
 from the DT node supplied by its driver. Group membership is documented in

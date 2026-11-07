@@ -10,6 +10,8 @@ Read exactly 2,500,004 bytes in 10 seconds, then validate 1000 FIPS blocks
 within 30 seconds. Preserve the existing threshold of at least 997 successes.
 Short reads, incomplete or invalid statistics and command/timeouts FAIL.
 Missing clients SKIP. CWD results/rngtest/run-* retains entropy and logs.
+`rngtest.res` remains beside `run.sh` and replaces the previous result for both
+Runner-directory launches and direct suite-directory execution.
 Works on Yocto, Debian, Ubuntu and CentOS without an init manager.
 
 Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.

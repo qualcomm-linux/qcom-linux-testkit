@@ -37,7 +37,7 @@ fi
 . "$TOOLS/functestlib.sh"
 
 TESTNAME="Reboot_health_check"
-RES_FILE="$PWD/$TESTNAME.res"
+RES_FILE="$SCRIPT_DIR/$TESTNAME.res"
 test_result_init "$TESTNAME" "$RES_FILE" || exit 1
 
 log_info "Boot context: kernel=$(uname -r), architecture=$(uname -m)"

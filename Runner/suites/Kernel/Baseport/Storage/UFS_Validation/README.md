@@ -15,7 +15,8 @@ CWD resolves to a filesystem directly backed by UFS. Each operation has a
 write subcheck is SKIP and the read-only check remains available. No raw writes
 or formatting are performed. The temporary file is removed during cleanup.
 
-`UFS_Validation.res` summarizes the checks, any failure takes precedence. A PASS
+`UFS_Validation.res` remains beside `run.sh` and replaces the previous result,
+including launches from Runner. Any failure takes precedence. A PASS
 with the write subcheck skipped reports read-only coverage. Logs and the shared
 kernel snapshot are retained under a unique `ufs-validation.*` directory in CWD.
 

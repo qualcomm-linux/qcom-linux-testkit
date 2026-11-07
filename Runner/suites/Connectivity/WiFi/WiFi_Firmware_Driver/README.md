@@ -83,6 +83,10 @@ The test writes the result file:
 WiFi_Firmware_Driver.res
 ```
 
+The result remains beside `run.sh` for both Runner-directory launches and
+direct suite-directory execution. Each invocation clears the previous result.
+Logs and scratch files remain under the invocation CWD.
+
 Depending on helper behavior and failure mode, WiFi probe/runtime log artifacts may be collected under the configured probe log directory.
 
 ## PASS criteria
@@ -100,13 +104,13 @@ The test passes when:
 The test skips when:
 
 - Required tools are missing.
-- No supported uncompressed, `.xz`, or `.zst` WiFi firmware file or readable
-  symlink is found under `/lib/firmware`.
+- No supported WiFi family is identified from runtime drivers or device aliases.
 
 ## FAIL criteria
 
 The test fails when:
 
+- A runtime WiFi family has no readable provisioned firmware asset.
 - Family-specific runtime preparation fails.
 - Expected family modules are not visible.
 - Firmware load/use evidence is not found.
