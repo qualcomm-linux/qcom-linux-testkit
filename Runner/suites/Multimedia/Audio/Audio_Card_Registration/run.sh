@@ -55,7 +55,7 @@ if [ -r "$TOOLS/lib_pkg_provider.sh" ]; then
 fi
 
 TESTNAME="Audio_Card_Registration"
-RES_FILE="$AUDIO_WORK_DIR/$TESTNAME.res"
+RES_FILE="$SCRIPT_DIR/$TESTNAME.res"
 EXPECTED_DT_COMPATIBLE=""
 DT_FIT_IMAGE=""
 
@@ -167,7 +167,7 @@ fi
 # Resolve absolute output paths. The complete runner remains the root
 # orchestrator on Debian and CentOS, so logs, results, inventory, and dmesg
 # evidence stay root-owned.
-RES_FILE="$AUDIO_WORK_DIR/$TESTNAME.res"
+RES_FILE="$SCRIPT_DIR/$TESTNAME.res"
 if ! LOGDIR="$(audio_create_run_directory "$AUDIO_WORK_DIR/results/$TESTNAME")"; then
     log_fail "$TESTNAME FAIL - cannot create artifacts under CWD=$AUDIO_WORK_DIR"
     echo "$TESTNAME FAIL" >"$RES_FILE"
