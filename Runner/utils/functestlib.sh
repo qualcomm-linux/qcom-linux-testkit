@@ -4633,6 +4633,79 @@ platform_device_driver_name() {
     basename "$pddn_driver_path"
 }
 
+# iommu_validate_runtime_devices <result-directory>
+# Validate enabled DT DMA contexts against their exact runtime platform devices.
+# Container parents need no group when the DT assigns DMA to child contexts.
+# Retain DT, device, driver and group evidence. Diagnostics go to stderr.
+# Return 0 for complete attachment, 1 for broken attachment/discovery, 2 when
+# DT context evidence is unavailable, and 3 for invalid input. No state changes.
+iommu_validate_runtime_devices() (
+    ivrd_out="$1"
+    [ -n "$ivrd_out" ] || exit 3
+    mkdir -p "$ivrd_out" || exit 1
+    ivrd_root=$(dt_runtime_root) || exit 2
+    ivrd_index="$ivrd_out/iommu_platform_index.tsv"
+    ivrd_nodes="$ivrd_out/iommu_dt_nodes.log"
+    ivrd_inventory="$ivrd_out/iommu_contexts.tsv"
+    : >"$ivrd_index" || exit 1
+    : >"$ivrd_inventory" || exit 1
+    # The generic provider index does not include iommus. Collect it once here.
+    if DT_PROPERTY_INDEX="" dt_list_enabled_property_nodes "$ivrd_root" iommus >"$ivrd_nodes"; then
+        :
+    else
+        ivrd_rc=$?
+        [ "$ivrd_rc" -eq 1 ] && exit 2
+        exit 1
+    fi
+    for ivrd_link in /sys/bus/platform/devices/*/of_node; do
+        [ -e "$ivrd_link" ] || continue
+        ivrd_node=$(readlink -f "$ivrd_link") || exit 1
+        printf '%s|%s\n' "$ivrd_node" "${ivrd_link%/of_node}" >>"$ivrd_index"
+    done
+    ivrd_count=0
+    ivrd_failed=0
+    while IFS= read -r ivrd_node; do
+        [ -n "$ivrd_node" ] || continue
+        ivrd_parent="$ivrd_node"
+        ivrd_enabled=1
+        while [ "$ivrd_parent" != "$ivrd_root" ]; do
+            if ! dt_node_enabled "$ivrd_parent"; then
+                ivrd_enabled=0
+                break
+            fi
+            ivrd_parent=${ivrd_parent%/*}
+        done
+        [ "$ivrd_enabled" -eq 1 ] || continue
+        ivrd_count=$((ivrd_count + 1))
+        ivrd_device=$(DT_PLATFORM_DEVICE_INDEX="$ivrd_index" find_platform_device_for_dt_node "$ivrd_node") || ivrd_device=""
+        ivrd_driver="unbound"
+        ivrd_group="missing"
+        ivrd_status="FAIL"
+        if [ -n "$ivrd_device" ]; then
+            ivrd_driver=$(platform_device_driver_name "$ivrd_device") || ivrd_driver="unbound"
+            if [ -e "$ivrd_device/iommu_group" ]; then
+                ivrd_group=$(readlink -f "$ivrd_device/iommu_group") || exit 1
+                ivrd_status="PASS"
+            fi
+        fi
+        ivrd_iommus=$(dt_property_hex "$ivrd_node" iommus) || ivrd_iommus="unreadable"
+        if [ -z "$ivrd_iommus" ] || [ "$ivrd_iommus" = "unreadable" ] ||
+           [ "$((${#ivrd_iommus} % 8))" -ne 0 ]; then
+            ivrd_status="FAIL"
+        fi
+        printf '%s|%s|%s|%s|%s|%s\n' "$ivrd_node" \
+            "${ivrd_device:-missing}" "$ivrd_driver" "$ivrd_group" \
+            "$ivrd_iommus" "$ivrd_status" >>"$ivrd_inventory"
+        if [ "$ivrd_status" = "FAIL" ]; then
+            ivrd_failed=$((ivrd_failed + 1))
+            printf '%s\n' "IOMMU context is not attached: DT=$ivrd_node device=${ivrd_device:-missing} driver=$ivrd_driver group=$ivrd_group. Check the DT supplier, driver binding and image modules." >&2
+        fi
+    done <"$ivrd_nodes"
+    printf '%s\n' "IOMMU runtime contexts: checked=$ivrd_count failed=$ivrd_failed artifact=$ivrd_inventory" >&2
+    [ "$ivrd_failed" -eq 0 ] || exit 1
+    [ "$ivrd_count" -gt 0 ] || exit 2
+)
+
 # kernel_modules_for_modalias <modalias>
 # Prints kernel module candidates resolved from the running image's alias
 # database. Returns 0 when candidates are found, 1 when no alias matches, 2
