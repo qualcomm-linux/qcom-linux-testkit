@@ -35,7 +35,7 @@ wifi_wait_command() (
     wifi_op_limit="$1"
     wifi_op_label="$2"
     shift 2
-    wifi_op_remaining=$((wifi_wait_deadline - $(date +%s)))
+    wifi_op_remaining=$((wifi_wait_deadline - $(get_monotonic_seconds)))
     [ "$wifi_op_remaining" -gt 0 ] || return 124
     if [ "$wifi_op_limit" -gt "$wifi_op_remaining" ]; then
         wifi_op_limit="$wifi_op_remaining"
@@ -47,7 +47,7 @@ wait_for_wifi_interface() {
     max_wait="${1:-60}"
     sleep_step="${2:-2}"
     waited=0
-    wifi_wait_started=$(date +%s)
+    wifi_wait_started=$(get_monotonic_seconds)
     iface=""
     settle_done=0
     reload_done=0
@@ -165,14 +165,14 @@ wait_for_wifi_interface() {
             done
         fi
 
-        waited=$(($(date +%s) - wifi_wait_started))
+        waited=$(($(get_monotonic_seconds) - wifi_wait_started))
         [ "$waited" -lt "$max_wait" ] || break
         wifi_wait_delay="$sleep_step"
         if [ "$wifi_wait_delay" -gt "$((max_wait - waited))" ]; then
             wifi_wait_delay=$((max_wait - waited))
         fi
         sleep "$wifi_wait_delay"
-        waited=$(($(date +%s) - wifi_wait_started))
+        waited=$(($(get_monotonic_seconds) - wifi_wait_started))
 
         if [ "$waited" -gt 0 ] && [ $((waited % 10)) -eq 0 ]; then
             log_info "Still waiting for WiFi interface... waited=${waited}s/${max_wait}s" >&2
@@ -482,7 +482,7 @@ wifi_alias_modules() (
 # Modaliases include the enabled runtime DT nodes instantiated on the platform
 # bus. Installed firmware alone is never evidence of applicable hardware.
 wifi_runtime_families() (
-    wifi_discovery_started=$(date +%s)
+    wifi_discovery_started=$(get_monotonic_seconds)
     for wifi_device in /sys/class/ieee80211/*/device /sys/bus/platform/devices/* /sys/bus/pci/devices/* /sys/bus/sdio/devices/*; do
         [ -d "$wifi_device" ] || continue
         if wifi_bound_family "$wifi_device"; then
@@ -490,7 +490,7 @@ wifi_runtime_families() (
         fi
         # A device bound to a different driver is not an unloaded WiFi candidate.
         [ ! -L "$wifi_device/driver" ] || continue
-        if [ "$(($(date +%s) - wifi_discovery_started))" -ge 20 ]; then
+        if [ "$(($(get_monotonic_seconds) - wifi_discovery_started))" -ge 20 ]; then
             log_warn "WiFi runtime alias discovery exceeded 20 seconds" >&2
             return 1
         fi
@@ -761,8 +761,8 @@ wifi_verify_family_modules() {
 # Check kernel logs and runtime wireless state for evidence that WiFi firmware
 # was consumed by the driver. Returns success when firmware load/use evidence exists.
 wifi_firmware_loaded() {
-    wifi_phy_started=$(date +%s)
-    while [ "$(($(date +%s) - wifi_phy_started))" -lt 15 ]; do
+    wifi_phy_started=$(get_monotonic_seconds)
+    while [ "$(($(get_monotonic_seconds) - wifi_phy_started))" -lt 15 ]; do
         if wifi_family_has_phy "$1"; then
             return 0
         fi

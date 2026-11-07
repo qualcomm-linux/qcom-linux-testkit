@@ -766,7 +766,7 @@ validate_per_cpu_interrupt_active() {
     skip_isolated="$4"
     irq_budget="${5:-0}"
     [ "$irq_budget" = auto ] || is_unsigned_number "$irq_budget" || return 1
-    irq_started=$(date +%s) || return 1
+    irq_started=$(get_monotonic_seconds) || return 1
 
     IRQ_ACTIVE_TESTED=0
     IRQ_ACTIVE_PASSED=0
@@ -876,7 +876,7 @@ validate_per_cpu_interrupt_active() {
 
         while [ "$attempt" -le "$retries" ]; do
             if [ "$irq_budget" -gt 0 ]; then
-                irq_now=$(date +%s) || return 1
+                irq_now=$(get_monotonic_seconds) || return 1
                 if [ "$((irq_now - irq_started + workload_seconds))" -gt "$irq_budget" ]; then
                     log_fail "Active interrupt validation exceeded its ${irq_budget}s budget"
                     return 1

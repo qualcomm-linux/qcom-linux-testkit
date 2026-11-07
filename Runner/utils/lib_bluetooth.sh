@@ -3881,7 +3881,7 @@ bt_wait_ready() {
     bt_wr_sleep_step="${2:-2}"
     bt_wr_requested_adapter="${3:-${BT_ADAPTER:-}}"
     bt_wr_waited=0
-    bt_wr_started_at=$(date +%s)
+    bt_wr_started_at=$(get_monotonic_seconds)
     bt_wr_started_service=0
     bt_wr_adapter=""
 
@@ -3953,7 +3953,7 @@ bt_wait_ready() {
             bt_wr_started_service=1
         fi
 
-        bt_wr_waited=$(($(date +%s) - bt_wr_started_at))
+        bt_wr_waited=$(($(get_monotonic_seconds) - bt_wr_started_at))
         if [ "$bt_wr_waited" -ge "$bt_wr_max_wait" ]; then
             break
         fi
@@ -3965,7 +3965,7 @@ bt_wait_ready() {
         fi
 
         sleep "$bt_wr_delay"
-        bt_wr_waited=$(($(date +%s) - bt_wr_started_at))
+        bt_wr_waited=$(($(get_monotonic_seconds) - bt_wr_started_at))
     done
 
     if [ -n "$bt_wr_adapter" ]; then
