@@ -1,0 +1,27 @@
+metadata:
+  name: pre-suspend-check
+  format: "Lava-Test Test Definition 1.0"
+  description: "Record the state of the machine before it is suspended, so that Resume_Check can confirm afterwards that a suspend/resume cycle really happened. This test does not suspend the machine: run it, trigger the suspend by whatever means the job uses, then run Resume_Check once the machine is back up."
+  os:
+    - linux
+  scope:
+    - functional
+    - power-management
+
+params:
+  # Where to save the recorded state. Resume_Check must be given the same path.
+  STATE_FILE: "/tmp/pre-suspend-state.txt"
+  # When set, check that this sleep mode is offered by /sys/power/state.
+  # Leave empty to skip the check.
+  SLEEP_MODE: ""
+  # Suspend-to-RAM variant used for the cycle: default, s2idle, shallow or
+  # deep. When set, it is appended to the result name (e.g. Pre_Suspend_Check_deep).
+  # Leave empty for a result named Pre_Suspend_Check.
+  SUSPEND_MODE: ""
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/Pre_Suspend_Check
+    - ./run.sh --state-file "${STATE_FILE}" --sleep-mode "${SLEEP_MODE}" --suspend-mode "${SUSPEND_MODE}" || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh Pre_Suspend_Check.res || true
