@@ -4634,7 +4634,7 @@ platform_device_driver_name() {
 }
 
 # iommu_validate_runtime_devices <result-directory>
-# Validate enabled DT DMA contexts against their exact runtime platform devices.
+# Validate enabled DT DMA contexts against their exact runtime bus devices.
 # Container parents need no group when the DT assigns DMA to child contexts.
 # Retain DT, device, driver and group evidence. Diagnostics go to stderr.
 # Return 0 for complete attachment, 1 for broken attachment/discovery, 2 when
@@ -4657,7 +4657,9 @@ iommu_validate_runtime_devices() (
         [ "$ivrd_rc" -eq 1 ] && exit 2
         exit 1
     fi
-    for ivrd_link in /sys/bus/platform/devices/*/of_node; do
+    # DMA consumers include AMBA CoreSight devices and platform child contexts.
+    # Keep the existing index format and use the shared exact-DT lookup.
+    for ivrd_link in /sys/bus/*/devices/*/of_node; do
         [ -e "$ivrd_link" ] || continue
         ivrd_node=$(readlink -f "$ivrd_link") || exit 1
         printf '%s|%s\n' "$ivrd_node" "${ivrd_link%/of_node}" >>"$ivrd_index"
@@ -7138,8 +7140,8 @@ list_remoteproc_instances() {
 
 ###############################################################################
 # find_image_firmware <firmware-name>
-# Prints the first matching image-provided firmware path under the standard or
-# running-kernel firmware roots, accepting uncompressed, .xz, and .zst files.
+# Prints the first matching image-provided firmware path under custom, update,
+# running-kernel or standard roots, accepting uncompressed, .xz, and .zst files.
 # Returns 0 on a match, 1 when no asset is exposed, and 3 when no name is
 # supplied.
 ###############################################################################
@@ -7148,7 +7150,16 @@ find_image_firmware() {
     firmware_release=$(uname -r 2>/dev/null || true)
     [ -n "$firmware_name" ] || return 3
 
+    firmware_custom_root=""
+    if [ -r /sys/module/firmware_class/parameters/path ]; then
+        IFS= read -r firmware_custom_root </sys/module/firmware_class/parameters/path || true
+    fi
     for firmware_root in \
+        "$firmware_custom_root" \
+        "/lib/firmware/updates/$firmware_release" \
+        "/usr/lib/firmware/updates/$firmware_release" \
+        /lib/firmware/updates \
+        /usr/lib/firmware/updates \
         "/lib/firmware/$firmware_release" \
         "/usr/lib/firmware/$firmware_release" \
         /lib/firmware \

@@ -2,7 +2,10 @@
 
 Run `./run.sh` from this directory, or invoke it by absolute path from Runner.
 The suite checks the existing SMMU kernel configuration, registered IOMMU groups
-and every enabled DT `iommus` context's exact runtime platform-device attachment.
+and every enabled DT `iommus` context's exact runtime bus-device attachment.
+Device discovery follows `of_node` links across sysfs buses, including AMBA
+CoreSight sinks and platform child contexts. An unrelated working trace sink
+does not prove that an ETR has an IOMMU attachment.
 Container parents do not need a group when DMA contexts are declared on children.
 Missing runtime contexts or groups fail, including unresolved driver suppliers.
 No board-name or device-address mapping is used.

@@ -134,6 +134,10 @@ if a descendant holds the pipe open. A drain warning means console evidence may
 be incomplete. Capture-disabled and file-only paths retain their existing
 behavior, and cleanup preserves the suite exit status.
 
+Shared firmware discovery follows an image's custom firmware search root,
+kernel update directories and standard firmware directories. It accepts
+uncompressed, `.xz` and `.zst` assets and does not install or copy firmware.
+
 ## LAVA integration
 
 Per-suite YAML files launch the test and publish its result using

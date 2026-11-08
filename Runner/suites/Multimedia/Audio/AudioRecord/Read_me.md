@@ -418,7 +418,7 @@ evidence.
 
 ## Audio Remoteproc Preflight
 
-Before backend discovery, the suite enumerates runtime remoteprocs and checks the configured firmware and topology under `/lib/firmware` or `/usr/lib/firmware`. It recognizes audio DSP identities and the Shikra modem-hosted audio path. A remoteproc named `modem` is ignored on non-Shikra targets because it is not their audio preflight dependency.
+Before backend discovery, the suite enumerates runtime remoteprocs and checks the configured firmware and topology through shared image-firmware discovery. This includes the image's custom firmware root, kernel update paths, `/lib/firmware` and `/usr/lib/firmware`, with compressed assets supported. It recognizes audio DSP identities and the Shikra modem-hosted audio path. A remoteproc named `modem` is ignored on non-Shikra targets because it is not their audio preflight dependency.
 
 If the matching remoteproc is `running`, the suite records its name and firmware evidence. If it is `offline`, the suite starts it only after confirming the corresponding firmware is provisioned. Generic audio DSP paths also require adjacent topology evidence. Shikra's modem-hosted path does not require a topology beside the modem firmware, the selected ALSA card's q6apm topology is validated separately. The suite never stops a remoteproc. Platforms with no applicable audio remoteproc continue normally. Provisioning or start issues on an applicable remoteproc report FAIL with the reason.
 
