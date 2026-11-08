@@ -11,6 +11,15 @@ The script does not alter DT, firmware, modules or driver state.
 `$PWD/results/Probe_Failure_Check/run-*/`: `dmesg_snapshot.log`,
 `dmesg_errors.log`, `probe_failures.log`, and `devices_deferred.log` when
 available. Failure evidence is printed to stdout as well as retained in files.
+On failure, `firmware_assets.tsv` maps requested filenames to current
+image-provided files, including custom firmware roots and kernel update paths.
+`probe_devices.tsv` records matching bus devices, driver bindings and DT nodes.
+These diagnostics distinguish a missing asset from an error despite an asset
+being present. Neither a current file nor a bound driver erases a captured
+firmware-load or probe failure. The error replay is bounded to 60 lines, and
+the complete snapshot and filtered failure log remain available.
+Missing optional context tools omit that extra inventory and preserve the core
+probe verdict, they do not turn a known failure into SKIP.
 Missing kernel-log access skips that check, it cannot create a clean-log PASS.
 An independently observed unresolved probe still fails.
 

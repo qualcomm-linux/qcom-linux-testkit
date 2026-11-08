@@ -1,6 +1,7 @@
 #!/bin/sh
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
-# SPDX-License-Identifier: BSD-3-Clause# Probe failure / deferred probe detector using kernel logs + devices_deferred
+# SPDX-License-Identifier: BSD-3-Clause
+# Probe failure / deferred probe detector using kernel logs + devices_deferred
 
 # ---------- Repo env + helpers ----------
 SCRIPT_DIR="$(
@@ -77,7 +78,47 @@ else
     log_info "Deferred-probe debugfs evidence is unavailable, retaining the kernel-log check"
 fi
 if [ -s "$LOG_FILE" ]; then
-    log_file_with_label PROBE-ERROR "$LOG_FILE"
+    if CHECK_DEPS_NO_EXIT=1 check_dependencies awk sort uname readlink basename; then
+        # Requested filenames and current bindings explain image/setup failures.
+        # Current asset presence never erases an error in the captured kernel log.
+        sed -n 's/.*Direct firmware load for \(.*\) failed.*/\1/p' "$LOG_FILE" |
+            sort -u >"$OUT_DIR/requested_firmware.list"
+        : >"$OUT_DIR/firmware_assets.tsv"
+        while IFS= read -r probe_firmware; do
+            [ -n "$probe_firmware" ] || continue
+            if probe_asset=$(find_image_firmware "$probe_firmware"); then
+                printf '%s|present|%s\n' "$probe_firmware" "$probe_asset"
+            else
+                printf '%s|not-found-in-current-image|missing\n' "$probe_firmware"
+            fi
+        done <"$OUT_DIR/requested_firmware.list" >"$OUT_DIR/firmware_assets.tsv"
+        awk '
+            match($0, /: /) {
+                prefix = substr($0, 1, RSTART - 1)
+                count = split(prefix, words, /[[:space:]]+/)
+                if (words[count] != "") print words[count]
+            }
+        ' "$LOG_FILE" | sort -u >"$OUT_DIR/probe_devices.list"
+        : >"$OUT_DIR/probe_devices.tsv"
+        while IFS= read -r probe_device; do
+            probe_found=0
+            for probe_path in /sys/bus/*/devices/"$probe_device"; do
+                [ -d "$probe_path" ] || continue
+                probe_found=1
+                probe_driver=$(platform_device_driver_name "$probe_path") || probe_driver="unbound"
+                probe_dt=$(readlink -f "$probe_path/of_node" 2>/dev/null) || probe_dt="unexposed"
+                printf '%s|%s|%s|%s\n' "$probe_device" "$probe_path" "$probe_driver" "$probe_dt"
+            done
+            if [ "$probe_found" -eq 0 ]; then
+                printf '%s|missing|unbound|unexposed\n' "$probe_device"
+            fi
+        done <"$OUT_DIR/probe_devices.list" >"$OUT_DIR/probe_devices.tsv"
+        log_file_with_label FIRMWARE-ASSET "$OUT_DIR/firmware_assets.tsv" 60
+        log_file_with_label PROBE-DEVICE "$OUT_DIR/probe_devices.tsv" 60
+    else
+        log_warn "Additional probe context tools are unavailable, retaining captured failure evidence"
+    fi
+    log_file_with_label PROBE-ERROR "$LOG_FILE" 60
     test_result_record FAIL "Kernel probe or firmware-load errors detected, inspect $LOG_FILE and the image firmware/DT"
 elif [ "${DMESG_ACCESS_STATUS:-unavailable}" = "available" ]; then
     test_result_record PASS "No probe, firmware or bind failure found in the captured kernel log"
