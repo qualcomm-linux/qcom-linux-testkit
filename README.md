@@ -128,6 +128,12 @@ timestamped log in the invocation directory. Suites may also keep detailed
 artifacts under `results/`. Collect the current run's `.res` file and logs.
 Treat missing results as incomplete execution, not success.
 
+The capture child drains buffered output after the suite closes its pipe.
+Cleanup allows five seconds for normal draining, then uses bounded termination
+if a descendant holds the pipe open. A drain warning means console evidence may
+be incomplete. Capture-disabled and file-only paths retain their existing
+behavior, and cleanup preserves the suite exit status.
+
 ## LAVA integration
 
 Per-suite YAML files launch the test and publish its result using
