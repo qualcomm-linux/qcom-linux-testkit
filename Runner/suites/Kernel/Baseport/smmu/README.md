@@ -21,6 +21,9 @@ The candidates file records priority, DT node and device path. Kernel errors
 and context failures
 are also printed to stdout. Fault and bypass wording is treated as an error,
 never as a benign exclusion. The captured log is reused for all filtering.
+The ordinary strict or lazy TLB invalidation policy announcement is benign.
+Only the complete policy line is excluded. Invalidation errors, timeouts and
+translation or permission faults continue to fail.
 
 The same image-provided shell tools are used on Yocto, Debian, Ubuntu and CentOS.
 No packages are installed. Missing tools skip. Unavailable DT or kernel-log

@@ -78,7 +78,7 @@ esac
 
 # Correct API: result directory, module expression, benign exclusions.
 scan_dmesg_errors "$OUT_DIR" '.*(arm-smmu|smmu|iommu).*' \
-    'dummy regulator|supply [^ ]+ not found|using dummy regulator' || true
+    'dummy regulator|supply [^ ]+ not found|using dummy regulator|^\[[^]]+\][[:space:]]+iommu: DMA domain TLB invalidation policy: (strict|lazy) mode[[:space:]]*$' || true
 if [ "${DMESG_ACCESS_STATUS:-unavailable}" != "available" ]; then
     test_result_record SKIP "Kernel log access unavailable, inspect $OUT_DIR/dmesg_access.log"
 else
