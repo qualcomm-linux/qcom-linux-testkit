@@ -59,7 +59,7 @@ TESTDATA_PATH="" # --testdata
 EXTRA_ARGS="" # --args "..."
 TIMEOUT_SECS="" # --timeout N
 SUITE_TIMEOUT_SECS="" # --suite-timeout N
-SUITE="all" # --suite accuracy|performance|all
+SUITE="all" # --suite accuracy|performance|all|smoke
 LIST_ONLY=0 # --list
 REPEAT="" # --repeat N
 SHUFFLE=0 # --shuffle
@@ -73,7 +73,8 @@ Usage: $0 [options]
   --bin <path|name> Run a single OpenCV gtest/perf binary (overrides --suite)
   --bin-list "<bin1 bin2 ...>" Run selected OpenCV binaries and aggregate result
   --build-dir <path> Root to search for binaries (default: .)
-  --suite <name> accuracy | performance | all (default: all)
+  --suite <name> accuracy | performance | all | smoke (default: all)
+                 smoke runs in-memory core matrix tests without external data
   --filter <pattern> gtest filter for all runs (default from env or "-tracking_GOTURN.GOTURN/*")
   --repeat <N> gtest repeat count
   --shuffle [0|1] Enable shuffle, or explicitly disable it with 0
@@ -175,6 +176,16 @@ parse_args() {
     done
 }
 parse_args "$@"
+if [ "$SUITE" = smoke ]; then
+    # These upstream gtest suites construct their own matrices. The installed
+    # binary selects its available cases, no board or release mapping is used.
+    DEFAULT_FILTER="Core_Mat.*:Core_MatExpr.*:Core_IOArray.*"
+    if [ -z "$BIN_PATH" ] && [ -z "$BIN_LIST" ]; then
+        BIN_LIST="opencv_test_core"
+    fi
+    TIMEOUT_SECS=${TIMEOUT_SECS:-120}
+    SUITE_TIMEOUT_SECS=${SUITE_TIMEOUT_SECS:-180}
+fi
 for cv_bound in "$TIMEOUT_SECS" "$SUITE_TIMEOUT_SECS"; do
     [ -n "$cv_bound" ] || continue
     if ! is_unsigned_number "$cv_bound" || [ "$cv_bound" -eq 0 ]; then
@@ -248,7 +259,7 @@ append_summary() {
 parse_zero_tests_as_skip() {
     # Return 0 (true) if log shows "Running 0 tests ..." (suites or cases wording) or "No tests to run"
     logp="$1"
-    grep -Eq '^\[==========\] Running 0 tests from 0 test (suites|cases)\.' "$logp" \
+    grep -Eq 'Running 0 tests from 0 test (suites|cases)\.' "$logp" \
       || grep -qi 'No tests to run' "$logp"
 }
 
@@ -256,12 +267,18 @@ run_one() {
     bin_short="$1"
     bin_extra="$2"
 
-    bin_path="$(resolve_bin "$bin_short")" || {
+    # An explicit --bin has already been resolved. Retain that exact executable
+    # even when the build directory contains another binary with the same name.
+    bin_path="${3:-}"
+    if [ -z "$bin_path" ]; then
+        bin_path="$(resolve_bin "$bin_short")"
+    fi
+    if [ -z "$bin_path" ]; then
         log_skip "$bin_short : not found — SKIP"
         echo "$bin_short SKIP" >> "$RESLIST_FILE"
         append_summary "$bin_short" "SKIP" "-"
         return 2
-    }
+    fi
 
     effective_timeout="$TIMEOUT_SECS"
     if [ -n "$SUITE_TIMEOUT_SECS" ]; then
@@ -279,7 +296,11 @@ run_one() {
 
     # Build argument list
     ts="$(date +%Y%m%d-%H%M%S)"
-    gargs="--gtest_color=yes --gtest_filter=$GTEST_FILTER"
+    cv_color=yes
+    if [ "$SUITE" = smoke ]; then
+        cv_color=no
+    fi
+    gargs="--gtest_color=$cv_color --gtest_filter=$GTEST_FILTER"
     [ -n "$REPEAT" ] && gargs="$gargs --gtest_repeat=$REPEAT"
     [ "$SHUFFLE" -eq 1 ] && gargs="$gargs --gtest_shuffle"
     [ -n "$SEED" ] && gargs="$gargs --gtest_random_seed=$SEED"
@@ -339,10 +360,10 @@ run_one() {
                 cv_use_session=1
             fi
             MANAGED_TIMEOUT_USE_SESSION="$cv_use_session" \
-                run_with_managed_timeout "$effective_timeout" "$LOG_DIR" OpenCV sh -c "exec $cmd"
+                run_with_managed_timeout "$effective_timeout" "$LOG_DIR" OpenCV \
+                    sh -c "exec \"\$1\" $gargs" sh "$bin_path"
         else
-            # shellcheck disable=SC2086
-            sh -c "$cmd"
+            sh -c "exec \"\$1\" $gargs" sh "$bin_path"
         fi
     ) >"$run_log" 2>&1
     rc=$?
@@ -375,6 +396,23 @@ run_one() {
         return 2
     fi
 
+    if [ "$rc" -eq 0 ] && [ "$SUITE" = smoke ]; then
+        cv_summary=$(sed -n "s/$(printf '\033')\[[0-9;]*m//g; /\[[[:space:]]*PASSED[[:space:]]*\]/p; /\[[[:space:]]*SKIPPED[[:space:]]*\]/p" "$run_log")
+        if printf '%s\n' "$cv_summary" |
+           grep -Eq '\[[[:space:]]*PASSED[[:space:]]*\][[:space:]]+[1-9][0-9]* test'; then
+            :
+        elif printf '%s\n' "$cv_summary" |
+             grep -Eq '\[[[:space:]]*SKIPPED[[:space:]]*\][[:space:]]+[1-9][0-9]* test'; then
+            log_skip "$bin_short : selected gtests skipped, no successful smoke workload"
+            printf '%s SKIP\n' "$bin_short" >>"$RESLIST_FILE"
+            append_summary "$bin_short" "SKIP" "$run_log"
+            return 2
+        else
+            log_fail "$bin_short : no positive gtest execution summary, smoke validation is incomplete"
+            rc=1
+        fi
+    fi
+
     if [ "$rc" -eq 0 ]; then
         log_pass "$bin_short : PASS"
         echo "$bin_short PASS" >> "$RESLIST_FILE"
@@ -387,6 +425,15 @@ run_one() {
         log_fail "$bin_short : FAIL/TIMEOUT after ${effective_timeout}s (exit=$rc). See: $run_log"
     else
         log_fail "$bin_short : FAIL (exit=$rc). See: $run_log"
+    fi
+    # Retain the complete log and replay its ending, where gtest reports the
+    # failing cases and asset errors. Do not replace a crash with an asset SKIP.
+    if command -v tail >/dev/null 2>&1; then
+        if tail -n 80 "$run_log" >"$run_log.failure-tail"; then
+            log_file_with_label OPENCV-FAILURE "$run_log.failure-tail" 80
+        fi
+    else
+        log_file_with_label OPENCV-FAILURE "$run_log" 80
     fi
 
     echo "$bin_short FAIL" >> "$RESLIST_FILE"
@@ -436,7 +483,7 @@ log_info "Suite settings: FILTER='$GTEST_FILTER_STRING' | PERF_TO_TESTS=$PERF_TO
 # ----- single-binary mode: dependency check + run -----
 if [ -n "$BIN_PATH" ]; then
     # Resolve; if not found => SKIP the suite
-    rb="$(resolve_bin "$(basename "$BIN_PATH")" 2>/dev/null || true)"
+    rb="$(resolve_bin "$BIN_PATH" 2>/dev/null || true)"
     if [ -z "$rb" ]; then
         log_skip "$(basename "$BIN_PATH") : not found — SKIP"
         echo "$TESTNAME SKIP" > "$RES_FILE"
@@ -449,7 +496,7 @@ if [ -n "$BIN_PATH" ]; then
     check_dependencies "$bname" || log_warn "Dependency check failed for $bname — proceeding"
 
     BIN_SHORT="$bname"
-    run_one "$BIN_SHORT" ""
+    run_one "$BIN_SHORT" "" "$rb"
     rc=$?
     echo ""
     echo "========= OpenCV Suite Summary ========="

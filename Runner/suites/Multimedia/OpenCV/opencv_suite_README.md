@@ -350,10 +350,40 @@ Bounded runs reuse the managed timeout helper, with private-session cleanup when
 ./run.sh --suite all --timeout 120 --suite-timeout 1200
 ```
 
-The premerge plan uses the last command's bounds so enumeration does not replace
-actual coverage and the suite has its own budget within the LAVA action.
+The full-suite command retains its execution bounds. Kernel premerge uses the
+smoke command below so it does not launch every accuracy and performance binary.
 Default logs, summary and temporary discovery files stay under `$PWD/logs`.
 The existing `LOG_DIR` override is retained. `OpenCV.res` stays beside `run.sh`.
+
+## Kernel premerge smoke validation
+
+`--suite smoke` locates the installed `opencv_test_core` through the existing
+binary discovery. Its default filter is
+`Core_Mat.*:Core_MatExpr.*:Core_IOArray.*`, upstream suites that construct their
+input matrices in memory. No external clips, models or OpenCV testdata are
+required for this selection. The installed binary selects available cases,
+without a SoC or package-version table.
+
+```sh
+./run.sh --suite smoke
+./run.sh --suite smoke --timeout 120 --suite-timeout 180
+./run.sh --suite smoke --bin /opt/opencv/bin/opencv_test_core
+./run.sh --suite smoke --filter 'Core_Mat.zeros' --list
+./run.sh --suite smoke --filter 'Core_Mat.zeros' --list 0
+./run.sh --suite all --testdata /usr/share/opencv4/testdata --timeout 600 --suite-timeout 3600
+```
+
+Smoke defaults to 120 seconds per binary and 180 seconds overall. Existing
+explicit binary selectors and filter precedence are retained. A custom filter
+may select workloads needing external assets. Missing optional binaries,
+listing-only runs and zero selected tests report SKIP. A smoke PASS requires a
+positive gtest success summary. Assertion failures, crashes and timeouts remain
+FAIL. Full-suite, accuracy and performance modes retain their existing defaults.
+
+On any binary failure, its last 80 log lines are printed with `OPENCV-FAILURE`
+labels and saved as `<binary-log>.failure-tail`. The full log remains in the
+same directory. A nonzero exit without these details is insufficient to decide
+whether the image lacks testdata or the workload has a software fault.
 
 
 ## License
