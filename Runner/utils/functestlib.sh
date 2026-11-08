@@ -4645,6 +4645,7 @@ iommu_validate_runtime_devices() (
     mkdir -p "$ivrd_out" || exit 1
     ivrd_root=$(dt_runtime_root) || exit 2
     ivrd_index="$ivrd_out/iommu_platform_index.tsv"
+    ivrd_candidates="$ivrd_out/iommu_device_candidates.tsv"
     ivrd_nodes="$ivrd_out/iommu_dt_nodes.log"
     ivrd_inventory="$ivrd_out/iommu_contexts.tsv"
     : >"$ivrd_index" || exit 1
@@ -4657,13 +4658,24 @@ iommu_validate_runtime_devices() (
         [ "$ivrd_rc" -eq 1 ] && exit 2
         exit 1
     fi
-    # DMA consumers include AMBA CoreSight devices and platform child contexts.
-    # Keep the existing index format and use the shared exact-DT lookup.
+    # Auxiliary devices can share the consumer's DT link. Rank attached devices
+    # first, then bound devices, so a proxy cannot hide the actual DMA consumer.
+    # No bus-name filter is needed for AMBA or other image-provided consumers.
     for ivrd_link in /sys/bus/*/devices/*/of_node; do
         [ -e "$ivrd_link" ] || continue
         ivrd_node=$(readlink -f "$ivrd_link") || exit 1
-        printf '%s|%s\n' "$ivrd_node" "${ivrd_link%/of_node}" >>"$ivrd_index"
+        ivrd_device=${ivrd_link%/of_node}
+        ivrd_priority=2
+        if [ -e "$ivrd_device/iommu_group" ]; then
+            ivrd_priority=0
+        elif [ -L "$ivrd_device/driver" ]; then
+            ivrd_priority=1
+        fi
+        printf '%s|%s|%s\n' "$ivrd_priority" "$ivrd_node" "$ivrd_device" >>"$ivrd_index"
     done
+    sort "$ivrd_index" >"$ivrd_candidates" || exit 1
+    # Preserve the two-column cache consumed by the shared exact-DT lookup.
+    awk -F '|' '{ print $2 "|" $3 }' "$ivrd_candidates" >"$ivrd_index" || exit 1
     ivrd_count=0
     ivrd_failed=0
     while IFS= read -r ivrd_node; do
