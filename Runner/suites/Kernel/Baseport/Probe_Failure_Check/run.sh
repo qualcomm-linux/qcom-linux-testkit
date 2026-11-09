@@ -102,15 +102,46 @@ if [ -s "$LOG_FILE" ]; then
         : >"$OUT_DIR/probe_devices.tsv"
         while IFS= read -r probe_device; do
             probe_found=0
-            for probe_path in /sys/bus/*/devices/"$probe_device"; do
+            for probe_path in /sys/bus/*/devices/"$probe_device" /sys/class/*/"$probe_device"; do
                 [ -d "$probe_path" ] || continue
                 probe_found=1
-                probe_driver=$(platform_device_driver_name "$probe_path") || probe_driver="unbound"
-                probe_dt=$(readlink -f "$probe_path/of_node" 2>/dev/null) || probe_dt="unexposed"
-                printf '%s|%s|%s|%s\n' "$probe_device" "$probe_path" "$probe_driver" "$probe_dt"
+                probe_driver="unbound"
+                probe_dt="unexposed"
+                probe_driver_owner="none"
+                probe_dt_owner="none"
+                probe_owner=$(readlink -f "$probe_path" 2>/dev/null) || probe_owner=""
+                # Class devices can inherit their transport driver and DT
+                # identity from an ancestor. Record the owner, not a binding
+                # on the class child. These fields do not change the verdict.
+                while [ -d "$probe_owner" ]; do
+                    case "$probe_owner" in
+                        /sys/devices/*)
+                            ;;
+                        *)
+                            break
+                            ;;
+                    esac
+                    if [ "$probe_driver_owner" = "none" ] &&
+                       probe_bound_driver=$(platform_device_driver_name "$probe_owner"); then
+                        probe_driver="$probe_bound_driver"
+                        probe_driver_owner="$probe_owner"
+                    fi
+                    if [ "$probe_dt_owner" = "none" ] && [ -d "$probe_owner/of_node" ]; then
+                        probe_dt=$(readlink -f "$probe_owner/of_node" 2>/dev/null) || probe_dt="unexposed"
+                        if [ -d "$probe_dt" ]; then
+                            probe_dt_owner="$probe_owner"
+                        fi
+                    fi
+                    if [ "$probe_driver_owner" != "none" ] && [ "$probe_dt_owner" != "none" ]; then
+                        break
+                    fi
+                    probe_owner=${probe_owner%/*}
+                done
+                printf '%s|%s|%s|%s|%s|%s\n' "$probe_device" "$probe_path" \
+                    "$probe_driver" "$probe_dt" "$probe_driver_owner" "$probe_dt_owner"
             done
             if [ "$probe_found" -eq 0 ]; then
-                printf '%s|missing|unbound|unexposed\n' "$probe_device"
+                printf '%s|missing|unbound|unexposed|none|none\n' "$probe_device"
             fi
         done <"$OUT_DIR/probe_devices.list" >"$OUT_DIR/probe_devices.tsv"
         log_file_with_label FIRMWARE-ASSET "$OUT_DIR/firmware_assets.tsv" 60
