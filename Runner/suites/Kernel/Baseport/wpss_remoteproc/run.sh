@@ -1,7 +1,7 @@
 #!/bin/sh
 
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
-# SPDX-License-Identifier: BSD-3-Clause#
+# SPDX-License-Identifier: BSD-3-Clause
 INVOCATION_CWD="$PWD"
 
 # ---------- Repo env + helpers ----------
@@ -125,6 +125,16 @@ parse_args() {
                 ;;
         esac
     done
+    for ssr_seconds in "$STOP_TO" "$START_TO"; do
+        case "$ssr_seconds" in
+            ''|*[!0-9]*|0|0[0-9]*)
+                test_result_finish FAIL "SSR timeouts require positive decimal seconds without leading zeros"
+                ;;
+        esac
+        if [ "${#ssr_seconds}" -gt 5 ] || [ "$ssr_seconds" -gt 86400 ]; then
+            test_result_finish FAIL "SSR timeouts must not exceed 86400 seconds"
+        fi
+    done
     case "$BOOT_TO" in
         ''|*[!0-9]*|0[0-9]*)
             test_result_finish FAIL "--boot-to requires whole decimal seconds without leading zeros"
@@ -148,22 +158,41 @@ parse_args "$@"
 log_info "Tunables: BOOT_TO=$BOOT_TO STOP_TO=$STOP_TO START_TO=$START_TO POLL_I=$POLL_I"
 log_info "SSR control: DO_SSR=$DO_SSR (0=no stop/start, 1=do stop/start)"
 
-if ! CHECK_DEPS_NO_EXIT=1 check_dependencies awk sleep readlink basename mkdir mktemp date grep sed wc tr cat cp; then
+if ! CHECK_DEPS_NO_EXIT=1 check_dependencies awk sleep readlink basename mkdir mktemp date grep sed wc tr cat cp find rm; then
     test_result_finish SKIP "DSP readiness requires image-provided shell and sysfs diagnostic tools"
 fi
 OUT_DIR=$(test_create_run_directory "$INVOCATION_CWD/results/$TESTNAME") ||
     test_result_finish FAIL "Cannot create DSP diagnostics under CWD=$INVOCATION_CWD"
 log_info "DSP diagnostics: $OUT_DIR"
 
+SSR_OWNED_PATH=""
+
+# cleanup_ssr
+# Restore only the running instance stopped by this explicit SSR invocation.
+cleanup_ssr() {
+    if [ -n "$SSR_OWNED_PATH" ]; then
+        if remoteproc_restore_running "$SSR_OWNED_PATH" "$START_TO" "$POLL_I"; then
+            SSR_OWNED_PATH=""
+        else
+            log_fail "DSP state restoration failed: $SSR_OWNED_PATH"
+            return 1
+        fi
+    fi
+}
+# shellcheck disable=SC2034 # Consumed by shared finalization.
+TEST_RESULT_CLEANUP=cleanup_ssr
+trap cleanup_ssr 0
+trap 'test_result_finish FAIL "DSP validation interrupted"' HUP INT TERM
+
+
 # ---------- Try remoteproc path ----------
-rp_entries=""
+rp_entries="$(get_remoteproc_by_firmware "$FW" "" all)" || rp_entries=""
 dt_says_present=0
 
 if dt_has_remoteproc_fw "$FW"; then
     dt_says_present=1
     log_info "DT indicates $FW is present"
     # prints: path|state|firmware|name (multiple lines)
-    rp_entries="$(get_remoteproc_by_firmware "$FW" "" all)" || rp_entries=""
 else
     log_info "DT does NOT list $FW – may be driver-loaded (ath11k) on this platform"
 fi
@@ -194,6 +223,7 @@ if [ -n "$rp_entries" ]; then
             inst_fail=$((inst_fail + 1))
             RESULT_LINES="$RESULT_LINES
  $inst: boot=$boot_res, stop=$stop_res, start=$start_res, ping=$ping_res"
+            cleanup_ssr || test_result_finish FAIL "DSP restoration failed"
             continue
         fi
 
@@ -201,11 +231,12 @@ if [ -n "$rp_entries" ]; then
             # Stop
             (
                 cd "$OUT_DIR" || exit 1
-                dump_rproc_logs "$rpath" before-stop
+                dump_rproc_logs "$rpath" before-stop "$OUT_DIR/$inst/before-stop/dmesg_snapshot.log"
             )
             t0=$(date +%s)
             log_info "$inst: stopping"
-            if stop_remoteproc "$rpath" && wait_remoteproc_state "$rpath" offline "$STOP_TO" "$POLL_I"; then
+            SSR_OWNED_PATH="$rpath"
+        if stop_remoteproc "$rpath" "$STOP_TO" "$POLL_I"; then
                 t1=$(date +%s)
                 log_pass "$inst: stop PASS ($((t1 - t0))s)"
                 stop_res="PASS"
@@ -219,6 +250,7 @@ if [ -n "$rp_entries" ]; then
                 inst_fail=$((inst_fail + 1))
                 RESULT_LINES="$RESULT_LINES
  $inst: boot=$boot_res, stop=$stop_res, start=$start_res, ping=$ping_res"
+                cleanup_ssr || test_result_finish FAIL "DSP restoration failed"
                 continue
             fi
             (
@@ -233,10 +265,16 @@ if [ -n "$rp_entries" ]; then
             )
             t2=$(date +%s)
             log_info "$inst: starting"
-            if start_remoteproc "$rpath" && wait_remoteproc_state "$rpath" running "$START_TO" "$POLL_I"; then
+            if start_remoteproc "$rpath" "$START_TO" "$POLL_I"; then
                 t3=$(date +%s)
                 log_pass "$inst: start PASS ($((t3 - t2))s)"
                 start_res="PASS"
+                SSR_OWNED_PATH=""
+                if ! wait_remoteproc_boot_ready "$rpath" "$START_TO" "$POLL_I" "$OUT_DIR/$inst/restart-health" running; then
+                    start_res="FAIL"
+                    inst_fail=$((inst_fail + 1))
+                    test_result_record FAIL "$inst: fatal or incomplete post-restart health"
+                fi
             else
                 (
                     cd "$OUT_DIR" || exit 1
@@ -247,6 +285,7 @@ if [ -n "$rp_entries" ]; then
                 inst_fail=$((inst_fail + 1))
                 RESULT_LINES="$RESULT_LINES
  $inst: boot=$boot_res, stop=$stop_res, start=$start_res, ping=$ping_res"
+                cleanup_ssr || test_result_finish FAIL "DSP restoration failed"
                 continue
             fi
             (
@@ -260,19 +299,23 @@ if [ -n "$rp_entries" ]; then
         fi
 
         # RPMsg ping (optional)
-        if CTRL_DEV=$(find_rpmsg_ctrl_for "$FW"); then
-            log_info "$inst: RPMsg ctrl dev: $CTRL_DEV"
-            if rpmsg_ping_generic "$CTRL_DEV"; then
-                log_pass "$inst: rpmsg ping PASS"
-                ping_res="PASS"
-            else
-                log_warn "$inst: rpmsg ping FAIL"
-                ping_res="FAIL"
-                inst_fail=$((inst_fail + 1))
-            fi
-        else
-            log_info "$inst: no RPMsg channel, skipping ping"
-        fi
+    rpmsg_validate_echo "$rpath" "$OUT_DIR/$inst/rpmsg"
+    ping_rc=$?
+    case "$ping_rc" in
+        0)
+            ping_res="PASS"
+            test_result_record PASS "$inst: configured RPMsg echo validated"
+            ;;
+        2)
+            ping_res="SKIPPED"
+            test_result_record SKIP "$inst: optional named RPMsg echo service/client unavailable"
+            ;;
+        *)
+            ping_res="FAIL"
+            inst_fail=$((inst_fail + 1))
+            test_result_record FAIL "$inst: RPMsg echo execution failed"
+            ;;
+    esac
 
         RESULT_LINES="$RESULT_LINES
  $inst: boot=$boot_res, stop=$stop_res, start=$start_res, ping=$ping_res"
@@ -292,50 +335,31 @@ __RPROC_LIST__
     test_result_finish PASS
 fi
 
-# ---------- Fallback: ath11k driver mode ----------
-log_info "Remoteproc instance not used → checking ath11k driver path"
-
-# Is ath11k/ath11xx loaded?
-if lsmod | grep -qE '^ath11k(_pci)?\b'; then
-    log_pass "ath11k driver is loaded"
-else
-    # Try modprobe quietly
-    if command -v modprobe >/dev/null 2>&1 && modprobe ath11k_pci 2>/dev/null; then
-        log_info "Loaded ath11k_pci via modprobe"
+# ---------- Fallback: runtime WiFi driver ownership ----------
+# shellcheck disable=SC1091
+. "$TOOLS/lib_connectivity.sh"
+wifi_families=$(wifi_runtime_families) || test_result_finish FAIL "WiFi ownership discovery failed"
+if [ -z "$wifi_families" ]; then
+    if [ "$dt_says_present" -eq 1 ]; then
+        test_result_finish FAIL "Enabled WPSS DT has neither a remoteproc instance nor a WiFi driver owner"
     fi
-
-    if lsmod | grep -qE '^ath11k(_pci)?\b'; then
-        log_pass "ath11k driver loaded (post-modprobe)"
+    test_result_finish SKIP "No WPSS remoteproc or supported WiFi runtime owner"
+fi
+for wifi_family in $wifi_families; do
+    if wifi_family_has_phy "$wifi_family"; then
+        test_result_record PASS "WPSS is owned by a bound $wifi_family wireless PHY"
     else
-        # If DT said WPSS present but neither remoteproc nor driver -> FAIL
-        if [ "$dt_says_present" -eq 1 ]; then
-            log_fail "DT lists $FW but no remoteproc and ath11k not loaded"
-            test_result_finish FAIL
-        fi
-        log_skip "$TESTNAME SKIP – neither remoteproc nor ath11k path available"
-        test_result_finish SKIP
+        test_result_record FAIL "Runtime $wifi_family driver has no bound wireless PHY"
     fi
-fi
-
-# Firmware presence check (paths may vary, so just log)
-if [ -d /lib/firmware/ath11k ]; then
-    log_info "Found /lib/firmware/ath11k directory"
-else
-    log_warn "No /lib/firmware/ath11k directory found"
-fi
-
-# Dmesg scan for errors/success
-scan_dmesg_errors "$OUT_DIR/driver" "ath11k|wpss" "fw_version|firmware" || true
-# (Return codes from scan_dmesg_errors are informational; it logs itself)
-
-# Net interface presence is informative
-set -- /sys/class/net/wlan[0-9]*
-if [ -e "$1" ]; then
-    log_info "wlan interface present (ath11k up)"
-else
-    log_info "No wlan interface yet (maybe not brought up)"
-fi
-
-# Final result for driver path: PASS if we got here
-log_pass "WPSS driver path checks passed"
-test_result_finish PASS
+done
+wifi_has_probe_failures "$OUT_DIR/driver" "$TESTNAME"
+driver_rc=$?
+case "$driver_rc" in
+    0)
+        test_result_record FAIL "Captured WPSS/WiFi driver faults"
+        ;;
+    2)
+        test_result_record SKIP "Driver kernel health is unverified, see capture diagnostics"
+        ;;
+esac
+test_result_finish

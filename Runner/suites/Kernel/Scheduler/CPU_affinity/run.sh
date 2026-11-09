@@ -1,10 +1,14 @@
 #!/bin/sh
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause
-# Robustly find and source init_env
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# ---------- Repo env + helpers ----------
+SCRIPT_DIR="$(
+  cd "$(dirname "$0")" || exit 1
+  pwd
+)"
 INIT_ENV=""
 SEARCH="$SCRIPT_DIR"
+
 while [ "$SEARCH" != "/" ]; do
     if [ -f "$SEARCH/init_env" ]; then
         INIT_ENV="$SEARCH/init_env"
@@ -12,82 +16,112 @@ while [ "$SEARCH" != "/" ]; do
     fi
     SEARCH=$(dirname "$SEARCH")
 done
- 
+
 if [ -z "$INIT_ENV" ]; then
     echo "[ERROR] Could not find init_env (starting at $SCRIPT_DIR)" >&2
     exit 1
 fi
- 
-# Only source if not already loaded (idempotent)
-if [ -z "$__INIT_ENV_LOADED" ]; then
+
+# Only source once (idempotent)
+# NOTE: We intentionally **do not export** any new vars. They stay local to this shell.
+if [ -z "${__INIT_ENV_LOADED:-}" ]; then
     # shellcheck disable=SC1090
     . "$INIT_ENV"
+    __INIT_ENV_LOADED=1
 fi
-# Always source functestlib.sh, using $TOOLS exported by init_env
-# shellcheck disable=SC1090,SC1091
+
+# shellcheck disable=SC1090
+. "$INIT_ENV"
+# shellcheck disable=SC1091
 . "$TOOLS/functestlib.sh"
 
 TESTNAME="CPU_affinity"
-test_path=$(find_test_case_by_name "$TESTNAME")
-cd "$test_path" || exit 1
-# shellcheck disable=SC2034
-res_file="./$TESTNAME.res"
+RES_FILE="$SCRIPT_DIR/$TESTNAME.res"
+test_result_init "$TESTNAME" "$RES_FILE" || exit 1
+# shellcheck disable=SC2034 # Consumed by check_dependencies.
+CHECK_DEPS_RECOVER=0
+
+# usage
+# Print the supported options without changing hardware.
+usage() {
+    printf '%s\n' "Usage: $0 [--help]"
+}
+
+# parse_args <arguments...>
+# Reject unsupported arguments before test setup.
+parse_args() {
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --help|-h)
+                usage
+                exit 0
+                ;;
+            *)
+                test_result_finish FAIL "Unsupported option: $1"
+                ;;
+        esac
+    done
+}
+parse_args "$@"
+if ! CHECK_DEPS_NO_EXIT=1 check_dependencies taskset chrt awk grep cat sed tr sleep mkdir mktemp date; then
+    test_result_finish SKIP "Image-provided CPU_affinity validation utilities are unavailable"
+fi
+OUT_DIR=$(test_create_run_directory "$PWD/results/$TESTNAME") ||
+    test_result_finish FAIL "Cannot create evidence under CWD=$PWD"
+log_info "Evidence: $OUT_DIR"
 
 TASK_PID=""
-trap '[ -n "${TASK_PID:-}" ] && kill "$TASK_PID" 2>/dev/null || true' EXIT INT TERM
 
-log_info "----------------------------------------------------"
-log_info "-------- Starting $TESTNAME Functional Test --------"
+# cleanup
+# Stop only the child created by this affinity test.
+cleanup() {
+    if [ -n "$TASK_PID" ]; then
+        kill "$TASK_PID" 2>/dev/null || true
+        wait "$TASK_PID" 2>/dev/null || true
+        TASK_PID=""
+    fi
+}
+trap cleanup 0
+trap 'test_result_finish FAIL "CPU affinity validation interrupted"' HUP INT TERM
 
-check_dependencies taskset top chrt zcat grep
-
-REQUIRED_CONFIGS="CONFIG_CGROUP_SCHED CONFIG_SMP"
-for config in $REQUIRED_CONFIGS; do
-    if check_kernel_config "$config"; then
-        log_pass "$config is enabled"
-        echo "$TESTNAME PASS" > "$res_file"
-    else
-        log_fail "$config is missing"
-        echo "$TESTNAME FAIL" > "$res_file"
-        exit 1
+selected_cpu=""
+for candidate_cpu in $(get_online_cpus); do
+    if cpu_is_schedulable "$candidate_cpu"; then
+        selected_cpu="$candidate_cpu"
+        break
     fi
 done
+[ -n "$selected_cpu" ] || test_result_finish SKIP "No online CPU is schedulable in this session"
 
-log_info "Creating a CPU-bound background task..."
+# cpu_task
+# Keep one test-owned process alive, with no descendants to leak on interruption.
 cpu_task() {
-    while true; do :; done
+    while :; do
+        :
+    done
 }
 cpu_task &
 TASK_PID=$!
-sleep 2
-
-log_info "Checking CPU affinity of task $TASK_PID..."
-CPU_AFFINITY=$(taskset -p "$TASK_PID" | awk -F: '{print $2}' | xargs)
-log_info "CPU affinity: $CPU_AFFINITY"
-
-log_info "Setting affinity to CPU 0"
-taskset -pc 0 "$TASK_PID" > /dev/null
-sleep 1
-
-NEW_AFFINITY=$(taskset -p "$TASK_PID" | awk -F: '{print $2}' | xargs)
-if [ "$NEW_AFFINITY" = "1" ]; then
-    log_pass "Successfully set CPU affinity"
-    echo "$TESTNAME PASS" > "$res_file"
+if taskset -pc "$selected_cpu" "$TASK_PID" >"$OUT_DIR/taskset.log" 2>&1; then
+    if taskset -pc "$TASK_PID" >"$OUT_DIR/effective-affinity.log" 2>&1; then
+        actual_cpu=$(awk -F ': ' 'NF > 1 {print $NF}' "$OUT_DIR/effective-affinity.log")
+        if [ "$actual_cpu" = "$selected_cpu" ]; then
+            test_result_record PASS "Affinity assignment verified on CPU$selected_cpu"
+        else
+            test_result_record FAIL "Effective affinity '$actual_cpu' differs from CPU$selected_cpu"
+        fi
+    else
+        test_result_record FAIL "Could not read effective affinity"
+    fi
 else
-    log_fail "Failed to set CPU affinity"
-    echo "$TESTNAME FAIL" > "$res_file"
+    test_result_record FAIL "Affinity assignment command failed on CPU$selected_cpu"
 fi
-
-log_info "Checking scheduling policy of task..."
-SCHED_POLICY=$(chrt -p "$TASK_PID" | grep "scheduling policy" | awk -F: '{print $2}' | xargs)
-log_info "Scheduling Policy: $SCHED_POLICY"
-
-if echo "$SCHED_POLICY" | grep -q "SCHED_OTHER"; then
-    log_pass "Default scheduling policy detected. Test passed"
-    echo "$TESTNAME PASS" > "$res_file"
-    exit 0
+log_file_with_label AFFINITY "$OUT_DIR/taskset.log"
+log_file_with_label AFFINITY "$OUT_DIR/effective-affinity.log"
+if chrt -p "$TASK_PID" >"$OUT_DIR/policy.log" 2>&1 &&
+   grep -q 'SCHED_OTHER' "$OUT_DIR/policy.log"; then
+    test_result_record PASS "Default scheduling policy is SCHED_OTHER"
 else
-    log_fail "Unexpected scheduling policy. Test Failed"
-    echo "$TESTNAME FAIL" > "$res_file"
-    exit 1
+    test_result_record FAIL "Default scheduling policy was not confirmed"
 fi
+test_result_finish

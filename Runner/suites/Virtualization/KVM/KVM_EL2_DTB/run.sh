@@ -62,7 +62,7 @@ log_info "----------------------------------------------------------------------
 log_info "-------------------Starting $TESTNAME Testcase----------------------------"
 log_info "=== Test Initialization ==="
 
-deps_list="cat grep awk sed find tr mkdir uname"
+deps_list="cat grep awk sed find tr mkdir uname readlink sort cp mktemp date"
 log_info "Checking dependencies: $deps_list"
 # shellcheck disable=SC2034 # Consumed by check_dependencies.
 CHECK_DEPS_RECOVER=0
@@ -102,7 +102,7 @@ if [ "$dev_rc" -ne 0 ]; then
     test_result_finish FAIL
 fi
 
-log_info "=== Dynamic EL2-DTB Runtime Evidence Validation ==="
+log_info "=== Runtime Remoteproc DMA Attachment Validation ==="
 log_info "This test performs log-only remoteproc inspection and does not stop/start/reset remoteprocs."
 
 kvm_check_el2_runtime_evidence
@@ -114,16 +114,12 @@ if [ "$el2_rc" -eq 2 ]; then
 fi
 
 if [ "$el2_rc" -ne 0 ]; then
-    log_fail "$TESTNAME FAIL - EL2-DTB remoteproc/IOMMU runtime evidence is missing"
+    log_fail "$TESTNAME FAIL - Verified remoteproc DMA attachment is missing"
     test_result_finish FAIL
 fi
 
-log_info "=== EL2/KVM Dmesg Advisory Scan ==="
-if ! kvm_check_boot_dmesg_errors "$DMESG_DIR"; then
-    log_warn "$TESTNAME WARN - KVM/EL2 dmesg issues detected; not failing due to possible CI dmesg flooding"
-fi
- 
-log_pass "$TESTNAME PASS - dynamic EL2-DTB evidence is valid"
+
+log_pass "$TESTNAME PASS - KVM readiness and remoteproc DMA attachment are valid"
 test_result_finish PASS
 
 log_info "-------------------Completed $TESTNAME Testcase----------------------------"

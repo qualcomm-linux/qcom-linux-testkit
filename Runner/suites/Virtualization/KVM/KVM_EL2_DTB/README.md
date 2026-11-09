@@ -3,7 +3,7 @@
 ## Overview
 
 `KVM_EL2_DTB` validates that the running target exposes dynamic EL2-DTB
-runtime evidence required for KVM and remoteproc/IOMMU coexistence.
+KVM readiness and verified remoteproc DMA attachment. Runtime DT and DMA evidence do not identify the selected FIT configuration or independently prove EL2 handoff.
 
 This test is designed for Qualcomm ARM64 embedded targets where EL2 boot may
 use an EL2-specific DTB or overlay. It intentionally avoids maintaining a
@@ -61,10 +61,10 @@ The test validates:
    - logs `/sys/class/remoteproc/remoteproc*/state`
    - uses existing `functestlib.sh` remoteproc helpers when available
 
-4. EL2-DTB evidence:
+4. Remoteproc DMA evidence:
    - remoteproc/rproc DT nodes
    - remoteproc/rproc `iommus` properties
-   - runtime sysfs IOMMU/devlink/platform evidence for remoteproc devices
+   - exact runtime DMA group plus reverse membership for the registered remoteproc DT node or its DMA descendants
 
 5. Kernel log scan:
    - checks for fatal KVM/EL2/HYP/GIC related runtime errors
@@ -188,3 +188,8 @@ Missing Python or QEMU still skips the corresponding functional check. Readiness
 evidence alone does not replace ioctl or QEMU validation. No tools are installed.
 
 KVM/EL2 initialization errors FAIL before optional-client SKIP gates.
+
+Ordinary platform directories and DT `iommus` alone do not establish runtime
+attachment. The shared IOMMU validator supplies the exact device/group evidence.
+Unrelated DMA contexts are not KVM proof. Python/QEMU checks remain optional,
+their commands are bounded and diagnostic files are retained under CWD.

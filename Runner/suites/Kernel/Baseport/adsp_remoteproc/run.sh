@@ -139,6 +139,16 @@ parse_args() {
                 ;;
         esac
     done
+    for ssr_seconds in "$STOP_TO" "$START_TO"; do
+        case "$ssr_seconds" in
+            ''|*[!0-9]*|0|0[0-9]*)
+                test_result_finish FAIL "SSR timeouts require positive decimal seconds without leading zeros"
+                ;;
+        esac
+        if [ "${#ssr_seconds}" -gt 5 ] || [ "$ssr_seconds" -gt 86400 ]; then
+            test_result_finish FAIL "SSR timeouts must not exceed 86400 seconds"
+        fi
+    done
     case "$BOOT_TO" in
         ''|*[!0-9]*|0[0-9]*)
             test_result_finish FAIL "--boot-to requires whole decimal seconds without leading zeros"
@@ -162,12 +172,32 @@ parse_args "$@"
 log_info "Tunables: BOOT_TO=$BOOT_TO STOP_TO=$STOP_TO START_TO=$START_TO POLL_I=$POLL_I PRE_STOP_DELAY=$PRE_STOP_DELAY FATAL_ON_UNSUSPENDED=$FATAL_ON_UNSUSPENDED"
 log_info "SSR control: DO_SSR=$DO_SSR (0=no stop/start, 1=do stop/start)"
 
-if ! CHECK_DEPS_NO_EXIT=1 check_dependencies awk sleep readlink basename mkdir mktemp date grep sed wc tr cat cp; then
+if ! CHECK_DEPS_NO_EXIT=1 check_dependencies awk sleep readlink basename mkdir mktemp date grep sed wc tr cat cp find rm; then
     test_result_finish SKIP "DSP readiness requires image-provided shell and sysfs diagnostic tools"
 fi
 OUT_DIR=$(test_create_run_directory "$INVOCATION_CWD/results/$TESTNAME") ||
     test_result_finish FAIL "Cannot create DSP diagnostics under CWD=$INVOCATION_CWD"
 log_info "DSP diagnostics: $OUT_DIR"
+
+SSR_OWNED_PATH=""
+
+# cleanup_ssr
+# Restore only the running instance stopped by this explicit SSR invocation.
+cleanup_ssr() {
+    if [ -n "$SSR_OWNED_PATH" ]; then
+        if remoteproc_restore_running "$SSR_OWNED_PATH" "$START_TO" "$POLL_I"; then
+            SSR_OWNED_PATH=""
+        else
+            log_fail "DSP state restoration failed: $SSR_OWNED_PATH"
+            return 1
+        fi
+    fi
+}
+# shellcheck disable=SC2034 # Consumed by shared finalization.
+TEST_RESULT_CLEANUP=cleanup_ssr
+trap cleanup_ssr 0
+trap 'test_result_finish FAIL "DSP validation interrupted"' HUP INT TERM
+
 
 # --- Audio readiness snapshot (no hardcoding, no long wait) -------------------
 # Discovers a bound snd*/snd-soc* driver, logs module once, collects nodes to check.
@@ -196,7 +226,7 @@ discover_audio_stack_and_snapshot() {
     CHECK_NODES=""
     if [ -z "$platform_drv" ]; then
         log_warn "No suitable platform audio driver found (module+bound), skipping suspend snapshot"
-        AUDIO_PM_SNAPSHOT_OK=1
+        AUDIO_PM_SNAPSHOT_OK=0
         return 0
     fi
 
@@ -213,7 +243,7 @@ discover_audio_stack_and_snapshot() {
     fi
 
     log_info "Using bound audio driver: $platform_drv${platform_mod:+ (module: $platform_mod)}"
-    TARGET_PATH="$DRIVERS_BASE/$platform_drv/sound"
+    TARGET_PATH=$(readlink -f "$DRIVERS_BASE/$platform_drv/sound" 2>/dev/null || true)
 
     # 1) Platform sound root + immediate children (collect runtime_status files)
     if [ -d "$TARGET_PATH" ]; then
@@ -237,8 +267,8 @@ discover_audio_stack_and_snapshot() {
     done
 
     if [ -z "$CHECK_NODES" ]; then
-        log_warn "No runtime_status nodes found for audio stack, treating snapshot as OK"
-        AUDIO_PM_SNAPSHOT_OK=1
+        log_warn "No runtime_status nodes found, audio PM snapshot is unverified"
+        AUDIO_PM_SNAPSHOT_OK=0
         return 0
     fi
 
@@ -262,6 +292,10 @@ discover_audio_stack_and_snapshot() {
 
 # Re-check after fixed delay (if gating is enabled)
 audio_pm_snapshot_ok() {
+    if [ -z "$CHECK_NODES" ]; then
+        printf "%s\n" 0
+        return 0
+    fi
     # Re-sample the same CHECK_NODES set; if empty, treat as OK.
     if [ -z "$CHECK_NODES" ]; then
         echo "1"
@@ -277,7 +311,8 @@ audio_pm_snapshot_ok() {
 discover_audio_stack_and_snapshot
 
 # --- Check DT presence for ADSP -----------------------------------------------
-if ! dt_has_remoteproc_fw "$FW"; then
+entries=$(get_remoteproc_by_firmware "$FW" "" all) || entries=""
+if [ -z "$entries" ] && ! dt_has_remoteproc_fw "$FW"; then
     log_skip "$TESTNAME SKIP – $FW not described in DT"
     log_info "Writing to file $RES_FILE"
     test_result_finish SKIP
@@ -285,7 +320,6 @@ fi
 log_info "DT indicates $FW is present"
 
 # --- Enumerate ADSP remoteproc entries ----------------------------------------
-entries="$(get_remoteproc_by_firmware "$FW" "" all 2>/dev/null)" || entries=""
 if [ -z "$entries" ]; then
     log_fail "$FW present in DT but no /sys/class/remoteproc entry found"
     log_info "Writing to file $RES_FILE"
@@ -316,6 +350,7 @@ while IFS='|' read -r rpath rstate rfirm rname; do
         boot_res="FAIL"
         inst_fail=$((inst_fail + 1))
         RESULT_LINES="$RESULT_LINES $inst_id: boot=$boot_res, stop=$stop_res, start=$start_res, ping=$ping_res"
+        cleanup_ssr || test_result_finish FAIL "DSP restoration failed"
         continue
     fi
 
@@ -337,13 +372,14 @@ while IFS='|' read -r rpath rstate rfirm rname; do
         scan_dmesg_errors "$OUT_DIR/$inst_id/before-stop" "remoteproc|qcom.*pas|qcom_q6v5" "not a crash|non-fatal" || true
         (
             cd "$OUT_DIR" || exit 1
-            dump_rproc_logs "$rpath" before-stop
+            dump_rproc_logs "$rpath" before-stop "$OUT_DIR/$inst_id/before-stop/dmesg_snapshot.log"
         )
 
         # ---- Stop ADSP -----------------------------------------------------------
         t0="$(date +%s)"
         log_info "$inst_id: stopping"
-        if stop_remoteproc "$rpath" && wait_remoteproc_state "$rpath" offline "$STOP_TO" "$POLL_I"; then
+        SSR_OWNED_PATH="$rpath"
+        if stop_remoteproc "$rpath" "$STOP_TO" "$POLL_I"; then
             t1="$(date +%s)"
             log_pass "$inst_id: stop PASS ($((t1 - t0))s)"
             stop_res="PASS"
@@ -356,6 +392,7 @@ while IFS='|' read -r rpath rstate rfirm rname; do
             stop_res="FAIL"
             inst_fail=$((inst_fail + 1))
             RESULT_LINES="$RESULT_LINES $inst_id: boot=$boot_res, stop=$stop_res, start=$start_res, ping=$ping_res"
+            cleanup_ssr || test_result_finish FAIL "DSP restoration failed"
             continue
         fi
 
@@ -371,10 +408,16 @@ while IFS='|' read -r rpath rstate rfirm rname; do
         # ---- Start ADSP ----------------------------------------------------------
         t2="$(date +%s)"
         log_info "$inst_id: starting"
-        if start_remoteproc "$rpath" && wait_remoteproc_state "$rpath" running "$START_TO" "$POLL_I"; then
+        if start_remoteproc "$rpath" "$START_TO" "$POLL_I"; then
             t3="$(date +%s)"
             log_pass "$inst_id: start PASS ($((t3 - t2))s)"
             start_res="PASS"
+            SSR_OWNED_PATH=""
+            if ! wait_remoteproc_boot_ready "$rpath" "$START_TO" "$POLL_I" "$OUT_DIR/$inst_id/restart-health" running; then
+                start_res="FAIL"
+                inst_fail=$((inst_fail + 1))
+                test_result_record FAIL "$inst_id: fatal or incomplete post-restart health"
+            fi
         else
             (
                 cd "$OUT_DIR" || exit 1
@@ -384,6 +427,7 @@ while IFS='|' read -r rpath rstate rfirm rname; do
             start_res="FAIL"
             inst_fail=$((inst_fail + 1))
             RESULT_LINES="$RESULT_LINES $inst_id: boot=$boot_res, stop=$stop_res, start=$start_res, ping=$ping_res"
+            cleanup_ssr || test_result_finish FAIL "DSP restoration failed"
             continue
         fi
 
@@ -391,7 +435,6 @@ while IFS='|' read -r rpath rstate rfirm rname; do
             cd "$OUT_DIR" || exit 1
             dump_rproc_logs "$rpath" after-start
         )
-        scan_dmesg_errors "$OUT_DIR/$inst_id/after-restart" "remoteproc|qcom.*pas|qcom_q6v5" "not a crash|non-fatal" || true
     else
         log_info "$inst_id: SSR disabled (--ssr not set). Skipping stop/start."
         stop_res="SKIPPED"
@@ -399,19 +442,23 @@ while IFS='|' read -r rpath rstate rfirm rname; do
     fi
 
     # ---- Optional RPMsg sanity ping -----------------------------------------
-    if CTRL_DEV="$(find_rpmsg_ctrl_for "$FW")"; then
-        log_info "$inst_id: RPMsg ctrl dev: $CTRL_DEV"
-        if rpmsg_ping_generic "$CTRL_DEV"; then
-            log_pass "$inst_id: rpmsg ping PASS"
+    rpmsg_validate_echo "$rpath" "$OUT_DIR/$inst_id/rpmsg"
+    ping_rc=$?
+    case "$ping_rc" in
+        0)
             ping_res="PASS"
-        else
-            log_warn "$inst_id: rpmsg ping FAIL"
+            test_result_record PASS "$inst_id: configured RPMsg echo validated"
+            ;;
+        2)
+            ping_res="SKIPPED"
+            test_result_record SKIP "$inst_id: optional named RPMsg echo service/client unavailable"
+            ;;
+        *)
             ping_res="FAIL"
             inst_fail=$((inst_fail + 1))
-        fi
-    else
-        log_info "$inst_id: no RPMsg channel, skipping ping"
-    fi
+            test_result_record FAIL "$inst_id: RPMsg echo execution failed"
+            ;;
+    esac
 
     RESULT_LINES="$RESULT_LINES $inst_id: boot=$boot_res, stop=$stop_res, start=$start_res, ping=$ping_res"
 done <<__RPROC_LIST__
