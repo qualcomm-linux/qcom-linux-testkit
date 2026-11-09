@@ -392,3 +392,22 @@ On Qualcomm boards, this test is useful for identifying early audio bring-up iss
 - `/dev/snd` node creation problems
 
 This test should remain lightweight and non-destructive. It should not attempt to recover the audio subsystem by restarting services or remote processors.
+
+## Runtime topology selection
+
+Base audio validates image-provided topology only when the active DT declares
+a q6apm dependency. Selection uses the registered ALSA card driver when present,
+then an exact matching sound-card DT binding directory. This is a discovery
+hint, the DT compatible and actual ALSA driver name can differ. Firmware symlinks that
+resolve to the same asset do not create an ambiguity. Distinct unresolved assets,
+an empty file, or the actual driver's missing topology still fail. The registered
+card check continues to validate the kernel's exact driver/model firmware name.
+No SoC mapping, topology copy, download or package-policy change is introduced.
+Direct-codec and overlay paths retain their existing applicability checks.
+
+## Result publication
+
+Audio_Card_Registration.res is always written beside run.sh, including early
+DT/topology failures and applicability skips. Logs and temporary evidence
+remain below invocation CWD. Both suite-directory and Runner launches publish
+the same result path to existing plans.

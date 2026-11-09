@@ -9,6 +9,8 @@ metadata:
     - preempt-rt
 
 params:
+  RT_CPUS: ""
+  BG_CPUS: ""
   BACKGROUND_CMD: ""
   ITERATIONS: "1"
 
@@ -27,5 +29,5 @@ run:
   steps:
     - REPO_PATH=$PWD
     - cd Runner/suites/Kernel/RT-tests/SSDD
-    - ./run.sh --iterations "${ITERATIONS}" --background-cmd "${BACKGROUND_CMD}" --forks "${FORKS}" --ssdd-iters "${SSDD_ITERS}" --quiet "${QUIET}" --binary "${BINARY}" --out "${OUT_DIR}" --progress-every "${PROGRESS_EVERY}" --heartbeat-sec "${HEARTBEAT_SEC}" $( [ "${VERBOSE}" = "1" ] && echo "--verbose" ) || true
+    - RT_CPUS="${RT_CPUS}" BG_CPUS="${BG_CPUS}" ./run.sh --iterations "${ITERATIONS}" --background-cmd "${BACKGROUND_CMD}" --forks "${FORKS}" --ssdd-iters "${SSDD_ITERS}" --quiet "${QUIET}" --binary "${BINARY}" --out "${OUT_DIR}" --progress-every "${PROGRESS_EVERY}" --heartbeat-sec "${HEARTBEAT_SEC}" $( [ "${VERBOSE}" = "1" ] && echo "--verbose" ) || true
     - $REPO_PATH/Runner/utils/send-to-lava.sh SSDD.res

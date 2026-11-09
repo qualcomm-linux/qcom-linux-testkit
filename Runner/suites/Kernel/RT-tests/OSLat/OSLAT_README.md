@@ -226,3 +226,10 @@ The `.res` file is the gating artifact. The detailed KPI remains under `logs_OSL
 - `--single-preheat` should only be used when CPU frequency behavior is understood and controlled.
 - `--trace-threshold` is useful only if ftrace is configured and available on the target.
 - `--workload memmove` plus large `--workload-mem` can significantly increase system pressure.
+
+
+See [shared runtime validation](../README.md) for background workload health,
+cleanup, RT_CPUS/BG_CPUS selection and retained diagnostics.
+
+The LAVA `.res` file remains next to `run.sh`. Default workload logs,
+background evidence and temporary files use the invocation CWD.

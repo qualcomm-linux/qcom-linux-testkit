@@ -299,3 +299,10 @@ This wrapper is intentionally consistent with the Qualcomm RT test wrappers alre
 - ShellCheck cleanliness
 - LAVA-friendly behavior
 - reuse of shared helpers from `functestlib.sh` and `lib_rt.sh`
+
+
+See [shared runtime validation](../README.md) for background workload health,
+cleanup, RT_CPUS/BG_CPUS selection and retained diagnostics.
+
+The LAVA `.res` file remains next to `run.sh`. Default workload logs,
+background evidence and temporary files use the invocation CWD.

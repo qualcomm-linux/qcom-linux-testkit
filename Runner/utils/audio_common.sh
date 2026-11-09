@@ -4416,19 +4416,60 @@ audio_dt_requires_topology() {
   return 1
 }
 
-# audio_topology_for_dt_model <model>
+# audio_alsa_card_driver <card-number>
+# Print the registered ALSA driver name, return 1 when it is unavailable.
+audio_alsa_card_driver() {
+  aacd_driver=$(awk -v card="$1" '
+    $1 == card {
+      sub(/^.*\]:[[:space:]]*/, "")
+      sub(/[[:space:]]+- .*/, "")
+      print
+      exit
+    }
+  ' /proc/asound/cards 2>/dev/null)
+  [ -n "$aacd_driver" ] || return 1
+  printf '%s\n' "$aacd_driver"
+}
+
+# audio_topology_for_dt_model <model> [sound-card-DT-node]
 # Before ALSA registers, discover the installed driver directory containing the
 # exact DT-model topology basename. Print its nonempty image-provided path.
-# Reject ambiguous driver directories. The registered-card check later verifies
-# the exact ALSA driver name. Use the same roots/precedence as find_image_firmware.
+# Prefer the registered card's driver, then an exact DT binding directory match.
+# A compatible is only a pre-registration hint, its name can differ from the
+# ALSA driver. Registration validates the actual driver's exact firmware path.
+# Canonical aliases are one asset, unrelated ambiguous assets remain failures.
+# Use find_image_firmware precedence. Diagnostics go to stderr, path to stdout.
 audio_topology_for_dt_model() {
   atfdm_model="$1"
+  atfdm_node="${2:-}"
   case "$atfdm_model" in
     ''|*/*|*..*)
       printf '%s\n' "Invalid or missing sound-card DT model for topology discovery: '$atfdm_model'" >&2
       return 1
       ;;
   esac
+  if [ -n "$atfdm_node" ]; then
+    atfdm_card_node=$(readlink -f "$atfdm_node") || return 1
+    for atfdm_card_dir in /proc/asound/card[0-9]*; do
+      [ -d "$atfdm_card_dir" ] || continue
+      atfdm_card=${atfdm_card_dir##*/card}
+      atfdm_registered_node=$(audio_alsa_card_dt_node "$atfdm_card") || continue
+      [ "$atfdm_registered_node" = "$atfdm_card_node" ] || continue
+      atfdm_driver=$(audio_alsa_card_driver "$atfdm_card") || return 1
+      case "$atfdm_driver" in
+        ''|*/*|*..*)
+          return 1
+          ;;
+      esac
+      atfdm_path=$(find_image_firmware "qcom/$atfdm_driver/$atfdm_model-tplg.bin") || atfdm_path=""
+      if [ ! -s "$atfdm_path" ]; then
+        printf '%s\n' "Required registered-driver topology 'qcom/$atfdm_driver/$atfdm_model-tplg.bin' is missing or empty, provision the selected driver/model asset in the build" >&2
+        return 1
+      fi
+      printf '%s\n' "$atfdm_path"
+      return 0
+    done
+  fi
   atfdm_release="$(uname -r)"
   atfdm_drivers=""
   for atfdm_root in \
@@ -4451,11 +4492,50 @@ audio_topology_for_dt_model() {
     printf '%s\n' "Required DT-model topology '$atfdm_model-tplg.bin' is missing from the image firmware qcom/<driver>/ directories, provision it in the build" >&2
     return 1
   fi
+  atfdm_binding_drivers=""
+  if [ -n "$atfdm_node" ]; then
+    atfdm_compatibles=$(dt_property_text "$atfdm_node" compatible) || atfdm_compatibles=""
+    for atfdm_compatible in $atfdm_compatibles; do
+      case "$atfdm_compatible" in
+        qcom,*-sndcard)
+          atfdm_binding=${atfdm_compatible#qcom,}
+          atfdm_binding=${atfdm_binding%-sndcard}
+          if printf '%s\n' "$atfdm_drivers" | grep -F -x "$atfdm_binding" >/dev/null; then
+            atfdm_binding_drivers="${atfdm_binding_drivers}${atfdm_binding}
+"
+          fi
+          ;;
+      esac
+    done
+  fi
+  atfdm_binding_drivers=$(printf '%s' "$atfdm_binding_drivers" | sort -u)
+  if [ -n "$atfdm_binding_drivers" ] &&
+     [ "$(printf '%s\n' "$atfdm_binding_drivers" | wc -l)" -eq 1 ]; then
+    atfdm_drivers="$atfdm_binding_drivers"
+  fi
   if [ "$(printf '%s\n' "$atfdm_drivers" | wc -l)" -ne 1 ]; then
-    printf '%s\n' "Ambiguous image topology directories for DT model '$atfdm_model': $atfdm_drivers" >&2
+    atfdm_target=""
+    atfdm_selected=""
+    while IFS= read -r atfdm_driver; do
+      atfdm_path=$(find_image_firmware "qcom/$atfdm_driver/$atfdm_model-tplg.bin") || return 1
+      [ -s "$atfdm_path" ] || return 1
+      atfdm_canonical=$(readlink -f "$atfdm_path") || return 1
+      if [ -n "$atfdm_target" ] && [ "$atfdm_target" != "$atfdm_canonical" ]; then
+        printf '%s\n' "Ambiguous image topology assets for DT model '$atfdm_model': $atfdm_drivers. Check the active sound DT and ALSA driver." >&2
+        return 1
+      fi
+      atfdm_target="$atfdm_canonical"
+      atfdm_selected="$atfdm_path"
+    done <<EOF
+$atfdm_drivers
+EOF
+    printf '%s\n' "$atfdm_selected"
+    return 0
+  fi
+  if ! atfdm_path=$(find_image_firmware "qcom/$atfdm_drivers/$atfdm_model-tplg.bin"); then
+    printf '%s\n' "Required topology 'qcom/$atfdm_drivers/$atfdm_model-tplg.bin' is missing from the image, provision the selected driver/model asset in the build" >&2
     return 1
   fi
-  atfdm_path="$(find_image_firmware "qcom/$atfdm_drivers/$atfdm_model-tplg.bin")" || return 1
   if [ ! -s "$atfdm_path" ]; then
     printf '%s\n' "Required audio topology is empty: $atfdm_path, provision a valid topology in the build" >&2
     return 1
@@ -4734,7 +4814,7 @@ audio_base_topology_preflight() {
     [ -n "$abtp_card" ] || continue
     audio_dt_requires_topology "$abtp_card" || continue
     abtp_model="$(dt_property_text "$abtp_card" model)"
-    abtp_path="$(audio_topology_for_dt_model "$abtp_model")" || return 1
+    abtp_path="$(audio_topology_for_dt_model "$abtp_model" "$abtp_card")" || return 1
     printf '%s\n' "Audio topology preflight: DT=$abtp_card model=$abtp_model file=$abtp_path, exact ALSA driver path will be checked after card registration" >&2
     abtp_paths="${abtp_paths}${abtp_path}
 "
@@ -5355,16 +5435,7 @@ audio_alsa_validate_topology() {
   audio_dt_requires_topology "$aavt_node" || return 0
 
   aavt_model="$(dt_property_text "$aavt_node" model)"
-  aavt_driver="$(
-    awk -v card="$aavt_card" '
-      $1 == card {
-        sub(/^.*\]:[[:space:]]*/, "")
-        sub(/[[:space:]]+- .*/, "")
-        print
-        exit
-      }
-    ' /proc/asound/cards 2>/dev/null
-  )"
+  aavt_driver=$(audio_alsa_card_driver "$aavt_card") || aavt_driver=""
   case "$aavt_driver:$aavt_model" in
     :*|*:|*/*|*..*)
       printf '%s\n' "Cannot derive the q6apm topology filename for ALSA card $aavt_card, DT=$aavt_node" >&2

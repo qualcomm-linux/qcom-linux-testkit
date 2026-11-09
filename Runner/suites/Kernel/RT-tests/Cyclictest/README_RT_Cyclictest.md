@@ -236,3 +236,10 @@ If you update `lib_rt.sh`, please keep:
 - POSIX compatibility
 - ShellCheck cleanliness (avoid `A && B || C` for control flow, avoid unused vars)
 - Robustness on minimal images
+
+
+See [shared runtime validation](../README.md) for background workload health,
+cleanup, RT_CPUS/BG_CPUS selection and retained diagnostics.
+
+The LAVA `.res` file remains next to `run.sh`. Default workload logs,
+background evidence and temporary files use the invocation CWD.

@@ -1,93 +1,40 @@
-# Kernel Selftest Runner
-
-This directory contains the automation scripts for running **Linux Kernel Selftests** on Qualcomm-based platforms (e.g., RB3GEN2) using the standardized `qcom-linux-testkit` framework.
-
-## Overview
-
-The selftest runner (`run.sh`) is designed to:
-- Automatically detect and run enabled kernel selftests using a whitelist file (`enabled_tests.list`)
-- Ensure all required dependencies and directories are present
-- Log detailed test results for CI/CD integration
-- Support both standalone execution and integration with LAVA/automated test infrastructure
-
-## Files
-
-- **run.sh**: Main test runner script. Executes all tests listed in `enabled_tests.list` and produces `.res` and `.run` result files.
-- **enabled_tests.list**: Whitelist of test suites or binaries to run (one per line). Supports comments and blank lines.
-- **Kernel_Selftests.res**: Detailed result file, capturing PASS/FAIL/SKIP for each test or subtest.
-- **Kernel_Selftests.run**: Cumulative PASS or FAIL summary, used by CI pipelines for quick parsing.
-
-## Prerequisites
-
-- `/kselftest` directory must be present on the device/target. This is where the selftest binaries are located (usually deployed by the build or CI).
-- All test scripts must have the executable bit set (`chmod +x run.sh`), enforced by GitHub Actions.
-- `enabled_tests.list` must exist and contain at least one non-comment, non-blank entry.
-
-## Script Flow
-
-1. **Environment Setup**:  
-   Dynamically locates and sources `init_env` and `functestlib.sh` to ensure robust, path-independent execution.
-
-2. **Dependency Checks**:  
-   - Checks for required commands (e.g., `find`)
-   - Ensures `/kselftest` directory exists
-   - Validates `enabled_tests.list` is present and usable
-
-3. **Test Discovery & Execution**:  
-   - Parses `enabled_tests.list`, ignoring comments and blanks
-   - Supports both directory and subtest (e.g., `timers/thread_test`) entries
-   - Executes test binaries or `run_test.sh` for each listed test
-   - Logs individual and summary results
-
-4. **Result Logging**:  
-   - Writes detailed results to `Kernel_Selftests.res`
-   - Writes overall PASS/FAIL to `Kernel_Selftests.run`
-
-5. **CI Compatibility**:  
-   - Designed for direct invocation by LAVA or any CI/CD harness
-   - Fails early and logs meaningful errors if prerequisites are missing
-
-## enabled_tests.list Format
-
-```text
-# This is a comment
-timers
-thread
-timers/thread_test
-# Add more test names or subtests as needed
-```
-
-- Each non-comment, non-blank line specifies a test directory or a test binary under `/kselftest`.
-
-## Example Usage
+# Installed kernel selftests
 
 ```sh
-sh run.sh
+./run.sh
+./run.sh --selftest-dir /kselftest --allowlist ./enabled_tests.list --timeout 300
 ```
 
-or from a higher-level testkit runner:
+SELFTEST_DIR, ALLOWLIST and TIMEOUT supply defaults for the corresponding CLI
+options. Without a directory override, discovery checks /kselftest,
+/usr/lib/kselftests and /usr/libexec/kselftests. The supplied allowlist remains the
+default, no additional test collections run automatically.
 
-```sh
-./run-test.sh Kernel_Selftests
-```
+Allowlist lines accept collection, collection:test or collection/test. Blank lines
+and comments are ignored. An installed kselftest-list.txt expands collections.
+The installed run_kselftest.sh is used for manifest-listed selections. Legacy
+installations use run_test.sh for a selected collection, otherwise executable
+*test files. Duplicate selections are removed and a collection harness is not
+followed by rediscovery of its child binaries. A selected legacy collection harness takes precedence over explicit child
+selections in that collection to prevent duplicate execution.
 
-## Troubleshooting
+Requires existing test payloads, their runtime dependencies, shell utilities and
+setsid for owned-session timeout cleanup. Nothing is installed or downloaded.
+The test works without systemd. Missing optional payloads are SKIP. Existing tests
+that fail, time out, emit an unexpected TAP/KTAP failure or cannot retain their
+output are FAIL. Kselftest exit 4, zero-test plans and all-skipped TAP output are
+SKIP. A supported non-TAP executable can PASS with exit zero. Exit failures take
+precedence over success text. Catchable interruption fails the suite.
 
-- **Missing executable bit**:  
-  If you see permission errors, ensure all scripts are `chmod +x`.
-
-- **Missing `/kselftest` directory**:  
-  Ensure selftests are built and deployed to the target system.
-
-- **Missing or empty `enabled_tests.list`**:  
-  Add test entries as needed. The runner will fail if this file is absent or empty.
-
-## Contribution Guidelines
-
-- Update `enabled_tests.list` as test coverage expands.
-- Follow the coding and structure conventions enforced by CI (see `CONTRIBUTING.md`).
-- All changes should pass permission checks and shellcheck lints in CI.
-
-## License
+Each selection has a timeout in seconds. The owned process session is terminated
+on timeout/completion with bounded TERM/KILL cleanup. A surviving process
+retains ownership and makes the selection FAIL, without an unbounded wait.
+Payloads run beside their installed fixtures, as required by upstream selftests.
+Testkit logs and TMPDIR are under a unique kselftest-run.*
+directory in invocation CWD. Upstream payloads may manage their own fixture files.
+Kernel_Selftests.res remains beside run.sh for existing publishers. The
+per-selection log, status, elapsed time and selection list remain under that run
+directory. Use the provided YAML to
+publish results even when a functional selection fails.
 
 SPDX-License-Identifier: BSD-3-ClauseCopyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.

@@ -482,7 +482,7 @@ fallback on older distributions with sparse metadata.
 
 ## Audio Remoteproc Preflight
 
-Before backend discovery, the suite enumerates runtime remoteprocs and checks the configured firmware and topology under `/lib/firmware` or `/usr/lib/firmware`. It recognizes audio DSP identities and the Shikra modem-hosted audio path. A remoteproc named `modem` is ignored on non-Shikra targets because it is not their audio preflight dependency.
+Before backend discovery, the suite enumerates runtime remoteprocs and checks the configured firmware and topology through shared image-firmware discovery. This includes the image's custom firmware root, kernel update paths, `/lib/firmware` and `/usr/lib/firmware`, with compressed assets supported. It recognizes audio DSP identities and the Shikra modem-hosted audio path. A remoteproc named `modem` is ignored on non-Shikra targets because it is not their audio preflight dependency.
 
 If the matching remoteproc is `running`, the suite records its name and firmware evidence. If it is `offline`, the suite starts it only after confirming the corresponding firmware is provisioned. Generic audio DSP paths also require adjacent topology evidence. Shikra's modem-hosted path does not require a topology beside the modem firmware, the selected ALSA card's q6apm topology is validated separately. The suite never stops a remoteproc. Platforms with no applicable audio remoteproc continue normally. Provisioning or start issues on an applicable remoteproc report FAIL with the reason.
 
@@ -910,3 +910,15 @@ playback limit and does not claim the entire clip completed. For example:
 A clip longer than ten seconds is intentionally bounded in this example.
 Unexpected exits retain their warnings. Automatic clip-duration timeouts,
 backend selection, runtime evidence and result classification are unchanged.
+
+## Runtime topology selection
+
+Base audio validates image-provided topology only when the active DT declares
+a q6apm dependency. Selection uses the registered ALSA card driver when present,
+then an exact matching sound-card DT binding directory. This is a discovery
+hint, the DT compatible and actual ALSA driver name can differ. Firmware symlinks that
+resolve to the same asset do not create an ambiguity. Distinct unresolved assets,
+an empty file, or the actual driver's missing topology still fail. The registered
+card check continues to validate the kernel's exact driver/model firmware name.
+No SoC mapping, topology copy, download or package-policy change is introduced.
+Direct-codec and overlay paths retain their existing applicability checks.

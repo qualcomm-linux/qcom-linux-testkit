@@ -24,7 +24,8 @@ The testcase does not bring interfaces up, run DHCP, change link settings, or tr
 When the runtime PCI topology contains a QPS615 switch (`1179:0623`), the
 testcase also correlates downstream TC956x driver functions with exported
 Ethernet interfaces and verifies that `TC956X_Firmware_PCIeBridge.bin` remains
-available from a standard firmware root. Images without QPS615 retain the
+available through shared firmware discovery, including custom image roots,
+kernel update paths and standard firmware directories. Images without QPS615 retain the
 generic Ethernet inventory behavior.
 
 For each expected Toshiba `1179:0220` Ethernet function, the live log and TSV

@@ -12,43 +12,46 @@
 # wrapper can continue and still collect logs.
 # - Always exits 0 (LAVA-friendly). Use PI_Stress.res for gating.
 
+# ---------- Repo env + helpers ----------
 SCRIPT_DIR="$(
   cd "$(dirname "$0")" || exit 1
   pwd
 )"
-
 INIT_ENV=""
 SEARCH="$SCRIPT_DIR"
+
 while [ "$SEARCH" != "/" ]; do
-  if [ -f "$SEARCH/init_env" ]; then
-    INIT_ENV="$SEARCH/init_env"
-    break
-  fi
-  SEARCH=$(dirname "$SEARCH")
+    if [ -f "$SEARCH/init_env" ]; then
+        INIT_ENV="$SEARCH/init_env"
+        break
+    fi
+    SEARCH=$(dirname "$SEARCH")
 done
 
 if [ -z "$INIT_ENV" ]; then
-  echo "[ERROR] Could not find init_env (starting at $SCRIPT_DIR)" >&2
-  exit 1
+    echo "[ERROR] Could not find init_env (starting at $SCRIPT_DIR)" >&2
+    exit 1
 fi
 
+# Only source once (idempotent)
+# NOTE: We intentionally **do not export** any new vars. They stay local to this shell.
 if [ -z "${__INIT_ENV_LOADED:-}" ]; then
-  # shellcheck disable=SC1090
-  . "$INIT_ENV"
-  __INIT_ENV_LOADED=1
+    # shellcheck disable=SC1090
+    . "$INIT_ENV"
+    __INIT_ENV_LOADED=1
 fi
 
+# shellcheck disable=SC1090
+. "$INIT_ENV"
 # shellcheck disable=SC1091
 . "$TOOLS/functestlib.sh"
 # shellcheck disable=SC1091
 . "$TOOLS/lib_rt.sh"
 
 TESTNAME="PI_Stress"
-test_path=$(find_test_case_by_name "$TESTNAME")
-[ -n "$test_path" ] || test_path="$SCRIPT_DIR"
-
-RES_FILE="$test_path/${TESTNAME}.res"
-OUT_DIR="${OUT_DIR:-$test_path/logs_${TESTNAME}}"
+RES_FILE="$SCRIPT_DIR/${TESTNAME}.res"
+test_result_init "$TESTNAME" "$RES_FILE" || exit 1
+OUT_DIR="${OUT_DIR:-$PWD/logs_${TESTNAME}}"
 RESULT_TXT="${RESULT_TXT:-$OUT_DIR/result.txt}"
 
 # params (env/LAVA can override)
@@ -68,6 +71,8 @@ HEARTBEAT_SEC="${HEARTBEAT_SEC:-10}"
 usage() {
   cat <<EOF
 Usage: $0 [OPTIONS]
+  Environment: RT_CPUS and BG_CPUS accept runtime CPU lists.
+  Explicit masks require taskset, background commands require setsid.
 
 Options:
   --out DIR Output directory (default: $OUT_DIR)
@@ -95,68 +100,83 @@ Examples:
 EOF
 }
 
-while [ "$#" -gt 0 ]; do
-  case "$1" in
-    -h|--help)
-      usage
-      exit 0
-      ;;
-    --out)
-      shift
-      OUT_DIR="$1"
-      ;;
-    --result)
-      shift
-      RESULT_TXT="$1"
-      ;;
-    --duration)
-      shift
-      DURATION="$1"
-      ;;
-    --mlockall)
-      shift
-      MLOCKALL="$1"
-      ;;
-    --rr)
-      shift
-      RR="$1"
-      ;;
-    --iterations)
-      shift
-      ITERATIONS="$1"
-      ;;
-    --user-baseline)
-      shift
-      USER_BASELINE="$1"
-      ;;
-    --background-cmd)
-      shift
-      BACKGROUND_CMD="$1"
-      ;;
-    --binary)
-      shift
-      BINARY="$1"
-      ;;
-    --progress-every)
-      shift
-      PROGRESS_EVERY="$1"
-      ;;
-    --heartbeat-sec)
-      shift
-      HEARTBEAT_SEC="$1"
-      ;;
-    --verbose)
-      VERBOSE=1
-      ;;
-    *)
-      log_warn "Unknown option: $1"
-      usage
-      echo "$TESTNAME FAIL" >"$RES_FILE"
-      exit 1
-      ;;
-  esac
-  shift
-done
+# parse_args <arguments...>
+# Parse existing RT client and output options before execution.
+parse_args() {
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      --out)
+        [ "$#" -ge 2 ] || test_result_finish FAIL "Missing value for $1"
+        shift
+        OUT_DIR="$1"
+        ;;
+      --result)
+        [ "$#" -ge 2 ] || test_result_finish FAIL "Missing value for $1"
+        shift
+        RESULT_TXT="$1"
+        ;;
+      --duration)
+        [ "$#" -ge 2 ] || test_result_finish FAIL "Missing value for $1"
+        shift
+        DURATION="$1"
+        ;;
+      --mlockall)
+        [ "$#" -ge 2 ] || test_result_finish FAIL "Missing value for $1"
+        shift
+        MLOCKALL="$1"
+        ;;
+      --rr)
+        [ "$#" -ge 2 ] || test_result_finish FAIL "Missing value for $1"
+        shift
+        RR="$1"
+        ;;
+      --iterations)
+        [ "$#" -ge 2 ] || test_result_finish FAIL "Missing value for $1"
+        shift
+        ITERATIONS="$1"
+        ;;
+      --user-baseline)
+        [ "$#" -ge 2 ] || test_result_finish FAIL "Missing value for $1"
+        shift
+        USER_BASELINE="$1"
+        ;;
+      --background-cmd)
+        [ "$#" -ge 2 ] || test_result_finish FAIL "Missing value for $1"
+        shift
+        BACKGROUND_CMD="$1"
+        ;;
+      --binary)
+        [ "$#" -ge 2 ] || test_result_finish FAIL "Missing value for $1"
+        shift
+        BINARY="$1"
+        ;;
+      --progress-every)
+        [ "$#" -ge 2 ] || test_result_finish FAIL "Missing value for $1"
+        shift
+        PROGRESS_EVERY="$1"
+        ;;
+      --heartbeat-sec)
+        [ "$#" -ge 2 ] || test_result_finish FAIL "Missing value for $1"
+        shift
+        HEARTBEAT_SEC="$1"
+        ;;
+      --verbose)
+        VERBOSE=1
+        ;;
+      *)
+        log_warn "Unknown option: $1"
+        usage
+        test_result_finish FAIL "$TESTNAME prerequisite or argument check failed, see preceding diagnostic"
+        ;;
+    esac
+    shift
+  done
+}
+parse_args "$@"
 
 LOG_PREFIX="$OUT_DIR/pi-stress"
 TMP_ONE="$OUT_DIR/tmp_result_one.txt"
@@ -179,20 +199,17 @@ log_info "$TESTNAME: Checking for the tools required to run pi_stress"
 
 if ! rt_require_common_tools uname awk sed grep tr head tail mkdir cat sh tee sleep kill date sort wc; then
   log_skip "$TESTNAME: basic tools missing"
-  echo "$TESTNAME SKIP" >"$RES_FILE"
-  exit 0
+  test_result_finish SKIP "$TESTNAME prerequisite or argument check unavailable, see preceding diagnostic"
 fi
 
 if ! command -v perf_parse_rt_tests_json >/dev/null 2>&1; then
   log_skip "$TESTNAME: perf_parse_rt_tests_json missing (lib_rt.sh not loaded?)"
-  echo "$TESTNAME SKIP" >"$RES_FILE"
-  exit 0
+  test_result_finish SKIP "$TESTNAME prerequisite or argument check unavailable, see preceding diagnostic"
 fi
 
 if ! command -v rt_require_duration_seconds >/dev/null 2>&1; then
   log_skip "$TESTNAME: rt_require_duration_seconds missing (lib_rt.sh not updated/loaded?)"
-  echo "$TESTNAME SKIP" >"$RES_FILE"
-  exit 0
+  test_result_finish SKIP "$TESTNAME prerequisite or argument check unavailable, see preceding diagnostic"
 fi
 
 case "$ITERATIONS" in
@@ -216,13 +233,11 @@ esac
 PI_BIN=$(rt_resolve_binary pi_stress "$BINARY" 2>/dev/null || echo "")
 if [ -z "$PI_BIN" ] || [ ! -x "$PI_BIN" ]; then
   log_skip "$TESTNAME: pi_stress binary not found/executable (${PI_BIN:-none})"
-  echo "$TESTNAME SKIP" >"$RES_FILE"
-  exit 0
+  test_result_finish SKIP "$TESTNAME prerequisite or argument check unavailable, see preceding diagnostic"
 fi
 
 PI_DURATION_SECS=$(rt_require_duration_seconds "$TESTNAME" "$DURATION") || {
-  echo "$TESTNAME FAIL" >"$RES_FILE"
-  exit 0
+  test_result_finish FAIL "$TESTNAME prerequisite or argument check failed, see preceding diagnostic"
 }
 
 rt_log_common_runtime_env "$TESTNAME" "$PI_BIN"
@@ -243,7 +258,11 @@ trap '' TERM
 trap 'rt_handle_int; perf_rt_bg_stop >/dev/null 2>&1 || true' INT
 trap 'perf_rt_bg_stop >/dev/null 2>&1 || true' EXIT
 
-perf_rt_bg_start "$TESTNAME" "$BACKGROUND_CMD"
+if ! perf_rt_bg_start "$TESTNAME" "$BACKGROUND_CMD"; then
+  test_result_init "$TESTNAME" "$RES_FILE" || exit 1
+  test_result_record FAIL "Requested RT CPU selection or background workload could not start"
+  test_result_finish
+fi
 
 overall_fail=0
 fail_count=0

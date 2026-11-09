@@ -3099,6 +3099,8 @@ run_with_timeout() {
 #   COMMAND...   - command and arguments to execute.
 #
 # Optional caller-provided hook:
+#   MANAGED_TIMEOUT_USE_SESSION=1 requires setsid and terminates the owned
+#   session on timeout/completion. Default 0 preserves existing callers.
 #   MANAGED_TIMEOUT_PRE_EXEC_HOOK - function/command invoked in the child command
 #                                   and watcher before they do work.
 #
@@ -3117,6 +3119,11 @@ run_with_managed_timeout() {
     mt_label="$3"
     shift 3
     mt_command_display="$*"
+    mt_use_session=${MANAGED_TIMEOUT_USE_SESSION:-0}
+    if [ "$mt_use_session" = 1 ] && ! command -v setsid >/dev/null 2>&1; then
+        echo "setsid is required for managed session cleanup" >&2
+        return 125
+    fi
     mt_pre_exec_hook="${MANAGED_TIMEOUT_PRE_EXEC_HOOK:-}"
 
     mt_run_pre_exec_hook() {
@@ -3145,6 +3152,9 @@ run_with_managed_timeout() {
 
     (
         mt_run_pre_exec_hook
+        if [ "$mt_use_session" = 1 ]; then
+            exec setsid "$@"
+        fi
         exec "$@"
     ) &
     mt_cmd_pid=$!
@@ -3171,14 +3181,53 @@ run_with_managed_timeout() {
         if [ "$mt_sleep_rc" -eq 0 ]; then
             printf 'timeout after %ss: %s\n' "$mt_timeout_secs" "$mt_command_display" >"$mt_timeout_marker_file" 2>/dev/null || true
             echo "[TIMEOUT] command exceeded ${mt_timeout_secs}s: $mt_command_display" >&2
-            kill "$mt_cmd_pid" >/dev/null 2>&1 || true
-            sleep 2
-            kill -KILL "$mt_cmd_pid" >/dev/null 2>&1 || true
+            if [ "$mt_use_session" = 1 ]; then
+                kill -s TERM -- "-$mt_cmd_pid" >/dev/null 2>&1 || true
+                sleep 2
+                kill -s KILL -- "-$mt_cmd_pid" >/dev/null 2>&1 || true
+            else
+                kill "$mt_cmd_pid" >/dev/null 2>&1 || true
+                sleep 2
+                kill -KILL "$mt_cmd_pid" >/dev/null 2>&1 || true
+            fi
         fi
     ) &
     mt_watcher_pid=$!
     # shellcheck disable=SC2034  # Exposed for caller cleanup traps while command is running.
     MANAGED_TIMEOUT_WATCHER_PID="$mt_watcher_pid"
+
+    if [ "$mt_use_session" = 1 ]; then
+        mt_status=0
+        while bounded_timeout_pid_running "$mt_cmd_pid"; do
+            if [ -r "$mt_timeout_marker_file" ]; then
+                mt_status=124
+                break
+            fi
+            if ! bounded_timeout_pid_running "$mt_watcher_pid"; then
+                echo "[ERROR] timeout watcher exited before the owned command" >&2
+                mt_status=125
+                break
+            fi
+            sleep 1
+        done
+        if ! bounded_timeout_pid_running "$mt_cmd_pid"; then
+            wait "$mt_cmd_pid" 2>/dev/null
+            mt_command_status=$?
+            if [ "$mt_status" -eq 0 ]; then
+                mt_status=$mt_command_status
+            fi
+        fi
+        if [ -r "$mt_timeout_marker_file" ]; then
+            mt_status=124
+        fi
+        if ! managed_timeout_cancel_bounded 2; then
+            echo "[ERROR] owned command session remains active after cleanup" >&2
+            if [ "$mt_status" -eq 0 ]; then
+                mt_status=125
+            fi
+        fi
+        return "$mt_status"
+    fi
 
     wait "$mt_cmd_pid" 2>/dev/null
     mt_status=$?
@@ -3231,6 +3280,8 @@ run_with_managed_timeout() {
 #     blocked in kernel I/O
 #   - All PID and file state is cleared after cleanup so repeated trap
 #     invocations cannot act on stale values
+#   - MANAGED_TIMEOUT_USE_SESSION=1 cancels the private command group and
+#     retains its leader PID while any active group member survives
 #
 # Arguments:
 #   grace_secs  positive integer seconds to wait after SIGTERM before
@@ -3246,6 +3297,11 @@ managed_timeout_cancel_bounded() {
     mtcb_sleep_pid="${MANAGED_TIMEOUT_WATCHER_SLEEP_PID:-}"
     mtcb_sleep_pid_file="${MANAGED_TIMEOUT_SLEEP_PID_FILE:-}"
     mtcb_marker_file="${MANAGED_TIMEOUT_MARKER_FILE:-}"
+    mtcb_use_session="${MANAGED_TIMEOUT_USE_SESSION:-0}"
+    mtcb_cmd_target="$mtcb_cmd_pid"
+    if [ "$mtcb_use_session" = 1 ] && [ -n "$mtcb_cmd_pid" ]; then
+        mtcb_cmd_target="-$mtcb_cmd_pid"
+    fi
 
     # Stop the watcher's sleep subprocess first so it cannot race and send
     # SIGKILL to the command after we have already handled it.
@@ -3277,20 +3333,22 @@ managed_timeout_cancel_bounded() {
 
     # Kill the command with a bounded wait after both SIGTERM and SIGKILL.
     if [ -n "$mtcb_cmd_pid" ]; then
-        kill "$mtcb_cmd_pid" 2>/dev/null || true
+        kill -s TERM -- "$mtcb_cmd_target" 2>/dev/null || true
         mtcb_i=0
-        while [ "$mtcb_i" -lt "$mtcb_grace" ] && kill -0 "$mtcb_cmd_pid" 2>/dev/null; do
-            sleep 1; mtcb_i=$((mtcb_i + 1))
+        while [ "$mtcb_i" -lt "$mtcb_grace" ] && bounded_timeout_pid_running "$mtcb_cmd_pid" "$mtcb_use_session"; do
+            sleep 1
+            mtcb_i=$((mtcb_i + 1))
         done
-        kill -KILL "$mtcb_cmd_pid" 2>/dev/null || true
+        kill -s KILL -- "$mtcb_cmd_target" 2>/dev/null || true
         # Bound the wait after SIGKILL: tasks in kernel I/O can still delay exit.
         mtcb_i=0
-        while [ "$mtcb_i" -lt 3 ] && kill -0 "$mtcb_cmd_pid" 2>/dev/null; do
-            sleep 1; mtcb_i=$((mtcb_i + 1))
+        while [ "$mtcb_i" -lt 3 ] && bounded_timeout_pid_running "$mtcb_cmd_pid" "$mtcb_use_session"; do
+            sleep 1
+            mtcb_i=$((mtcb_i + 1))
         done
         # Only reap if the process has already exited; an unconditional wait
         # can block indefinitely when the child is stuck in kernel I/O.
-        if ! kill -0 "$mtcb_cmd_pid" 2>/dev/null; then
+        if ! bounded_timeout_pid_running "$mtcb_cmd_pid"; then
             wait "$mtcb_cmd_pid" 2>/dev/null || true
         fi
     fi
@@ -3313,7 +3371,7 @@ managed_timeout_cancel_bounded() {
     # (e.g. the EXIT trap running after a signal trap) detects it and does not
     # treat DRM ownership as released.
     mtcb_rc=0
-    if [ -n "$mtcb_cmd_pid" ] && kill -0 "$mtcb_cmd_pid" 2>/dev/null; then
+    if [ -n "$mtcb_cmd_pid" ] && bounded_timeout_pid_running "$mtcb_cmd_pid" "$mtcb_use_session"; then
         mtcb_rc=1
     else
         MANAGED_TIMEOUT_CMD_PID=""
@@ -3327,9 +3385,46 @@ managed_timeout_cancel_bounded() {
     return "$mtcb_rc"
 }
 
-# bounded_timeout_pid_running PID
-# Check an owned child, treating an exited Linux zombie as ready to reap.
+# bounded_timeout_pid_running PID [group]
+# Check an owned child, or its private process group when group=1.
+# Exited Linux zombies are ready to reap and do not retain active ownership.
 bounded_timeout_pid_running() {
+    if [ "${2:-0}" = 1 ]; then
+        local btp_stat btp_line btp_tail btp_state btp_group btp_group_found=0
+        case "$1" in
+            ''|*[!0-9]*|0|1)
+                return 1
+                ;;
+        esac
+        kill -s 0 -- "-$1" 2>/dev/null || return 1
+        for btp_stat in /proc/[0-9]*/stat; do
+            [ -r "$btp_stat" ] || continue
+            IFS= read -r btp_line <"$btp_stat" || continue
+            # comm can contain spaces and parentheses, parse after its last ).
+            btp_tail=${btp_line##*) }
+            btp_state=${btp_tail%% *}
+            btp_tail=${btp_tail#* }
+            btp_tail=${btp_tail#* }
+            btp_group=${btp_tail%% *}
+            if [ "$btp_group" = "$1" ]; then
+                btp_group_found=1
+                case "$btp_state" in
+                    Z|X)
+                        continue
+                        ;;
+                    *)
+                        return 0
+                        ;;
+                esac
+            fi
+        done
+        if [ "$btp_group_found" = 0 ]; then
+            # A signallable group with unreadable procfs is still owned.
+            kill -s 0 -- "-$1" 2>/dev/null
+            return $?
+        fi
+        return 1
+    fi
     kill -0 "$1" 2>/dev/null || return 1
     if [ -r "/proc/$1/status" ]; then
         while read -r btp_key btp_value; do
@@ -4537,6 +4632,93 @@ platform_device_driver_name() {
     [ -n "$pddn_driver_path" ] || return 1
     basename "$pddn_driver_path"
 }
+
+# iommu_validate_runtime_devices <result-directory>
+# Validate enabled DT DMA contexts against their exact runtime bus devices.
+# Container parents need no group when the DT assigns DMA to child contexts.
+# Retain DT, device, driver and group evidence. Diagnostics go to stderr.
+# Return 0 for complete attachment, 1 for broken attachment/discovery, 2 when
+# DT context evidence is unavailable, and 3 for invalid input. No state changes.
+iommu_validate_runtime_devices() (
+    ivrd_out="$1"
+    [ -n "$ivrd_out" ] || exit 3
+    mkdir -p "$ivrd_out" || exit 1
+    ivrd_root=$(dt_runtime_root) || exit 2
+    ivrd_index="$ivrd_out/iommu_platform_index.tsv"
+    ivrd_candidates="$ivrd_out/iommu_device_candidates.tsv"
+    ivrd_nodes="$ivrd_out/iommu_dt_nodes.log"
+    ivrd_inventory="$ivrd_out/iommu_contexts.tsv"
+    : >"$ivrd_index" || exit 1
+    : >"$ivrd_inventory" || exit 1
+    # The generic provider index does not include iommus. Collect it once here.
+    if DT_PROPERTY_INDEX="" dt_list_enabled_property_nodes "$ivrd_root" iommus >"$ivrd_nodes"; then
+        :
+    else
+        ivrd_rc=$?
+        [ "$ivrd_rc" -eq 1 ] && exit 2
+        exit 1
+    fi
+    # Auxiliary devices can share the consumer's DT link. Rank attached devices
+    # first, then bound devices, so a proxy cannot hide the actual DMA consumer.
+    # No bus-name filter is needed for AMBA or other image-provided consumers.
+    for ivrd_link in /sys/bus/*/devices/*/of_node; do
+        [ -e "$ivrd_link" ] || continue
+        ivrd_node=$(readlink -f "$ivrd_link") || exit 1
+        ivrd_device=${ivrd_link%/of_node}
+        ivrd_priority=2
+        if [ -e "$ivrd_device/iommu_group" ]; then
+            ivrd_priority=0
+        elif [ -L "$ivrd_device/driver" ]; then
+            ivrd_priority=1
+        fi
+        printf '%s|%s|%s\n' "$ivrd_priority" "$ivrd_node" "$ivrd_device" >>"$ivrd_index"
+    done
+    sort "$ivrd_index" >"$ivrd_candidates" || exit 1
+    # Preserve the two-column cache consumed by the shared exact-DT lookup.
+    awk -F '|' '{ print $2 "|" $3 }' "$ivrd_candidates" >"$ivrd_index" || exit 1
+    ivrd_count=0
+    ivrd_failed=0
+    while IFS= read -r ivrd_node; do
+        [ -n "$ivrd_node" ] || continue
+        ivrd_parent="$ivrd_node"
+        ivrd_enabled=1
+        while [ "$ivrd_parent" != "$ivrd_root" ]; do
+            if ! dt_node_enabled "$ivrd_parent"; then
+                ivrd_enabled=0
+                break
+            fi
+            ivrd_parent=${ivrd_parent%/*}
+        done
+        [ "$ivrd_enabled" -eq 1 ] || continue
+        ivrd_count=$((ivrd_count + 1))
+        ivrd_device=$(DT_PLATFORM_DEVICE_INDEX="$ivrd_index" find_platform_device_for_dt_node "$ivrd_node") || ivrd_device=""
+        ivrd_driver="unbound"
+        ivrd_group="missing"
+        ivrd_status="FAIL"
+        if [ -n "$ivrd_device" ]; then
+            ivrd_driver=$(platform_device_driver_name "$ivrd_device") || ivrd_driver="unbound"
+            if [ -e "$ivrd_device/iommu_group" ]; then
+                ivrd_group=$(readlink -f "$ivrd_device/iommu_group") || exit 1
+                ivrd_status="PASS"
+            fi
+        fi
+        ivrd_iommus=$(dt_property_hex "$ivrd_node" iommus) || ivrd_iommus="unreadable"
+        if [ -z "$ivrd_iommus" ] || [ "$ivrd_iommus" = "unreadable" ] ||
+           [ "$((${#ivrd_iommus} % 8))" -ne 0 ]; then
+            ivrd_status="FAIL"
+        fi
+        printf '%s|%s|%s|%s|%s|%s\n' "$ivrd_node" \
+            "${ivrd_device:-missing}" "$ivrd_driver" "$ivrd_group" \
+            "$ivrd_iommus" "$ivrd_status" >>"$ivrd_inventory"
+        if [ "$ivrd_status" = "FAIL" ]; then
+            ivrd_failed=$((ivrd_failed + 1))
+            printf '%s\n' "IOMMU context is not attached: DT=$ivrd_node device=${ivrd_device:-missing} driver=$ivrd_driver group=$ivrd_group. Check the DT supplier, driver binding and image modules." >&2
+        fi
+    done <"$ivrd_nodes"
+    printf '%s\n' "IOMMU runtime contexts: checked=$ivrd_count failed=$ivrd_failed artifact=$ivrd_inventory" >&2
+    [ "$ivrd_failed" -eq 0 ] || exit 1
+    [ "$ivrd_count" -gt 0 ] || exit 2
+)
 
 # kernel_modules_for_modalias <modalias>
 # Prints kernel module candidates resolved from the running image's alias
@@ -6970,8 +7152,8 @@ list_remoteproc_instances() {
 
 ###############################################################################
 # find_image_firmware <firmware-name>
-# Prints the first matching image-provided firmware path under the standard or
-# running-kernel firmware roots, accepting uncompressed, .xz, and .zst files.
+# Prints the first matching image-provided firmware path under custom, update,
+# running-kernel or standard roots, accepting uncompressed, .xz, and .zst files.
 # Returns 0 on a match, 1 when no asset is exposed, and 3 when no name is
 # supplied.
 ###############################################################################
@@ -6980,7 +7162,16 @@ find_image_firmware() {
     firmware_release=$(uname -r 2>/dev/null || true)
     [ -n "$firmware_name" ] || return 3
 
+    firmware_custom_root=""
+    if [ -r /sys/module/firmware_class/parameters/path ]; then
+        IFS= read -r firmware_custom_root </sys/module/firmware_class/parameters/path || true
+    fi
     for firmware_root in \
+        "$firmware_custom_root" \
+        "/lib/firmware/updates/$firmware_release" \
+        "/usr/lib/firmware/updates/$firmware_release" \
+        /lib/firmware/updates \
+        /usr/lib/firmware/updates \
         "/lib/firmware/$firmware_release" \
         "/usr/lib/firmware/$firmware_release" \
         /lib/firmware \
@@ -7129,6 +7320,186 @@ wait_remoteproc_state() {
         sleep "$poll"
     done
 }
+
+# wait_remoteproc_boot_ready <sysfs-path> <timeout-s> <poll-s> <output-dir> [discovery-state]
+# Passively wait for a discovered processor to run, retaining observed crashes.
+# Inputs: live sysfs, bounded decimal seconds and a dedicated artifact directory.
+# Output: state transitions and kernel evidence on stderr, artifacts in output-dir.
+# Returns: 0 for running without observed crash evidence, 1 for failed readiness,
+# 2 for invalid input or unavailable diagnostics storage. No start/stop writes.
+# Subshell scope protects callers from globals used by existing shared helpers.
+wait_remoteproc_boot_ready() (
+    br_path="$1"
+    br_timeout="$2"
+    br_poll="$3"
+    br_out="$4"
+    br_discovery="${5:-unknown}"
+
+    case "$br_timeout" in
+        ''|*[!0-9]*|0[0-9]*)
+            log_error "Boot-readiness seconds must be decimal integers without leading zeros"
+            return 2
+            ;;
+    esac
+    if [ "${#br_timeout}" -gt 5 ] || [ "$br_timeout" -gt 86400 ]; then
+        log_error "Boot-readiness seconds must not exceed 86400"
+        return 2
+    fi
+    if ! awk -v poll="$br_poll" 'BEGIN {
+        exit !(length(poll) <= 16 && poll ~ /^[0-9]+([.][0-9]+)?$/ && poll > 0 && poll <= 86400)
+    }'; then
+        log_error "Boot-readiness poll interval must be positive decimal seconds up to 86400"
+        return 2
+    fi
+    if ! mkdir -p "$br_out" || ! : >"$br_out/readiness.log"; then
+        log_error "Cannot write DSP boot-readiness diagnostics: $br_out"
+        return 2
+    fi
+
+    br_id="$(basename "$br_path")"
+    br_controller=""
+    if [ -e "$br_path/device" ]; then
+        br_controller="$(readlink -f "$br_path/device" 2>/dev/null || true)"
+    fi
+    if [ -z "$br_controller" ]; then
+        br_resolved="$(readlink -f "$br_path" 2>/dev/null || true)"
+        case "$br_resolved" in
+            */remoteproc/remoteproc*)
+                br_controller="${br_resolved%/remoteproc/*}"
+                ;;
+        esac
+    fi
+    br_controller="${br_controller##*/}"
+    br_start="$(get_monotonic_seconds)"
+    br_initial="$(get_remoteproc_state "$br_path")" || br_initial="unknown"
+    br_initial="${br_initial:-unknown}"
+    br_state="$br_initial"
+    br_last="$br_initial"
+    br_crashed=0
+    br_reason="deadline-expired"
+    br_access="unknown"
+    case "$br_discovery" in
+        crashed)
+            br_crashed=1
+            ;;
+    esac
+    case "$br_initial" in
+        crashed)
+            br_crashed=1
+            ;;
+    esac
+    printf 'instance=%s controller=%s discovery=%s initial=%s deadline=%ss poll=%ss\n' \
+        "$br_id" "${br_controller:-unknown}" "$br_discovery" "$br_initial" \
+        "$br_timeout" "$br_poll" >>"$br_out/readiness.log"
+
+    # Capture boot history before waiting so recovery or ring-buffer turnover
+    # cannot erase evidence already available at entry.
+    scan_dmesg_errors "$br_out/initial" 'remoteproc|qcom.*pas|qcom_q6v5' 'not a crash|non-fatal' || true
+    br_access="$DMESG_ACCESS_STATUS"
+    while :; do
+        br_state="$(get_remoteproc_state "$br_path")" || br_state="unknown"
+        br_state="${br_state:-unknown}"
+        br_now="$(get_monotonic_seconds)"
+        br_elapsed=$((br_now - br_start))
+        if [ "$br_state" != "$br_last" ]; then
+            printf 'transition=%s->%s elapsed=%ss\n' \
+                "$br_last" "$br_state" "$br_elapsed" >>"$br_out/readiness.log"
+            br_last="$br_state"
+        fi
+        case "$br_state" in
+            crashed)
+                br_crashed=1
+                ;;
+            running)
+                br_reason="ready"
+                break
+                ;;
+            unknown)
+                br_reason="state-unreadable"
+                break
+                ;;
+        esac
+        if [ "$br_elapsed" -ge "$br_timeout" ]; then
+            break
+        fi
+        br_sleep="$(awk -v remaining="$((br_timeout - br_elapsed))" -v poll="$br_poll" '
+            BEGIN { print poll < remaining ? poll : remaining }
+        ')"
+        if ! sleep "$br_sleep"; then
+            br_reason="poll-sleep-failed"
+            break
+        fi
+    done
+
+    set -- "$br_out/initial/dmesg_snapshot.log"
+    if [ "$br_state" != "$br_initial" ] || [ "$br_reason" != "ready" ]; then
+        scan_dmesg_errors "$br_out/final" 'remoteproc|qcom.*pas|qcom_q6v5' 'not a crash|non-fatal' || true
+        br_access="$br_access/$DMESG_ACCESS_STATUS"
+        set -- "$@" "$br_out/final/dmesg_snapshot.log"
+    fi
+    # Match literal, whole runtime identities, not SoC addresses or sibling IDs.
+    # Fatal reason lines can be tagged with the platform controller rather than
+    # the remoteproc class name, so both sysfs-derived identities are checked.
+    if ! awk -v instance="$br_id" -v controller="$br_controller" '
+        function tagged(line, token, offset, part, pos, before, after) {
+            if (token == "") return 0
+            offset = 1
+            while (offset <= length(line)) {
+                part = substr(line, offset)
+                pos = index(part, token)
+                if (!pos) return 0
+                pos += offset - 1
+                before = pos > 1 ? substr(line, pos - 1, 1) : ""
+                after = substr(line, pos + length(token), 1)
+                if (before !~ /[[:alnum:]_.-]/ && after !~ /[[:alnum:]_.-]/) return 1
+                offset = pos + length(token)
+            }
+            return 0
+        }
+        {
+            line = tolower($0)
+            if (line ~ /not a crash|non-fatal|nonfatal/) next
+            if (!tagged($0, instance) && !tagged($0, controller)) next
+            if (line ~ /(^|[^[:alnum:]_-])fatal([^[:alnum:]_-]|$)|crashed|crash detected|detected.*crash|handling crash|watchdog (bite|received|interrupt)|panic|oops/) {
+                print
+            }
+        }
+    ' "$@" >"$br_out/fatal_errors.log"; then
+        br_reason="kernel-evidence-read-failed"
+    fi
+    if [ -s "$br_out/fatal_errors.log" ]; then
+        br_crashed=1
+    fi
+    br_elapsed=$(($(get_monotonic_seconds) - br_start))
+    br_outcome="FAIL"
+    br_class="startup-not-ready"
+    if [ "$br_crashed" -eq 1 ]; then
+        br_class="crash-not-recovered"
+        if [ "$br_state" = "running" ]; then
+            br_class="crash-recovered"
+        fi
+    elif [ "$br_reason" = "ready" ]; then
+        br_outcome="PASS"
+        br_class="already-running"
+        if [ "$br_initial" != "running" ]; then
+            br_class="startup-delay"
+        fi
+    fi
+    printf 'final=%s elapsed=%ss classification=%s reason=%s crash_observed=%s kernel_access=%s result=%s\n' \
+        "$br_state" "$br_elapsed" "$br_class" "$br_reason" "$br_crashed" \
+        "$br_access" "$br_outcome" >>"$br_out/readiness.log"
+    if [ -r "$br_path/trace" ]; then
+        cp "$br_path/trace" "$br_out/trace.log" 2>/dev/null || true
+    fi
+    log_file_with_label DSP-BOOT "$br_out/readiness.log"
+    if [ -s "$br_out/fatal_errors.log" ]; then
+        log_file_with_label DSP-FATAL "$br_out/fatal_errors.log"
+    fi
+    if [ "$br_access" != "available" ] && [ "$br_access" != "available/available" ]; then
+        log_warn "$br_id: kernel crash history is incomplete, provide readable boot kernel logs"
+    fi
+    [ "$br_outcome" = "PASS" ]
+) >&2
 
 # Stop remoteproc
 stop_remoteproc() {

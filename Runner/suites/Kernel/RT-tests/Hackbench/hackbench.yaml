@@ -13,6 +13,8 @@ metadata:
     - preempt-rt
 
 params:
+  RT_CPUS: ""
+  BG_CPUS: ""
   OUT_DIR: "./logs_Hackbench"
   VERBOSE: "0"
   PROGRESS_EVERY: "1"
@@ -34,5 +36,5 @@ run:
   steps:
     - REPO_PATH=$PWD
     - cd Runner/suites/Kernel/RT-tests/Hackbench
-    - ./run.sh --out "${OUT_DIR}" --iterations "${ITERATIONS}" --target "${TARGET}" --datasize "${DATASIZE}" --loops "${LOOPS}" --grps "${GRPS}" --fds "${FDS}" --pipe "${PIPE}" --threads "${THREADS}" --background-cmd "${BACKGROUND_CMD}" --binary "${BINARY}" --progress-every "${PROGRESS_EVERY}" --heartbeat-sec "${HEARTBEAT_SEC}" $( [ "${VERBOSE}" = "1" ] && echo "--verbose" ) || true
+    - RT_CPUS="${RT_CPUS}" BG_CPUS="${BG_CPUS}" ./run.sh --out "${OUT_DIR}" --iterations "${ITERATIONS}" --target "${TARGET}" --datasize "${DATASIZE}" --loops "${LOOPS}" --grps "${GRPS}" --fds "${FDS}" --pipe "${PIPE}" --threads "${THREADS}" --background-cmd "${BACKGROUND_CMD}" --binary "${BINARY}" --progress-every "${PROGRESS_EVERY}" --heartbeat-sec "${HEARTBEAT_SEC}" $( [ "${VERBOSE}" = "1" ] && echo "--verbose" ) || true
     - $REPO_PATH/Runner/utils/send-to-lava.sh Hackbench.res

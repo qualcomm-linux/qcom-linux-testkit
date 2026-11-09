@@ -9,6 +9,8 @@ metadata:
     - preempt-rt
 
 params:
+  RT_CPUS: ""
+  BG_CPUS: ""
   DURATION: "30s"
   MLOCKALL: "false"
   RR: "false"
@@ -27,5 +29,5 @@ run:
   steps:
     - REPO_PATH=$PWD
     - cd Runner/suites/Kernel/RT-tests/PI_Stress
-    - ./run.sh --duration "${DURATION}" --mlockall "${MLOCKALL}" --rr "${RR}" --iterations "${ITERATIONS}" --background-cmd "${BACKGROUND_CMD}" --user-baseline "${USER_BASELINE}" --binary "${BINARY}" --out "${OUT_DIR}" --progress-every "${PROGRESS_EVERY}" --heartbeat-sec "${HEARTBEAT_SEC}" $( [ "${VERBOSE}" = "1" ] && echo "--verbose" ) || true
+    - RT_CPUS="${RT_CPUS}" BG_CPUS="${BG_CPUS}" ./run.sh --duration "${DURATION}" --mlockall "${MLOCKALL}" --rr "${RR}" --iterations "${ITERATIONS}" --background-cmd "${BACKGROUND_CMD}" --user-baseline "${USER_BASELINE}" --binary "${BINARY}" --out "${OUT_DIR}" --progress-every "${PROGRESS_EVERY}" --heartbeat-sec "${HEARTBEAT_SEC}" $( [ "${VERBOSE}" = "1" ] && echo "--verbose" ) || true
     - $REPO_PATH/Runner/utils/send-to-lava.sh PI_Stress.res
