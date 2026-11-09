@@ -4636,23 +4636,45 @@ platform_device_driver_name() {
     basename "$pddn_driver_path"
 }
 
-# iommu_validate_runtime_devices <result-directory>
+# iommu_validate_runtime_devices <result-directory> [all|registered]
 # Validate enabled DT DMA contexts against their exact runtime bus devices.
 # Container parents need no group when the DT assigns DMA to child contexts.
+# Default to all enabled DT contexts. Registered scope checks only contexts
+# with a runtime bus device, whose parent can consume other DT children.
+# Driver links are diagnostic, require actual group and reverse membership.
 # Retain DT, device, driver and group evidence. Diagnostics go to stderr.
 # Return 0 for complete attachment, 1 for broken attachment/discovery, 2 when
 # DT context evidence is unavailable, and 3 for invalid input. No state changes.
 iommu_validate_runtime_devices() (
     ivrd_out="$1"
     [ -n "$ivrd_out" ] || exit 3
+    ivrd_scope="${2:-all}"
+    case "$ivrd_scope" in
+        all|registered)
+            ;;
+        *)
+            exit 3
+            ;;
+    esac
     mkdir -p "$ivrd_out" || exit 1
-    ivrd_root=$(dt_runtime_root) || exit 2
     ivrd_index="$ivrd_out/iommu_platform_index.tsv"
     ivrd_candidates="$ivrd_out/iommu_device_candidates.tsv"
     ivrd_nodes="$ivrd_out/iommu_dt_nodes.log"
     ivrd_inventory="$ivrd_out/iommu_contexts.tsv"
+    ivrd_groups="$ivrd_out/iommu_group_members.tsv"
     : >"$ivrd_index" || exit 1
     : >"$ivrd_inventory" || exit 1
+    : >"$ivrd_groups" || exit 1
+    for ivrd_group_dir in /sys/kernel/iommu_groups/*; do
+        [ -d "$ivrd_group_dir" ] || continue
+        for ivrd_member in "$ivrd_group_dir"/devices/*; do
+            [ -e "$ivrd_member" ] || continue
+            ivrd_member_device=$(readlink -f "$ivrd_member") || exit 1
+            printf '%s|%s\n' "${ivrd_group_dir##*/}" "$ivrd_member_device" \
+                >>"$ivrd_groups" || exit 1
+        done
+    done
+    ivrd_root=$(dt_runtime_root) || exit 2
     # The generic provider index does not include iommus. Collect it once here.
     if DT_PROPERTY_INDEX="" dt_list_enabled_property_nodes "$ivrd_root" iommus >"$ivrd_nodes"; then
         :
@@ -4667,7 +4689,7 @@ iommu_validate_runtime_devices() (
     for ivrd_link in /sys/bus/*/devices/*/of_node; do
         [ -e "$ivrd_link" ] || continue
         ivrd_node=$(readlink -f "$ivrd_link") || exit 1
-        ivrd_device=${ivrd_link%/of_node}
+        ivrd_device=$(readlink -f "${ivrd_link%/of_node}") || exit 1
         ivrd_priority=2
         if [ -e "$ivrd_device/iommu_group" ]; then
             ivrd_priority=0
@@ -4693,8 +4715,11 @@ iommu_validate_runtime_devices() (
             ivrd_parent=${ivrd_parent%/*}
         done
         [ "$ivrd_enabled" -eq 1 ] || continue
-        ivrd_count=$((ivrd_count + 1))
         ivrd_device=$(DT_PLATFORM_DEVICE_INDEX="$ivrd_index" find_platform_device_for_dt_node "$ivrd_node") || ivrd_device=""
+        if [ "$ivrd_scope" = registered ] && [ -z "$ivrd_device" ]; then
+            continue
+        fi
+        ivrd_count=$((ivrd_count + 1))
         ivrd_driver="unbound"
         ivrd_group="missing"
         ivrd_status="FAIL"
@@ -4702,7 +4727,12 @@ iommu_validate_runtime_devices() (
             ivrd_driver=$(platform_device_driver_name "$ivrd_device") || ivrd_driver="unbound"
             if [ -e "$ivrd_device/iommu_group" ]; then
                 ivrd_group=$(readlink -f "$ivrd_device/iommu_group") || exit 1
-                ivrd_status="PASS"
+                ivrd_group_id=${ivrd_group##*/}
+                if [ -d "$ivrd_group" ] &&
+                   [ "$ivrd_group" = "$(readlink -f "/sys/kernel/iommu_groups/$ivrd_group_id")" ] &&
+                   grep -Fx "$ivrd_group_id|$ivrd_device" "$ivrd_groups" >/dev/null; then
+                    ivrd_status="PASS"
+                fi
             fi
         fi
         ivrd_iommus=$(dt_property_hex "$ivrd_node" iommus) || ivrd_iommus="unreadable"
