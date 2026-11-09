@@ -7350,48 +7350,29 @@ audio_card_find_matching_cards() {
 }
 
 # Return 0 if current DT/sysfs suggests audio card registration is expected.
-audio_card_dt_audio_expected() {
-  if [ -d /sys/class/sound ]; then
-    for card_path in /sys/class/sound/card*; do
-      if [ -e "$card_path" ]; then
-        return 0
-      fi
+audio_card_dt_audio_expected() (
+    for acdae_card in /sys/class/sound/card*; do
+        [ -e "$acdae_card" ] && return 0
     done
-  fi
-
-  audio_card_dt_root="$(dt_runtime_root)" || return 1
-
-  if find "$audio_card_dt_root" -type d \( \
-      -name "sound" -o \
-      -name "*sound*" -o \
-      -name "*audio*" \
-    \) 2>/dev/null | grep -q .; then
-    return 0
-  fi
-
-  compat_match_dir="$(audio_scratch_dir 2>/dev/null || true)"
-  [ -n "$compat_match_dir" ] || return 1
-  compat_match_file="$(mktemp "$compat_match_dir/audio_compat_match.XXXXXX" 2>/dev/null || printf '%s\n' "$compat_match_dir/audio_compat_match.$$")"
-  : > "$compat_match_file" 2>/dev/null || return 1
-
-  find "$audio_card_dt_root" -name compatible -type f 2>/dev/null |
-  while IFS= read -r compat_file || [ -n "$compat_file" ]; do
-    [ -n "$compat_file" ] || continue
-
-    if tr '\000' '\n' < "$compat_file" 2>/dev/null | grep -Eiq 'qcom,.*(sound|audio|snd|lpass|wsa|rx-macro|tx-macro|va-macro|codec|swr|soundwire)'; then
-      printf '%s\n' "$compat_file" > "$compat_match_file"
-      break
-    fi
-  done
-
-  if [ -s "$compat_match_file" ]; then
-    rm -f "$compat_match_file" 2>/dev/null || true
-    return 0
-  fi
-
-  rm -f "$compat_match_file" 2>/dev/null || true
-  return 1
-}
+    acdae_root=$(dt_runtime_root) || return 1
+    acdae_nodes=$(mktemp "$PWD/.audio-dt.XXXXXX") || return 1
+    trap 'rm -f "$acdae_nodes"' 0
+    find "$acdae_root" -type d >"$acdae_nodes" || return 1
+    while IFS= read -r acdae_node; do
+        case "${acdae_node##*/}" in
+            *sound*|*audio*)
+                dt_node_enabled "$acdae_node" || continue
+                return 0
+                ;;
+        esac
+        acdae_compat=$(dt_property_text "$acdae_node" compatible 2>/dev/null || true)
+        if printf '%s\n' "$acdae_compat" | grep -Eiq 'qcom,.*(sound|audio|snd|lpass|wsa|rx-macro|tx-macro|va-macro|codec|swr|soundwire)'; then
+            dt_node_enabled "$acdae_node" || continue
+            return 0
+        fi
+    done <"$acdae_nodes"
+    return 1
+)
 
 # Wait for at least one valid ALSA card, optionally matching AUDIO_CARD_MATCH.
 audio_card_wait_for_cards() {
@@ -7603,10 +7584,10 @@ audio_card_validate_control_nodes() {
 
     control_node="/dev/snd/controlC${card_idx}"
 
-    if [ -e "$control_node" ]; then
-      log_pass "ALSA control node present for card ${card_idx}, ${control_node}, id='${card_id}', desc='${card_desc}'"
+    if [ -c "$control_node" ]; then
+      log_pass "ALSA control character device present for card ${card_idx}, ${control_node}, id='${card_id}', desc='${card_desc}'"
     else
-      log_fail "Missing ALSA control node for card ${card_idx}, expected ${control_node}, id='${card_id}', desc='${card_desc}'"
+      log_fail "Missing or invalid ALSA control character device for card ${card_idx}, expected ${control_node}, id='${card_id}', desc='${card_desc}'"
       failed=1
     fi
   done < "$cards_file"
@@ -7704,12 +7685,12 @@ audio_card_validate_pcm_nodes() {
           total_checked=$((total_checked + 1))
           pcm_node="/dev/snd/pcmC${card_idx}D${pcm_dev_num}p"
 
-          if [ -e "$pcm_node" ]; then
+          if [ -c "$pcm_node" ]; then
             if [ "$mode" = "any" ]; then
               log_pass "Advertised playback PCM node present, ${pcm_node}, card=${card_idx}, id='${card_id}', desc='${card_desc}'"
             fi
           else
-            log_fail "Advertised playback PCM node missing, expected ${pcm_node}, line='${pcm_line}', card=${card_idx}, id='${card_id}', desc='${card_desc}'"
+            log_fail "Advertised playback PCM character device missing or invalid, expected ${pcm_node}, line='${pcm_line}', card=${card_idx}, id='${card_id}', desc='${card_desc}'"
             failed=1
           fi
         fi
@@ -7722,12 +7703,12 @@ audio_card_validate_pcm_nodes() {
           total_checked=$((total_checked + 1))
           pcm_node="/dev/snd/pcmC${card_idx}D${pcm_dev_num}c"
 
-          if [ -e "$pcm_node" ]; then
+          if [ -c "$pcm_node" ]; then
             if [ "$mode" = "any" ]; then
               log_pass "Advertised capture PCM node present, ${pcm_node}, card=${card_idx}, id='${card_id}', desc='${card_desc}'"
             fi
           else
-            log_fail "Advertised capture PCM node missing, expected ${pcm_node}, line='${pcm_line}', card=${card_idx}, id='${card_id}', desc='${card_desc}'"
+            log_fail "Advertised capture PCM character device missing or invalid, expected ${pcm_node}, line='${pcm_line}', card=${card_idx}, id='${card_id}', desc='${card_desc}'"
             failed=1
           fi
         fi
@@ -9959,6 +9940,15 @@ audio_run_helper_as_test_user() {
 
   arhatu_helper="$1"
   shift
+  # Inventory helpers need no desktop session in image-only kernel validation.
+  if [ "${TESTKIT_IMAGE_ONLY:-0}" = 1 ] && [ "$arhatu_require_session" -eq 0 ]; then
+    case "$arhatu_helper" in
+      audio_card_validate_control_nodes|audio_card_validate_pcm_nodes)
+        "$arhatu_helper" "$@"
+        return $?
+        ;;
+    esac
+  fi
 
   if command -v pkg_detect_os_id >/dev/null 2>&1; then
     arhatu_os_id="$(
