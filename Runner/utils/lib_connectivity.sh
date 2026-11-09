@@ -5,12 +5,30 @@
 # Source functestlib.sh before sourcing this file.
 # Best-effort helper to unblock WiFi before discovery or retry loops.
 # Silent success is acceptable on minimal images where rfkill may be absent.
-wifi_unblock_rfkill() {
-    if command -v rfkill >/dev/null 2>&1; then
-        rfkill unblock wifi >/dev/null 2>&1 || true
-        rfkill unblock all >/dev/null 2>&1 || true
+wifi_unblock_rfkill() (
+    wur_selected="${1:-${WIFI_IFACE:-}}"
+    wur_device=""
+    if [ -n "$wur_selected" ]; then
+        wur_device=$(readlink -f "/sys/class/net/$wur_selected/device") || return 1
     fi
-}
+    for wur_node in /sys/class/rfkill/rfkill*; do
+        [ -r "$wur_node/type" ] || continue
+        [ "$(cat "$wur_node/type")" = wlan ] || continue
+        wur_radio=$(readlink -f "$wur_node/device") || continue
+        if [ -n "$wur_device" ]; then
+            case "$wur_radio" in
+                "$wur_device"|"$wur_device"/*)
+                    ;;
+                *)
+                    continue
+                    ;;
+            esac
+        fi
+        if [ "$(cat "$wur_node/soft")" = 1 ]; then
+            printf '%s\n' 0 >"$wur_node/soft" || return 1
+        fi
+    done
+)
 
 # Retry WiFi interface discovery for a bounded time while unblocking rfkill.
 # Prints interface name on success and returns non-zero on timeout.
@@ -43,7 +61,7 @@ wifi_wait_command() (
     run_with_managed_timeout "$wifi_op_limit" "$PWD" "$wifi_op_label" "$@"
 )
 
-wait_for_wifi_interface() {
+wait_for_wifi_interface() (
     max_wait="${1:-60}"
     sleep_step="${2:-2}"
     waited=0
@@ -53,6 +71,11 @@ wait_for_wifi_interface() {
     reload_done=0
     reload_after=""
     mod=""
+    wifi_restore_module=""
+    trap 'if [ -n "$wifi_restore_module" ]; then
+        run_with_managed_timeout 10 "$PWD" wifi-restore modprobe "$wifi_restore_module" >&2 || exit 3
+    fi' 0
+    trap 'exit 3' HUP INT TERM
     recovery_modules="${WIFI_RECOVERY_MODULES:-ath12k_wifi7 ath12k_pci ath12k_ahb ath11k_pci ath11k_ahb ath11k_snoc ath10k_snoc ath10k_pci ath10k_sdio}"
 
     case "$max_wait" in
@@ -96,7 +119,7 @@ wait_for_wifi_interface() {
     log_info "Waiting up to ${max_wait}s for WiFi interface creation" >&2
 
     while [ "$waited" -lt "$max_wait" ]; do
-        wifi_unblock_rfkill
+        wifi_unblock_rfkill "${WIFI_IFACE:-}"
 
         iface="$(get_wifi_interface 2>/dev/null || true)"
         if [ -n "$iface" ]; then
@@ -135,13 +158,15 @@ wait_for_wifi_interface() {
 
                 log_warn "No WiFi interface after ${waited}s; attempting one controlled reload of $mod" >&2
 
+                wifi_restore_module="$mod"
                 if wifi_wait_command 10 wifi-unload modprobe -r "$mod" >/dev/null 2>&1; then
                     sleep 2
 
                     if run_with_managed_timeout 10 "$PWD" wifi-reload modprobe "$mod" >/dev/null 2>&1; then
+                        wifi_restore_module=""
                         log_info "Reloaded WiFi module: $mod" >&2
 
-                        wifi_unblock_rfkill
+                        wifi_unblock_rfkill "${WIFI_IFACE:-}"
 
                         if command -v udevadm >/dev/null 2>&1; then
                             wifi_wait_command 5 wifi-udev udevadm trigger --action=add --subsystem-match=net >/dev/null 2>&1 || true
@@ -154,10 +179,14 @@ wait_for_wifi_interface() {
                             return 0
                         fi
                     else
-                        log_warn "Reload failed for WiFi module $mod after unload" >&2
+                        log_fail "Reload failed for WiFi module $mod after unload" >&2
+                        return 3
                     fi
                 else
-                    log_warn "Could not unload WiFi module $mod; it may be busy" >&2
+                    if is_module_loaded "$mod"; then
+                        wifi_restore_module=""
+                    fi
+                    log_warn "Could not unload WiFi module $mod, it may be busy" >&2
                 fi
 
                 # Attempt only one loaded leaf driver module.
@@ -180,7 +209,7 @@ wait_for_wifi_interface() {
     done
 
     return 1
-}
+)
 
 # Reuse the existing DT matcher with caller-provided WiFi node/compatible
 # patterns so run.sh stays small and gets built-in logging from functestlib.sh.
@@ -276,80 +305,24 @@ infer_wifi_driver_cfgs() {
 }
 
 # Scan kernel logs for WiFi driver probe/runtime failures and print matched
-# lines to stdout. Returns success when probe failures are present.
+# captured faults to stdout. Returns 0 for faults, 1 for clean, 2 for unavailable evidence.
 wifi_has_probe_failures() {
-    outdir="$1"
-    tag="${2:-wifi-probe-check}"
-    include_regex="wifi|wlan|ath|cfg80211|mac80211|qca|wcn|firmware|mhi|pci|msi|qmi"
-    exclude_regex="using dummy regulator|Loading compiled-in X.509 certificates for regulatory database"
-    failure_regex='(ath|wifi|wlan|qca|wcn).*(probe with driver .* failed|failed to alloc msi|qmi dma allocation failed|failed to create .*wlan|failed to register .*wlan|Direct firmware load .* failed|firmware.*failed|failed to load board data|failed to fetch board data|mhi.*failed)|(probe with driver .* failed|failed to alloc msi|qmi dma allocation failed|failed to create .*wlan|failed to register .*wlan|Direct firmware load .* failed|firmware.*failed|failed to load board data|failed to fetch board data|mhi.*failed).*(ath|wifi|wlan|qca|wcn)'
-    recoverable_dma_regex='qmi dma allocation failed.*will try later with small size'
-    errfile=""
-    failure_file=""
-    filtered_failure_file=""
-    tmp_matches=""
-    line=""
-
-    if [ -z "$outdir" ]; then
-        outdir="/tmp/wifi_dmesg"
+    wpf_out="${1:-$PWD/wifi_dmesg}"
+    wpf_tag="${2:-wifi-probe-check}"
+    # Firmware failures must belong to WiFi, Bluetooth shares QCA/WCN names.
+    wpf_include='ath10k|ath11k|ath12k|wifi|wlan|cfg80211|mac80211|regulatory'
+    wpf_exclude='using dummy regulator|Loading compiled-in X.509 certificates for regulatory database|qmi dma allocation failed.*will try later with small size'
+    mkdir -p "$wpf_out" || return 2
+    scan_dmesg_errors "$wpf_out" "$wpf_include" "$wpf_exclude" || true
+    if [ "${DMESG_ACCESS_STATUS:-unavailable}" != available ]; then
+        log_warn "[$wpf_tag] Kernel health unverified, inspect $wpf_out/dmesg_access.log"
+        return 2
     fi
-
-    mkdir -p "$outdir" >/dev/null 2>&1 || true
-    errfile="$outdir/dmesg_errors.log"
-    failure_file="$outdir/wifi_probe_failures.log"
-    filtered_failure_file="${failure_file}.filtered"
-    : >"$failure_file"
-
-    if command -v scan_dmesg_errors >/dev/null 2>&1; then
-        scan_dmesg_errors "$outdir" "$include_regex" "$exclude_regex" >/dev/null 2>&1 || true
-    fi
-
-    if [ -s "$errfile" ]; then
-        grep -Ei "$failure_regex" "$errfile" 2>/dev/null >>"$failure_file" || true
-    fi
-
-    tmp_matches="$(
-        get_kernel_log 2>/dev/null |
-            grep -Ei "$failure_regex" ||
-            true
-    )"
-
-    if [ -n "$tmp_matches" ]; then
-        printf '%s\n' "$tmp_matches" >>"$failure_file"
-    fi
-
-    # ath12k can first request a large QMI DMA buffer and then explicitly
-    # retry with a smaller buffer. Treat that exact retry/fallback indication
-    # as informational; retain all other DMA allocation failures as failures.
-    if grep -Eiq "$recoverable_dma_regex" "$failure_file" 2>/dev/null; then
-        log_info "[$tag] Ignoring recoverable WiFi QMI DMA allocation fallback(s):"
-
-        grep -Ei "$recoverable_dma_regex" "$failure_file" 2>/dev/null |
-            awk '!seen[$0]++' |
-            while IFS= read -r line; do
-                [ -n "$line" ] || continue
-                log_info "[$tag] $line"
-            done
-    fi
-
-    grep -Eiv "$recoverable_dma_regex" "$failure_file" >"$filtered_failure_file" 2>/dev/null || true
-    mv "$filtered_failure_file" "$failure_file"
-
-    if [ -s "$failure_file" ]; then
-        awk '!seen[$0]++' "$failure_file" >"${failure_file}.dedup" 2>/dev/null ||
-            cp "$failure_file" "${failure_file}.dedup" 2>/dev/null ||
-            true
-
-        log_fail "[$tag] matched WiFi probe/runtime failures:"
-        while IFS= read -r line; do
-            [ -n "$line" ] || continue
-            log_fail "[$tag] $line"
-        done <"${failure_file}.dedup"
-
-        rm -f "${failure_file}.dedup"
+    cp "$wpf_out/dmesg_errors.log" "$wpf_out/wifi_probe_failures.log" || return 2
+    if [ -s "$wpf_out/wifi_probe_failures.log" ]; then
+        log_file_with_label WIFI-ERROR "$wpf_out/wifi_probe_failures.log"
         return 0
     fi
-
     return 1
 }
 
@@ -526,6 +499,43 @@ wifi_detect_firmware_info() {
     WIFI_FW_BASENAME=""
     WIFI_FW_SIZE=""
 
+    WIFI_FW_FAMILY="$wifi_selected_family"
+    # shellcheck disable=SC2034 # Reported by the firmware runner.
+    # shellcheck disable=SC2034 # Public result consumed by another script.
+    WIFI_FW_EVIDENCE="asset"
+    # DT firmware requests belong to the bound wireless PHY's controller.
+    for wifi_fw_phy in /sys/class/ieee80211/*; do
+        [ -e "$wifi_fw_phy" ] || continue
+        [ "$(wifi_bound_family "$wifi_fw_phy/device")" = "$wifi_selected_family" ] || continue
+        wifi_fw_owner=$(readlink -f "$wifi_fw_phy/device") || continue
+        while [ "$wifi_fw_owner" != / ]; do
+            wifi_fw_dt=$(readlink -f "$wifi_fw_owner/of_node" 2>/dev/null || true)
+            if [ -d "$wifi_fw_dt" ] && dt_node_enabled "$wifi_fw_dt"; then
+                for wifi_fw_property in firmware-name qcom,firmware-name; do
+                    wifi_fw_request=$(dt_property_text "$wifi_fw_dt" "$wifi_fw_property" 2>/dev/null || true)
+                    for wifi_fw_part in $wifi_fw_request; do
+                        if WIFI_FW_FILE=$(find_image_firmware "$wifi_fw_part"); then
+                            WIFI_FW_BASENAME="${WIFI_FW_FILE##*/}"
+                            WIFI_FW_SIZE=$(stat -Lc%s "$WIFI_FW_FILE" 2>/dev/null || printf '%s' unknown)
+                            return 0
+                        fi
+                    done
+                done
+            fi
+            wifi_fw_owner=${wifi_fw_owner%/*}
+            [ -n "$wifi_fw_owner" ] || break
+        done
+        # Registered PHY is stronger runtime proof than an unrelated family's
+        # first firmware file. Built-in or consumed firmware need not stay on disk.
+        WIFI_FW_FILE="not-exposed"
+        WIFI_FW_BASENAME=""
+        WIFI_FW_SIZE="unknown"
+        # shellcheck disable=SC2034 # Public result consumed by another script.
+        WIFI_FW_EVIDENCE="registered-phy"
+        return 0
+    done
+    # Keep image-asset discovery for unbound legacy transports as diagnostics.
+    # A candidate below is not consumed-firmware proof, the PHY check still gates.
     if [ "$wifi_selected_family" = ath12k ] && [ -d /lib/firmware/ath12k ]; then
         WIFI_FW_FILE="$(
             wifi_find_firmware_asset \

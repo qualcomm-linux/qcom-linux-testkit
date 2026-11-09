@@ -999,6 +999,8 @@ bt_scan_devices_interactive_fallback() {
 # shellcheck disable=SC2120
 bt_scan_devices() {
     BT_SCAN_EXECUTION_OK=0
+    # shellcheck disable=SC2034 # Public result consumed by another script.
+    BT_SCAN_CLEANUP_FAILED=0
     adapter="${BT_ADAPTER:-}"
     scan_window="${SCAN_SECONDS:-10}"
     scan_attempts="${SCAN_ATTEMPTS:-3}"
@@ -1078,6 +1080,7 @@ bt_scan_devices() {
     attempt=1
     found_lines=""
 
+    scan_cache_before=$(bt_list_devices_raw 2>/dev/null | sanitize_bt_output || true)
     while [ "$attempt" -le "$scan_attempts" ]; do
         log_info "bt_scan_devices: scan attempt ${attempt}/${scan_attempts}"
 
@@ -1092,7 +1095,14 @@ bt_scan_devices() {
 
         if command -v bt_set_scan >/dev/null 2>&1; then
             if ! bt_set_scan off "$adapter"; then
-                log_warn "bt_scan_devices: bt_set_scan(off) reported failure after attempt $attempt"
+                if bt_scan_poll_off 5 1; then
+                    log_warn "Scan-off command failed, bounded state polling accepted cleanup"
+                else
+                    log_fail "Bluetooth remains discovering after scan-off attempt $attempt"
+                    # shellcheck disable=SC2034 # Public result consumed by another script.
+                    BT_SCAN_CLEANUP_FAILED=1
+                    return 1
+                fi
             fi
         else
             run_with_timeout 5 bluetoothctl scan off >/dev/null 2>&1 || true
@@ -1110,6 +1120,17 @@ bt_scan_devices() {
             )"
         fi
 
+        # Cache fallback contributes only new addresses observed since entry.
+        cache_out=$(printf '%s\n' "$cache_out" | awk -v previous="$scan_cache_before" '
+            BEGIN {
+                n=split(previous, rows, "\n")
+                for (j=1; j<=n; j++) {
+                    split(rows[j], fields, " ")
+                    if (fields[1] == "Device") seen[toupper(fields[2])]=1
+                }
+            }
+            $1 == "Device" && !seen[toupper($2)] { print }
+        ')
         found_lines="$(
             {
                 printf '%s\n' "$live_out"
@@ -1760,96 +1781,12 @@ btloghcidiag() {
         log_warn "journalctl not found; cannot dump bluetooth logs"
     fi
 
-    if command -v dmesg >/dev/null 2>&1; then
-        log_warn "Bluetooth-related dmesg tail:"
-        dmesg 2>&1 |
-            grep -Ei "$bt_dmesg_modules" |
-            tail -n 200 |
-            sed 's/^/[BT-DIAG] /' || true
-    else
-        log_warn "dmesg not found; cannot dump kernel Bluetooth logs"
+    bt_diag_dir="${diag_test_path:-$PWD/results/${TESTNAME:-Bluetooth}/diagnostics}"
+    if [ ! -r "$bt_diag_dir/dmesg_snapshot.log" ]; then
+        scan_dmesg_errors "$bt_diag_dir" "$bt_dmesg_modules" "" || true
     fi
+    log_file_with_label BT-KERNEL "$bt_diag_dir/dmesg_errors.log"
 
-    if [ -n "$diag_test_path" ] && command -v scan_dmesg_errors >/dev/null 2>&1; then
-        log_warn "Running scan_dmesg_errors for Bluetooth-related modules"
-        scan_dmesg_errors "$diag_test_path" "$bt_dmesg_modules" "" || true
-    fi
-
-    log_warn "Bluetooth firmware candidates:"
-
-    fw_list="${TMPDIR:-/tmp}/bt_fw_candidates_$$.txt"
-    : > "$fw_list"
-
-    for qca_root in /lib/firmware/qca /usr/lib/firmware/qca; do
-        [ -d "$qca_root" ] || continue
-
-        log_warn "Firmware root: $qca_root"
-
-        if command -v find >/dev/null 2>&1; then
-            find "$qca_root" -maxdepth 2 -type f \
-                \( -name '*btfw*' -o \
-                   -name '*BT*' -o \
-                   -name '*bt*' -o \
-                   -name '*nv*' -o \
-                   -name '*.tlv' -o \
-                   -name '*.bin' -o \
-                   -name '*.mbn' -o \
-                   -name '*.b*' \) \
-                -print 2>/dev/null >> "$fw_list"
-        fi
-    done
-
-    if [ -s "$fw_list" ]; then
-        sort -u "$fw_list" 2>/dev/null |
-        while IFS= read -r fw_file || [ -n "$fw_file" ]; do
-            [ -n "$fw_file" ] || continue
-
-            if command -v print_path_meta >/dev/null 2>&1; then
-                print_path_meta "$fw_file" 2>/dev/null |
-                    sed 's/^/[BT-DIAG] /' || true
-            elif command -v stat >/dev/null 2>&1; then
-                stat -c '%A %U %G %a %n' "$fw_file" 2>/dev/null |
-                    sed 's/^/[BT-DIAG] /' || true
-            else
-                printf '%s\n' "$fw_file" |
-                    sed 's/^/[BT-DIAG] /'
-            fi
-        done
-    else
-        if command -v btfwpresent >/dev/null 2>&1; then
-            fw_dir="$(btfwpresent 2>/dev/null || true)"
-
-            if [ -n "$fw_dir" ]; then
-                log_warn "btfwpresent found Bluetooth firmware under: $fw_dir"
-
-                if command -v find >/dev/null 2>&1; then
-                    find "$fw_dir" -maxdepth 1 -type f -print 2>/dev/null |
-                    while IFS= read -r fw_file || [ -n "$fw_file" ]; do
-                        [ -n "$fw_file" ] || continue
-
-                        if command -v print_path_meta >/dev/null 2>&1; then
-                            print_path_meta "$fw_file" 2>/dev/null |
-                                sed 's/^/[BT-DIAG] /' || true
-                        elif command -v stat >/dev/null 2>&1; then
-                            stat -c '%A %U %G %a %n' "$fw_file" 2>/dev/null |
-                                sed 's/^/[BT-DIAG] /' || true
-                        else
-                            printf '%s\n' "$fw_file" |
-                                sed 's/^/[BT-DIAG] /'
-                        fi
-                    done
-                else
-                    log_warn "find not available; firmware file listing skipped"
-                fi
-            else
-                log_warn "No Bluetooth firmware candidates found by btfwpresent"
-            fi
-        else
-            log_warn "No Bluetooth firmware candidates found under known QCA firmware roots"
-        fi
-    fi
-
-    rm -f "$fw_list" 2>/dev/null || true
 }
 
 # Warn+diag once per run if "bluetoothctl list" is empty in non-interactive mode.
@@ -2018,14 +1955,32 @@ __BT_POWER__
 
 # bt_set_scan on|off [adapter]
 # NOTE:
-#   - We deliberately ignore adapter here and rely on BlueZ's default controller,
-#     which matches the manual "bluetoothctl ; scan on" usage.
+#   - Without an adapter, retain the existing default-controller flow.
+#   - An explicit adapter is resolved to its runtime BD address in one session.
 #   - Non-expect, pure CLI.
 bt_set_scan() {
     mode="$1"
-    # $2 (adapter) is currently unused but kept for API compatibility.
-    # adapter="${2:-}"
 
+    if [ -n "${2:-}" ]; then
+        bt_scan_addr=$(btgetbdaddr "$2" 2>/dev/null | awk 'NF { print $NF; exit }')
+        [ -n "$bt_scan_addr" ] || return 1
+        bt_scan_selected_output=$(btctl_script "select $bt_scan_addr" "scan $mode" "show $bt_scan_addr" "quit" 2>/dev/null || true)
+        case "$mode" in
+            on)
+                printf '%s\n' "$bt_scan_selected_output" | grep -q 'Discovery started' && return 0
+                [ "$(bt_get_discovering "$2" 2>/dev/null)" = yes ]
+                return $?
+                ;;
+            off)
+                printf '%s\n' "$bt_scan_selected_output" | grep -q 'Discovery stopped' && return 0
+                [ "$(bt_get_discovering "$2" 2>/dev/null)" = no ]
+                return $?
+                ;;
+            *)
+                return 2
+                ;;
+        esac
+    fi
     [ -n "$mode" ] || return 2
 
     case "$mode" in
@@ -2353,9 +2308,11 @@ bt_find_loaded_nvm_firmware() {
     bt_flnf_log=""
     bt_flnf_adapter_log=""
 
-    if command -v get_kernel_log >/dev/null 2>&1; then
-        bt_flnf_log="$(get_kernel_log 2>/dev/null || true)"
+    bt_flnf_snapshot="${BT_KERNEL_LOG_DIR:-$PWD/results/${TESTNAME:-Bluetooth}/kernel}/dmesg_snapshot.log"
+    if [ ! -r "$bt_flnf_snapshot" ]; then
+        scan_dmesg_errors "${bt_flnf_snapshot%/*}" 'Bluetooth|hci[0-9]+|btqca|btusb|hci_uart' '' >&2 || true
     fi
+    bt_flnf_log=$(cat "$bt_flnf_snapshot" 2>/dev/null || true)
 
     [ -n "$bt_flnf_log" ] || return 1
 
@@ -3235,8 +3192,18 @@ bt_pair_once() {
 # Get current Discovering state from bluetoothctl show.
 # Prints one of: yes | no | unknown
 bt_get_discovering() {
+    bt_discovery_adapter="${1:-${BT_ADAPTER:-}}"
+    set -- bluetoothctl show
+    if [ -n "$bt_discovery_adapter" ]; then
+        bt_discovery_addr=$(btgetbdaddr "$bt_discovery_adapter" 2>/dev/null | awk 'NF { print $NF; exit }')
+        if [ -z "$bt_discovery_addr" ]; then
+            printf '%s\n' unknown
+            return 1
+        fi
+        set -- "$@" "$bt_discovery_addr"
+    fi
     out="$(
-        run_with_timeout 3 bluetoothctl show 2>/dev/null \
+        run_with_timeout 3 "$@" 2>/dev/null \
             | sanitize_bt_output \
             | tr -d '\r'
     )"
@@ -3862,10 +3829,91 @@ bt_start_image_daemons() {
     return 0
 }
 
+# bt_snapshot_adapter_state <adapter>
+# Save the selected adapter's readable power/discovery state before exercise.
+# Return 1 when power cannot be observed, unknown optional discovery is retained.
+bt_snapshot_adapter_state() {
+    BT_STATE_ADAPTER="$1"
+    BT_STATE_POWER=$(btgetpower "$BT_STATE_ADAPTER" 2>/dev/null || true)
+    BT_STATE_DISCOVERING=$(bt_get_discovering "$BT_STATE_ADAPTER" 2>/dev/null || true)
+    case "$BT_STATE_POWER" in
+        yes|no)
+            return 0
+            ;;
+    esac
+    return 1
+}
+
+# bt_restore_adapter_state
+# Restore only the adapter saved by bt_snapshot_adapter_state. Preserve paired
+# devices and cache. Return 1 for incomplete verified restoration.
+bt_restore_adapter_state() {
+    [ -n "${BT_STATE_ADAPTER:-}" ] || return 0
+    bt_restore_rc=0
+    bt_current_power=$(btgetpower "$BT_STATE_ADAPTER" 2>/dev/null || true)
+    if [ "$bt_current_power" != "$BT_STATE_POWER" ]; then
+        case "$BT_STATE_POWER" in
+            yes)
+                btpower "$BT_STATE_ADAPTER" on || bt_restore_rc=1
+                ;;
+            no)
+                btpower "$BT_STATE_ADAPTER" off || bt_restore_rc=1
+                ;;
+        esac
+    fi
+    bt_current_scan=$(bt_get_discovering "$BT_STATE_ADAPTER" 2>/dev/null || true)
+    case "${BT_STATE_DISCOVERING:-unknown}" in
+        yes|no)
+            if [ "$bt_current_scan" != "$BT_STATE_DISCOVERING" ]; then
+                if [ "$BT_STATE_DISCOVERING" = yes ]; then
+                    bt_set_scan on "$BT_STATE_ADAPTER" || bt_restore_rc=1
+                else
+                    # Unknown optional discovery state remains unverified.
+                    if ! bt_set_scan off "$BT_STATE_ADAPTER"; then
+                        bt_current_scan=$(bt_get_discovering "$BT_STATE_ADAPTER" 2>/dev/null || true)
+                        [ "$bt_current_scan" != yes ] || bt_restore_rc=1
+                    fi
+                fi
+            fi
+            ;;
+        *)
+            if [ "$bt_current_scan" = yes ]; then
+                bt_set_scan off "$BT_STATE_ADAPTER" || bt_restore_rc=1
+            fi
+            ;;
+    esac
+    if [ "$(btgetpower "$BT_STATE_ADAPTER" 2>/dev/null)" != "$BT_STATE_POWER" ]; then
+        bt_restore_rc=1
+    fi
+    bt_current_scan=$(bt_get_discovering "$BT_STATE_ADAPTER" 2>/dev/null || true)
+    case "$BT_STATE_DISCOVERING:$bt_current_scan" in
+        yes:no|no:yes)
+            bt_restore_rc=1
+            ;;
+    esac
+    if [ "$bt_restore_rc" -eq 0 ]; then
+        BT_STATE_ADAPTER=""
+    fi
+    return "$bt_restore_rc"
+}
+
 # bt_cleanup_image_daemons
 # Stop only children launched by this runner, BlueZ before its system bus.
 bt_cleanup_image_daemons() {
-    managed_timeout_cancel_bounded 2 || true
+    bt_cleanup_failed=0
+    managed_timeout_cancel_bounded 2 || bt_cleanup_failed=1
+    if ! bt_restore_adapter_state; then
+        bt_cleanup_failed=1
+        log_fail "Bluetooth adapter state restoration failed"
+        if [ -n "${RES_FILE:-}" ]; then
+            printf '%s FAIL\n' "$TESTNAME" >"$RES_FILE"
+        fi
+    fi
+    if [ -n "${BT_RFKILL_STATE_FILE:-}" ] && ! radio_restore_rfkill "$BT_RFKILL_STATE_FILE"; then
+        bt_cleanup_failed=1
+        log_fail "Bluetooth rfkill restoration failed"
+        printf '%s FAIL\n' "$TESTNAME" >"$RES_FILE"
+    fi
     for bt_owned_pid in "${BT_OWNED_BLUEZ_PID:-}" "${BT_OWNED_DBUS_PID:-}"; do
         [ -n "$bt_owned_pid" ] || continue
         # shellcheck disable=SC2034 # Consumed by managed_timeout_cancel_bounded.
@@ -3874,6 +3922,7 @@ bt_cleanup_image_daemons() {
     done
     BT_OWNED_BLUEZ_PID=""
     BT_OWNED_DBUS_PID=""
+    [ "$bt_cleanup_failed" -eq 0 ]
 }
 
 bt_wait_ready() {
@@ -4165,21 +4214,28 @@ btfwloaded() {
     # Retry/transient hints.
     transient_re="${BTFW_TRANSIENT_RE:-Retry BT power ON|retry bt power on|reset|re-init|reinit|failed.*[(]-110[)]}"
  
-    # ---- Collect recent relevant current-boot kernel log ----
-    if command -v get_kernel_log >/dev/null 2>&1; then
-        out="$(
-            get_kernel_log 2>/dev/null \
-            | grep -i -E 'Bluetooth|hci[0-9]|QCA|wcn|btqca|WCN' \
-            | tail -n "${BTFW_DMESG_TAIL:-600}"
-        )"
-    else
-        out="$(
-            dmesg 2>/dev/null \
-            | grep -i -E 'Bluetooth|hci[0-9]|QCA|wcn|btqca|WCN' \
-            | tail -n "${BTFW_DMESG_TAIL:-600}"
-        )"
+    # shellcheck disable=SC2034 # Public result consumed by another script.
+    BT_FW_FATAL=0
+    btfw_dir="${BT_KERNEL_LOG_DIR:-$PWD/results/$TESTNAME/kernel}"
+    scan_dmesg_errors "$btfw_dir" 'Bluetooth|btqca|btusb|hci_uart|hci[0-9]+' 'not a crash|non-fatal' || true
+    if [ "${DMESG_ACCESS_STATUS:-unavailable}" != available ]; then
+        log_warn "Bluetooth boot health is unverified, see $btfw_dir/dmesg_access.log"
+        return 1
     fi
- 
+    out=$(grep -iE 'Bluetooth|hci[0-9]|QCA|wcn|btqca|WCN' "$btfw_dir/dmesg_snapshot.log" || true)
+    if ! kernel_log_filter_instance_faults "$btfw_dir/dmesg_errors.log" \
+        'Bluetooth|btqca|btusb|hci_uart|hci[0-9]+' 'hci[0-9]+' "$adapter" >"$btfw_dir/fault_blocks.log"; then
+        # shellcheck disable=SC2034 # Public result consumed by another script.
+        BT_FW_FATAL=1
+        return 1
+    fi
+    if [ -s "$btfw_dir/fault_blocks.log" ]; then
+        # shellcheck disable=SC2034 # Public result consumed by another script.
+        BT_FW_FATAL=1
+        log_file_with_label BT-FAULT "$btfw_dir/fault_blocks.log"
+        return 1
+    fi
+
     if [ -z "$out" ]; then
         log_warn "btfwloaded: no Bluetooth/QCA/WCN messages found in current-boot kernel log."
         return 1
@@ -4198,37 +4254,51 @@ btfwloaded() {
             out="$adapter_out"
             log_info "btfwloaded: evaluating firmware log for selected adapter $adapter"
         else
-            log_warn "btfwloaded: no adapter-specific kernel log found for $adapter; falling back to global BT log"
+            log_warn "btfwloaded: no adapter-specific boot markers for $adapter"
+            return 1
         fi
     fi
  
+    # A confirmed crash remains fatal even when firmware later recovers.
+    if printf '%s\n' "$out" | grep -Ei '(^|[^[:alnum:]_-])(fatal|crashed|panic|oops)([^[:alnum:]_-]|$)|crash detected|handling crash' |
+       grep -Eiv 'not a crash|non-fatal|nonfatal' >"$btfw_dir/fatal_runtime.log"; then
+        # shellcheck disable=SC2034 # Public result consumed by another script.
+        BT_FW_FATAL=1
+        log_file_with_label BT-FATAL "$btfw_dir/fatal_runtime.log"
+        return 1
+    fi
+
     # ---- Find last success line number and last fatal line number ----
     last_success="$(
         printf '%s\n' "$out" \
-        | awk -v IGNORECASE=1 -v re="$success_re" '
-            $0 ~ re { n=NR }
+        | awk -v re="$success_re" '
+            tolower($0) ~ tolower(re) { n=NR }
             END { if (n > 0) print n; else print 0 }
         '
     )"
  
     last_fatal="$(
         printf '%s\n' "$out" \
-        | awk -v IGNORECASE=1 -v re="$fatal_re" '
-            $0 ~ re { n=NR }
+        | awk -v re="$fatal_re" '
+            tolower($0) ~ tolower(re) { n=NR }
             END { if (n > 0) print n; else print 0 }
         '
     )"
  
     saw_transient="$(
         printf '%s\n' "$out" \
-        | awk -v IGNORECASE=1 -v re="$transient_re" '
-            $0 ~ re { found=1; exit }
+        | awk -v re="$transient_re" '
+            tolower($0) ~ tolower(re) { found=1; exit }
             END { if (found) print 1; else print 0 }
         '
     )"
  
     # ---- Decision tree ----
     if [ "$last_success" -eq 0 ]; then
+        if [ "$last_fatal" -gt 0 ]; then
+            # shellcheck disable=SC2034 # Public result consumed by another script.
+            BT_FW_FATAL=1
+        fi
         log_warn "btfwloaded: no firmware success marker found${adapter:+ for $adapter} (pattern: $success_re). Recent kernel-log tail:"
         printf '%s\n' "$out" | tail -n 30 >&2
         return 1
@@ -4236,6 +4306,8 @@ btfwloaded() {
  
     # Fatal after success => FAIL only within the selected adapter scope.
     if [ "$last_fatal" -gt "$last_success" ]; then
+        # shellcheck disable=SC2034 # Public result consumed by another script.
+        BT_FW_FATAL=1
         log_warn "btfwloaded: fatal BT/QCA errors occurred after firmware success marker${adapter:+ for $adapter}, treating as FAIL."
         printf '%s\n' "$out" | tail -n 40 >&2
         return 1
@@ -4264,7 +4336,8 @@ btkmdpresent() {
         if [ -d "/sys/module/$m" ]; then present=1; break; fi
     done
     if [ $present -eq 1 ]; then return 0; fi
-    if dmesg 2>/dev/null | grep -qi 'HCI UART protocol QCA registered'; then
+    if [ -r "${BT_KERNEL_LOG_DIR:-$PWD/results/$TESTNAME/kernel}/dmesg_snapshot.log" ] &&
+       grep -qi 'HCI UART protocol QCA registered' "${BT_KERNEL_LOG_DIR:-$PWD/results/$TESTNAME/kernel}/dmesg_snapshot.log"; then
         return 0
     fi
     return 1

@@ -375,7 +375,7 @@ ethv_qps615_collect_runtime() {
 
         ethv_qcr_driver=""
         if [ -L "$ethv_qcr_device/driver" ]; then
-            ethv_qcr_driver="$(basename "$(readlink -f "$ethv_qcr_device/driver" 2>/dev/null)" 2>/dev/null || true)"
+            ethv_qcr_driver=$(platform_device_driver_name "$ethv_qcr_device" || true)
         fi
         ethv_qcr_vendor="$(ethv_read_first_line "$ethv_qcr_device/vendor" 2>/dev/null || true)"
         ethv_qcr_id="$(ethv_read_first_line "$ethv_qcr_device/device" 2>/dev/null || true)"
@@ -878,6 +878,7 @@ ethv_wait_for_ipv4() {
             printf '%s\n' "$ethv_wfi_ip"
             return 0
         fi
+        return 1
     fi
 
     while [ "$ethv_wfi_waited" -le "$ethv_wfi_timeout" ]; do
@@ -914,7 +915,9 @@ ethv_prepare_interface() {
     if ! ethv_wait_for_carrier "$ethv_pi_iface" 1; then
         if command -v ethEnsureLinkUpWithFallback >/dev/null 2>&1 && \
            command -v ethtool >/dev/null 2>&1; then
-            ethEnsureLinkUpWithFallback "$ethv_pi_iface" "$ethv_pi_link_timeout" >/dev/null 2>&1 || true
+            if [ "${ETHV_PRESERVE_LINK_SETTINGS:-0}" != 1 ]; then
+                ethEnsureLinkUpWithFallback "$ethv_pi_iface" "$ethv_pi_link_timeout" >/dev/null 2>&1 || true
+            fi
         fi
     fi
 
@@ -981,7 +984,10 @@ ethv_ping_interface() {
     ethv_pi_count="${3:-4}"
     ethv_pi_wait="${4:-2}"
 
-    ping -I "$ethv_pi_iface" \
+    ethv_is_positive_integer "$ethv_pi_count" || return 2
+    ethv_is_positive_integer "$ethv_pi_wait" || return 2
+    ethv_pi_deadline=$((ethv_pi_count * (ethv_pi_wait + 1) + 5))
+    run_with_managed_timeout "$ethv_pi_deadline" "$PWD" ethernet-ping ping -I "$ethv_pi_iface" \
         -c "$ethv_pi_count" \
         -W "$ethv_pi_wait" \
         "$ethv_pi_target"
@@ -1137,3 +1143,32 @@ ethv_float_ge() {
         }
     '
 }
+
+# ethv_capture_failure <interface> <output-directory>
+# Retain ethtool driver/link/statistics evidence without changing device settings.
+# Replay to stdout for LAVA. Missing optional ethtool is explicitly recorded.
+ethv_capture_failure() (
+    ecf_iface="$1"
+    ecf_out="$2"
+    mkdir -p "$ecf_out" || return 1
+    {
+        printf 'interface=%s driver=%s carrier=%s operstate=%s speed=%s duplex=%s\n' \
+            "$ecf_iface" "$(ethv_get_driver "$ecf_iface")" "$(ethv_get_carrier "$ecf_iface")" \
+            "$(ethv_get_operstate "$ecf_iface")" "$(ethv_get_speed "$ecf_iface")" "$(ethv_get_duplex "$ecf_iface")"
+        if command -v ethtool >/dev/null 2>&1; then
+            for ecf_option in link -i -S; do
+                printf '\n[ETHTOOL] %s %s\n' "$ecf_option" "$ecf_iface"
+                if [ "$ecf_option" = link ]; then
+                    run_with_managed_timeout 5 "$ecf_out" ethtool ethtool "$ecf_iface"
+                else
+                    run_with_managed_timeout 5 "$ecf_out" ethtool ethtool "$ecf_option" "$ecf_iface"
+                fi
+                ecf_rc=$?
+                printf '[ETHTOOL] status=%s\n' "$ecf_rc"
+            done
+        else
+            printf 'Optional ethtool is absent from the image\n'
+        fi
+    } >"$ecf_out/ethtool.log" 2>&1
+    log_file_with_label ETH-DIAG "$ecf_out/ethtool.log"
+)
