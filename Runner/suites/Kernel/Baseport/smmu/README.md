@@ -31,7 +31,8 @@ and context failures are also printed to stdout. Group members are printed on
 attachment failure. Fault and bypass wording is treated as an error,
 never as a benign exclusion. The captured log is reused for all filtering.
 The ordinary strict or lazy TLB invalidation policy announcement is benign.
-Only the complete policy line is excluded. Invalidation errors, timeouts and
+Only the complete policy line is excluded, with optional timestamp/thread
+prefixes, whether separated by spaces or adjacent. Invalidation errors, timeouts and
 translation or permission faults continue to fail.
 
 The same image-provided shell tools are used on Yocto, Debian, Ubuntu and CentOS.
