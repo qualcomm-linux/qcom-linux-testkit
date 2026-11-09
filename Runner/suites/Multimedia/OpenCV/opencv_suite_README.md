@@ -1,6 +1,11 @@
 # OpenCV Test/Perf Suite Runner — README
 *(Updated 2025-10-15 10:33:13Z)*
 
+All accuracy, performance, custom and smoke runs require a positive gtest
+execution summary. Exit zero cannot override reported failed tests. Listing,
+zero executed tests and all-skipped workloads produce SKIP. Unknown options or
+suite names fail rather than selecting a different workload.
+
 This README documents the **OpenCV-only** test/performance suite runner (`run.sh`) that auto-discovers
 OpenCV gtest binaries (`opencv_test_*`) and perf binaries (`opencv_perf_*`), runs them with a unified
 interface, and produces a single summary with correct exit codes. Camera tests are **not** included here.
