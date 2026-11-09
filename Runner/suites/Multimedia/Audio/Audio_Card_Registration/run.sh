@@ -168,11 +168,19 @@ fi
 # orchestrator on Debian and CentOS, so logs, results, inventory, and dmesg
 # evidence stay root-owned.
 RES_FILE="$SCRIPT_DIR/$TESTNAME.res"
+# Gate image utilities before topology, FIT, user or package helpers use them.
+if ! CHECK_DEPS_NO_EXIT=1 CHECK_DEPS_RECOVER=0 check_dependencies \
+    awk grep sed cat find sleep wc readlink tr mkdir mktemp date cp; then
+    test_result_init "$TESTNAME" "$RES_FILE" || exit 1
+    test_result_finish SKIP "Image lacks registration inventory utilities"
+fi
+
 if ! LOGDIR="$(audio_create_run_directory "$AUDIO_WORK_DIR/results/$TESTNAME")"; then
     log_fail "$TESTNAME FAIL - cannot create artifacts under CWD=$AUDIO_WORK_DIR"
     echo "$TESTNAME FAIL" >"$RES_FILE"
     exit 1
 fi
+
 
 # Package preparation is privileged and runs exactly once in the root runner.
 TMPDIR="$LOGDIR"
@@ -220,7 +228,7 @@ if ! command -v audio_prepare_desktop_audio_environment >/dev/null 2>&1; then
     exit 1
 fi
 
-if ! audio_prepare_desktop_audio_environment 0; then
+if [ "${TESTKIT_IMAGE_ONLY:-0}" != 1 ] && ! audio_prepare_desktop_audio_environment 0; then
     log_fail "$TESTNAME FAIL: desktop Audio environment preparation failed"
     echo "$TESTNAME FAIL" > "$RES_FILE"
     exit 1
@@ -452,7 +460,7 @@ if ! cd "$test_path"; then
     exit 1
 fi
 
-if ! CHECK_DEPS_NO_EXIT=1 check_dependencies awk grep sed cat ls find sleep wc chmod; then
+if ! CHECK_DEPS_NO_EXIT=1 CHECK_DEPS_RECOVER=0 check_dependencies awk grep sed cat ls find sleep wc chmod; then
     log_skip "$TESTNAME SKIP: missing required dependencies"
     echo "$TESTNAME SKIP" > "$RES_FILE"
     exit 0
