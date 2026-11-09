@@ -304,13 +304,39 @@ infer_wifi_driver_cfgs() {
     done
 }
 
+# wifi_filter_regulatory_warnings <captured-log> <warning-file>
+# Print remaining lines and retain only optional global database lookup warnings.
+# No kernel read or readiness claim occurs. Callers must validate their runtime.
+# Return 0 on successful classification, 2 on unavailable input/output.
+wifi_filter_regulatory_warnings() (
+    wfrw_input="$1"
+    wfrw_warnings="$2"
+    [ -r "$wfrw_input" ] || return 2
+    : >"$wfrw_warnings" || return 2
+    awk -v warnings="$wfrw_warnings" '
+        {
+            text=$0
+            sub(/^[[:space:]]*/, "", text)
+            while (text ~ /^\[[^]]*\]/) {
+                sub(/^\[[^]]*\][[:space:]]*/, "", text)
+            }
+            if (text ~ /^cfg80211: failed to load regulatory[.]db[[:space:]]*$/ ||
+                text ~ /^[^:]*regulatory: Direct firmware load for regulatory[.]db failed with error -2[[:space:]]*$/) {
+                print $0 >> warnings
+            } else {
+                print
+            }
+        }
+    ' "$wfrw_input" || return 2
+)
+
 # Scan kernel logs for WiFi driver probe/runtime failures and print matched
 # captured faults to stdout. Returns 0 for faults, 1 for clean, 2 for unavailable evidence.
 wifi_has_probe_failures() {
     wpf_out="${1:-$PWD/wifi_dmesg}"
     wpf_tag="${2:-wifi-probe-check}"
     # Firmware failures must belong to WiFi, Bluetooth shares QCA/WCN names.
-    wpf_include='ath10k|ath11k|ath12k|wifi|wlan|cfg80211|mac80211|regulatory'
+    wpf_include='ath(10|11|12)k[^[:space:]:]*|wifi[^[:space:]:]*|wlan[^[:space:]:]*|cfg80211|mac80211|([^[:space:]:]+[[:space:]]+)?regulatory'
     wpf_exclude='using dummy regulator|Loading compiled-in X.509 certificates for regulatory database|qmi dma allocation failed.*will try later with small size'
     mkdir -p "$wpf_out" || return 2
     scan_dmesg_errors "$wpf_out" "$wpf_include" "$wpf_exclude" || true
@@ -318,7 +344,14 @@ wifi_has_probe_failures() {
         log_warn "[$wpf_tag] Kernel health unverified, inspect $wpf_out/dmesg_access.log"
         return 2
     fi
-    cp "$wpf_out/dmesg_errors.log" "$wpf_out/wifi_probe_failures.log" || return 2
+    # A registered runtime is checked by each caller. Invalid databases, device
+    # firmware errors and captured fault blocks remain failures.
+    wifi_filter_regulatory_warnings "$wpf_out/dmesg_errors.log" \
+        "$wpf_out/wifi_regulatory_warnings.log" >"$wpf_out/wifi_probe_failures.log" || return 2
+    if [ -s "$wpf_out/wifi_regulatory_warnings.log" ]; then
+        log_warn "[$wpf_tag] Global regulatory database lookup failed, continuing with wireless driver and PHY validation"
+        log_file_with_label WIFI-REGULATORY "$wpf_out/wifi_regulatory_warnings.log"
+    fi
     if [ -s "$wpf_out/wifi_probe_failures.log" ]; then
         log_file_with_label WIFI-ERROR "$wpf_out/wifi_probe_failures.log"
         return 0

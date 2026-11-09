@@ -1160,6 +1160,115 @@ kernel_config_value() {
     return 1
 }
 
+# kaslr_check_runtime <evidence-directory>
+# Check current-boot KASLR activation using shared config and kernel-log capture.
+# Emits diagnostic logs and sets KASLR_REASON for the caller. Do not use command
+# substitution, stdout contains logs rather than a machine-readable result.
+# Returns 0 for activation, 1 for explicit disable, 2 for unavailable proof,
+# or 3 for an artifact/parser failure. Retains evidence below the supplied path.
+# shellcheck disable=SC2034 # KASLR_REASON is consumed by the suite runner.
+kaslr_check_runtime() {
+    kaslr_dir="$1"
+    KASLR_REASON="Cannot retain KASLR evidence under $kaslr_dir"
+    mkdir -p "$kaslr_dir" || return 3
+    kaslr_config=$(kernel_config_value CONFIG_RANDOMIZE_BASE || true)
+    kaslr_config_source=$(kernel_config_source || true)
+    kaslr_cmdline="unknown"
+    if [ -r /proc/cmdline ]; then
+        kaslr_cmdline=$(cat /proc/cmdline 2>/dev/null) || kaslr_cmdline="unknown"
+    fi
+    kaslr_symbol=$(awk '$3 == "_stext" || $3 == "stext" {print $1; exit}' \
+        /proc/kallsyms 2>/dev/null || true)
+    kaslr_kptr=$(cat /proc/sys/kernel/kptr_restrict 2>/dev/null || true)
+    {
+        printf 'kernel=%s\n' "$(uname -r)"
+        printf 'config=%s source=%s\n' "${kaslr_config:-unknown}" \
+            "${kaslr_config_source:-unavailable}"
+        printf 'cmdline=%s\n' "$kaslr_cmdline"
+        printf 'text_symbol=%s kptr_restrict=%s (diagnostic only)\n' \
+            "${kaslr_symbol:-unavailable}" "${kaslr_kptr:-unknown}"
+    } >"$kaslr_dir/kaslr_runtime.log" || return 3
+    log_file_with_label KASLR "$kaslr_dir/kaslr_runtime.log"
+
+    # Capture before any verdict so disabled and inconclusive runs retain logs.
+    scan_dmesg_errors "$kaslr_dir" 'kaslr|randomiz|Kernel Offset' '' || true
+    : >"$kaslr_dir/kaslr_boot_evidence.log" || return 3
+    if [ "${DMESG_ACCESS_STATUS:-unavailable}" = available ]; then
+        # Strip only kernel timestamps or the shared current-boot journal prefix.
+        # Exact message matching avoids treating KPTI or quoted messages as proof.
+        if ! awk '
+            {
+                sub(/^\[journal\][[:space:]]*/, "")
+                sub(/^\[[[:space:]]*[0-9]+([.][0-9]+)?\][[:space:]]*/, "")
+                sub(/^\[[[:space:]]*[TC][[:space:]]*[0-9]+\][[:space:]]*/, "")
+                if ($0 ~ /KASLR|Kernel Offset:/) {
+                    print
+                }
+            }
+        ' "$kaslr_dir/dmesg_snapshot.log" \
+            >"$kaslr_dir/kaslr_boot_evidence.log"; then
+            KASLR_REASON="Cannot parse the captured KASLR boot log, see $kaslr_dir"
+            return 3
+        fi
+    fi
+    log_file_with_label KASLR-BOOT "$kaslr_dir/kaslr_boot_evidence.log"
+
+    printf '%s\n' "$kaslr_cmdline" |
+        grep -Eq '(^|[[:space:]])nokaslr([[:space:]]|$)'
+    kaslr_cmdline_rc=$?
+    case "$kaslr_cmdline_rc" in
+        0)
+            KASLR_REASON="Boot command line disables KASLR, remove nokaslr and reboot"
+            return 1
+            ;;
+        1)
+            ;;
+        *)
+            KASLR_REASON="Cannot evaluate the KASLR boot command line, see $kaslr_dir"
+            return 3
+            ;;
+    esac
+    if [ "$kaslr_config" = CONFIG_RANDOMIZE_BASE=n ]; then
+        KASLR_REASON="Running kernel disables CONFIG_RANDOMIZE_BASE, use a KASLR-enabled kernel"
+        return 1
+    fi
+    grep -Eq '^(KASLR:?[[:space:]]+disabled([[:space:]].*)?|Kernel Offset:[[:space:]]+disabled)[[:space:]]*$' \
+        "$kaslr_dir/kaslr_boot_evidence.log"
+    kaslr_disabled_rc=$?
+    case "$kaslr_disabled_rc" in
+        0)
+            KASLR_REASON="Current-boot log reports KASLR disabled, check the bootloader seed and boot arguments"
+            return 1
+            ;;
+        1)
+            ;;
+        *)
+            KASLR_REASON="Cannot evaluate captured KASLR disable evidence, see $kaslr_dir"
+            return 3
+            ;;
+    esac
+    grep -Eq '^KASLR:?[[:space:]]+enabled[[:space:]]*$' "$kaslr_dir/kaslr_boot_evidence.log"
+    kaslr_enabled_rc=$?
+    case "$kaslr_enabled_rc" in
+        0)
+            KASLR_REASON="Current-boot kernel message confirms KASLR activation, cross-boot randomness was not tested"
+            return 0
+            ;;
+        1)
+            ;;
+        *)
+            KASLR_REASON="Cannot evaluate captured KASLR activation evidence, see $kaslr_dir"
+            return 3
+            ;;
+    esac
+    if [ "${DMESG_ACCESS_STATUS:-unavailable}" != available ]; then
+        KASLR_REASON="KASLR activation cannot be verified because the current-boot kernel log is unavailable, check $kaslr_dir/dmesg_access.log and kernel-log access"
+    else
+        KASLR_REASON="Current-boot KASLR activation message is absent, retain the early boot log or use a kernel that reports activation, config and symbol addresses alone are insufficient"
+    fi
+    return 2
+}
+
 check_dt_nodes() {
     node_paths="$1"
     log_info "$node_paths"
@@ -6223,6 +6332,105 @@ pcie_collect_runtime_health() {
 }
 
 ###############################################################################
+# pcie_classify_kernel_errors <result-dir>
+# Separate a verified empty host's no-device message from captured PCI faults.
+# Reuses sysfs/DT helpers and one captured log, no hardware state is changed.
+# Returns 0 for faults, 1 for clean/advisory-only, 2 for unavailable evidence.
+###############################################################################
+pcie_classify_kernel_errors() (
+    pcke_dir="$1"
+    : >"$pcke_dir/pcie_fatal_errors.log" || return 2
+    : >"$pcke_dir/pcie_empty_ports.log" || return 2
+    [ -s "$pcke_dir/dmesg_snapshot.log" ] || return 2
+    [ -r "$pcke_dir/dmesg_errors.log" ] || return 2
+
+    while IFS= read -r pcke_line || [ -n "$pcke_line" ]; do
+        pcke_empty=0
+        case "$pcke_line" in
+            *": Device not found")
+                pcke_text=$(printf '%s\n' "$pcke_line" | sed -E 's/^(\[[^]]*\][[:space:]]*)*//')
+                pcke_id=${pcke_text%: Device not found}
+                pcke_driver=${pcke_id%% *}
+                pcke_id=${pcke_id#* }
+                case "$pcke_id" in
+                    ''|*[![:alnum:]._-]*)
+                        printf '%s\n' "$pcke_line" >>"$pcke_dir/pcie_fatal_errors.log" || return 2
+                        continue
+                        ;;
+                esac
+                pcke_host=$(readlink -f "/sys/bus/platform/devices/$pcke_id" 2>/dev/null || true)
+                pcke_bound=$(platform_device_driver_name "$pcke_host" 2>/dev/null || true)
+                pcke_host_dt=$(readlink -f "$pcke_host/of_node" 2>/dev/null || true)
+                pcke_bridges=0
+                pcke_endpoints=0
+                pcke_port_dt=""
+                if [ -n "$pcke_host" ] && [ "$pcke_bound" = "$pcke_driver" ] &&
+                   dt_node_enabled "$pcke_host_dt"; then
+                    for pcke_device in /sys/bus/pci/devices/*; do
+                        [ -d "$pcke_device" ] || continue
+                        pcke_path=$(readlink -f "$pcke_device") || return 2
+                        case "$pcke_path" in
+                            "$pcke_host"/*)
+                                ;;
+                            *)
+                                continue
+                                ;;
+                        esac
+                        pcke_class=$(cat "$pcke_device/class" 2>/dev/null || true)
+                        case "$pcke_class" in
+                            0x0604*)
+                                pcke_bridges=$((pcke_bridges + 1))
+                                pcke_port_dt=$(readlink -f "$pcke_device/of_node" 2>/dev/null || true)
+                                ;;
+                            *)
+                                pcke_endpoints=$((pcke_endpoints + 1))
+                                ;;
+                        esac
+                    done
+                    # A registered root port alone does not require a cable or
+                    # endpoint. Enabled descendants declare expected hardware.
+                    pcke_related=0
+                    case "$pcke_port_dt" in
+                        "$pcke_host_dt"/*)
+                            pcke_related=1
+                            ;;
+                    esac
+                    if [ "$pcke_bridges" -eq 1 ] && [ "$pcke_endpoints" -eq 0 ] &&
+                       [ "$pcke_related" -eq 1 ] && dt_node_enabled "$pcke_port_dt"; then
+                        pcke_declarations=$(find "$pcke_port_dt" -mindepth 1 \( -name reg -o -name compatible \) -type f) || return 2
+                        pcke_expected=0
+                        while IFS= read -r pcke_property; do
+                            [ -n "$pcke_property" ] || continue
+                            pcke_node=${pcke_property%/*}
+                            [ "$pcke_node" != "$pcke_port_dt" ] || continue
+                            if dt_node_enabled "$pcke_node"; then
+                                pcke_expected=1
+                                break
+                            fi
+                        done <<PCIE_DECLARATIONS
+$pcke_declarations
+PCIE_DECLARATIONS
+                        if [ "$pcke_expected" -eq 0 ]; then
+                            pcke_empty=1
+                        fi
+                    fi
+                fi
+                ;;
+        esac
+        if [ "$pcke_empty" -eq 1 ]; then
+            printf '%s\n' "$pcke_line" >>"$pcke_dir/pcie_empty_ports.log" || return 2
+        else
+            printf '%s\n' "$pcke_line" >>"$pcke_dir/pcie_fatal_errors.log" || return 2
+        fi
+    done <"$pcke_dir/dmesg_errors.log"
+    if [ -s "$pcke_dir/pcie_empty_ports.log" ]; then
+        log_warn "PCIe host has a registered root port without an enumerated or DT-declared downstream device"
+        log_file_with_label PCIE-EMPTY "$pcke_dir/pcie_empty_ports.log"
+    fi
+    [ -s "$pcke_dir/pcie_fatal_errors.log" ]
+)
+
+###############################################################################
 # usb_collect_host_inventory <result-dir>
 # Captures USB root hubs, connected devices, interfaces, speeds, drivers, and
 # runtime-power state. Returns 0 for host runtime, 1 for malformed host state,
@@ -8735,6 +8943,132 @@ kernel_log_filter_instance_faults() (
         }
         END { emit() }
     '
+)
+
+# probe_classify_kernel_failures <result-directory>
+# Classify one retained probe snapshot, preserving genuine kernel fault blocks.
+# Reuse the connectivity/BT lookup contracts only with observed runtime readiness.
+# Source lib_connectivity.sh and lib_bluetooth.sh first. No kernel read, package
+# operation, radio mutation or service startup occurs. All artifacts stay in the
+# supplied CWD run directory. Return 0 for faults, 1 for clean, 2 for unavailable
+# evidence or classification failure. Raw snapshot/scanner files remain intact.
+probe_classify_kernel_failures() (
+    pckf_dir="$1"
+    pckf_snapshot="$pckf_dir/dmesg_snapshot.log"
+    pckf_pending="$pckf_dir/probe_remaining.log"
+    pckf_filtered="$pckf_dir/probe_filtered.log"
+    pckf_warnings="$pckf_dir/probe_warnings.log"
+    pckf_failures="$pckf_dir/probe_failures.log"
+    for pckf_file in probe_candidates.log probe_remaining.log probe_filtered.log \
+        probe_warnings.log probe_failures.log probe_fault_blocks.log \
+        wifi_regulatory_warnings.log probe_bt_adapters.list probe_runtime.tsv; do
+        : >"$pckf_dir/$pckf_file" || return 2
+    done
+    [ "${DMESG_ACCESS_STATUS:-unavailable}" = available ] || return 2
+    [ -s "$pckf_snapshot" ] && [ -r "$pckf_snapshot" ] || return 2
+    command -v wifi_filter_regulatory_warnings >/dev/null 2>&1 || return 2
+    command -v bt_firmware_fallback_pattern >/dev/null 2>&1 || return 2
+
+    # Faults stay independent of optional lookup classification. A later bound
+    # driver or success marker cannot erase a BUG, oops or fault stack.
+    kernel_log_filter_faults "$pckf_snapshot" '.*' \
+        >"$pckf_dir/probe_fault_blocks.log" || return 2
+    pckf_pattern='(failed to (probe|instantiate)|'\
+'probe of .* failed|probe with driver .* failed|deferred probe timeout, ignoring dependency|'\
+'Direct firmware load .* failed|tplg firmware loading .* failed|ASoC error|'\
+'unprobe failed|failed to remove .* driver|component bind error|component unbind error|'\
+'Driver .* failed|cannot register device driver|register_component error|'\
+'sound: ASoC: failed|load_firmware failed|request_firmware failed|device_add failed|'\
+'platform device_add failed|Cannot register component|bind failed|'\
+'lookup_component error|failed to add machine driver|QCA Failed to request file|'\
+'cfg80211:.*regulatory[.]db.*(failed|malformed|invalid)|cfg80211: failed to load regulatory[.]db)'
+    grep -Ei "$pckf_pattern" "$pckf_snapshot" >"$pckf_dir/probe_candidates.log"
+    pckf_status=$?
+    case "$pckf_status" in
+        0|1)
+            ;;
+        *)
+            return 2
+            ;;
+    esac
+    wifi_filter_regulatory_warnings "$pckf_dir/probe_candidates.log" \
+        "$pckf_dir/wifi_regulatory_warnings.log" >"$pckf_pending" || return 2
+    if [ -s "$pckf_dir/wifi_regulatory_warnings.log" ]; then
+        pckf_phy=""
+        for pckf_path in /sys/class/ieee80211/*; do
+            [ -d "$pckf_path/device" ] || continue
+            if pckf_driver=$(platform_device_driver_name "$pckf_path/device"); then
+                pckf_phy=${pckf_path##*/}
+                break
+            fi
+        done
+        if [ -n "$pckf_phy" ]; then
+            cat "$pckf_dir/wifi_regulatory_warnings.log" >>"$pckf_warnings" || return 2
+            printf 'regulatory|optional-global-lookup|phy=%s|driver=%s\n' \
+                "$pckf_phy" "$pckf_driver" >>"$pckf_dir/probe_runtime.tsv" || return 2
+        else
+            cat "$pckf_dir/wifi_regulatory_warnings.log" >>"$pckf_pending" || return 2
+            printf '%s\n' 'regulatory|lookup-failed|no-bound-wireless-PHY' \
+                >>"$pckf_dir/probe_runtime.tsv" || return 2
+        fi
+    fi
+    awk '
+        {
+            text=tolower($0)
+            sub(/^[[:space:]]*/, "", text)
+            while (text ~ /^\[[^]]*\]/) sub(/^\[[^]]*\][[:space:]]*/, "", text)
+            if (text ~ /^bluetooth[ :]+hci[0-9]+:/) {
+                sub(/^bluetooth[ :]+/, "", text)
+                sub(/:.*/, "", text)
+                print text
+            }
+        }
+    ' "$pckf_pending" >"$pckf_dir/probe_bt_adapters.list" || return 2
+    sort -u "$pckf_dir/probe_bt_adapters.list" >"$pckf_filtered" || return 2
+    cp "$pckf_filtered" "$pckf_dir/probe_bt_adapters.list" || return 2
+    while IFS= read -r pckf_adapter; do
+        pckf_fallback=$(bt_firmware_fallback_pattern "$pckf_adapter") || return 2
+        [ "$pckf_fallback" != 'a^' ] || continue
+        grep -Eiq "^[[:space:]]*(\[[^]]+\][[:space:]]*)*bluetooth[ :]+$pckf_adapter:.*($pckf_fallback)" "$pckf_pending"
+        pckf_status=$?
+        case "$pckf_status" in
+            0)
+                ;;
+            1)
+                continue
+                ;;
+            *)
+                return 2
+                ;;
+        esac
+        # Query only adapters named by a candidate lookup. Missing optional
+        # BlueZ/hciconfig or failed readiness leaves the lookup as a failure.
+        if ! bt_adapter_is_usable "$pckf_adapter" \
+            >"$pckf_dir/$pckf_adapter-readiness.log" 2>&1; then
+            printf '%s|lookup-failed|QCA-UART-runtime-not-ready\n' \
+                "$pckf_adapter" >>"$pckf_dir/probe_runtime.tsv" || return 2
+            continue
+        fi
+        awk -v adapter="$pckf_adapter" -v fallback="$pckf_fallback" -v warnings="$pckf_warnings" '
+            {
+                text=tolower($0)
+                sub(/^[[:space:]]*/, "", text)
+                while (text ~ /^\[[^]]*\]/) sub(/^\[[^]]*\][[:space:]]*/, "", text)
+                if (text ~ ("^bluetooth[ :]+" adapter ":") &&
+                    text ~ tolower(fallback)) {
+                    print $0 >> warnings
+                } else {
+                    print
+                }
+            }
+        ' "$pckf_pending" >"$pckf_filtered" || return 2
+        cp "$pckf_filtered" "$pckf_pending" || return 2
+        printf '%s|QCA-UART-ROM-lookup-fallback|runtime-ready|patched-firmware-unverified\n' \
+            "$pckf_adapter" >>"$pckf_dir/probe_runtime.tsv" || return 2
+    done <"$pckf_dir/probe_bt_adapters.list"
+    cat "$pckf_pending" "$pckf_dir/probe_fault_blocks.log" >"$pckf_failures" || return 2
+    [ -s "$pckf_failures" ] && return 0
+    return 1
 )
 
 # scan_dmesg_errors OUTPUT_DIR MODULE_REGEX [EXCLUDE_REGEX]

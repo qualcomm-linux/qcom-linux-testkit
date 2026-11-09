@@ -4197,6 +4197,35 @@ bt_ensure_runtime_ready() {
     return 1
 }
 
+# bt_firmware_fallback_pattern <adapter>
+# Print the supported ROM lookup pattern only for the runtime-bound QCA UART
+# transport. Explicit fatal policy disables the exemption. No readiness claim
+# or kernel capture occurs, unknown transports receive a never-matching pattern.
+bt_firmware_fallback_pattern() (
+    bffp_adapter="${1:-}"
+    bffp_index=${bffp_adapter#hci}
+    case "$bffp_adapter:$bffp_index" in
+        hci*:*)
+            case "$bffp_index" in
+                ''|*[!0-9]*)
+                    printf '%s\n' 'a^'
+                    return 0
+                    ;;
+            esac
+            ;;
+        *)
+            printf '%s\n' 'a^'
+            return 0
+            ;;
+    esac
+    bffp_driver=$(platform_device_driver_name "/sys/class/bluetooth/$bffp_adapter/device" 2>/dev/null || true)
+    if [ "$bffp_driver" = hci_uart_qca ] && [ -z "${BTFW_FATAL_RE:-}" ]; then
+        printf '%s\n' 'Direct firmware load for .+ failed with error -(2|11)([[:space:]]|$)|QCA Failed to request file: .+ [(]-(2|11)[)]'
+    else
+        printf '%s\n' 'a^'
+    fi
+)
+
 btfwloaded() {
     adapter="${1:-}"
  
@@ -4213,11 +4242,21 @@ btfwloaded() {
  
     # Retry/transient hints.
     transient_re="${BTFW_TRANSIENT_RE:-Retry BT power ON|retry bt power on|reset|re-init|reinit|failed.*[(]-110[)]}"
- 
+    # hci_qca accepts ENOENT/EAGAIN by using the original ROM firmware/config.
+    # Other firmware/transport errors and crashes remain fatal. A caller's
+    # explicit fatal-pattern override still takes precedence over this fallback.
+    btfw_fallback_re='a^'
+
     # shellcheck disable=SC2034 # Public result consumed by another script.
     BT_FW_FATAL=0
     btfw_dir="${BT_KERNEL_LOG_DIR:-$PWD/results/$TESTNAME/kernel}"
     scan_dmesg_errors "$btfw_dir" 'Bluetooth|btqca|btusb|hci_uart|hci[0-9]+' 'not a crash|non-fatal' || true
+    if ! : >"$btfw_dir/firmware_unavailable.log"; then
+        # shellcheck disable=SC2034 # Public result consumed by another script.
+        BT_FW_FATAL=1
+        log_error "Cannot initialize Bluetooth firmware lookup evidence"
+        return 1
+    fi
     if [ "${DMESG_ACCESS_STATUS:-unavailable}" != available ]; then
         log_warn "Bluetooth boot health is unverified, see $btfw_dir/dmesg_access.log"
         return 1
@@ -4269,6 +4308,19 @@ btfwloaded() {
     fi
 
     # ---- Find last success line number and last fatal line number ----
+    btfw_fallback_re=$(bt_firmware_fallback_pattern "$adapter") || return 1
+    if ! printf '%s\n' "$out" | awk -v fallback="$btfw_fallback_re" '
+        tolower($0) ~ tolower(fallback) { print }
+    ' >"$btfw_dir/firmware_unavailable.log"; then
+        # shellcheck disable=SC2034 # Public result consumed by another script.
+        BT_FW_FATAL=1
+        log_error "Cannot retain Bluetooth firmware lookup evidence"
+        return 1
+    fi
+    if [ -s "$btfw_dir/firmware_unavailable.log" ]; then
+        log_warn "Requested Bluetooth patch/config was unavailable at lookup time, checking current runtime without claiming patched firmware"
+        log_file_with_label BT-FIRMWARE "$btfw_dir/firmware_unavailable.log"
+    fi
     last_success="$(
         printf '%s\n' "$out" \
         | awk -v re="$success_re" '
@@ -4279,8 +4331,8 @@ btfwloaded() {
  
     last_fatal="$(
         printf '%s\n' "$out" \
-        | awk -v re="$fatal_re" '
-            tolower($0) ~ tolower(re) { n=NR }
+        | awk -v re="$fatal_re" -v fallback="$btfw_fallback_re" '
+            tolower($0) ~ tolower(re) && tolower($0) !~ tolower(fallback) { n=NR }
             END { if (n > 0) print n; else print 0 }
         '
     )"
@@ -4314,7 +4366,8 @@ btfwloaded() {
     fi
  
     # Fatal before success OR transient hints => WARN.
-    if [ "$last_fatal" -gt 0 ] && [ "$last_fatal" -lt "$last_success" ]; then
+    if { [ "$last_fatal" -gt 0 ] && [ "$last_fatal" -lt "$last_success" ]; } ||
+       [ -s "$btfw_dir/firmware_unavailable.log" ]; then
         log_warn "btfwloaded: transient errors occurred before firmware success marker${adapter:+ for $adapter}, treating as WARN."
         printf '%s\n' "$out" | tail -n 30 >&2
         return 2
@@ -4530,7 +4583,8 @@ bt_hci_bdaddr() {
 # Check whether an HCI adapter is usable for BT_ON_OFF.
 # Requires a non-zero BD address. When hciconfig is available, retain its
 # UP/RUNNING check. Otherwise use BlueZ controller visibility as the runtime
-# state evidence. Returns 0 when usable and 1 otherwise, with no output or
+# state evidence. Bound the HCI query with the shared timeout helper and reject
+# failed queries. Returns 0 when usable and 1 otherwise, with no output or
 # runtime state changes.
 bt_adapter_is_usable() {
     adapter="$1"
@@ -4543,7 +4597,7 @@ bt_adapter_is_usable() {
     fi
 
     if command -v hciconfig >/dev/null 2>&1; then
-        out="$(hciconfig "$adapter" 2>/dev/null || true)"
+        out="$(run_with_managed_timeout 3 "$PWD" bt-hci-state hciconfig "$adapter" 2>/dev/null)" || return 1
         if printf '%s\n' "$out" | grep -q 'UP RUNNING'; then
             return 0
         fi
