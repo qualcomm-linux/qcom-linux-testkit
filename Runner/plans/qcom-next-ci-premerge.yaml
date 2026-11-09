@@ -1,7 +1,7 @@
 metadata:
     format: Lava-Test Test Definition 1.0
     name: AUSanity
-    description: "Baseline AU Sanity test plan"
+    description: "Kernel and fixed-ramdisk premerge plan with 41 functional suites"
     maintainer:
         - vnarapar@qti.qualcomm.com
     os:
@@ -123,7 +123,7 @@ run:
             "$REPO_PATH/Runner/utils/send-to-lava.sh" "CPU_affinity.res" --strict --expected-testcase-id "CPU_affinity" || lava-test-case "CPU_affinity_result_publication" --result fail
         - cd "$REPO_PATH/Runner/suites/Kernel/Baseport/PCIe" || exit 1
         - rm -f "PCIe.res"
-        - ./run.sh || true
+        - PCIE_DMESG_STRICT=1 ./run.sh || true
         - >-
             "$REPO_PATH/Runner/utils/send-to-lava.sh" "PCIe.res" --strict --expected-testcase-id "PCIe" || lava-test-case "PCIe_result_publication" --result fail
         - cd "$REPO_PATH/Runner/suites/Kernel/Baseport/USBHost" || exit 1
@@ -136,6 +136,11 @@ run:
         - ./run.sh || true
         - >-
             "$REPO_PATH/Runner/utils/send-to-lava.sh" "shmbridge.res" --strict --expected-testcase-id "shmbridge" || lava-test-case "shmbridge_result_publication" --result fail
+        - cd "$REPO_PATH/Runner/suites/Connectivity/Ethernet/Ethernet_Inventory_Validation" || exit 1
+        - rm -f "Ethernet_Inventory_Validation.res"
+        - ./run.sh || true
+        - >-
+            "$REPO_PATH/Runner/utils/send-to-lava.sh" "Ethernet_Inventory_Validation.res" --strict --expected-testcase-id "Ethernet_Inventory_Validation" || lava-test-case "Ethernet_Inventory_Validation_result_publication" --result fail
         - cd "$REPO_PATH/Runner/suites/Connectivity/Ethernet/Ethernet_Basic_Validation" || exit 1
         - rm -f "Ethernet_Basic_Validation.res"
         - ./run.sh || true
