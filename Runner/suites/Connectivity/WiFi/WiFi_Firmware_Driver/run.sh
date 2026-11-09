@@ -63,10 +63,10 @@ fi
 for wifi_family in $wifi_families; do
     log_info "Runtime WiFi family: $wifi_family"
     if ! wifi_detect_firmware_info "$wifi_family"; then
-        test_result_record FAIL "Runtime family $wifi_family has no readable firmware asset under /lib/firmware/$wifi_family"
+        test_result_record FAIL "Runtime family $wifi_family has no runtime consumed-firmware evidence or readable image firmware candidate"
         continue
     fi
-    log_info "Provisioned firmware: $WIFI_FW_FILE ($WIFI_FW_SIZE bytes)"
+    log_info "Firmware evidence=${WIFI_FW_EVIDENCE:-asset} path=$WIFI_FW_FILE size=$WIFI_FW_SIZE"
     if ! wifi_handle_firmware_family "$wifi_family" "$WIFI_FW_BASENAME"; then
         test_result_record FAIL "Cannot prepare runtime WiFi driver for $wifi_family"
         continue

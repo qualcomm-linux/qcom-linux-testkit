@@ -134,8 +134,12 @@ test_result_init "$TESTNAME" "$RES_FILE" || exit 1
 
 log_info "------------------------------------------------------------"
 log_info "Starting $TESTNAME Testcase"
+BT_RFKILL_STATE_FILE="$PWD/${TESTNAME}-rfkill.$$.log"
+radio_snapshot_rfkill bluetooth "$BT_RFKILL_STATE_FILE" || test_result_finish FAIL "Cannot snapshot Bluetooth rfkill state"
+# shellcheck disable=SC2034 # Consumed by shared finalization.
+TEST_RESULT_CLEANUP=bt_cleanup_image_daemons
 trap bt_cleanup_image_daemons 0
-trap 'exit 1' HUP INT TERM
+trap 'test_result_finish FAIL "Bluetooth validation interrupted"' HUP INT TERM
 if ! bt_prepare_bluetooth_stack; then
     test_result_finish "FAIL" "$TESTNAME FAIL - Bluetooth stack preparation failed"
 fi
@@ -162,6 +166,8 @@ if ! bt_ensure_runtime_ready \
 fi
 
 ADAPTER="$BT_RUNTIME_READY_ADAPTER"
+BT_ADAPTER="$ADAPTER"
+bt_snapshot_adapter_state "$ADAPTER" || test_result_finish FAIL "Cannot snapshot selected adapter power before exercise"
 test_result_record "PASS" "Bluetooth runtime is ready with usable adapter $ADAPTER"
 
 # -----------------------------
@@ -285,7 +291,10 @@ else
     fi
 
     if [ -z "$TARGET_MAC" ] && [ "${BT_SCAN_EXECUTION_OK:-0}" -eq 1 ]; then
-        test_result_finish SKIP "Discovery started but no discoverable peer was found, provide a controlled Bluetooth fixture"
+        if [ "${BT_SCAN_CLEANUP_FAILED:-0}" -eq 1 ]; then
+            test_result_finish FAIL "Discovery cleanup failed"
+        fi
+        test_result_finish SKIP "Discovery started but no fresh discoverable peer was found, provide a controlled Bluetooth fixture"
     fi
     test_result_finish "FAIL" "Bluetooth scan did not discover the required device or confirm discovery startup"
 fi
@@ -309,7 +318,8 @@ if bt_scan_poll_off 10 1; then
     fi
 else
     # If you keep bt_scan_poll_off strict, this may still warn; not a test failure.
-    log_warn "Scan OFF cleanup did not confirm Discovering=no (non-fatal)."
+    test_result_record FAIL "Scan OFF cleanup did not confirm Discovering=no"
 fi
 
+bt_restore_adapter_state || test_result_record FAIL "Bluetooth state restoration failed"
 test_result_finish

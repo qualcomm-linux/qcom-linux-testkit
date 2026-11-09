@@ -1,11 +1,10 @@
 #!/bin/sh
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause
-
-# Robustly find and source init_env
+# ---------- Repo env + helpers ----------
 SCRIPT_DIR="$(
-    cd "$(dirname "$0")" || exit 1
-    pwd
+  cd "$(dirname "$0")" || exit 1
+  pwd
 )"
 INIT_ENV=""
 SEARCH="$SCRIPT_DIR"
@@ -23,195 +22,167 @@ if [ -z "$INIT_ENV" ]; then
     exit 1
 fi
 
+# Only source once (idempotent)
+# NOTE: We intentionally **do not export** any new vars. They stay local to this shell.
 if [ -z "${__INIT_ENV_LOADED:-}" ]; then
     # shellcheck disable=SC1090
     . "$INIT_ENV"
+    __INIT_ENV_LOADED=1
 fi
 
-# shellcheck disable=SC1090,SC1091
+# shellcheck disable=SC1090
+. "$INIT_ENV"
+# shellcheck disable=SC1091
 . "$TOOLS/functestlib.sh"
-# shellcheck disable=SC1090,SC1091
-. "$TOOLS/lib_connectivity.sh"
 
 TESTNAME="WiFi_OnOff"
-test_path="$(find_test_case_by_name "$TESTNAME")"
-cd "$test_path" || exit 1
+RES_FILE="$SCRIPT_DIR/$TESTNAME.res"
+test_result_init "$TESTNAME" "$RES_FILE" || exit 1
+# shellcheck disable=SC2034 # Consumed by check_dependencies.
+CHECK_DEPS_RECOVER=0
 
-WIFI_DT_PATTERNS_DEFAULT="$(
-cat <<'EOF'
-qcom,wcn7850
-qcom,wcn6855
-qcom,wcn6750
-qcom,wcn3950
-ath12k
-ath11k
-ath10k
-wifi
-wlan
-qca
-EOF
-)"
-
-WIFI_DRIVER_MODULES_DEFAULT="$(
-cat <<'EOF'
-ath12k_wifi7
-ath12k
-ath11k
-ath11k_pci
-ath10k_pci
-ath10k_snoc
-cfg80211
-mac80211
-mhi
-EOF
-)"
-
-WIFI_WAIT_SECS="${WIFI_WAIT_SECS:-60}"
-WIFI_WAIT_STEP_SECS="${WIFI_WAIT_STEP_SECS:-2}"
-WIFI_RECOVERY_RELOAD="${WIFI_RECOVERY_RELOAD:-1}"
-WIFI_RECOVERY_RELOAD_AFTER_S="${WIFI_RECOVERY_RELOAD_AFTER_S:-}"
-WIFI_PROBE_LOG_DIR="${WIFI_PROBE_LOG_DIR:-./wifi_onoff_dmesg}"
-WIFI_PROBE_LOG_TAG="${WIFI_PROBE_LOG_TAG:-${TESTNAME}/probe}"
-WIFI_DT_PATTERNS="${WIFI_DT_PATTERNS:-$WIFI_DT_PATTERNS_DEFAULT}"
-WIFI_DRIVER_MODULES="${WIFI_DRIVER_MODULES:-$WIFI_DRIVER_MODULES_DEFAULT}"
-
-wifi_iface=""
-
-# Convert a newline-separated config list into normal shell arguments and call
-# the requested helper without needing unquoted expansion in run.sh.
-run_with_line_args() {
-    target_func="$1"
-    list_data="$2"
-
-    set --
-
-    while IFS= read -r entry; do
-        [ -n "$entry" ] || continue
-        set -- "$@" "$entry"
-    done <<EOF
-$list_data
-EOF
-
-    "$target_func" "$@"
+# usage
+# Print the supported options without changing hardware.
+usage() {
+    printf '%s\n' "Usage: $0 [--help]"
 }
 
-log_info "-----------------------------------------------------------------------------------------"
-log_info "-------------------Starting $TESTNAME Testcase----------------------------"
-log_info "=== Test Initialization ==="
-log_info "Config: WIFI_WAIT_SECS=${WIFI_WAIT_SECS} WIFI_WAIT_STEP_SECS=${WIFI_WAIT_STEP_SECS}"
-log_info "Config: WIFI_RECOVERY_RELOAD=${WIFI_RECOVERY_RELOAD} WIFI_RECOVERY_RELOAD_AFTER_S=${WIFI_RECOVERY_RELOAD_AFTER_S:-auto}"
-log_info "Config: WIFI_PROBE_LOG_TAG=${WIFI_PROBE_LOG_TAG}"
-
-if [ -n "${WIFI_IFACE:-}" ]; then
-    log_info "Config: WIFI_IFACE override requested: ${WIFI_IFACE}"
+# parse_args <arguments...>
+# Reject unsupported arguments before test setup.
+parse_args() {
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --help|-h)
+                usage
+                exit 0
+                ;;
+            *)
+                test_result_finish FAIL "Unsupported option: $1"
+                ;;
+        esac
+    done
+}
+parse_args "$@"
+if ! CHECK_DEPS_NO_EXIT=1 check_dependencies ip iw cat awk readlink sort grep sed tr mkdir mktemp date sleep; then
+    test_result_finish SKIP "Image-provided WiFi_OnOff validation utilities are unavailable"
 fi
+OUT_DIR=$(test_create_run_directory "$PWD/results/$TESTNAME") ||
+    test_result_finish FAIL "Cannot create evidence under CWD=$PWD"
+log_info "Evidence: $OUT_DIR"
 
-check_dependencies ip iw
+# shellcheck disable=SC1091
+. "$TOOLS/lib_connectivity.sh"
+WIFI_STATE_FILE="$OUT_DIR/rfkill-state.log"
+wifi_iface=""
+wifi_initial_state=""
 
-log_info "=== WiFi Kernel Config Validation ==="
-wifi_required_cfgs="CONFIG_WIRELESS CONFIG_WLAN CONFIG_CFG80211 CONFIG_MAC80211"
-
-if check_kernel_config "$wifi_required_cfgs"; then
-    log_pass "Mandatory WiFi baseline kernel configs are enabled."
-else
-    log_fail_exit "$TESTNAME" "Mandatory WiFi baseline kernel configs are missing." ""
-fi
-
-log_info "=== WiFi Optional Kernel Config Visibility ==="
-if check_kernel_config "CONFIG_NL80211_TESTMODE" >/dev/null 2>&1; then
-    log_info "Optional WiFi config present: CONFIG_NL80211_TESTMODE"
-else
-    log_warn "Optional WiFi config not enabled: CONFIG_NL80211_TESTMODE"
-fi
-
-if check_kernel_config "CONFIG_WLAN_VENDOR_ATH" >/dev/null 2>&1; then
-    log_info "Optional WiFi config present: CONFIG_WLAN_VENDOR_ATH"
-else
-    log_warn "Optional WiFi config not enabled: CONFIG_WLAN_VENDOR_ATH"
-fi
-
-log_info "=== WiFi DT Validation ==="
-if run_with_line_args wifi_dt_present "$WIFI_DT_PATTERNS"; then
-    log_pass "WiFi/combined WCN DT entry/compatible matched."
-else
-    log_warn "No WiFi/combined WCN DT entry/compatible matched from configured patterns."
-fi
-
-log_info "=== WiFi Module Visibility ==="
-run_with_line_args wifi_log_module_info "$WIFI_DRIVER_MODULES"
-
-log_info "=== WiFi Driver Kernel Config Validation ==="
-wifi_driver_cfgs="$(infer_wifi_driver_cfgs)"
-if [ -n "$wifi_driver_cfgs" ]; then
-    if check_kernel_config "$wifi_driver_cfgs"; then
-        log_pass "Target-specific WiFi driver kernel configs are enabled."
-    else
-        log_fail_exit "$TESTNAME" "Target-specific WiFi driver kernel configs are missing." ""
+# cleanup
+# Restore original administration/rfkill states, including failure and signals.
+cleanup() {
+    cleanup_failed=0
+    if [ -n "$wifi_iface" ] && [ -n "$wifi_initial_state" ]; then
+        net_restore_interface_admin "$wifi_iface" "$wifi_initial_state" || cleanup_failed=1
     fi
-else
-    log_warn "No target-specific WiFi driver config requirement inferred from module/runtime evidence."
-fi
-
-log_info "=== WiFi Probe Check ==="
-if wifi_has_probe_failures "$WIFI_PROBE_LOG_DIR" "$WIFI_PROBE_LOG_TAG"; then
-    log_fail_exit "$TESTNAME" "WiFi driver probe/runtime failures detected in kernel log." ""
-else
-    log_pass "[$WIFI_PROBE_LOG_TAG] No WiFi probe/runtime failures detected in kernel log."
-fi
-
-log_info "=== Waiting for WiFi Interface ==="
-wifi_iface="$(wait_for_wifi_interface "$WIFI_WAIT_SECS" "$WIFI_WAIT_STEP_SECS" || true)"
-
-if [ -z "$wifi_iface" ]; then
-    log_info "No WiFi interface detected after wait/recovery. Collecting diagnostics..."
- 
-    run_with_line_args wifi_dump_debug_info "$WIFI_DT_PATTERNS"
-    run_with_line_args wifi_log_module_info "$WIFI_DRIVER_MODULES"
- 
-    if wifi_has_probe_failures "$WIFI_PROBE_LOG_DIR" "$WIFI_PROBE_LOG_TAG"; then
-        log_fail_exit "$TESTNAME" "WiFi driver probe/runtime failures detected and no usable WiFi interface was found." ""
+    radio_restore_rfkill "$WIFI_STATE_FILE" || cleanup_failed=1
+    if [ "$cleanup_failed" -ne 0 ]; then
+        log_fail "WiFi initial state restoration failed"
+        printf '%s FAIL\n' "$TESTNAME" >"$RES_FILE"
+        return 1
     fi
- 
-    if wifi_stack_present; then
-        log_fail_exit "$TESTNAME" "WiFi runtime stack is present, but no usable WiFi interface was found after retries." ""
+}
+radio_snapshot_rfkill wlan "$WIFI_STATE_FILE" || test_result_finish FAIL "Cannot snapshot WiFi rfkill state"
+# shellcheck disable=SC2034 # Consumed by shared finalization.
+TEST_RESULT_CLEANUP=cleanup
+trap cleanup 0
+trap 'test_result_finish FAIL "WiFi toggle interrupted"' HUP INT TERM
+wifi_iface=$(get_wifi_interface || true)
+if [ -n "$wifi_iface" ]; then
+    wifi_initial_state=$(net_interface_admin_state "$wifi_iface") || test_result_finish FAIL "Cannot read original WiFi interface flags"
+fi
+wifi_families=$(wifi_runtime_families) || test_result_finish FAIL "WiFi runtime discovery failed"
+if [ -z "$wifi_families" ] && [ -z "$wifi_iface" ]; then
+    if [ -n "${WIFI_IFACE:-}" ]; then
+        test_result_finish FAIL "Requested WiFi interface is unavailable: $WIFI_IFACE"
     fi
- 
-    log_warn "WiFi modules may be loaded, but no WiFi phy/netdev/runtime object is exposed."
-    log_skip_exit "$TESTNAME" "No usable WiFi interface or runtime WiFi phy/netdev was found. Skipping." ""
+    test_result_finish SKIP "No runtime WiFi hardware or driver modalias identifies an applicable device"
 fi
-
-log_pass "Detected WiFi interface: $wifi_iface"
-
-log_info "=== Initial Interface State ==="
-ip link show "$wifi_iface" 2>/dev/null || true
-if command -v iw >/dev/null 2>&1; then
-    iw dev "$wifi_iface" info 2>/dev/null || true
+# Configuration is supplementary runtime evidence. Definite disabled settings
+# fail applicable hardware, unavailable build configuration is reported separately.
+wifi_cfgs="CONFIG_WIRELESS CONFIG_WLAN CONFIG_CFG80211 CONFIG_MAC80211 $(infer_wifi_driver_cfgs)"
+for wifi_cfg in $wifi_cfgs; do
+    wifi_cfg_value=$(kernel_config_value "$wifi_cfg" || true)
+    case "$wifi_cfg_value" in
+        n|not-set)
+            test_result_record FAIL "Applicable WiFi configuration is disabled: $wifi_cfg"
+            ;;
+        *)
+            log_info "$wifi_cfg=${wifi_cfg_value:-unavailable}"
+            ;;
+    esac
+done
+# Preserve caller-provided diagnostic patterns and module visibility overrides.
+if [ -n "${WIFI_DT_PATTERNS:-}" ]; then
+    set --
+    while IFS= read -r wifi_pattern; do
+        [ -n "$wifi_pattern" ] || continue
+        set -- "$@" "$wifi_pattern"
+    done <<WIFI_DT_DIAGNOSTICS
+$WIFI_DT_PATTERNS
+WIFI_DT_DIAGNOSTICS
+    wifi_dt_present "$@" || log_warn "Configured WiFi DT patterns did not match enabled hardware"
 fi
-
-log_info "=== WiFi Toggle Validation ==="
-
-if bring_interface_up_down "$wifi_iface" down; then
-    log_info "Brought $wifi_iface down successfully."
-    ip link show "$wifi_iface" 2>/dev/null || true
+if [ -n "${WIFI_DRIVER_MODULES:-}" ]; then
+    set --
+    while IFS= read -r wifi_module; do
+        [ -n "$wifi_module" ] || continue
+        set -- "$@" "$wifi_module"
+    done <<WIFI_MODULE_DIAGNOSTICS
+$WIFI_DRIVER_MODULES
+WIFI_MODULE_DIAGNOSTICS
+    wifi_log_module_info "$@"
+fi
+wifi_has_probe_failures "${WIFI_PROBE_LOG_DIR:-$OUT_DIR/initial}" "${WIFI_PROBE_LOG_TAG:-$TESTNAME}"
+probe_rc=$?
+case "$probe_rc" in
+    0)
+        test_result_finish FAIL "Captured WiFi probe/runtime errors"
+        ;;
+    2)
+        test_result_record SKIP "Initial WiFi kernel health is unverified, inspect capture diagnostics"
+        ;;
+esac
+discovered_iface=$(wait_for_wifi_interface "${WIFI_WAIT_SECS:-60}" "${WIFI_WAIT_STEP_SECS:-2}")
+discovery_rc=$?
+if [ "$discovery_rc" -eq 3 ]; then
+    test_result_finish FAIL "WiFi recovery or module restoration failed"
+fi
+if [ "$discovery_rc" -ne 0 ] || [ -z "$discovered_iface" ]; then
+    test_result_finish FAIL "Applicable WiFi runtime has no usable interface after bounded discovery"
+fi
+if [ -n "${WIFI_IFACE:-}" ] && [ "$discovered_iface" != "$WIFI_IFACE" ]; then
+    test_result_finish FAIL "Discovery did not return the requested WiFi interface"
+fi
+wifi_iface="$discovered_iface"
+if [ -z "$wifi_initial_state" ]; then
+    wifi_initial_state=$(net_interface_admin_state "$wifi_iface") || test_result_finish FAIL "Cannot snapshot discovered interface flags"
+fi
+log_info "Selected WiFi interface=$wifi_iface original_admin=$wifi_initial_state"
+if ! bring_interface_up_down "$wifi_iface" down; then
+    test_result_record FAIL "Could not bring $wifi_iface down"
+elif ! bring_interface_up_down "$wifi_iface" up; then
+    test_result_record FAIL "Could not bring $wifi_iface up after toggle"
 else
-    log_info "Failed while bringing $wifi_iface down. Collecting diagnostics..."
-    wifi_dump_runtime_info
-    wifi_has_probe_failures "$WIFI_PROBE_LOG_DIR" "$WIFI_PROBE_LOG_TAG" || true
-    log_fail_exit "$TESTNAME" "Failed to bring $wifi_iface down." ""
+    test_result_record PASS "$wifi_iface toggled down/up successfully"
 fi
-
-sleep 2
-
-if bring_interface_up_down "$wifi_iface" up; then
-    log_info "Brought $wifi_iface up successfully."
-    ip link show "$wifi_iface" 2>/dev/null || true
-    if command -v iw >/dev/null 2>&1; then
-        iw dev "$wifi_iface" info 2>/dev/null || true
-    fi
-    log_pass_exit "$TESTNAME" "$wifi_iface toggled up/down successfully." ""
-else
-    log_info "Failed while bringing $wifi_iface up. Collecting diagnostics..."
-    wifi_dump_runtime_info
-    wifi_has_probe_failures "$WIFI_PROBE_LOG_DIR" "$WIFI_PROBE_LOG_TAG" || true
-    log_fail_exit "$TESTNAME" "Failed to bring $wifi_iface up after down." ""
-fi
+wifi_has_probe_failures "$OUT_DIR/final" "$TESTNAME"
+probe_rc=$?
+case "$probe_rc" in
+    0)
+        test_result_record FAIL "Captured WiFi errors after interface toggle"
+        ;;
+    2)
+        test_result_record SKIP "Final kernel health is unverified, inspect capture diagnostics"
+        ;;
+esac
+cleanup || test_result_record FAIL "WiFi restoration was incomplete"
+test_result_finish

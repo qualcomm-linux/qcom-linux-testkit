@@ -85,3 +85,12 @@ Only daemon processes started by this invocation are stopped during cleanup.
 Existing daemons and sockets are retained. Startup logs are stored in a unique
 `bluetooth-runtime.*` directory in CWD and printed if readiness fails. The kbdev
 plan sets `TESTKIT_IMAGE_ONLY=1` to disable package installation and recovery.
+
+Validation restores the selected adapter's original power/discovery state and
+recorded Bluetooth rfkill soft state. Healthy unchanged state is reused.
+Confirmed failure to stop discovery or restore owned state fails the final
+result. Minimal images with unavailable optional discovery state report it as
+unverified. Paired devices and the persistent peer cache are preserved.
+Discovery requires a fresh observation or an address newly added during the
+scan, an unchanged cached peer cannot satisfy the test. Confirmed fatal firmware
+or kernel fault evidence is retained separately from missing success markers.

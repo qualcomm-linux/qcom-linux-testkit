@@ -49,15 +49,10 @@ fi
 . "$ETHERNET_LIB"
 
 TESTNAME="Ethernet_Basic_Validation"
-RES_FILE="./$TESTNAME.res"
-
-test_path="$(find_test_case_by_name "$TESTNAME")"
-
-if [ -n "$test_path" ]; then
-    cd "$test_path" || exit 1
-else
-    cd "$SCRIPT_DIR" || exit 1
-fi
+RES_FILE="$PWD/$TESTNAME.res"
+test_result_init "$TESTNAME" "$RES_FILE" || exit 1
+# shellcheck disable=SC2034 # Consumed by check_dependencies.
+CHECK_DEPS_RECOVER=0
 
 SUMMARY_FILE="./$TESTNAME.summary"
 RESULT_TABLE="./$TESTNAME.results.tsv"
@@ -165,7 +160,57 @@ parse_args() {
 
 parse_args "$@"
 
-rm -f "$RES_FILE" "$SUMMARY_FILE" "$RESULT_TABLE"
+if ! CHECK_DEPS_NO_EXIT=1 check_dependencies \
+    ip ping awk sed grep cat sleep tr mkdir mktemp date rm readlink cp wc; then
+
+    log_skip "$TESTNAME SKIP: missing runtime dependencies"
+    echo "$TESTNAME SKIP" >"$RES_FILE"
+    exit 0
+fi
+
+rm -f "$SUMMARY_FILE" "$RESULT_TABLE"
+OUT_DIR=$(test_create_run_directory "$PWD/results/$TESTNAME") || test_result_finish FAIL "Cannot create Ethernet evidence in CWD"
+STATE_FILE="$OUT_DIR/interface-state.log"
+: >"$STATE_FILE"
+
+# cleanup
+# Restore only selected interfaces and settings captured before preparation.
+cleanup() {
+    eth_cleanup_failed=0
+    while IFS='|' read -r saved_iface saved_admin saved_autoneg saved_speed saved_duplex; do
+        [ -n "$saved_iface" ] || continue
+        if [ "$saved_autoneg" = on ] || [ "$saved_autoneg" = off ]; then
+            current_autoneg=$(ethGetAutonegState "$saved_iface" 2>/dev/null || true)
+            current_speed=$(ethv_get_speed "$saved_iface")
+            current_duplex=$(ethv_get_duplex "$saved_iface")
+            if [ "$current_autoneg" != "$saved_autoneg" ] ||
+               { [ "$saved_autoneg" = off ] && { [ "$current_speed" != "$saved_speed" ] || [ "$current_duplex" != "$saved_duplex" ]; }; }; then
+                if [ "$saved_autoneg" = on ]; then
+                    run_with_managed_timeout 5 "$PWD" ethernet-restore ethtool -s "$saved_iface" autoneg on || eth_cleanup_failed=1
+                elif ethv_is_positive_integer "$saved_speed" && { [ "$saved_duplex" = full ] || [ "$saved_duplex" = half ]; }; then
+                    run_with_managed_timeout 5 "$PWD" ethernet-restore ethtool -s "$saved_iface" speed "$saved_speed" duplex "$saved_duplex" autoneg off || eth_cleanup_failed=1
+                else
+                    eth_cleanup_failed=1
+                fi
+            fi
+            [ "$(ethGetAutonegState "$saved_iface" 2>/dev/null)" = "$saved_autoneg" ] || eth_cleanup_failed=1
+            if [ "$saved_autoneg" = off ] && ethv_is_positive_integer "$saved_speed"; then
+                [ "$(ethv_get_speed "$saved_iface")" = "$saved_speed" ] || eth_cleanup_failed=1
+                [ "$(ethv_get_duplex "$saved_iface")" = "$saved_duplex" ] || eth_cleanup_failed=1
+            fi
+        fi
+        net_restore_interface_admin "$saved_iface" "$saved_admin" || eth_cleanup_failed=1
+    done <"$STATE_FILE"
+    if [ "$eth_cleanup_failed" -ne 0 ]; then
+        log_fail "Ethernet initial state restoration failed"
+        printf '%s FAIL\n' "$TESTNAME" >"$RES_FILE"
+        return 1
+    fi
+}
+# shellcheck disable=SC2034 # Consumed by shared finalization.
+TEST_RESULT_CLEANUP=cleanup
+trap cleanup 0
+trap 'test_result_finish FAIL "Ethernet validation interrupted"' HUP INT TERM
 : >"$SUMMARY_FILE"
 : >"$RESULT_TABLE"
 
@@ -173,19 +218,6 @@ log_info "----------------------------------------------------------------------
 log_info "------------------- Starting $TESTNAME Testcase --------------------------"
 log_info "Configuration: interface=${ETH_INTERFACE:-auto} LINK_TIMEOUT_S=$LINK_TIMEOUT_S IP_TIMEOUT_S=$IP_TIMEOUT_S PING_TARGET=$PING_TARGET PING_COUNT=$PING_COUNT PING_WAIT_S=$PING_WAIT_S PING_RETRIES=$PING_RETRIES"
 
-if ! CHECK_DEPS_NO_EXIT=1 check_dependencies \
-    ip \
-    ping \
-    awk \
-    sed \
-    grep \
-    cat \
-    sleep; then
-
-    log_skip "$TESTNAME SKIP: missing runtime dependencies"
-    echo "$TESTNAME SKIP" >"$RES_FILE"
-    exit 0
-fi
 
 if ! ethv_is_positive_integer "$LINK_TIMEOUT_S" \
    || ! ethv_is_positive_integer "$IP_TIMEOUT_S" \
@@ -213,11 +245,36 @@ fi
 
 log_info "Detected Ethernet interfaces: $(printf '%s' "$ETH_IFACES" | tr '\n' ' ')"
 
-ANY_PASS=0
-ANY_FAIL=0
-ANY_TESTED=0
-
 for iface in $ETH_IFACES; do
+    if [ ! -d "/sys/class/net/$iface" ]; then
+        ethv_record_result "$RESULT_TABLE" "$iface presence" FAIL "Requested interface is absent"
+        continue
+    fi
+    initial_admin=$(net_interface_admin_state "$iface") || {
+        ethv_record_result "$RESULT_TABLE" "$iface state snapshot" FAIL "Cannot read interface flags before mutation"
+        continue
+    }
+    initial_autoneg=$(ethGetAutonegState "$iface" 2>/dev/null || true)
+    initial_speed=$(ethv_get_speed "$iface")
+    initial_duplex=$(ethv_get_duplex "$iface")
+    printf '%s|%s|%s|%s|%s\n' "$iface" "$initial_admin" "$initial_autoneg" "$initial_speed" "$initial_duplex" >>"$STATE_FILE"
+    # shellcheck disable=SC2034 # Consumed by ethv_prepare_interface.
+    # shellcheck disable=SC2034 # Public result consumed by another script.
+    ETHV_PRESERVE_LINK_SETTINGS=0
+    case "$initial_autoneg" in
+        on)
+            ;;
+        off)
+            if ! ethv_is_positive_integer "$initial_speed" || { [ "$initial_duplex" != full ] && [ "$initial_duplex" != half ]; }; then
+                # shellcheck disable=SC2034 # Public result consumed by another script.
+                ETHV_PRESERVE_LINK_SETTINGS=1
+            fi
+            ;;
+        *)
+            # shellcheck disable=SC2034 # Public result consumed by another script.
+            ETHV_PRESERVE_LINK_SETTINGS=1
+            ;;
+    esac
     driver="$(ethv_get_driver "$iface")"
     carrier="$(ethv_get_carrier "$iface")"
     operstate="$(ethv_get_operstate "$iface")"
@@ -225,7 +282,7 @@ for iface in $ETH_IFACES; do
     ethv_record_result \
         "$RESULT_TABLE" \
         "$iface interface presence" \
-        "PASS" \
+        "SKIP" \
         "driver=${driver:-unknown} carrier=$carrier operstate=$operstate"
 
     log_info "---- Testing interface: $iface ----"
@@ -245,8 +302,6 @@ for iface in $ETH_IFACES; do
                 "$iface link and IPv4" \
                 "PASS" \
                 "ip=$ip_addr speed=${speed:-unknown}Mb/s duplex=${duplex:-unknown}"
-
-            ANY_TESTED=1
             attempt=1
             ping_ok=0
 
@@ -275,7 +330,6 @@ for iface in $ETH_IFACES; do
                     "ping to $target succeeded from $ip_addr"
 
                 echo "$iface: PASS (IP: $ip_addr, target: $target, ping OK)" >>"$SUMMARY_FILE"
-                ANY_PASS=1
             else
                 ethv_record_result \
                     "$RESULT_TABLE" \
@@ -284,7 +338,7 @@ for iface in $ETH_IFACES; do
                     "ping to $target failed after $PING_RETRIES attempt(s)"
 
                 echo "$iface: FAIL (IP: $ip_addr, target: $target, ping failed)" >>"$SUMMARY_FILE"
-                ANY_FAIL=1
+                ethv_capture_failure "$iface" "$OUT_DIR/$iface"
             fi
             ;;
         1)
@@ -295,8 +349,7 @@ for iface in $ETH_IFACES; do
                 "unable to bring the interface administratively up"
 
             echo "$iface: FAIL (interface bring-up failed)" >>"$SUMMARY_FILE"
-            ANY_FAIL=1
-            ANY_TESTED=1
+            ethv_capture_failure "$iface" "$OUT_DIR/$iface"
             ;;
         2)
             ethv_record_result \
@@ -324,15 +377,8 @@ ethv_print_summary "$RESULT_TABLE" "Ethernet Basic Connectivity Summary"
 log_info "Per-interface summary:"
 cat "$SUMMARY_FILE"
 
-if [ "$ANY_PASS" -eq 1 ]; then
-    log_pass "$TESTNAME PASS"
-    echo "$TESTNAME PASS" >"$RES_FILE"
-elif [ "$ANY_TESTED" -eq 1 ] || [ "$ANY_FAIL" -eq 1 ]; then
-    log_fail "$TESTNAME FAIL"
-    echo "$TESTNAME FAIL" >"$RES_FILE"
-else
-    log_skip "$TESTNAME SKIP"
-    echo "$TESTNAME SKIP" >"$RES_FILE"
+if ! cleanup; then
+    ethv_record_result "$RESULT_TABLE" "Initial state restoration" FAIL "See restoration diagnostics"
 fi
-
-exit 0
+overall=$(ethv_compute_overall_result "$RESULT_TABLE")
+test_result_finish "$overall" "Ethernet result=$overall, per-interface evidence=$OUT_DIR"

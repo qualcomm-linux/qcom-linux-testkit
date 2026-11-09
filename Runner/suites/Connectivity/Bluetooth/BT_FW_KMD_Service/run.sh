@@ -113,8 +113,12 @@ WARN_COUNT=0
 log_info "------------------------------------------------------------"
 log_info "Starting $TESTNAME"
 
+BT_RFKILL_STATE_FILE="$PWD/${TESTNAME}-rfkill.$$.log"
+radio_snapshot_rfkill bluetooth "$BT_RFKILL_STATE_FILE" || test_result_finish FAIL "Cannot snapshot Bluetooth rfkill state"
+# shellcheck disable=SC2034 # Consumed by shared finalization.
+TEST_RESULT_CLEANUP=bt_cleanup_image_daemons
 trap bt_cleanup_image_daemons 0
-trap 'exit 1' HUP INT TERM
+trap 'test_result_finish FAIL "Bluetooth validation interrupted"' HUP INT TERM
 if ! bt_prepare_bluetooth_stack; then
     test_result_finish "FAIL" "$TESTNAME FAIL - Bluetooth stack preparation failed"
 fi
@@ -224,6 +228,9 @@ fi
 if command -v btfwloaded >/dev/null 2>&1; then
     btfwloaded "$ADAPTER"
     rc=$?
+    if [ "${BT_FW_FATAL:-0}" -eq 1 ]; then
+        test_result_record FAIL "Confirmed Bluetooth fatal boot/runtime error, healthy current state does not erase it"
+    fi
     case "$rc" in
         0)
             test_result_record "PASS" "Firmware load/setup appears completed in the kernel log"
