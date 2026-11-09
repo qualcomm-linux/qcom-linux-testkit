@@ -4633,6 +4633,7 @@ platform_device_driver_name() {
 
     pddn_driver_path=$(readlink -f "$pddn_device_dir/driver" 2>/dev/null || true)
     [ -n "$pddn_driver_path" ] || return 1
+    [ -d "$pddn_driver_path" ] || return 1
     basename "$pddn_driver_path"
 }
 
@@ -8435,6 +8436,118 @@ rng_cleanup() {
     fi
 }
 
+# kernel_log_filter_faults SNAPSHOT MODULE_REGEX [EXCLUDE_REGEX]
+# Print retained kernel fault blocks attributed to the selected module through
+# their header or stack symbols. Ignore unrelated module lists and later logs.
+# Accept optional timestamp/thread prefixes, preserving the original evidence.
+# Use image-provided shell and grep, without reading the kernel or changing state.
+kernel_log_filter_faults() (
+    kff_snapshot="$1"
+    kff_module="$2"
+    kff_exclude="${3:-}"
+    [ -r "$kff_snapshot" ] || exit 1
+    kff_block=""
+    kff_matched=0
+    kff_thread=""
+    kff_count=0
+
+    while IFS= read -r kff_raw || [ -n "$kff_raw" ]; do
+        kff_text="$kff_raw"
+        kff_line_thread=""
+        while :; do
+            kff_text=${kff_text#"${kff_text%%[![:space:]]*}"}
+            case "$kff_text" in
+                \[*\]*)
+                    kff_prefix=${kff_text%%]*}
+                    kff_prefix=${kff_prefix#\[}
+                    kff_prefix=${kff_prefix#"${kff_prefix%%[![:space:]]*}"}
+                    case "$kff_prefix" in
+                        T[0-9]*|C[0-9]*)
+                            kff_line_thread="$kff_prefix"
+                            ;;
+                    esac
+                    kff_text=${kff_text#*]}
+                    ;;
+                *)
+                    break
+                    ;;
+            esac
+        done
+        kff_header=0
+        kff_frame=0
+        kff_context=0
+        case "$kff_text" in
+            BUG:*|WARNING:*|Oops:*|Oops\ -*|Internal\ error:*Oops*|Kernel\ panic*|kernel\ BUG\ at*|\
+            Unable\ to\ handle*|Unhandled\ fault*|invalid\ opcode:*)
+                kff_header=1
+                ;;
+            *+0x*|*+0X*|pc\ :*|lr\ :*|PC\ is\ at*|LR\ is\ at*)
+                kff_frame=1
+                ;;
+            Call\ trace:*|Call\ Trace:*)
+                kff_context=1
+                ;;
+            in_atomic\(\):*|preempt_count:*|RCU\ nest\ depth:*|\
+            Preemption\ disabled\ at:*|CPU:*|Hardware\ name:*|\
+            Modules\ linked\ in:*|pstate:*|sp\ :*|x[0-9]*|r[0-9]*|\
+            Mem\ abort\ info:*|ESR\ =*|EC\ =*|SET\ =*|FSC\ =*|\
+            ISV\ =*|ISS\ =*|CM\ =*|user\ pgtable:*|'<TASK>'|'</TASK>')
+                kff_context=1
+                ;;
+        esac
+        # A new fault closes the current block. Other interleaved task output
+        # cannot attribute its module or stack to the current fault.
+        if [ "$kff_header" -eq 0 ] && [ -n "$kff_block" ] && [ -n "$kff_thread" ] &&
+           [ -n "$kff_line_thread" ] && [ "$kff_thread" != "$kff_line_thread" ]; then
+            continue
+        fi
+        if [ -n "$kff_block" ] &&
+           { [ "$kff_header" -eq 1 ] ||
+             { [ "$kff_frame" -eq 0 ] && [ "$kff_context" -eq 0 ]; }; }; then
+            if [ "$kff_matched" -eq 1 ]; then
+                printf '%s\n' "$kff_block"
+            fi
+            kff_block=""
+            kff_matched=0
+            kff_thread=""
+            kff_count=0
+        fi
+        if [ "$kff_header" -eq 1 ]; then
+            if [ -n "$kff_exclude" ] &&
+               printf '%s\n' "$kff_raw" | grep -qiE -- "$kff_exclude"; then
+                continue
+            fi
+            kff_block="$kff_raw"
+            if printf '%s\n' "$kff_raw" | grep -qiE -- "$kff_module"; then
+                kff_matched=1
+            fi
+            kff_thread="$kff_line_thread"
+            kff_count=1
+        elif [ -n "$kff_block" ]; then
+            kff_keep=0
+            if [ "$kff_count" -lt 128 ]; then
+                kff_keep=1
+            fi
+            if [ "$kff_frame" -eq 1 ] && [ "$kff_matched" -eq 0 ] &&
+               printf '%s\n' "$kff_raw" | grep -qiE -- "$kff_module"; then
+                kff_matched=1
+                kff_keep=1
+            fi
+            # Bound retained context, still inspect every later stack symbol
+            # and retain the one that proves attribution. Full input is saved.
+            if [ "$kff_keep" -eq 1 ]; then
+                kff_block="$kff_block
+$kff_raw"
+            fi
+            kff_count=$((kff_count + 1))
+        fi
+    done <"$kff_snapshot"
+    if [ -n "$kff_block" ] && [ "$kff_matched" -eq 1 ]; then
+        printf '%s\n' "$kff_block"
+    fi
+    exit 0
+)
+
 # scan_dmesg_errors OUTPUT_DIR MODULE_REGEX [EXCLUDE_REGEX]
 # Capture the kernel log once and report non-benign errors for selected modules.
 # Inputs: retained output directory, extended module regex, and optional exclusion
@@ -8449,7 +8562,6 @@ scan_dmesg_errors() {
     prefix="$1"
     module_regex="$2"   # e.g. 'qcom_camss|camss|isp'
     exclude_regex="${3:-"dummy regulator|supply [^ ]+ not found|using dummy regulator"}"
-    shift 3
 
     mkdir -p "$prefix"
 
@@ -8569,8 +8681,10 @@ scan_dmesg_errors() {
 
     # 1. Match lines with correct module and error pattern
     # 2. Exclude lines with harmless patterns (using dummy regulator etc)
-    grep -iE "^\[[^]]+\][[:space:]]+($module_regex):.*($err_patterns)" "$DMESG_SNAPSHOT" \
+    grep -iE "^(\[[^]]+\][[:space:]]*)*($module_regex)([[:space:]][^:]*)?:.*($err_patterns)" "$DMESG_SNAPSHOT" \
         | grep -vEi -- "$exclude_regex" > "$DMESG_ERRORS" || true
+    kernel_log_filter_faults "$DMESG_SNAPSHOT" "$module_regex" "$exclude_regex" \
+        >>"$DMESG_ERRORS"
 
     cp "$DMESG_ERRORS" "$DMESG_HISTORY"
 
