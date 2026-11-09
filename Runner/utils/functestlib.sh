@@ -104,6 +104,13 @@ test_result_record() {
 # Writes the final result and exits successfully for LAVA result processing.
 # Without an explicit status, failures take precedence, then passes, then skip.
 test_result_finish() {
+    if [ -n "${TEST_RESULT_CLEANUP:-}" ]; then
+        if ! "$TEST_RESULT_CLEANUP"; then
+            test_result_record FAIL "Test-owned state restoration failed"
+            # A requested PASS/SKIP must not replace cleanup failure.
+            set -- FAIL "Test-owned state restoration failed"
+        fi
+    fi
     test_result_status="${1:-}"
     test_result_message="${2:-}"
 
@@ -162,7 +169,7 @@ get_kernel_log() {
 
 # Locate a kernel module file by name.
 # Supports uncompressed and commonly compressed module formats.
-# Tries the running kernel first, then all module trees.
+# Optional second argument running forbids fallback to another kernel tree.
 find_kernel_module() {
     module_name="$1"
     kver=$(uname -r)
@@ -181,7 +188,7 @@ find_kernel_module() {
         )
     fi
 
-    if [ -z "$module_path" ] && [ -d /lib/modules ]; then
+    if [ "${2:-all}" != running ] && [ -z "$module_path" ] && [ -d /lib/modules ]; then
         log_warn "Module $module_name not found under /lib/modules/$kver, searching all module trees" >&2
         module_path=$(
             find /lib/modules -type f \
@@ -3060,6 +3067,94 @@ wait_for_ip_address() {
     return 1
 }
 
+# net_interface_admin_state <interface>
+# Print up/down from IFF_UP, not carrier or operstate. No network changes.
+# Return 1 for unavailable or malformed flags.
+net_interface_admin_state() (
+    nias_flags=$(cat "/sys/class/net/$1/flags" 2>/dev/null) || return 1
+    case "$nias_flags" in
+        0x*)
+            nias_digits=${nias_flags#0x}
+            case "$nias_digits" in
+                ''|*[!0-9a-fA-F]*)
+                    return 1
+                    ;;
+            esac
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    if [ "$((nias_flags & 1))" -eq 1 ]; then
+        printf '%s\n' up
+    else
+        printf '%s\n' down
+    fi
+)
+
+# net_restore_interface_admin <interface> <up|down>
+# Restore the selected interface's original administrative state and verify it.
+# Diagnostics go to stderr. Return 1 if restoration is incomplete.
+net_restore_interface_admin() (
+    nria_iface="$1"
+    nria_state="$2"
+    case "$nria_state" in
+        up|down)
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    [ "$(net_interface_admin_state "$nria_iface")" = "$nria_state" ] && return 0
+    run_with_managed_timeout 5 "$PWD" net-restore ip link set dev "$nria_iface" "$nria_state" >&2 || return 1
+    [ "$(net_interface_admin_state "$nria_iface")" = "$nria_state" ]
+)
+
+# radio_snapshot_rfkill <type> <file>
+# Save index, canonical device identity and soft block state for this radio type.
+# Missing optional rfkill sysfs produces an empty snapshot. Return 1 on I/O error.
+radio_snapshot_rfkill() (
+    rsr_type="$1"
+    rsr_file="$2"
+    : >"$rsr_file" || return 1
+    for rsr_node in /sys/class/rfkill/rfkill*; do
+        [ -r "$rsr_node/type" ] || continue
+        [ "$(cat "$rsr_node/type")" = "$rsr_type" ] || continue
+        rsr_soft=$(cat "$rsr_node/soft") || return 1
+        rsr_device=$(readlink -f "$rsr_node/device") || return 1
+        case "$rsr_soft" in
+            0|1)
+                printf '%s|%s|%s|%s\n' "$rsr_node" "$rsr_type" "$rsr_device" "$rsr_soft" >>"$rsr_file" || return 1
+                ;;
+            *)
+                return 1
+                ;;
+        esac
+    done
+)
+
+# radio_restore_rfkill <snapshot-file>
+# Restore only recorded soft states whose runtime device identity still matches.
+# Never changes hard blocks or newly registered radios. Return 1 on mismatch/error.
+radio_restore_rfkill() (
+    [ -r "$1" ] || return 1
+    rrr_failed=0
+    while IFS='|' read -r rrr_node rrr_type rrr_device rrr_soft; do
+        [ -n "$rrr_node" ] || continue
+        if [ "$(cat "$rrr_node/type" 2>/dev/null)" != "$rrr_type" ] ||
+           [ "$(readlink -f "$rrr_node/device")" != "$rrr_device" ]; then
+            log_fail "Radio identity changed before restoration: $rrr_node" >&2
+            rrr_failed=1
+            continue
+        fi
+        if [ "$(cat "$rrr_node/soft" 2>/dev/null)" != "$rrr_soft" ]; then
+            printf '%s\n' "$rrr_soft" >"$rrr_node/soft" || rrr_failed=1
+        fi
+        [ "$(cat "$rrr_node/soft" 2>/dev/null)" = "$rrr_soft" ] || rrr_failed=1
+    done <"$1"
+    [ "$rrr_failed" -eq 0 ]
+)
+
 # Get the IPv4 address for a given interface.
 get_ip_address() {
     iface="$1"
@@ -3071,23 +3166,26 @@ get_ip_address() {
 }
 
 # Run a command with a timeout (in seconds)
-run_with_timeout() {
-    timeout="$1"; shift
-    ( "$@" ) &
-    pid=$!
-    ( sleep "$timeout"; kill "$pid" 2>/dev/null ) &
-    watcher=$!
-    wait $pid 2>/dev/null
-    status=$?
-    kill $watcher 2>/dev/null
-    return $status
-}
+run_with_timeout() (
+    rwt_seconds="$1"
+    shift
+    # Legacy callers include sleep-compatible seconds suffixes.
+    rwt_seconds=${rwt_seconds%s}
+    case "$rwt_seconds" in
+        ''|*[!0-9]*|0*)
+            return 125
+            ;;
+    esac
+    [ "${#rwt_seconds}" -le 9 ] || return 125
+    trap 'managed_timeout_cancel_bounded 2 >&2 || true' 0
+    trap 'exit 125' HUP INT TERM
+    run_with_managed_timeout "$rwt_seconds" "$PWD" command "$@"
+)
 
 # Purpose: Opt-in managed timeout runner with explicit watcher lifecycle cleanup.
 #
-# This intentionally does not change run_with_timeout(), which has existing
-# callers and historical behavior. Suites that need stronger lifecycle handling
-# can opt in to this helper without affecting existing users.
+# Keeps command status, stdin and optional session behavior unchanged.
+# Both session and direct-PID cancellation use bounded polling.
 #
 # Usage:
 #   run_with_managed_timeout TIMEOUT_SECS TEMP_DIR LABEL COMMAND [ARG...]
@@ -3096,7 +3194,7 @@ run_with_timeout() {
 #   TIMEOUT_SECS - positive integer to enable timeout enforcement. Empty, zero,
 #                  or non-numeric values run COMMAND directly without a watcher.
 #   TEMP_DIR     - directory for temporary watcher PID and timeout marker files;
-#                  /tmp is used when empty.
+#                  CWD is used when empty.
 #   LABEL        - caller-provided label for temp-file names. Callers should use
 #                  a simple filename-safe value.
 #   COMMAND...   - command and arguments to execute.
@@ -3150,17 +3248,27 @@ run_with_managed_timeout() {
             ;;
     esac
 
-    [ -n "$mt_temp_dir" ] || mt_temp_dir="/tmp"
+    [ -n "$mt_temp_dir" ] || mt_temp_dir="$PWD"
     [ -n "$mt_label" ] || mt_label="managed-timeout"
 
-    (
-        mt_run_pre_exec_hook
-        if [ "$mt_use_session" = 1 ]; then
-            exec setsid "$@"
-        fi
-        exec "$@"
-    ) &
-    mt_cmd_pid=$!
+    {
+        (
+            mt_run_pre_exec_hook
+            if [ "$mt_use_session" = 1 ]; then
+                exec setsid "$@"
+            fi
+            mt_command=$(command -v "$1") || exit 127
+            case "$mt_command" in
+                */*)
+                    exec "$@"
+                    ;;
+                *)
+                    "$@"
+                    ;;
+            esac
+        ) <&3 3<&- &
+        mt_cmd_pid=$!
+    } 3<&0
     # shellcheck disable=SC2034  # Exposed for caller cleanup traps while command is running.
     MANAGED_TIMEOUT_CMD_PID="$mt_cmd_pid"
 
@@ -3199,71 +3307,35 @@ run_with_managed_timeout() {
     # shellcheck disable=SC2034  # Exposed for caller cleanup traps while command is running.
     MANAGED_TIMEOUT_WATCHER_PID="$mt_watcher_pid"
 
-    if [ "$mt_use_session" = 1 ]; then
-        mt_status=0
-        while bounded_timeout_pid_running "$mt_cmd_pid"; do
-            if [ -r "$mt_timeout_marker_file" ]; then
-                mt_status=124
-                break
-            fi
-            if ! bounded_timeout_pid_running "$mt_watcher_pid"; then
-                echo "[ERROR] timeout watcher exited before the owned command" >&2
-                mt_status=125
-                break
-            fi
-            sleep 1
-        done
-        if ! bounded_timeout_pid_running "$mt_cmd_pid"; then
-            wait "$mt_cmd_pid" 2>/dev/null
-            mt_command_status=$?
-            if [ "$mt_status" -eq 0 ]; then
-                mt_status=$mt_command_status
-            fi
-        fi
+    mt_status=0
+    while bounded_timeout_pid_running "$mt_cmd_pid"; do
         if [ -r "$mt_timeout_marker_file" ]; then
             mt_status=124
+            break
         fi
-        if ! managed_timeout_cancel_bounded 2; then
-            echo "[ERROR] owned command session remains active after cleanup" >&2
-            if [ "$mt_status" -eq 0 ]; then
-                mt_status=125
-            fi
+        if ! bounded_timeout_pid_running "$mt_watcher_pid"; then
+            echo "[ERROR] timeout watcher exited before the owned command" >&2
+            mt_status=125
+            break
         fi
-        return "$mt_status"
+        sleep 0.1 2>/dev/null || sleep 1
+    done
+    if ! bounded_timeout_pid_running "$mt_cmd_pid"; then
+        wait "$mt_cmd_pid" 2>/dev/null
+        mt_command_status=$?
+        if [ "$mt_status" -eq 0 ]; then
+            mt_status=$mt_command_status
+        fi
     fi
-
-    wait "$mt_cmd_pid" 2>/dev/null
-    mt_status=$?
-
     if [ -r "$mt_timeout_marker_file" ]; then
         mt_status=124
     fi
-
-    if [ -r "$mt_sleep_pid_file" ]; then
-        MANAGED_TIMEOUT_WATCHER_SLEEP_PID="$(cat "$mt_sleep_pid_file" 2>/dev/null || true)"
+    if ! managed_timeout_cancel_bounded 2; then
+        echo "[ERROR] owned command session remains active after cleanup" >&2
+        if [ "$mt_status" -eq 0 ]; then
+            mt_status=125
+        fi
     fi
-
-    kill "$mt_watcher_pid" >/dev/null 2>&1 || true
-    wait "$mt_watcher_pid" 2>/dev/null || true
-
-    if [ -n "$MANAGED_TIMEOUT_WATCHER_SLEEP_PID" ]; then
-        kill "$MANAGED_TIMEOUT_WATCHER_SLEEP_PID" >/dev/null 2>&1 || true
-        wait "$MANAGED_TIMEOUT_WATCHER_SLEEP_PID" 2>/dev/null || true
-    fi
-
-    rm -f "$mt_sleep_pid_file" "$mt_timeout_marker_file" 2>/dev/null || true
-
-    # shellcheck disable=SC2034  # Clear externally-consumed timeout state after normal return.
-    MANAGED_TIMEOUT_CMD_PID=""
-    # shellcheck disable=SC2034  # Clear externally-consumed timeout state after normal return.
-    MANAGED_TIMEOUT_WATCHER_PID=""
-    # shellcheck disable=SC2034  # Clear externally-consumed timeout state after normal return.
-    MANAGED_TIMEOUT_WATCHER_SLEEP_PID=""
-    # shellcheck disable=SC2034  # Clear externally-consumed timeout state after normal return.
-    MANAGED_TIMEOUT_SLEEP_PID_FILE=""
-    # shellcheck disable=SC2034  # Clear externally-consumed timeout state after normal return.
-    MANAGED_TIMEOUT_MARKER_FILE=""
-
     return "$mt_status"
 }
 
@@ -4277,46 +4349,30 @@ get_remoteproc_by_firmware() {
 #     1 = DT does not describe it
 #     3 = misuse (no argument)
 # ------------------------------------------------------------------------------
-dt_has_remoteproc_fw() {
-    fw="$1"
-    [ -n "$fw" ] || return 3
- 
-    base=""
-    for candidate in /proc/device-tree /sys/firmware/devicetree/base; do
-        if [ -d "$candidate" ]; then
-            base="$candidate"
-            break
+dt_has_remoteproc_fw() (
+    dtfw_name="${1:-}"
+    [ -n "$dtfw_name" ] || return 3
+    dtfw_root=$(dt_runtime_root) || return 1
+    dtfw_files=$(mktemp "$PWD/.remoteproc-dt.XXXXXX") || return 1
+    trap 'rm -f "$dtfw_files"' 0
+    find "$dtfw_root" -type d >"$dtfw_files" || return 1
+    while IFS= read -r dtfw_node; do
+        dtfw_text="${dtfw_node##*/}"
+        for dtfw_property in firmware-name qcom,firmware-name; do
+            dtfw_value=$(dt_property_text "$dtfw_node" "$dtfw_property" 2>/dev/null || true)
+            dtfw_text="$dtfw_text $dtfw_value"
+        done
+        if printf '%s\n' "$dtfw_text" | awk -v wanted="$dtfw_name" '
+            BEGIN { pattern="(^|[^[:alnum:]])" tolower(wanted) "([^[:alnum:]]|$)" }
+            tolower($0) ~ pattern { found=1 }
+            END { exit !found }
+        '; then
+            dt_node_enabled "$dtfw_node" || continue
+            return 0
         fi
-    done
-    [ -n "$base" ] || return 1
- 
-    # lower-case match key
-    fw_lc=$(printf '%s\n' "$fw" | tr '[:upper:]' '[:lower:]')
- 
-    # new fast-path (any smp2p-<fw>* or remoteproc-<fw>* directory)
-    found=0
-    for d in "$base"/smp2p-"$fw"* "$base"/remoteproc-"$fw"*; do
-        [ -d "$d" ] && found=1 && break
-    done
-    [ "$found" -eq 1 ] && return 0
- 
-    # 2) Shallow find (<depth 2) for any node/prop name containing fw
-    if find "$base" -maxdepth 2 -iname "*$fw_lc*" -print -quit 2>/dev/null | grep -q .; then
-        return 0
-    fi
- 
-    # 3) Grep soc@0 and aliases for a first match
-    if grep -Iq -m1 -F "$fw_lc" "$base/soc@0" "$base/aliases" 2>/dev/null; then
-        return 0
-    fi
- 
-    # 4) Fallback: grep entire DT tree
-    if grep -Iq -m1 -F "$fw_lc" "$base" 2>/dev/null; then
-        return 0
-    fi
- 
+    done <"$dtfw_files"
     return 1
-}
+)
 
 ###############################################################################
 # dt_list_compatible_nodes <compatible-pattern> [fixed|regex]
@@ -4353,7 +4409,7 @@ dt_list_compatible_nodes() {
         [ "$dtlc_resolved_root" = "$dtlc_previous_root" ] && continue
         dtlc_previous_root="$dtlc_resolved_root"
 
-        dtlc_matches_file=$(mktemp "${TMPDIR:-/tmp}/dt-compatible.XXXXXX") || return 1
+        dtlc_matches_file=$(mktemp "$PWD/.dt-compatible.XXXXXX") || return 1
         if [ "$dtlc_mode" = "regex" ]; then
             find "$dtlc_resolved_root" -type f -name compatible 2>/dev/null >"$dtlc_matches_file"
         else
@@ -4363,12 +4419,7 @@ dt_list_compatible_nodes() {
         while IFS= read -r dtlc_compatible_file; do
             [ "$(basename "$dtlc_compatible_file")" = "compatible" ] || continue
             dtlc_node_dir=$(dirname "$dtlc_compatible_file")
-            dtlc_status=$(dt_property_text "$dtlc_node_dir" status 2>/dev/null || true)
-            case "$dtlc_status" in
-                disabled|fail|failed)
-                    continue
-                    ;;
-            esac
+            dt_node_enabled "$dtlc_node_dir" || continue
             if [ "$dtlc_mode" = "regex" ]; then
                 dtlc_text=$(dt_property_text "$dtlc_node_dir" compatible 2>/dev/null || true)
                 printf '%s\n' "$dtlc_text" | grep -Eq "$dtlc_pattern" || continue
@@ -4795,6 +4846,11 @@ kernel_module_runtime_origin() {
         printf '%s\n' "loaded"
         return 0
     fi
+    kmro_sysname=$(printf '%s' "$kmro_module" | tr '-' '_')
+    if [ -d "/sys/module/$kmro_sysname" ]; then
+        printf '%s\n' "builtin"
+        return 0
+    fi
 
     return 1
 }
@@ -4878,21 +4934,26 @@ dt_runtime_root() {
 
 ###############################################################################
 # dt_node_enabled <node-directory>
-# Returns success unless the node status explicitly disables or fails the node.
+# Returns success only for available nodes and ancestors, resolving symlinks.
 ###############################################################################
-dt_node_enabled() {
-    dtne_node_dir="$1"
-    [ -n "$dtne_node_dir" ] || return 3
-    dtne_status=$(dt_property_text "$dtne_node_dir" status 2>/dev/null || true)
-
-    case "$dtne_status" in
-        disabled|fail|failed)
-            return 1
-            ;;
-    esac
-
+dt_node_enabled() (
+    dtne_node_dir="${1:-}"
+    [ -d "$dtne_node_dir" ] || return 3
+    dtne_node_dir=$(readlink -f "$dtne_node_dir") || return 3
+    while [ "$dtne_node_dir" != / ]; do
+        dtne_status=$(dt_property_text "$dtne_node_dir" status 2>/dev/null || true)
+        case "$dtne_status" in
+            ''|okay|ok)
+                ;;
+            *)
+                return 1
+                ;;
+        esac
+        dtne_node_dir=${dtne_node_dir%/*}
+        [ -n "$dtne_node_dir" ] || break
+    done
     return 0
-}
+)
 
 ###############################################################################
 # dt_count_enabled_cpu_nodes <dt-root>
@@ -6070,6 +6131,14 @@ pcie_collect_runtime_health() {
         pcrh_vendor=$(cat "$pcrh_device/vendor" 2>/dev/null || true)
         pcrh_device_id=$(cat "$pcrh_device/device" 2>/dev/null || true)
         pcrh_class=$(cat "$pcrh_device/class" 2>/dev/null || true)
+        if ! printf '%s\n' "$pcrh_vendor" "$pcrh_device_id" "$pcrh_class" | awk '
+            NR <= 2 { if (length($0) != 6 || $0 !~ /^0x[[:xdigit:]]+$/) bad=1 }
+            NR == 3 { if (length($0) != 8 || $0 !~ /^0x[[:xdigit:]]+$/) bad=1 }
+            END { exit bad }
+        '; then
+            pcrh_invalid_link_count=$((pcrh_invalid_link_count + 1))
+            log_fail "Malformed PCI identity attributes: $pcrh_device"
+        fi
         pcrh_driver=$(platform_device_driver_name "$pcrh_device" 2>/dev/null || true)
         if [ -n "$pcrh_driver" ]; then
             PCIE_RUNTIME_BOUND_COUNT=$((PCIE_RUNTIME_BOUND_COUNT + 1))
@@ -6094,6 +6163,14 @@ pcie_collect_runtime_health() {
             PCIE_RUNTIME_MSI_DEVICE_COUNT=$((PCIE_RUNTIME_MSI_DEVICE_COUNT + 1))
         fi
 
+        if [ -e "$pcrh_device/current_link_width" ]; then
+            case "$pcrh_current_width" in
+                ''|*[!0-9]*)
+                    pcrh_invalid_link_count=$((pcrh_invalid_link_count + 1))
+                    log_fail "Malformed negotiated PCIe width: $pcrh_device"
+                    ;;
+            esac
+        fi
         if [ -n "$pcrh_current_speed" ] || [ -n "$pcrh_current_width" ]; then
             PCIE_RUNTIME_LINK_COUNT=$((PCIE_RUNTIME_LINK_COUNT + 1))
             pcrh_link_state="up"
@@ -6137,7 +6214,7 @@ pcie_collect_runtime_health() {
     if [ "$pcrh_invalid_link_count" -gt 0 ]; then
         # Exported result for suite orchestration after this helper returns.
         # shellcheck disable=SC2034
-        PCIE_RUNTIME_FAILURE_REASON="$pcrh_invalid_link_count non-bridge PCIe device(s) report zero negotiated link width"
+        PCIE_RUNTIME_FAILURE_REASON="$pcrh_invalid_link_count PCIe device(s) have malformed identity/link evidence or invalid endpoint width"
         return 1
     fi
 
@@ -6168,6 +6245,14 @@ usb_collect_host_inventory() {
     for uchi_hub in /sys/bus/usb/devices/usb*; do
         [ -d "$uchi_hub" ] || continue
         USB_RUNTIME_ROOT_HUB_COUNT=$((USB_RUNTIME_ROOT_HUB_COUNT + 1))
+        for uchi_attr in idVendor idProduct bDeviceClass; do
+            uchi_value=$(cat "$uchi_hub/$uchi_attr" 2>/dev/null || true)
+            if ! printf '%s\n' "$uchi_value" | grep -Eq '^[[:xdigit:]]+$'; then
+                USB_RUNTIME_FAILURE_REASON="malformed root-hub identity attribute $uchi_attr"
+                log_fail "$USB_RUNTIME_FAILURE_REASON: $uchi_hub"
+                return 1
+            fi
+        done
         uchi_speed=$(cat "$uchi_hub/speed" 2>/dev/null || true)
         uchi_runtime=$(cat "$uchi_hub/power/runtime_status" 2>/dev/null || true)
         uchi_path=$(readlink -f "$uchi_hub" 2>/dev/null || true)
@@ -6184,8 +6269,17 @@ usb_collect_host_inventory() {
             [ -r "$uchi_role" ] || continue
             uchi_role_value=$(tr -d '[:space:]' <"$uchi_role" 2>/dev/null)
             [ -n "$uchi_role_value" ] || continue
-            log_info "USB host mode is inactive: role_node=$uchi_role role=$uchi_role_value"
-            return 2
+            case "$uchi_role_value" in
+                host|"[host]device"|"device[host]")
+                    USB_RUNTIME_FAILURE_REASON="host role is active but no root hub is exposed"
+                    log_fail "$USB_RUNTIME_FAILURE_REASON: $uchi_role"
+                    return 1
+                    ;;
+                device|peripheral|none)
+                    log_info "USB host mode is inactive: role_node=$uchi_role role=$uchi_role_value"
+                    return 2
+                    ;;
+            esac
         done
         # Exported result for suite orchestration after this helper returns.
         # shellcheck disable=SC2034
@@ -7466,10 +7560,13 @@ wait_remoteproc_boot_ready() (
     done
 
     set -- "$br_out/initial/dmesg_snapshot.log"
+    br_error_files="$br_out/initial/dmesg_errors.log"
     if [ "$br_state" != "$br_initial" ] || [ "$br_reason" != "ready" ]; then
         scan_dmesg_errors "$br_out/final" 'remoteproc|qcom.*pas|qcom_q6v5' 'not a crash|non-fatal' || true
         br_access="$br_access/$DMESG_ACCESS_STATUS"
         set -- "$@" "$br_out/final/dmesg_snapshot.log"
+        br_error_files="$br_error_files
+$br_out/final/dmesg_errors.log"
     fi
     # Match literal, whole runtime identities, not SoC addresses or sibling IDs.
     # Fatal reason lines can be tagged with the platform controller rather than
@@ -7501,6 +7598,17 @@ wait_remoteproc_boot_ready() (
     ' "$@" >"$br_out/fatal_errors.log"; then
         br_reason="kernel-evidence-read-failed"
     fi
+    while IFS= read -r br_error_file; do
+        [ -r "$br_error_file" ] || continue
+        kernel_log_filter_instance_faults "$br_error_file" 'remoteproc|qcom.*pas|qcom_q6v5' \
+            'remoteproc[0-9]+' "$br_id" >"$br_out/fault_blocks.log" || {
+            br_reason="kernel-evidence-read-failed"
+            break
+        }
+        cat "$br_out/fault_blocks.log" >>"$br_out/fatal_errors.log" || br_reason="kernel-evidence-read-failed"
+    done <<DSP_ERROR_FILES
+$br_error_files
+DSP_ERROR_FILES
     if [ -s "$br_out/fatal_errors.log" ]; then
         br_crashed=1
     fi
@@ -7515,7 +7623,9 @@ wait_remoteproc_boot_ready() (
     elif [ "$br_reason" = "ready" ]; then
         br_outcome="PASS"
         br_class="already-running"
-        if [ "$br_initial" != "running" ]; then
+        if [ "$br_access" != available ] && [ "$br_access" != available/available ]; then
+            br_class="running-health-unverified"
+        elif [ "$br_initial" != "running" ]; then
             br_class="startup-delay"
         fi
     fi
@@ -7535,9 +7645,20 @@ wait_remoteproc_boot_ready() (
     [ "$br_outcome" = "PASS" ]
 ) >&2
 
+# remoteproc_restore_running <path> <timeout> <poll>
+# Restore an instance that the caller explicitly stopped from running state.
+# Return 1 on incomplete restoration, never restart an unowned processor.
+remoteproc_restore_running() (
+    rrr_path="$1"
+    [ "$(get_remoteproc_state "$rrr_path")" = running ] && return 0
+    start_remoteproc "$rrr_path" "$2" "$3"
+)
+
 # Stop remoteproc
 stop_remoteproc() {
     rproc_path="$1"
+    rproc_timeout="${2:-6}"
+    rproc_poll="${3:-1}"
  
     # Resolve to a real sysfs dir if only a name was given
     case "$rproc_path" in
@@ -7552,13 +7673,18 @@ stop_remoteproc() {
         return 1
     fi
  
-    printf 'stop\n' >"$statef" 2>/dev/null || return 1
-    wait_remoteproc_state "$path" offline 6
+    rproc_evidence=$(mktemp "$PWD/remoteproc-stop.XXXXXX") || return 1
+    # shellcheck disable=SC2016 # Positional arguments belong to the child shell.
+    run_with_bounded_timeout_capture "$rproc_timeout" "$rproc_evidence" \
+        sh -c 'printf "%s\n" "$2" >"$1"' sh "$statef" stop || return 1
+    wait_remoteproc_state "$path" offline "$rproc_timeout" "$rproc_poll"
 }
  
 # Start remoteproc
 start_remoteproc() {
     rproc_path="$1"
+    rproc_timeout="${2:-6}"
+    rproc_poll="${3:-1}"
  
     case "$rproc_path" in
         /sys/*) path="$rproc_path" ;;
@@ -7572,8 +7698,11 @@ start_remoteproc() {
         return 1
     fi
  
-    printf 'start\n' >"$statef" 2>/dev/null || return 1
-    wait_remoteproc_state "$path" running 6
+    rproc_evidence=$(mktemp "$PWD/remoteproc-start.XXXXXX") || return 1
+    # shellcheck disable=SC2016 # Positional arguments belong to the child shell.
+    run_with_bounded_timeout_capture "$rproc_timeout" "$rproc_evidence" \
+        sh -c 'printf "%s\n" "$2" >"$1"' sh "$statef" start || return 1
+    wait_remoteproc_state "$path" running "$rproc_timeout" "$rproc_poll"
 }
 # Validate remoteproc running state with retries and logging
 validate_remoteproc_running() {
@@ -7587,7 +7716,8 @@ validate_remoteproc_running() {
         echo "[ERROR] Remoteproc for '$fw_name' not found" >> "$log_file"
         {
             echo "---- Last 20 remoteproc dmesg logs ----"
-            dmesg | grep -i "remoteproc" | tail -n 20
+            scan_dmesg_errors "$PWD/remoteproc-validation" remoteproc "" || true
+            tail -n 20 "$PWD/remoteproc-validation/dmesg_errors.log"
             echo "----------------------------------------"
         } >> "$log_file"
         return 1
@@ -7606,7 +7736,8 @@ validate_remoteproc_running() {
     echo "[ERROR] $fw_name remoteproc did not reach 'running' state within ${max_wait_secs}s (last state: $state)" >> "$log_file"
     {
         echo "---- Last 20 remoteproc dmesg logs ----"
-        dmesg | grep -i "remoteproc" | tail -n 20
+        scan_dmesg_errors "$PWD/remoteproc-validation" remoteproc "" || true
+        tail -n 20 "$PWD/remoteproc-validation/dmesg_errors.log"
         echo "----------------------------------------"
     } >> "$log_file"
     return 1
@@ -7643,69 +7774,95 @@ summary_report() {
 
 # dump_rproc_logs <sysfs-path> <label>
 # Captures debug trace + filtered dmesg into a timestamped log
-dump_rproc_logs() {
-    rpath="$1"; label="$2"
-    ts=$(date +%Y%m%d_%H%M%S)
-    base=$(basename "$rpath")
-    logfile="rproc_${base}_${label}_${ts}.log"
-    log_info "Dumping ${base} [${label}] → ${logfile}"
-    [ -r "$rpath/trace" ] && cat "$rpath/trace" >"$logfile"
-    dmesg | grep -i "$base" >>"$logfile" 2>/dev/null || :
-}
+dump_rproc_logs() (
+    rpath="$1"
+    label="$2"
+    base=${rpath##*/}
+    logfile="$PWD/rproc_${base}_${label}_$(date +%Y%m%d_%H%M%S).log"
+    log_info "Dumping $base [$label] to $logfile"
+    : >"$logfile" || return 1
+    if [ -r "$rpath/trace" ]; then
+        cat "$rpath/trace" >>"$logfile"
+    fi
+    # Callers may provide a snapshot already captured for this operation.
+    snapshot="${3:-}"
+    if [ -z "$snapshot" ]; then
+        scan_dmesg_errors "${logfile}.kernel" 'remoteproc|qcom.*pas|qcom_q6v5' 'not a crash|non-fatal' || true
+        snapshot="${logfile}.kernel/dmesg_snapshot.log"
+    fi
+    if [ -r "$snapshot" ]; then
+        grep -Fi "$base" "$snapshot" >>"$logfile" || true
+    fi
+)
 
 # find_rpmsg_ctrl_for <short-name>
 # e.g. find_rpmsg_ctrl_for adsp
-find_rpmsg_ctrl_for() {
-    want="$1"  # e.g. "adsp"
-
-    for dev in /dev/rpmsg_ctrl*; do
-        [ -e "$dev" ] || continue
-
-        base=$(basename "$dev")
-        sysfs="/sys/class/rpmsg/${base}"
-
-        # resolve the rpmsg_ctrl node’s real path
-        target=$(readlink -f "$sysfs/device")
-        # climb up to the remoteprocX directory
-        remoteproc_dir=$(dirname "$(dirname "$(dirname "$target")")")
-
-        # Try the 'name' file
-        if [ -r "$remoteproc_dir/name" ]; then
-            rpname=$(cat "$remoteproc_dir/name")
-            if echo "$rpname" | grep -qi "^${want}"; then
-                printf '%s\n' "$dev"
-                return 0
-            fi
+find_rpmsg_ctrl_for() (
+    rpc_family="$1"
+    rpc_entries=$(get_remoteproc_by_firmware "$rpc_family" "" all) || return 1
+    # shellcheck disable=SC2034 # Inventory columns retained for its public format.
+    while IFS='|' read -r rpc_path rpc_state rpc_firmware rpc_name; do
+        if rpc_sys=$(find_rpmsg_ctrl_for_rproc "$rpc_path"); then
+            rpc_dev="/dev/${rpc_sys##*/}"
+            [ -c "$rpc_dev" ] || continue
+            printf '%s\n' "$rpc_dev"
+            return 0
         fi
-
-        # Fallback: try the 'firmware' file, strip extension
-        if [ -r "$remoteproc_dir/firmware" ]; then
-            fw=$(basename "$(cat "$remoteproc_dir/firmware")")   # adsp.mbn
-            short="${fw%%.*}"                                    # adsp
-            if echo "$short" | grep -qi "^${want}"; then
-                printf '%s\n' "$dev"
-                return 0
-            fi
-        fi
-    done
-
+    done <<RPMSG_INSTANCES
+$rpc_entries
+RPMSG_INSTANCES
     return 1
-}
+)
 
 # Given a remoteproc *absolute* path (e.g. /sys/class/remoteproc/remoteproc2),
 # return the FIRST matching /sys/class/rpmsg/rpmsg_ctrlN path.
-find_rpmsg_ctrl_for_rproc() {
-    rproc_path="$1"
-    for c in /sys/class/rpmsg/rpmsg_ctrl*; do
-        [ -e "$c" ] || continue
-        # device symlink for ctrl points into ...remoteprocX/...rpmsg_ctrl...
-        devlink=$(readlink -f "$c/device" 2>/dev/null) || continue
-        case "$devlink" in
-            "$rproc_path"/*) printf '%s\n' "$c"; return 0 ;;
+find_rpmsg_ctrl_for_rproc() (
+    rpc_root=$(readlink -f "$1") || return 1
+    [ -d "$rpc_root" ] || return 1
+    for rpc_ctrl in /sys/class/rpmsg/rpmsg_ctrl*; do
+        [ -e "$rpc_ctrl" ] || continue
+        rpc_device=$(readlink -f "$rpc_ctrl/device") || continue
+        case "$rpc_device" in
+            "$rpc_root"/*)
+                printf '%s\n' "$rpc_ctrl"
+                return 0
+                ;;
         esac
     done
     return 1
-}
+)
+
+# rpmsg_validate_echo <remoteproc-path> <output-directory>
+# Run an explicitly configured image client against an existing named echo
+# endpoint owned by this instance. Stdout is diagnostic, logs stay in CWD.
+# RPMSG_ECHO_CLIENT must accept the endpoint path as its sole argument and
+# validate the configured echo protocol. No endpoint is created or probed blindly.
+# Returns 0 for validated echo, 2 for absent optional assets, 1 for execution failure.
+rpmsg_validate_echo() (
+    rve_path=$(readlink -f "$1") || return 1
+    rve_out="$2"
+    [ -n "${RPMSG_ECHO_CLIENT:-}" ] && [ -n "${RPMSG_ECHO_SERVICE:-}" ] || return 2
+    rve_client=$(command -v "$RPMSG_ECHO_CLIENT") || return 2
+    mkdir -p "$rve_out" || return 1
+    for rve_endpoint in /sys/class/rpmsg/rpmsg[0-9]*; do
+        [ -r "$rve_endpoint/name" ] || continue
+        [ "$(cat "$rve_endpoint/name")" = "$RPMSG_ECHO_SERVICE" ] || continue
+        rve_device=$(readlink -f "$rve_endpoint/device") || continue
+        case "$rve_device" in
+            "$rve_path"/*)
+                rve_node="/dev/${rve_endpoint##*/}"
+                [ -c "$rve_node" ] || return 1
+                run_with_bounded_timeout_capture 10 "$rve_out/process.log" \
+                    "$rve_client" "$rve_node" >"$rve_out/echo.log" 2>&1
+                rve_rc=$?
+                log_file_with_label RPMSG "$rve_out/echo.log"
+                [ "$rve_rc" -eq 0 ]
+                return $?
+                ;;
+        esac
+    done
+    return 2
+)
 
 # Ensure /dev node exists for a sysfs rpmsg item (ctrl or data). Echo /dev/… path.
 rpmsg_sys_to_dev() {
@@ -7723,7 +7880,8 @@ rpmsg_sys_to_dev() {
 # Find existing rpmsg data endpoints that belong to this remoteproc path.
 # Echo all matching /dev/rpmsgN (one per line). Return 0 if any, 1 if none.
 find_rpmsg_data_for_rproc() {
-    rproc_path="$1"
+    rproc_path=$(readlink -f "$1") || return 1
+    [ -d "$rproc_path" ] || return 1
     found=0
     for d in /sys/class/rpmsg/rpmsg[0-9]*; do
         [ -e "$d" ] || continue
@@ -8546,6 +8704,37 @@ $kff_raw"
         printf '%s\n' "$kff_block"
     fi
     exit 0
+)
+
+# kernel_log_filter_instance_faults <snapshot> <module-regex> <identity-regex> <selected-id>
+# Reuse captured fault blocks, excluding only blocks explicitly owned by siblings.
+# Unassigned driver faults remain visible. No new kernel read occurs.
+kernel_log_filter_instance_faults() (
+    klif_blocks=$(kernel_log_filter_faults "$1" "$2") || return 1
+    printf '%s\n' "$klif_blocks" | awk -v identity="$3" -v selected="$4" '
+        function emit() {
+            if (block != "" && (!named || matched)) print block
+            block=""; named=0; matched=0
+        }
+        {
+            text=$0
+            sub(/^[[:space:]]*/, "", text)
+            while (text ~ /^\[[^]]*\]/) {
+                sub(/^\[[^]]*\][[:space:]]*/, "", text)
+            }
+            if (text ~ /^(BUG:|WARNING:|Oops[: -]|Internal error:|Kernel panic|kernel BUG at|Unable to handle|Unhandled fault|invalid opcode:)/) emit()
+            if ($0 == "" && block == "") next
+            block=block (block == "" ? "" : "\n") $0
+            rest=$0
+            while (match(rest, identity)) {
+                id=substr(rest, RSTART, RLENGTH)
+                named=1
+                if (id == selected) matched=1
+                rest=substr(rest, RSTART+RLENGTH)
+            }
+        }
+        END { emit() }
+    '
 )
 
 # scan_dmesg_errors OUTPUT_DIR MODULE_REGEX [EXCLUDE_REGEX]
@@ -11704,7 +11893,17 @@ cpu_hotplug_write_state() {
 
     rm -f "$err_file" 2>/dev/null
 
-    if (printf '%s\n' "$cpu_state" > "$online_file") 2>"$err_file"; then
+    cpu_write_timeout=6
+    if [ "$cpu_state" = 0 ] && [ -n "${CPU_HOTPLUG_DEADLINE:-}" ]; then
+        cpu_remaining=$((CPU_HOTPLUG_DEADLINE - $(get_monotonic_seconds)))
+        [ "$cpu_remaining" -gt 0 ] || return 1
+        if [ "$cpu_write_timeout" -gt "$cpu_remaining" ]; then
+            cpu_write_timeout="$cpu_remaining"
+        fi
+    fi
+    # shellcheck disable=SC2016 # Positional arguments belong to the child shell.
+    if run_with_bounded_timeout_capture "$cpu_write_timeout" "${err_file}.process" \
+        sh -c 'printf "%s\n" "$2" >"$1"' sh "$online_file" "$cpu_state" 2>"$err_file"; then
         return 0
     fi
 
@@ -11723,22 +11922,11 @@ cpu_hotplug_write_state() {
 # $3 - output directory
 # shellcheck disable=SC2317
 cpu_hotplug_log_dmesg_tail() {
-    cpu_index="$1"
-    tag="$2"
-    out_dir="$3"
-    dmesg_file="$out_dir/hotplug_cpu${cpu_index}_${tag}_dmesg.txt"
-
-    if command -v dmesg >/dev/null 2>&1; then
-        dmesg | tail -n 120 > "$dmesg_file" 2>/dev/null
-        log_info "Saved dmesg tail for CPU$cpu_index $tag: $dmesg_file"
-
-        tail -n 20 "$dmesg_file" 2>/dev/null |
-        while IFS= read -r dmesg_line || [ -n "$dmesg_line" ]; do
-            [ -n "$dmesg_line" ] || continue
-            log_info "[dmesg] $dmesg_line"
-        done
-    else
-        log_warn "dmesg command not available; cannot collect CPU$cpu_index $tag evidence"
+    cpu_log_dir="$3/cpu$1-$2"
+    scan_dmesg_errors "$cpu_log_dir" 'smp|cpuhp|hotplug|CPU[0-9]+' 'not a crash|non-fatal' || true
+    log_file_with_label CPU-HOTPLUG "$cpu_log_dir/dmesg_errors.log"
+    if [ "${DMESG_ACCESS_STATUS:-unavailable}" != available ]; then
+        log_warn "Hotplug kernel health is unverified, see $cpu_log_dir/dmesg_access.log"
     fi
 }
 
@@ -11769,7 +11957,8 @@ cpu_hotplug_restore_best_effort() {
     online_file="$(cpu_hotplug_control_file "$cpu_index")"
 
     if [ -w "$online_file" ]; then
-        if ! (printf '%s\n' 1 > "$online_file") 2>/dev/null; then
+        # shellcheck disable=SC2016 # Positional arguments belong to the child shell.
+        if ! run_with_bounded_timeout 6 sh -c 'printf "1\n" >"$1"' sh "$online_file" 2>/dev/null; then
             :
         fi
     fi
@@ -11778,6 +11967,7 @@ cpu_hotplug_restore_best_effort() {
 # Restore all CPUs recorded by cpu_hotplug_record_offlined_cpu().
 # shellcheck disable=SC2317
 cpu_hotplug_cleanup_registered() {
+    cpu_cleanup_failed=0
     for cpu_index in $CPU_HOTPLUG_OFFLINED_CPUS; do
         cpu_state="$(cpu_hotplug_read_state "$cpu_index")"
 
@@ -11785,7 +11975,12 @@ cpu_hotplug_cleanup_registered() {
             log_warn "Cleanup: CPU$cpu_index is still offline, restoring online"
             cpu_hotplug_restore_best_effort "$cpu_index"
         fi
+        if [ "$(cpu_hotplug_read_state "$cpu_index")" != 1 ]; then
+            log_fail "Cleanup could not restore CPU$cpu_index online"
+            cpu_cleanup_failed=1
+        fi
     done
+    [ "$cpu_cleanup_failed" -eq 0 ]
 }
 
 # Try to offline a CPU with retry handling.
@@ -11809,6 +12004,11 @@ cpu_hotplug_try_offline_with_retry() {
     attempt=1
  
     while [ "$attempt" -le "$retries" ]; do
+        if [ -n "${CPU_HOTPLUG_DEADLINE:-}" ] &&
+           [ "$(get_monotonic_seconds)" -ge "$CPU_HOTPLUG_DEADLINE" ]; then
+            log_fail "CPU hotplug deadline reached before another offline request"
+            return 1
+        fi
         log_info "CPU$cpu_index offline attempt $attempt/$retries"
  
         offline_output="$(cpu_hotplug_write_state "$cpu_index" 0 "offline_attempt${attempt}" "$out_dir" 2>&1)"
@@ -11834,7 +12034,15 @@ cpu_hotplug_try_offline_with_retry() {
  
         if [ "$attempt" -le "$retries" ]; then
             log_info "Waiting ${retry_delay}s before retrying CPU$cpu_index offline"
-            sleep "$retry_delay"
+            cpu_retry_sleep="$retry_delay"
+            if [ -n "${CPU_HOTPLUG_DEADLINE:-}" ]; then
+                cpu_remaining=$((CPU_HOTPLUG_DEADLINE - $(get_monotonic_seconds)))
+                [ "$cpu_remaining" -gt 0 ] || return 1
+                if [ "$cpu_retry_sleep" -gt "$cpu_remaining" ]; then
+                    cpu_retry_sleep="$cpu_remaining"
+                fi
+            fi
+            sleep "$cpu_retry_sleep"
         fi
     done
  
@@ -11925,6 +12133,8 @@ cpu_hotplug_validate_cpu_once() {
         return 1
     fi
 
+    # Register before the write, timeout or interruption can leave it offline.
+    cpu_hotplug_record_offlined_cpu "$cpu_index"
     cpu_hotplug_try_offline_with_retry "$cpu_index" "$retries" "$retry_delay" "$out_dir"
     offline_rc=$?
 
@@ -11939,10 +12149,18 @@ cpu_hotplug_validate_cpu_once() {
         return 1
     fi
 
-    cpu_hotplug_record_offlined_cpu "$cpu_index"
     tested=$((tested + 1))
 
-    sleep "$restore_delay"
+    cpu_restore_sleep="$restore_delay"
+    if [ -n "${CPU_HOTPLUG_DEADLINE:-}" ]; then
+        cpu_remaining=$((CPU_HOTPLUG_DEADLINE - $(get_monotonic_seconds)))
+        if [ "$cpu_remaining" -le 0 ]; then
+            cpu_restore_sleep=0
+        elif [ "$cpu_restore_sleep" -gt "$cpu_remaining" ]; then
+            cpu_restore_sleep="$cpu_remaining"
+        fi
+    fi
+    sleep "$cpu_restore_sleep"
 
     cpu_state="$(cpu_hotplug_read_state "$cpu_index")"
 
@@ -11980,7 +12198,16 @@ cpu_hotplug_validate_cpu_once() {
         return 1
     fi
 
-    sleep "$restore_delay"
+    cpu_restore_sleep="$restore_delay"
+    if [ -n "${CPU_HOTPLUG_DEADLINE:-}" ]; then
+        cpu_remaining=$((CPU_HOTPLUG_DEADLINE - $(get_monotonic_seconds)))
+        if [ "$cpu_remaining" -le 0 ]; then
+            cpu_restore_sleep=0
+        elif [ "$cpu_restore_sleep" -gt "$cpu_remaining" ]; then
+            cpu_restore_sleep="$cpu_remaining"
+        fi
+    fi
+    sleep "$cpu_restore_sleep"
 
     cpu_state="$(cpu_hotplug_read_state "$cpu_index")"
 
