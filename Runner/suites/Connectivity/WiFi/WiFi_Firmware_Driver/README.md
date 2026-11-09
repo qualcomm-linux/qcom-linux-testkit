@@ -120,3 +120,12 @@ The test fails when:
 
 - The test currently detects ath12k, ath11k, and ath10k firmware families through common connectivity helpers.
 - This test does not validate association to an access point or IP assignment. Use `WiFi_Dynamic_IP` or `WiFi_Manual_IP` for connection validation.
+
+An unavailable global `regulatory.db` lookup is retained in
+`wifi_regulatory_warnings.log` and printed as `WIFI-REGULATORY`. cfg80211 can
+use its world regulatory domain, so this message alone does not stop driver
+and PHY validation. A malformed database, device firmware failure or captured
+driver crash remains a failure. A runtime PHY confirms driver readiness,
+it does not prove that the regulatory database loaded or that association works.
+The original messages remain in `dmesg_errors.log` and the general probe suite
+can report the image provisioning gap independently.

@@ -88,6 +88,8 @@ Generic PCIe runtime and kernel-health evidence is retained in:
 ```sh
 cat results/PCIe/pcie_runtime/pcie_runtime.tsv
 cat results/PCIe/pcie_runtime/dmesg_errors.log
+cat results/PCIe/pcie_runtime/pcie_fatal_errors.log
+cat results/PCIe/pcie_runtime/pcie_empty_ports.log
 ```
 
 Kernel-log findings are advisory by default because the boot log can contain
@@ -114,3 +116,11 @@ The `qcom-next-ci-premerge.yaml` plan enables `PCIE_DMESG_STRICT=1` and includes
 `Ethernet_Inventory_Validation` to validate downstream QPS615 MAC readiness.
 The standalone PCIe advisory default and idle-bridge classification remain.
 `lspci` is optional, sysfs supplies the required runtime inventory.
+
+Strict kernel gating retains the original snapshot and all error messages.
+A `Device not found` message is advisory only when its runtime controller is
+bound, exactly one root bridge is registered, no downstream device is
+enumerated, and the enabled root-port DT has no enabled downstream hardware
+declaration. Controller addresses and DT paths are discovered at runtime.
+Missing topology evidence, a declared endpoint, other controller errors,
+uncorrected AER and captured crashes remain subject to the strict failure gate.

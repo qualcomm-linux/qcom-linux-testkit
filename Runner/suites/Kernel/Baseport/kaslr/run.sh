@@ -70,35 +70,17 @@ OUT_DIR=$(test_create_run_directory "$PWD/results/$TESTNAME") ||
     test_result_finish FAIL "Cannot create evidence under CWD=$PWD"
 log_info "Evidence: $OUT_DIR"
 
-config_value=$(kernel_config_value CONFIG_RANDOMIZE_BASE || true)
-config_source=$(kernel_config_source || true)
-log_info "CONFIG_RANDOMIZE_BASE=${config_value:-unknown} source=${config_source:-unavailable}"
-if grep -Eq '(^|[[:space:]])nokaslr([[:space:]]|$)' /proc/cmdline; then
-    test_result_finish FAIL "KASLR is disabled by the boot command line"
-fi
-case "$config_value" in
-    y)
+kaslr_check_runtime "$OUT_DIR"
+kaslr_status=$?
+case "$kaslr_status" in
+    0)
+        test_result_record PASS "$KASLR_REASON"
         ;;
-    n|not-set)
-        test_result_finish FAIL "Kernel configuration disables address randomization"
+    2)
+        test_result_record SKIP "$KASLR_REASON"
         ;;
     *)
-        test_result_finish SKIP "KASLR configuration evidence is unavailable"
+        test_result_record FAIL "$KASLR_REASON"
         ;;
 esac
-scan_dmesg_errors "$OUT_DIR" 'kaslr|randomiz|Kernel Offset' '' || true
-if [ "${DMESG_ACCESS_STATUS:-unavailable}" = available ] &&
-   grep -Eiq 'KASLR.*disabled|Kernel Offset:[[:space:]]+disabled' "$OUT_DIR/dmesg_snapshot.log"; then
-    test_result_finish FAIL "Boot evidence reports KASLR disabled"
-fi
-symbol=$(awk '$3 == "_stext" || $3 == "stext" {print $1; exit}' /proc/kallsyms 2>/dev/null || true)
-case "$symbol" in
-    ''|*[![:xdigit:]]*)
-        test_result_finish SKIP "Runtime KASLR symbol evidence is unavailable"
-        ;;
-esac
-if ! printf '%s\n' "$symbol" | grep -q '[1-9a-fA-F]'; then
-    test_result_finish SKIP "Kernel addresses are hidden, zero kallsyms data cannot verify runtime KASLR"
-fi
-log_info "Runtime kernel text symbol=$symbol, one boot cannot establish cross-boot randomness"
-test_result_finish PASS "KASLR configuration and runtime symbol evidence available with no observed boot disable, cross-boot randomness was not tested"
+test_result_finish

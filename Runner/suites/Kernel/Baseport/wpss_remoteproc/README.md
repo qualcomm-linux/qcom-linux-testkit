@@ -63,3 +63,9 @@ Explicit SSR writes use bounded stop/start operations and restore only the
 instance stopped by the test. Restoration failure affects the final verdict.
 Captured fatal blocks remain failures after recovery. Explicit sibling instance
 faults are excluded, unassigned remoteproc driver faults remain visible.
+
+In the WiFi-driver fallback, an unavailable global `regulatory.db` lookup is
+retained in `driver/wifi_regulatory_warnings.log` and printed to stdout.
+This optional database lookup does not establish a WPSS crash. The discovered
+family must still own a registered wireless PHY. Driver firmware errors,
+malformed regulatory data and captured kernel faults remain failures.

@@ -110,7 +110,15 @@ fi
 # fail applicable hardware, unavailable build configuration is reported separately.
 wifi_cfgs="CONFIG_WIRELESS CONFIG_WLAN CONFIG_CFG80211 CONFIG_MAC80211 $(infer_wifi_driver_cfgs)"
 for wifi_cfg in $wifi_cfgs; do
-    wifi_cfg_value=$(kernel_config_value "$wifi_cfg" || true)
+    wifi_cfg_entry=$(kernel_config_value "$wifi_cfg" || true)
+    case "$wifi_cfg_entry" in
+        "$wifi_cfg="*)
+            wifi_cfg_value=${wifi_cfg_entry#"$wifi_cfg="}
+            ;;
+        *)
+            wifi_cfg_value="unavailable"
+            ;;
+    esac
     case "$wifi_cfg_value" in
         n|not-set)
             test_result_record FAIL "Applicable WiFi configuration is disabled: $wifi_cfg"

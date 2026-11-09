@@ -70,6 +70,7 @@ if ! CHECK_DEPS_RECOVER=0 CHECK_DEPS_NO_EXIT=1 check_dependencies \
     mkdir \
     readlink \
     rm \
+    sed \
     tr \
     uname; then
     test_result_finish "SKIP" "$TESTNAME SKIP: required base utilities are unavailable"
@@ -192,12 +193,15 @@ scan_dmesg_errors \
     "$PCIE_RESULT_DIR" \
     'pcieport.*|qcom-pcie.*|pci.*' \
     'AER: Corrected|corrected error|deferred probe|EPROBE_DEFER|using dummy regulator|supply [^ ]+ not found'
+pcie_classify_kernel_errors "$PCIE_RESULT_DIR"
 pcie_dmesg_status=$?
 
 if [ ! -s "$PCIE_RESULT_DIR/dmesg_snapshot.log" ]; then
     test_result_record "SKIP" "Kernel log access is unavailable for PCIe health validation"
+elif [ "$pcie_dmesg_status" -eq 2 ]; then
+    test_result_record "FAIL" "Captured PCIe kernel evidence could not be classified"
 elif [ "$pcie_dmesg_status" -eq 0 ] && [ "$PCIE_DMESG_STRICT" -eq 1 ]; then
-    test_result_record "FAIL" "PCIe link, controller, or uncorrected AER errors were found in $PCIE_RESULT_DIR/dmesg_errors.log"
+    test_result_record "FAIL" "PCIe link, controller, or uncorrected AER errors were found in $PCIE_RESULT_DIR/pcie_fatal_errors.log"
 elif [ "$pcie_dmesg_status" -eq 0 ]; then
     test_result_record "SKIP" "PCIe kernel errors were retained as advisory evidence, set PCIE_DMESG_STRICT=1 to gate them"
 else

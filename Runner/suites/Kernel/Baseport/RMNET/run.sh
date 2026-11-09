@@ -97,7 +97,7 @@ if is_module_loaded "$MODNAME" || [ "$origin" = builtin ]; then
     test_result_record PASS "Image driver $MODNAME is active, origin=$origin"
 else
     case "$config_value" in
-        n|not-set)
+        CONFIG_RMNET=n)
             test_result_finish SKIP "CONFIG_RMNET is disabled"
             ;;
         '')
