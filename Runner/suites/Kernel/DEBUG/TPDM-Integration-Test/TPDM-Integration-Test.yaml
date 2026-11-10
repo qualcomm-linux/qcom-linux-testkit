@@ -1,0 +1,16 @@
+metadata:
+  name: TPDM-Integration-Test
+  format: "Lava-Test Test Definition 1.0"
+  description: "Coresight TPDM integration test script to verify trace generation by writing to integration_test nodes and verifying the ETF mgmt/rwp changes."
+  os:
+    - linux
+  scope:
+    - coresight
+    - kernel
+
+run:
+  steps:
+    - REPO_PATH=$PWD || true
+    - cd Runner/suites/Kernel/DEBUG/TPDM-Integration-Test || true
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh TPDM-Integration-Test.res || true
