@@ -10113,9 +10113,10 @@ audio_record_stop_child() {
 # --until-complete <marker>, --validate-at-deadline, then the command.
 # A completion marker additionally keeps loopback recording through playback.
 # Its absence never extends startup, stall or total capture deadlines.
-# Logs go to stderr. Optional pw-link output goes to <WAV path>.links while
-# recording, after the first payload. The diagnostic child is killed/reaped
-# within two polling intervals or when capture ends, without extending deadlines.
+# Logs go to stderr. Optional live diagnostics start near the startup deadline
+# if no payload arrives, with the usual links snapshot refreshed at first payload.
+# Diagnostic children are killed/reaped within two polling intervals or when
+# capture ends, without extending deadlines. Artifacts use the WAV path prefix.
 # Auto mode bounds startup to requested+grace and total time to twice that window.
 # AudioRecord opt-in validation retains the total budget after first payload,
 # stopping as soon as requested samples arrive. Other callers keep separate
@@ -10211,11 +10212,20 @@ audio_record_with_progress() {
   arwp_links_pid=""
   arwp_format_pid=""
   arwp_links_start=0
+  arwp_graph_pid=""
+  arwp_graph_start=0
+  arwp_startup_snapshot=0
+  arwp_snapshot_at=$((arwp_start + arwp_window - 2))
+  if [ "$arwp_limit" -gt 0 ] && [ "$arwp_limit" -lt "$arwp_window" ]; then
+    arwp_snapshot_at=$((arwp_deadline - 2))
+  fi
   if [ "$arwp_links" -eq 1 ]; then
     if ! printf '%s\n' 'AUDIO_LINKS status=not-started reason=no-payload-yet' >"${arwp_file}.links"; then
       printf '%s\n' 'AUDIO_LINKS status=unavailable reason=output-not-writable' >&2
       arwp_links=0
     fi
+    # Clear rerun evidence even when the startup snapshot is never needed.
+    printf '%s\n' 'AUDIO_GRAPH status=not-started reason=startup-not-pending' >"${arwp_file}.graph" 2>/dev/null || true
   fi
   if [ -n "$arwp_source_id" ]; then
     if ! printf 'AUDIO_SOURCE_FORMAT source_id=%s status=not-started reason=no-payload-yet\n' \
@@ -10230,6 +10240,9 @@ audio_record_with_progress() {
   fi
   if [ -n "$arwp_links_pid" ]; then
     audio_record_finish_link_snapshot "$arwp_links_pid" "${arwp_file}.links"
+  fi
+  if [ -n "$arwp_graph_pid" ]; then
+    audio_record_finish_link_snapshot "$arwp_graph_pid" "${arwp_file}.graph" AUDIO_GRAPH
   fi
   if [ -n "$arwp_pid" ]; then
     audio_record_stop_child "$arwp_pid" || true
@@ -10259,6 +10272,28 @@ audio_record_with_progress() {
          [ "$((arwp_now - arwp_links_start))" -ge 2 ]; }; then
       audio_record_finish_link_snapshot "$arwp_links_pid" "${arwp_file}.links"
       arwp_links_pid=""
+    fi
+    if [ -n "$arwp_graph_pid" ] &&
+       { ! kill -0 "$arwp_graph_pid" 2>/dev/null ||
+         [ "$((arwp_now - arwp_graph_start))" -ge 2 ]; }; then
+      audio_record_finish_link_snapshot "$arwp_graph_pid" "${arwp_file}.graph" AUDIO_GRAPH
+      arwp_graph_pid=""
+    fi
+    # Sample while the stalled client still exists, within its original budget.
+    # Exec each utility as a directly owned child, so a hung server cannot leave
+    # a diagnostic grandchild behind or delay the capture watchdog.
+    if [ "$arwp_links" -eq 1 ] && [ "$arwp_first" -eq 0 ] &&
+       [ "$arwp_startup_snapshot" -eq 0 ] &&
+       [ "$arwp_now" -ge "$arwp_snapshot_at" ] &&
+       [ "$arwp_now" -lt "$arwp_deadline" ] &&
+       [ "$((arwp_now - arwp_start))" -lt "$arwp_window" ]; then
+      arwp_startup_snapshot=1
+      audio_record_live_snapshot "$arwp_pid" startup-pending pw-link -l -I >"${arwp_file}.links" 2>&1 &
+      arwp_links_pid=$!
+      arwp_links_start="$arwp_now"
+      audio_record_live_snapshot "$arwp_pid" startup-pending pw-cli info all >"${arwp_file}.graph" 2>&1 &
+      arwp_graph_pid=$!
+      arwp_graph_start="$arwp_now"
     fi
     if [ "$arwp_now" -gt "$arwp_deadline" ]; then
       arwp_reason=capture-deadline
@@ -10330,6 +10365,10 @@ EOF
             fi
           fi
           if [ "$arwp_links" -eq 1 ]; then
+            if [ -n "$arwp_links_pid" ]; then
+              audio_record_finish_link_snapshot "$arwp_links_pid" "${arwp_file}.links"
+              arwp_links_pid=""
+            fi
             printf 'AUDIO_LINKS recorder_pid=%s phase=first-payload\n' "$arwp_pid" >"${arwp_file}.links"
             if command -v pw-link >/dev/null 2>&1; then
               pw-link -l -I >>"${arwp_file}.links" 2>&1 &
@@ -10383,6 +10422,10 @@ EOF
   if [ -n "$arwp_links_pid" ]; then
     audio_record_finish_link_snapshot "$arwp_links_pid" "${arwp_file}.links"
     arwp_links_pid=""
+  fi
+  if [ -n "$arwp_graph_pid" ]; then
+    audio_record_finish_link_snapshot "$arwp_graph_pid" "${arwp_file}.graph" AUDIO_GRAPH
+    arwp_graph_pid=""
   fi
   if [ "$arwp_reason" = "recorder-exited" ]; then
     arwp_rc=0
@@ -10444,8 +10487,23 @@ EOF
   return "$arwp_result"
 }
 
-# Finish only an owned read-only snapshot child. Arguments: PID, output path,
-# optional label (default AUDIO_LINKS, retained for existing callers).
+# audio_record_live_snapshot <recorder-pid> <phase> <tool> [arguments...]
+# Emit identity and exec an optional read-only utility in the capture session.
+# Launch asynchronously with stdout/stderr redirected to its artifact. Exec
+# preserves the owned PID for cleanup. Missing tools return 0 with an explicit
+# marker, otherwise return the utility status. No service or route changes.
+audio_record_live_snapshot() {
+  printf 'AUDIO_SNAPSHOT recorder_pid=%s phase=%s tool=%s\n' "$1" "$2" "$3"
+  shift 2
+  if ! command -v "$1" >/dev/null 2>&1; then
+    printf 'AUDIO_SNAPSHOT status=unavailable reason=missing-tool tool=%s\n' "$1"
+    exit 0
+  fi
+  exec "$@"
+}
+
+# Finish only an owned read-only diagnostic child. Arguments: PID, output path,
+# optional status label (default AUDIO_LINKS, also used by existing callers).
 # Reap completed children, kill a still-running snapshot without a grace wait.
 # Append completion/truncation status to the artifact, return 0 regardless of
 # diagnostic failure. No stdout and no effect on the recording verdict.
@@ -10836,6 +10894,9 @@ audio_record_failure_diagnostics() {
   if [ "$arfd_backend" = "pipewire" ] && [ -f "${arfd_wav}.source-format" ]; then
     log_file_with_label AUDIO-RECORD-LIVE-SOURCE-FORMAT "${arfd_wav}.source-format" 120
   fi
+  if [ "$arfd_backend" = "pipewire" ] && [ -f "${arfd_wav}.graph" ]; then
+    log_file_with_label AUDIO-RECORD-LIVE-GRAPH "${arfd_wav}.graph" 240
+  fi
   return 0
 }
 
@@ -10928,7 +10989,8 @@ audio_record_set_capture_paths() {
 audio_record_reset_capture_output() {
   rm -f "$record_user_out"
   if [ "${AUDIO_BACKEND:-}" = "pipewire" ]; then
-    rm -f "${record_user_out}.links" "${record_user_out}.source-format"
+    rm -f "${record_user_out}.links" "${record_user_out}.source-format" \
+      "${record_user_out}.graph"
   fi
 }
 
@@ -10946,7 +11008,7 @@ audio_record_promote_capture_output() {
   fi
 
   if [ "${AUDIO_BACKEND:-}" = "pipewire" ]; then
-    for arpc_artifact in links source-format; do
+    for arpc_artifact in links source-format graph; do
       rm -f "${record_out}.$arpc_artifact"
       if [ -f "${record_user_out}.$arpc_artifact" ]; then
         if ! mv "${record_user_out}.$arpc_artifact" "${record_out}.$arpc_artifact" ||

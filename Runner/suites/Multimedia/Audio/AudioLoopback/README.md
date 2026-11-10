@@ -56,8 +56,13 @@ are restored on the original nodes. Service reuse is independent of these
 temporary stream settings. The fixture must still provide an acoustic or
 electrical path, nonzero PCM alone does not prove waveform correlation.
 
-Capture logs, `.volume`, `.server-before`, `.server-after` and WAV `.links`
-artifacts retain diagnostics where applicable, replayed to stdout on failure.
+Capture logs, `.volume`, `.server-before`, `.server-after`, WAV `.links`,
+`.source-format` and `.graph` artifacts retain diagnostics where applicable,
+replayed to stdout on failure.
+When PipeWire startup produces no samples, the shared capture monitor collects
+optional `pw-link` connections and `pw-cli info all` graph state while the
+recorder is still alive, within the existing capture budget. Missing or hung
+diagnostic tools do not change the result. No tools are installed at runtime.
 Kernel diagnostics cover the current test window rather than all boot history.
 Header-only/startup failures do not start playback. Stream, stall and deadline
 failures are not retried or converted into PASS by weakening WAV validation.

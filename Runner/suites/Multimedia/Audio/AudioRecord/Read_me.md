@@ -667,8 +667,24 @@ polling intervals or when capture ends, without extending the capture deadline.
 The snapshot is retained as `<case>.wav.links`, including in desktop-user mode,
 and replayed to stdout on failure (up to 160 lines). Missing tools, unsupported
 options, and interrupted snapshots are recorded without changing PASS/FAIL.
-No-payload captures retain a `not-started` marker. Live links help distinguish
-the requested node from the node that actually feeds the stream.
+If startup is still waiting for samples, two seconds before the earlier startup
+or explicit capture deadline the monitor starts a `phase=startup-pending`
+snapshot. For budgets of two seconds or less, it starts at the first poll.
+`pw-link -l -I` saves live connections to `<case>.wav.links`, and optional
+`pw-cli info all` saves graph objects, node/link states and properties to
+`<case>.wav.graph`. Both run independently in the recorder's user session while
+the recorder is alive. A hung diagnostic is killed and reaped within two polling
+intervals or when recording stops, without adding time to the capture budget.
+If samples subsequently arrive, the normal first-payload links replace the
+startup links. The startup graph remains available.
+
+Graph evidence is preserved in desktop-user mode and replayed on failure under
+`AUDIO-RECORD-LIVE-GRAPH` (up to 240 lines). The full artifacts remain beside the
+WAV. Missing tools, failed commands and truncated collection are diagnostic
+limitations, not proof of missing links or a healthy server. No packages are
+installed. A header-only recording remains FAIL. Live evidence helps distinguish
+an unlinked recorder from graph startup failures without changing the requested
+rate, channels, source, service state or validation policy.
 
 For example, validate LeMans Config09 using runtime microphone discovery:
 
