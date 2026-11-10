@@ -1,14 +1,14 @@
 #!/bin/sh
-
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause
-
-TESTNAME="DSP_AudioPD"
-
-# Robustly find and source init_env
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# ---------- Repo env + helpers ----------
+SCRIPT_DIR="$(
+  cd "$(dirname "$0")" || exit 1
+  pwd
+)"
 INIT_ENV=""
 SEARCH="$SCRIPT_DIR"
+
 while [ "$SEARCH" != "/" ]; do
     if [ -f "$SEARCH/init_env" ]; then
         INIT_ENV="$SEARCH/init_env"
@@ -17,58 +17,79 @@ while [ "$SEARCH" != "/" ]; do
     SEARCH=$(dirname "$SEARCH")
 done
 
-RES_FALLBACK="$SCRIPT_DIR/${TESTNAME}.res"
-
 if [ -z "$INIT_ENV" ]; then
     echo "[ERROR] Could not find init_env (starting at $SCRIPT_DIR)" >&2
-    echo "$TESTNAME SKIP" >"$RES_FALLBACK" 2>/dev/null || true
-    exit 0
+    exit 1
 fi
 
-# Only source if not already loaded (idempotent)
+# Only source once (idempotent)
+# NOTE: We intentionally **do not export** any new vars. They stay local to this shell.
 if [ -z "${__INIT_ENV_LOADED:-}" ]; then
     # shellcheck disable=SC1090
     . "$INIT_ENV"
-    export __INIT_ENV_LOADED=1
+    __INIT_ENV_LOADED=1
 fi
 
-# Always source functestlib.sh, using $TOOLS exported by init_env
-# shellcheck disable=SC1090,SC1091
+# shellcheck disable=SC1090
+. "$INIT_ENV"
+# shellcheck disable=SC1091
 . "$TOOLS/functestlib.sh"
 
-test_path=$(find_test_case_by_name "$TESTNAME")
-if [ -z "$test_path" ] || [ ! -d "$test_path" ]; then
-    log_skip "$TESTNAME SKIP - test path not found"
-    echo "$TESTNAME SKIP" >"$RES_FALLBACK" 2>/dev/null || true
-    exit 0
+TESTNAME="DSP_AudioPD"
+RES_FILE="$SCRIPT_DIR/$TESTNAME.res"
+test_result_init "$TESTNAME" "$RES_FILE" || exit 1
+# usage
+# Describe the readiness-only contract and supported invocation.
+usage() {
+    printf '%s\n' "Usage: $0 [--help], validates ADSP allocator and daemon readiness, not an AudioPD transaction"
+}
+
+# parse_args <arguments...>
+# Reject unsupported options before daemon startup.
+parse_args() {
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --help|-h)
+                usage
+                exit 0
+                ;;
+            *)
+                test_result_finish FAIL "Unsupported AudioPD option: $1"
+                ;;
+        esac
+    done
+}
+parse_args "$@"
+
+# shellcheck disable=SC2034 # Consumed by check_dependencies.
+CHECK_DEPS_RECOVER=0
+if ! CHECK_DEPS_NO_EXIT=1 check_dependencies adsprpcd find cat awk readlink grep sed tr mkdir mktemp date sleep; then
+    test_result_finish SKIP "Image-provided AudioPD daemon or inventory utilities are unavailable"
 fi
+OUT_DIR=$(test_create_run_directory "$PWD/results/$TESTNAME") || test_result_finish FAIL "Cannot create AudioPD evidence in CWD"
+OWNED_ADSPRPC_PID=""
 
-if ! cd "$test_path"; then
-    log_skip "$TESTNAME SKIP - cannot cd into $test_path"
-    echo "$TESTNAME SKIP" >"$RES_FALLBACK" 2>/dev/null || true
-    exit 0
-fi
+# cleanup
+# Stop only the exact child started by this runner, never all adsprpcd PIDs.
+cleanup() {
+    if [ -n "$OWNED_ADSPRPC_PID" ]; then
+        # shellcheck disable=SC2034 # Consumed by the shared bounded cancellation.
+        MANAGED_TIMEOUT_CMD_PID="$OWNED_ADSPRPC_PID"
+        if ! managed_timeout_cancel_bounded 2; then
+            printf '%s FAIL\n' "$TESTNAME" >"$RES_FILE"
+            log_fail "Test-owned adsprpcd did not stop"
+            return 1
+        fi
+        OWNED_ADSPRPC_PID=""
+    fi
+}
+# shellcheck disable=SC2034 # Consumed by shared finalization.
+TEST_RESULT_CLEANUP=cleanup
+trap cleanup 0
+trap 'test_result_finish FAIL "AudioPD validation interrupted"' HUP INT TERM
 
-# shellcheck disable=SC2034
-res_file="./$TESTNAME.res"
-
-log_info "-----------------------------------------------------------------------------------------"
-log_info "-------------------Starting $TESTNAME Testcase----------------------------"
-log_info "=== Test Initialization ==="
-
-# Dependencies (single call; log list; SKIP if missing)
-deps_list="adsprpcd tr awk grep sleep find cat"
-log_info "Checking dependencies: $deps_list"
-if ! check_dependencies "$deps_list"; then
-    log_skip "$TESTNAME SKIP - missing one or more dependencies: $deps_list"
-    echo "$TESTNAME SKIP" >"$res_file"
-    exit 0
-fi
-
-STARTED_BY_TEST=0
-PID=""
-PIDS=""
-
+# check_adsprpcd_wait_state <pid>
+# Inspect an already alive daemon, return 0 for observed readiness or 2 for unavailable evidence.
 check_adsprpcd_wait_state() {
     pid="$1"
     pid=$(sanitize_pid "$pid")
@@ -91,7 +112,7 @@ check_adsprpcd_wait_state() {
                 return 0
                 ;;
             *)
-                log_info "adsprpcd PID $pid wchan='$wchan' (debug only; not used as failure gate)"
+                log_info "adsprpcd PID $pid wchan='$wchan' (debug only, not used as failure gate)"
                 return 0
                 ;;
         esac
@@ -109,328 +130,120 @@ check_adsprpcd_wait_state() {
     fi
 
     # Neither interface is available -> SKIP
-    log_skip "Kernel does not expose /proc/$pid/(wchan|stack); cannot validate adsprpcd wait state"
-    echo "$TESTNAME SKIP" >"$res_file"
+    log_skip "Kernel does not expose /proc/$pid/(wchan|stack), cannot validate adsprpcd wait state"
     return 2
 }
 
-# Check whether non-secure ADSP FastRPC and ADSP RPC remote heap are present
-# before running AudioPD validation. Return 0=supported, 2=unsupported/SKIP.
-# Check whether ADSP remoteproc, FastRPC device node, and allocator backing are
-# available before AudioPD validation. Return 0=supported, 2=unsupported/SKIP.
-check_audiopd_allocator_available() {
-    dt_root=""
-    dt_nodes_file=""
-    heap_path=""
-    logged_heaps=""
-    node=""
-    compat_text=""
-    rproc=""
-    remoteproc_name=""
-    remoteproc_state=""
-    memory_region_ok=0
-    vmids_ok=0
-    adsp_running=0
-    dev_found=0
-    heap_found=0
-    fastrpc_dt_found=0
-    fastrpc_allocator_found=0
-
-    log_info "=== AudioPD FastRPC allocator pre-check ==="
-
-    # Check remoteproc before FastRPC device nodes. FastRPC device nodes are
-    # expected only after the corresponding remoteproc is up.
-    for rproc in /sys/class/remoteproc/remoteproc*; do
-        [ -e "$rproc" ] || continue
-
-        remoteproc_name="$(cat "$rproc/name" 2>/dev/null || true)"
-        remoteproc_state="$(cat "$rproc/state" 2>/dev/null || true)"
-
-        if [ "$remoteproc_name" = "adsp" ]; then
-            log_info "[audiopd] ADSP remoteproc: $rproc state=$remoteproc_state"
-
-            if [ "$remoteproc_state" = "running" ]; then
-                adsp_running=1
-            fi
-        fi
-    done
-
-    if [ "$adsp_running" -eq 0 ]; then
-        log_skip "[audiopd] ADSP remoteproc is not running."
-        return 2
-    fi
-
-    # Device open logic checks secure first, then falls back to non-secure.
-    # Either device node is sufficient for this pre-check.
-    if [ -e /dev/fastrpc-adsp-secure ]; then
-        dev_found=1
-        log_info "[audiopd] Secure ADSP FastRPC device present: /dev/fastrpc-adsp-secure"
-    elif [ -e /dev/fastrpc-adsp ]; then
-        dev_found=1
-        log_info "[audiopd] Non-secure ADSP FastRPC device present: /dev/fastrpc-adsp"
-    else
-        log_warn "[audiopd] ADSP FastRPC device missing: /dev/fastrpc-adsp-secure and /dev/fastrpc-adsp"
-    fi
-
-    for dt_root in /proc/device-tree /sys/firmware/devicetree/base; do
-        [ -d "$dt_root" ] || continue
-
-        dt_nodes_file="${TMPDIR:-/tmp}/${TESTNAME}_fastrpc_dt.$$"
-        : >"$dt_nodes_file" 2>/dev/null || continue
-        find "$dt_root" -type d 2>/dev/null >"$dt_nodes_file"
-
-        while IFS= read -r node; do
-            [ -n "$node" ] || continue
-
-            compat_text=""
-            if [ -f "$node/compatible" ]; then
-                compat_text="$(tr '\000' ' ' <"$node/compatible" 2>/dev/null)"
-            fi
-
-            # memory-region and qcom,vmids belong to the parent qcom,fastrpc
-            # node. Do not validate compute-cb child nodes for these properties.
-            case "$compat_text" in
-                *qcom,fastrpc-compute-cb*)
-                    continue
-                    ;;
-            esac
-
-            case "$compat_text" in
-                *qcom,fastrpc*)
-                    fastrpc_dt_found=1
-                    log_info "[audiopd] FastRPC parent DT candidate: $node"
-
-                    memory_region_ok=0
-                    vmids_ok=0
-
-                    if [ -s "$node/memory-region" ]; then
-                        memory_region_ok=1
-                        log_info "[audiopd] FastRPC memory-region present: $node/memory-region"
-                    else
-                        log_warn "[audiopd] FastRPC parent DT node missing memory-region: $node"
-                    fi
-
-                    if [ -s "$node/qcom,vmids" ]; then
-                        vmids_ok=1
-                        log_info "[audiopd] FastRPC qcom,vmids present: $node/qcom,vmids"
-                    else
-                        log_warn "[audiopd] FastRPC parent DT node missing qcom,vmids: $node"
-                    fi
-
-                    if [ "$memory_region_ok" -eq 1 ]; then
-                        if [ "$vmids_ok" -eq 1 ]; then
-                            fastrpc_allocator_found=1
-                            log_info "[audiopd] FastRPC allocator DT properties are valid: $node"
-                            break
-                        fi
-                    fi
-                    ;;
-            esac
-        done <"$dt_nodes_file"
-
-        rm -f "$dt_nodes_file" 2>/dev/null || true
-
-        if [ "$fastrpc_allocator_found" -eq 1 ]; then
-            break
-        fi
-    done
-
-    # Keep reserved-memory scan for debug/fallback visibility. However, if a
-    # qcom,fastrpc parent node is visible, the parent node must carry
-    # memory-region + qcom,vmids to pass.
-    for dt_root in /proc/device-tree /sys/firmware/devicetree/base; do
-        [ -d "$dt_root" ] || continue
-
-        for heap_path in "$dt_root"/reserved-memory/*adsp*rpc*remote*heap* \
-                         "$dt_root"/reserved-memory/*adsp-rpc-remote-heap*; do
-            [ -e "$heap_path" ] || continue
-
-            case " $logged_heaps " in
-                *" $heap_path "*)
-                    continue
-                    ;;
-            esac
-            logged_heaps="$logged_heaps $heap_path"
-
-            heap_found=1
-            log_info "[audiopd] ADSP RPC remote heap reserved-memory node: $heap_path"
-
-            if [ -s "$heap_path/reg" ]; then
-                log_info "[audiopd] ADSP RPC remote heap reg property present: $heap_path/reg"
-            else
-                log_warn "[audiopd] ADSP RPC remote heap reg property missing or empty: $heap_path/reg"
-            fi
-        done
-    done
-
-    if [ "$dev_found" -eq 1 ]; then
-        if [ "$fastrpc_allocator_found" -eq 1 ]; then
-            log_pass "[audiopd] AudioPD FastRPC allocator prerequisites are available."
-            return 0
-        fi
-    fi
-
-    # Some live DT layouts may not expose the qcom,fastrpc parent node clearly
-    # under /proc/device-tree. In that case only, allow reserved heap evidence
-    # to avoid false SKIP on targets where the parent node is not discoverable.
-    if [ "$dev_found" -eq 1 ]; then
-        if [ "$fastrpc_dt_found" -eq 0 ]; then
-            if [ "$heap_found" -eq 1 ]; then
-                log_warn "[audiopd] FastRPC parent DT node was not discoverable; falling back to ADSP RPC remote heap evidence."
-                log_pass "[audiopd] AudioPD FastRPC allocator prerequisites are available."
-                return 0
-            fi
-        fi
-    fi
-
-    if [ "$dev_found" -eq 0 ]; then
-        log_skip "[audiopd] No secure/non-secure ADSP FastRPC device is available."
-    fi
-
-    if [ "$fastrpc_dt_found" -eq 1 ]; then
-        if [ "$fastrpc_allocator_found" -eq 0 ]; then
-            log_skip "[audiopd] FastRPC parent DT node is missing memory-region and/or qcom,vmids."
-        fi
-    elif [ "$heap_found" -eq 0 ]; then
-        log_skip "[audiopd] ADSP RPC remote heap reserved-memory is not available."
-    fi
-
-    return 2
-}
-
-check_audiopd_allocator_available
-allocator_rc=$?
-
-if [ "$allocator_rc" -eq 2 ]; then
-    log_skip "$TESTNAME SKIP - AudioPD FastRPC allocator prerequisites are not available on this target"
-    echo "$TESTNAME SKIP" >"$res_file"
-    log_info "-------------------Completed $TESTNAME Testcase----------------------------"
-    exit 0
-fi
-
-if is_process_running "adsprpcd"; then
-    # is_process_running already prints instances/cmdline (for CI debug)
-    PIDS=$(get_one_pid_by_name "adsprpcd" all 2>/dev/null || true)
-
-    # Pick a primary PID for legacy logging (first valid numeric PID)
-    for p in $PIDS; do
-        p_clean=$(sanitize_pid "$p")
-        if [ -n "$p_clean" ]; then
-            PID="$p_clean"
-            break
-        fi
-    done
-else
-    log_info "adsprpcd is not running"
-    log_info "Manually starting adsprpcd daemon"
-    adsprpcd >/dev/null 2>&1 &
-    PID=$(sanitize_pid "$!")
-    STARTED_BY_TEST=1
-
-    # adsprpcd might daemonize/fork; if $! isn't alive, discover PID by name
-    if [ -n "$PID" ] && ! wait_pid_alive "$PID" 2; then
-        PID=""
-    fi
-    if [ -z "$PID" ]; then
-        PID=$(get_one_pid_by_name "adsprpcd" 2>/dev/null || true)
-        PID=$(sanitize_pid "$PID")
-    fi
-
-    # After start, gather all adsprpcd PIDs (if helper supports it)
-    PIDS=$(get_one_pid_by_name "adsprpcd" all 2>/dev/null || true)
-fi
-
-# Fallback if helper returned nothing
-if [ -z "$PIDS" ] && [ -n "$PID" ]; then
-    PIDS="$PID"
-fi
-
-log_info "PID is $PID"
-
-# Build an "alive" PID list (avoid false failures if a PID disappears)
-PIDS_ALIVE=""
-alive_count=0
-dead_seen=0
-for p in $PIDS; do
-    p_clean=$(sanitize_pid "$p")
-    if [ -z "$p_clean" ]; then
-        continue
-    fi
-
-    if wait_pid_alive "$p_clean" 10; then
-        alive_count=$((alive_count + 1))
-        if [ -z "$PIDS_ALIVE" ]; then
-            PIDS_ALIVE="$p_clean"
-        else
-            PIDS_ALIVE="$PIDS_ALIVE $p_clean"
-        fi
-    else
-        dead_seen=1
-        log_warn "adsprpcd PID $p_clean did not become alive"
-    fi
-done
-
-# Only print alive list if something was dropped (avoids duplicate info in normal case)
-if [ "$dead_seen" -eq 1 ]; then
-    log_info "Alive adsprpcd PIDs: $PIDS_ALIVE"
-fi
-
-if [ "$alive_count" -le 0 ]; then
-    log_fail "Failed to start adsprpcd or no alive PID found"
-    echo "$TESTNAME FAIL" >"$res_file"
-
-    # Kill only if we started it and PID is valid
-    if [ "$STARTED_BY_TEST" -eq 1 ]; then
-        for p in $PIDS; do
-            p_clean=$(sanitize_pid "$p")
-            if [ -n "$p_clean" ]; then
-                kill_process "$p_clean" || true
-            fi
-        done
-    fi
-    exit 0
-fi
-
-# Evaluate all alive PIDs
-fail_seen=0
-skip_seen=0
-
-for p in $PIDS_ALIVE; do
-    check_adsprpcd_wait_state "$p"
-    rc=$?
-
-    if [ "$rc" -eq 2 ]; then
-        skip_seen=1
+adsp_entries=$(get_remoteproc_by_firmware adsp "" all) || adsp_entries=""
+[ -n "$adsp_entries" ] || test_result_finish SKIP "No registered ADSP runtime instance"
+adsp_ready=0
+while IFS='|' read -r adsp_path adsp_state adsp_firmware adsp_name; do
+    log_info "ADSP instance=$adsp_path state=$adsp_state firmware=$adsp_firmware name=$adsp_name"
+    [ "$adsp_state" = running ] && adsp_ready=1
+done <<ADSP_INSTANCES
+$adsp_entries
+ADSP_INSTANCES
+[ "$adsp_ready" -eq 1 ] || test_result_finish FAIL "Registered ADSP is not running"
+adsp_endpoint=""
+for adsp_node in /dev/fastrpc-adsp-secure /dev/fastrpc-adsp; do
+    if [ -c "$adsp_node" ]; then
+        adsp_endpoint="$adsp_node"
         break
     fi
-    if [ "$rc" -ne 0 ]; then
-        fail_seen=1
-    fi
 done
-
-if [ "$skip_seen" -eq 1 ]; then
-    # SKIP already written by the function
-    :
-else
-    if [ "$fail_seen" -eq 0 ]; then
-        log_pass "$TESTNAME : Test Passed"
-        echo "$TESTNAME PASS" >"$res_file"
-    else
-        log_fail "$TESTNAME : Test Failed"
-        echo "$TESTNAME FAIL" >"$res_file"
+[ -n "$adsp_endpoint" ] || test_result_finish SKIP "Image exposes no ADSP FastRPC character endpoint"
+adsp_owner=$(readlink -f "/sys/class/misc/${adsp_endpoint##*/}/device") || adsp_owner=""
+allocator_ready=0
+while [ -n "$adsp_owner" ] && [ "$adsp_owner" != / ]; do
+    allocator_node=$(readlink -f "$adsp_owner/of_node" 2>/dev/null || true)
+    if [ -d "$allocator_node" ] && dt_node_enabled "$allocator_node"; then
+        allocator_compat=$(dt_property_text "$allocator_node" compatible 2>/dev/null || true)
+        if printf '%s\n' "$allocator_compat" | grep -Fxq qcom,fastrpc; then
+            if [ -s "$allocator_node/memory-region" ] && [ -s "$allocator_node/qcom,vmids" ]; then
+                allocator_ready=1
+                log_info "ADSP endpoint=$adsp_endpoint enabled allocator=$allocator_node"
+                break
+            fi
+            test_result_finish FAIL "ADSP endpoint allocator lacks memory-region or qcom,vmids"
+        fi
+    fi
+    adsp_owner=${adsp_owner%/*}
+done
+if [ "$allocator_ready" -eq 0 ]; then
+    allocator_candidates="$OUT_DIR/adsp-allocator-nodes.log"
+    : >"$allocator_candidates"
+    while IFS='|' read -r adsp_path adsp_state adsp_firmware adsp_name; do
+        adsp_runtime=$(readlink -f "$adsp_path") || continue
+        adsp_controller=${adsp_runtime%/remoteproc/*}
+        adsp_dt=$(readlink -f "$adsp_controller/of_node" 2>/dev/null || true)
+        [ -d "$adsp_dt" ] || continue
+        find "$adsp_dt" -type d >>"$allocator_candidates" || test_result_finish FAIL "ADSP allocator traversal failed"
+    done <<ADSP_ALLOCATOR_INSTANCES
+$adsp_entries
+ADSP_ALLOCATOR_INSTANCES
+    while IFS= read -r allocator_node; do
+        dt_node_enabled "$allocator_node" || continue
+        allocator_compat=$(dt_property_text "$allocator_node" compatible 2>/dev/null || true)
+        if printf '%s\n' "$allocator_compat" | grep -Fxq qcom,fastrpc; then
+            if [ -s "$allocator_node/memory-region" ] && [ -s "$allocator_node/qcom,vmids" ]; then
+                allocator_ready=1
+                log_info "Registered ADSP owns enabled allocator=$allocator_node"
+                break
+            fi
+            test_result_finish FAIL "ADSP allocator DT is exposed but lacks memory-region or qcom,vmids"
+        fi
+    done <"$allocator_candidates"
+fi
+# Older ADSP stacks can expose only their reserved remote heap. Keep that
+# documented fallback only when no owned FastRPC parent was found.
+if [ "$allocator_ready" -eq 0 ]; then
+    adsp_dt_root=$(dt_runtime_root || true)
+    if [ -d "$adsp_dt_root/reserved-memory" ]; then
+        find "$adsp_dt_root/reserved-memory" -type d >"$OUT_DIR/adsp-reserved-nodes.log" || test_result_finish FAIL "Reserved-memory traversal failed"
+        while IFS= read -r adsp_heap; do
+            dt_node_enabled "$adsp_heap" || continue
+            case "${adsp_heap##*/}" in
+                *adsp*rpc*remote*heap*)
+                    if [ -s "$adsp_heap/reg" ]; then
+                        allocator_ready=1
+                        log_info "Legacy ADSP endpoint=$adsp_endpoint reserved heap=$adsp_heap"
+                        break
+                    fi
+                    ;;
+            esac
+        done <"$OUT_DIR/adsp-reserved-nodes.log"
     fi
 fi
-
-log_info "-------------------Completed $TESTNAME Testcase----------------------------"
-
-# Kill only if we started it
-if [ "$STARTED_BY_TEST" -eq 1 ]; then
-    for p in $PIDS; do
-        p_clean=$(sanitize_pid "$p")
-        if [ -n "$p_clean" ]; then
-            kill_process "$p_clean" || true
-        fi
-    done
+[ "$allocator_ready" -eq 1 ] || test_result_finish SKIP "ADSP endpoint has no exposed enabled allocator DT with memory-region and qcom,vmids"
+scan_dmesg_errors "$OUT_DIR" 'fastrpc|remoteproc|qcom.*pas|qcom_q6v5' 'not a crash|non-fatal' || true
+if [ -s "$OUT_DIR/dmesg_errors.log" ]; then
+    log_file_with_label AUDIOPD-ERROR "$OUT_DIR/dmesg_errors.log"
+    test_result_finish FAIL "Captured FastRPC or ADSP kernel errors"
 fi
-
-exit 0
+PIDS=$(get_one_pid_by_name adsprpcd all 2>/dev/null || true)
+if [ -z "$PIDS" ]; then
+    adsprpcd >"$OUT_DIR/adsprpcd.log" 2>&1 &
+    OWNED_ADSPRPC_PID=$!
+    PIDS="$OWNED_ADSPRPC_PID"
+fi
+for daemon_pid in $PIDS; do
+    if ! wait_pid_alive "$daemon_pid" 2; then
+        test_result_record FAIL "adsprpcd PID $daemon_pid did not remain alive, no unrelated daemon substituted"
+        continue
+    fi
+    check_adsprpcd_wait_state "$daemon_pid"
+    daemon_rc=$?
+    case "$daemon_rc" in
+        0)
+            test_result_record PASS "adsprpcd PID $daemon_pid readiness observed, no RPC transaction was exercised"
+            ;;
+        2)
+            test_result_record SKIP "Daemon wait-state evidence unavailable"
+            ;;
+        *)
+            test_result_record FAIL "Daemon readiness failed"
+            ;;
+    esac
+done
+cleanup || test_result_record FAIL "AudioPD daemon cleanup failed"
+test_result_finish

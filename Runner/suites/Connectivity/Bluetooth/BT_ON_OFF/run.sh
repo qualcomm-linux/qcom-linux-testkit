@@ -148,8 +148,18 @@ test_result_init "$TESTNAME" "$RES_FILE" || exit 1
 log_info "------------------------------------------------------------"
 log_info "Starting $TESTNAME Testcase"
 log_info "Config: BT_POWER_CYCLE_DELAY=${BT_POWER_CYCLE_DELAY}s BT_POWER_ON_ATTEMPTS=$BT_POWER_ON_ATTEMPTS BT_POWER_ON_RETRY_DELAY=${BT_POWER_ON_RETRY_DELAY}s BT_RESTART_SERVICE_ON_RETRY=$BT_RESTART_SERVICE_ON_RETRY"
+BT_RFKILL_STATE_FILE="$PWD/${TESTNAME}-rfkill.$$.log"
+radio_snapshot_rfkill bluetooth "$BT_RFKILL_STATE_FILE" || test_result_finish FAIL "Cannot snapshot Bluetooth rfkill state"
+# shellcheck disable=SC2034 # Consumed by shared finalization.
+TEST_RESULT_CLEANUP=bt_cleanup_image_daemons
+trap bt_cleanup_image_daemons 0
+trap 'test_result_finish FAIL "Bluetooth validation interrupted"' HUP INT TERM
 if ! bt_prepare_bluetooth_stack; then
     test_result_finish "FAIL" "$TESTNAME FAIL - Bluetooth stack preparation failed"
+fi
+
+if ! bt_systemd_running && ! bt_image_runtime_available; then
+    test_result_finish SKIP "Image lacks BlueZ or D-Bus runtime assets required for Bluetooth validation"
 fi
 
 log_info "Checking dependency: bluetoothctl"
@@ -171,6 +181,8 @@ if ! bt_ensure_runtime_ready \
 fi
 
 ADAPTER="$BT_RUNTIME_READY_ADAPTER"
+BT_ADAPTER="$ADAPTER"
+bt_snapshot_adapter_state "$ADAPTER" || test_result_finish FAIL "Cannot snapshot selected adapter power before exercise"
 test_result_record "PASS" "Bluetooth runtime is ready with usable adapter $ADAPTER"
 
 log_info "Checking if bluetoothd is running..."
@@ -296,6 +308,7 @@ if [ "$on_success" -eq 1 ]; then
     btwarniflistempty "$ADAPTER" || true
 
     test_result_record "PASS" "Power ON completed with consecutive Powered=yes confirmations"
+    bt_restore_adapter_state || test_result_record FAIL "Bluetooth state restoration failed"
     test_result_finish
 fi
 

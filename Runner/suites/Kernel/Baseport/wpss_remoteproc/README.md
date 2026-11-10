@@ -47,3 +47,25 @@ The passive boot deadline applies only to discovered remoteproc instances.
 
 Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 SPDX-License-Identifier: BSD-3-Clause
+
+The optional RPMsg subcheck requires an image-provided echo client and a known
+service. Set `RPMSG_ECHO_CLIENT` and `RPMSG_ECHO_SERVICE` only for the protocol
+implemented by that client. It receives one argument, the discovered endpoint
+device owned by the selected DSP, and must return failure when echo validation
+fails. Missing optional assets skip that subcheck, no arbitrary data is sent to
+unknown channels. For example:
+
+```sh
+RPMSG_ECHO_CLIENT=/opt/tests/rpmsg-echo RPMSG_ECHO_SERVICE=echo ./run.sh
+```
+
+Explicit SSR writes use bounded stop/start operations and restore only the
+instance stopped by the test. Restoration failure affects the final verdict.
+Captured fatal blocks remain failures after recovery. Explicit sibling instance
+faults are excluded, unassigned remoteproc driver faults remain visible.
+
+In the WiFi-driver fallback, an unavailable global `regulatory.db` lookup is
+retained in `driver/wifi_regulatory_warnings.log` and printed to stdout.
+This optional database lookup does not establish a WPSS crash. The discovered
+family must still own a registered wireless PHY. Driver firmware errors,
+malformed regulatory data and captured kernel faults remain failures.

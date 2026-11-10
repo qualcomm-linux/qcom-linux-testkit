@@ -1,56 +1,52 @@
 Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 SPDX-License-Identifier: BSD-3-Clause
-# shmbridge Validation test
 
-## Overview
+# SCM and shared-memory bridge validation
 
-This test case validates the presence and initialization of the Qualcomm Secure Channel Manager (QCOM_SCM) interface on the device. It ensures that:
+This test checks `CONFIG_QCOM_SCM`, runtime SCM evidence and the captured
+current-boot kernel log. It uses the shared `scan_dmesg_errors` helper once,
+retaining errors for SCM, the shared-memory bridge and its TZ memory allocator.
+Timestamp/thread prefixes and driver-instance names are supported. Kernel BUG,
+warning, oops and panic blocks fail when their header or stack identifies the
+selected driver. A module appearing only in the loaded-module list or a later
+unrelated log message does not attribute that fault to SCM.
 
-- The kernel is configured with QCOM_SCM support
-- The dmesg logs contain expected `qcom_scm` entries
-- There are no "probe failure" messages in the logs
+The test reads runtime state. It does not format partitions, provision storage,
+restart drivers or perform a secure-memory allocation workload. The existing
+YAML invocation and testcase ID remain `shmbridge`.
 
-## Usage
+## Run
 
-Instructions:
+Use image-provided tools on Yocto, Debian, Ubuntu, CentOS or shell-only ramdisk.
+The script has no command-line parameters and does not install packages.
+Kernel configuration discovery uses the existing shared helper, including
+`/proc/config.gz` and readable image-provided config fallbacks. The scanner uses
+preinstalled shell, grep, cat, sed, mkdir, mktemp, date, wc, tr, id and cp.
+Restricted kernel-log access requires the appropriate privileges. The existing
+`KERNEL_LOG_JOURNAL_FALLBACK=1` opt-in permits an installed journalctl fallback.
 
-1. **Copy repo to Target Device**: Use `scp` to transfer the scripts from the host to the target device. The scripts should be copied to any directory on the target device.
-2. **Verify Transfer**: Ensure that the repo has been successfully copied to the target device.
-3. **Run Scripts**: Navigate to the directory where these files are copied on the target device and execute the scripts as needed.
-
-Run the SHM Bridge test using:
----
-#### Quick Example
 ```sh
-git clone <this-repo>
-cd <this-repo>
-scp -r common Runner user@target_device_ip:<Path in device>
-ssh user@target_device_ip
-cd <Path in device>/Runner && ./run-test.sh shmbridge
-```
----
-## Prerequisites
-1. zcat, grep, and dmesg must be available.
-2. Root access may be required to write to read kernel logs.
- ---
- ## Result Format
-Test result will be saved in `shmbridge.res` as:  
-## Output
-A .res file is generated in the same directory:
+# Run from the suite directory.
+cd Runner/suites/Kernel/Baseport/shmbridge
+./run.sh
 
-`shmbridge PASS`  OR   `shmbridge FAIL`
+# Alternatively, from Runner, keep diagnostics under Runner/results/shmbridge.
+./suites/Kernel/Baseport/shmbridge/run.sh
 
-## Sample Log
+# Allow the existing journal fallback when direct kernel-log access is restricted.
+KERNEL_LOG_JOURNAL_FALLBACK=1 ./run.sh
 ```
-Output
 
-[INFO] 1970-01-01 01:10:01 - -----------------------------------------------------------------------------------------
-[INFO] 1970-01-01 01:10:01 - -------------------Starting shmbridge Testcase----------------------------
-[INFO] 1970-01-01 01:10:01 - ==== Test Initialization ====
-[INFO] 1970-01-01 01:10:01 - Checking if required tools are available
-[INFO] 1970-01-01 01:10:01 - Checking kernel config for QCOM_SCM support...
-[PASS] 1970-01-01 01:10:01 - Kernel config CONFIG_QCOM_SCM is enabled
-[INFO] 1970-01-01 01:10:01 - Scanning dmesg logs for qcom_scm initialization
-[PASS] 1970-01-01 01:10:01 - shmbridge : Test Passed (qcom_scm present and no probe failures)
-[INFO] 1970-01-01 01:10:01 - -------------------Completed shmbridge Testcase----------------------------
-```
+`shmbridge.res` stays beside `run.sh`. PASS means SCM runtime evidence exists
+and the captured log contains no selected error. A selected kernel fault or
+missing SCM evidence with an accessible log produces FAIL. Missing tools,
+unavailable kernel configuration or disabled SCM produces SKIP. Once SCM
+validation is selected, unavailable kernel-log access produces FAIL, whether
+or not SCM runtime evidence was found. A required health check cannot complete
+from an empty error file. Inspect `dmesg_access.log` for the capture failure
+and the privileges or image tools needed to obtain the log.
+
+Each invocation stores `dmesg_snapshot.log`, `dmesg_errors.log`, access
+information and timestamped error history under
+`$PWD/results/shmbridge/run-*/`. Failure evidence is printed to stdout. A new
+run uses fresh artifacts, so a previous PASS or FAIL cannot supply its verdict.

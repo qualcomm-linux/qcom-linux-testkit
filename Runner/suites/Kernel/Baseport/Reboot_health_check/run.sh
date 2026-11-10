@@ -40,54 +40,17 @@ TESTNAME="Reboot_health_check"
 RES_FILE="$SCRIPT_DIR/$TESTNAME.res"
 test_result_init "$TESTNAME" "$RES_FILE" || exit 1
 
-log_info "-----------------------------------------------------------------------------------------"
-log_info "-------------------Starting $TESTNAME Testcase----------------------------"
-log_info "=== Test Initialization ==="
-
-# Directory for health check files
-HEALTH_DIR="/var/reboot_health"
-RETRY_FILE="$HEALTH_DIR/reboot_retry_count"
-MAX_RETRIES=3
-
-# Make sure health directory exists
-mkdir -p "$HEALTH_DIR" || test_result_finish FAIL "Cannot create persistent boot-health state at $HEALTH_DIR"
-
-# Initialize retry count if not exist
-if [ ! -f "$RETRY_FILE" ]; then
-    echo "0" > "$RETRY_FILE"
+log_info "Boot context: kernel=$(uname -r), architecture=$(uname -m)"
+if [ -r /proc/1/comm ]; then
+    log_info "PID 1: $(cat /proc/1/comm)"
 fi
-
-# Read current retry count
-RETRY_COUNT=$(cat "$RETRY_FILE")
-
-log_info "--------------------------------------------"
-log_info "Boot Health Check Started - $(date)" 
-log_info "Current Retry Count: $RETRY_COUNT"
-
-# Health Check: You can expand this check
-if [ "$(whoami)" = "root" ]; then
-    log_pass "System booted successfully and root shell obtained."
-    log_info "Test Completed Successfully after $RETRY_COUNT retries."
-    
-    # Optional: clean retry counter after success
-    echo "0" > "$RETRY_FILE"
-    
-    test_result_finish PASS "System booted to a root shell"
+if [ -r /proc/mounts ]; then
+    awk '$2 == "/" {print "[BOOT] root source=" $1 " type=" $3 " options=" $4}' /proc/mounts
+fi
+if [ "$(id -u)" = 0 ]; then
+    test_result_record PASS "System booted and provided a root shell"
 else
-    log_fail "Root shell not available!"
-    
-    RETRY_COUNT=$((RETRY_COUNT + 1))
-    echo "$RETRY_COUNT" > "$RETRY_FILE"
-    
-    if [ "$RETRY_COUNT" -ge "$MAX_RETRIES" ]; then
-        log_error "[ERROR] Maximum retries ($MAX_RETRIES) reached. Stopping test."
-        test_result_finish FAIL "Root shell unavailable after $MAX_RETRIES retries"
-    else
-        log_info "Rebooting system for retry #$RETRY_COUNT..."
-        sync
-        sleep 2
-        printf '%s FAIL\n' "$TESTNAME" >"$RES_FILE"
-        reboot -f
-        test_result_finish FAIL "Reboot request failed, inspect the device boot/power setup"
-    fi
+    test_result_record FAIL "Root shell unavailable, configure the LAVA login action to obtain root"
 fi
+# Reboot and boot retry policy belongs to the LAVA job, never to this check.
+test_result_finish

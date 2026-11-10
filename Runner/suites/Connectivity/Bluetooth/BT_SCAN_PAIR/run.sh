@@ -177,8 +177,14 @@ if [ -z "$BT_MAC" ] && [ -z "$BT_NAME" ] && [ ! -f "./bt_device_list.txt" ]; the
     test_result_finish "SKIP" "No Bluetooth target and no bt_device_list.txt were provided"
 fi
 
+trap bt_cleanup_image_daemons 0
+trap 'exit 1' HUP INT TERM
 if ! bt_prepare_bluetooth_stack; then
     test_result_finish "FAIL" "$TESTNAME FAIL - Bluetooth stack preparation failed"
+fi
+
+if ! bt_systemd_running && ! bt_image_runtime_available; then
+    test_result_finish SKIP "Image lacks BlueZ or D-Bus runtime assets required for Bluetooth validation"
 fi
 
 if ! check_dependencies \
@@ -212,6 +218,7 @@ cleanup_bt_test() {
     # Cleanup only the primary MAC we worked with (if any)
     [ -n "$BT_MAC" ] && bt_cleanup_paired_device "$BT_MAC"
     killall -q bluetoothctl 2>/dev/null || true
+    bt_cleanup_image_daemons
 }
 trap cleanup_bt_test EXIT
 

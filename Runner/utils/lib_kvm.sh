@@ -71,7 +71,7 @@ kvm_check_api_version() {
         return 2
     fi
 
-    python3 - <<'PY'
+    run_with_bounded_timeout 10 python3 - <<'PY'
 import fcntl
 import os
 import sys
@@ -132,56 +132,51 @@ PY
 #
 # Behavior:
 # Uses scan_dmesg_errors from functestlib.sh when available.
-# Falls back to get_kernel_log/dmesg capture otherwise.
+# Reuses captured snapshot and retained fault blocks for this operation.
 #
 # Returns:
 # 0 if no fatal error is detected
 # 1 if fatal KVM/EL2-related messages are detected
 kvm_check_boot_dmesg_errors() {
-    outdir="$1"
-    include_regex='kvm|KVM|hyp|HYP|el2|EL2|vgic|VGIC|gicv|GICV'
-    exclude_regex='not found|dummy regulator|probe deferred|using dummy regulator|EEXIST'
-
-    mkdir -p "$outdir" 2>/dev/null || true
-
-    if command -v scan_dmesg_errors >/dev/null 2>&1; then
-        scan_dmesg_errors "$outdir" "$include_regex" "$exclude_regex" || true
-
-        if [ -s "$outdir/dmesg_errors.log" ]; then
-            if grep -Ei 'fail|failed|error|disabled|unavailable|not in hyp|hyp mode|EL2.*unavailable|HYP.*unavailable|KVM.*not available|kvm.*not available|panic|BUG|Oops' "$outdir/dmesg_errors.log" >/dev/null 2>&1; then
-                log_fail "Fatal KVM/EL2 related messages found in dmesg: $outdir/dmesg_errors.log"
-                return 1
-            fi
-
-            log_warn "KVM/EL2 related dmesg messages found but no fatal pattern matched: $outdir/dmesg_errors.log"
-            return 0
-        fi
-
-        log_info "No relevant KVM/EL2 dmesg errors found."
-        return 0
+    kvm_log_dir="$1"
+    if [ "${KVM_CAPTURED_DIR:-}" != "$kvm_log_dir" ]; then
+        scan_dmesg_errors "$kvm_log_dir" 'kvm|hyp|el2|vgic|gicv' \
+            'dummy regulator|probe deferred|using dummy regulator|EEXIST' || true
+        KVM_CAPTURED_DIR="$kvm_log_dir"
     fi
-
-    if command -v get_kernel_log >/dev/null 2>&1; then
-        get_kernel_log >"$outdir/dmesg_snapshot.log" 2>/dev/null || true
-    elif command -v dmesg >/dev/null 2>&1; then
-        dmesg >"$outdir/dmesg_snapshot.log" 2>/dev/null || true
-    else
-        log_warn "No kernel log source available for KVM dmesg validation"
-        return 0
+    if [ "${DMESG_ACCESS_STATUS:-unknown}" != available ]; then
+        log_warn "KVM kernel log access: ${DMESG_ACCESS_STATUS:-unknown}, see $kvm_log_dir"
     fi
-
-    if grep -Ei 'KVM|kvm|HYP|hyp|EL2|el2' "$outdir/dmesg_snapshot.log" >/dev/null 2>&1; then
-        grep -Ei 'KVM|kvm|HYP|hyp|EL2|el2' "$outdir/dmesg_snapshot.log" >"$outdir/kvm_dmesg.log" 2>/dev/null || true
-        log_info "KVM/EL2 dmesg lines captured: $outdir/kvm_dmesg.log"
-
-        if grep -Ei 'fail|failed|error|disabled|unavailable|not in hyp|hyp mode|EL2.*unavailable|HYP.*unavailable|KVM.*not available|kvm.*not available|panic|BUG|Oops' "$outdir/kvm_dmesg.log" >/dev/null 2>&1; then
-            log_fail "Fatal KVM/EL2 related messages found in dmesg: $outdir/kvm_dmesg.log"
-            return 1
-        fi
-    else
-        log_warn "No KVM/EL2 dmesg lines found"
+    # The generic error filter does not include all HYP availability messages.
+    grep -Ei '(^|[^[:alnum:]_])(kvm|hyp|el2|vgic|gicv)([^[:alnum:]_]|$)' "$kvm_log_dir/dmesg_snapshot.log" \
+        | grep -vE 'Kernel command line:|Command line:' >"$kvm_log_dir/kvm_dmesg.log" 2>/dev/null || true
+    cp "$kvm_log_dir/dmesg_errors.log" "$kvm_log_dir/kvm_errors.log" || return 1
+    grep -Ei '(^|[^[:alnum:]_])(failed|failure|error|unavailable|panic|BUG|Oops)([^[:alnum:]_]|$)|not available|not in hyp|(^|:)[[:space:]]*KVM[[:space:]]+(is[[:space:]]+)?disabled' \
+        "$kvm_log_dir/kvm_dmesg.log" >>"$kvm_log_dir/kvm_errors.log" || true
+    if [ -s "$kvm_log_dir/kvm_errors.log" ]; then
+        cat "$kvm_log_dir/kvm_errors.log"
+        log_fail "KVM/EL2 initialization errors found in $kvm_log_dir/kvm_errors.log"
+        return 1
     fi
+    return 0
+}
 
+# kvm_log_readiness <output-directory>
+# Capture readiness before callers gate on config, /dev/kvm, or optional clients.
+# This diagnostic does not replace ioctl or QEMU functional validation.
+kvm_log_readiness() {
+    kvm_readiness_dir="$1"
+    KVM_CAPTURED_DIR=""
+    log_info "KVM runtime: kernel=$(uname -r) architecture=$(uname -m)"
+    kvm_log_dt_identity
+    for kvm_config in CONFIG_VIRTUALIZATION CONFIG_KVM; do
+        check_kernel_config "$kvm_config" || true
+    done
+    ls -l /dev/kvm 2>&1 || true
+    if ! kvm_check_boot_dmesg_errors "$kvm_readiness_dir"; then
+        log_fail "KVM initialization failed, check firmware EL2 handoff and kernel diagnostics above"
+        return 1
+    fi
     return 0
 }
 
@@ -196,7 +191,7 @@ kvm_check_boot_dmesg_errors() {
 kvm_dt_roots() {
     for root in /proc/device-tree /sys/firmware/devicetree/base; do
         if [ -d "$root" ]; then
-            printf '%s\n' "$root"
+            readlink -f "$root"
         fi
     done
 }
@@ -234,11 +229,20 @@ kvm_log_dt_identity() {
 #
 # Returns:
 # Prints matching DT node paths to stdout.
-kvm_dt_find_remoteproc_nodes() {
-    for root in $(kvm_dt_roots); do
-        find "$root" -type d 2>/dev/null | grep -Ei '/([^/]*remoteproc[^/]*|[^/]*rproc[^/]*)$' || true
+kvm_dt_find_remoteproc_nodes() (
+    for kdfn_rproc in /sys/class/remoteproc/remoteproc*; do
+        [ -d "$kdfn_rproc" ] || continue
+        kdfn_owner=$(readlink -f "$kdfn_rproc/device" 2>/dev/null || true)
+        if [ -z "$kdfn_owner" ]; then
+            kdfn_owner=$(readlink -f "$kdfn_rproc" 2>/dev/null || true)
+            kdfn_owner=${kdfn_owner%/remoteproc/*}
+        fi
+        kdfn_node=$(readlink -f "$kdfn_owner/of_node" 2>/dev/null || true)
+        [ -d "$kdfn_node" ] || continue
+        dt_node_enabled "$kdfn_node" || continue
+        printf '%s\n' "$kdfn_node"
     done
-}
+)
 
 # Check whether live DT has remoteproc IOMMU evidence.
 #
@@ -250,53 +254,19 @@ kvm_dt_find_remoteproc_nodes() {
 # 0 if remoteproc DT IOMMU evidence is found
 # 1 if remoteproc DT nodes exist but no IOMMU evidence is found
 # 2 if no remoteproc DT nodes are found
-kvm_dt_remoteproc_has_iommus() {
-    node_file="/tmp/kvm_remoteproc_nodes.$$"
-    iommu_file="/tmp/kvm_remoteproc_iommus.$$"
-    node_count=0
-    iommu_count=0
-
-    rm -f "$node_file" "$iommu_file" 2>/dev/null || true
-
-    kvm_dt_find_remoteproc_nodes >"$node_file" 2>/dev/null || true
-
-    if [ -s "$node_file" ]; then
-        while IFS= read -r node; do
-            [ -n "$node" ] || continue
-            node_count=$((node_count + 1))
-            log_info "[EL2-DT] remoteproc DT node: $node"
-
-            if [ -e "$node/iommus" ]; then
-                iommu_count=$((iommu_count + 1))
-                log_info "[EL2-DT] remoteproc DT iommus present: $node/iommus"
-            fi
-        done <"$node_file"
-    fi
-
-    for root in $(kvm_dt_roots); do
-        find "$root" -type f -name iommus 2>/dev/null | grep -Ei 'remoteproc|rproc|adsp|cdsp|gpdsp|wpss' || true
-    done >"$iommu_file" 2>/dev/null || true
-
-    if [ -s "$iommu_file" ]; then
-        while IFS= read -r found_file; do
-            [ -n "$found_file" ] || continue
-            iommu_count=$((iommu_count + 1))
-            log_info "[EL2-DT] remoteproc/iommus evidence: $found_file"
-        done <"$iommu_file"
-    fi
-
-    rm -f "$node_file" "$iommu_file" 2>/dev/null || true
-
-    if [ "$node_count" -eq 0 ]; then
-        return 2
-    fi
-
-    if [ "$iommu_count" -gt 0 ]; then
-        return 0
-    fi
-
+kvm_dt_remoteproc_has_iommus() (
+    kdr_nodes=$(kvm_dt_find_remoteproc_nodes) || return 1
+    [ -n "$kdr_nodes" ] || return 2
+    while IFS= read -r kdr_node; do
+        if [ -s "$kdr_node/iommus" ]; then
+            log_info "Remoteproc DT declares DMA translation: $kdr_node, runtime attachment must also be verified"
+            return 0
+        fi
+    done <<KVM_DT_NODES
+$kdr_nodes
+KVM_DT_NODES
     return 1
-}
+)
 
 # Log remoteproc instances using sysfs and functestlib.sh helpers when present.
 #
@@ -351,43 +321,37 @@ __KVM_RPROC_ENTRIES__
 # Check runtime sysfs evidence that remoteproc devices are connected through
 # IOMMU/devlink/platform relationships.
 #
-# This is used as dynamic EL2-DTB evidence and avoids hardcoding board names.
+# This is used as runtime DMA attachment evidence and avoids hardcoding board names.
 #
 # Returns:
 # 0 if at least one sysfs evidence path is found
 # 1 if no evidence path is found
-kvm_sysfs_remoteproc_iommu_evidence() {
-    evidence_count=0
-
-    for path in \
-        /sys/kernel/iommu_groups/*/devices/*remoteproc* \
-        /sys/kernel/iommu_groups/*/devices/*rproc* \
-        /sys/kernel/iommu_groups/*/devices/*adsp* \
-        /sys/kernel/iommu_groups/*/devices/*cdsp* \
-        /sys/kernel/iommu_groups/*/devices/*gpdsp* \
-        /sys/class/devlink/*remoteproc* \
-        /sys/class/devlink/*rproc* \
-        /sys/class/devlink/*adsp* \
-        /sys/class/devlink/*cdsp* \
-        /sys/class/devlink/*gpdsp* \
-        /sys/devices/platform/*/*remoteproc* \
-        /sys/devices/platform/*/*rproc* \
-        /sys/bus/platform/devices/*remoteproc* \
-        /sys/bus/platform/devices/*rproc*
-    do
-        [ -e "$path" ] || continue
-        evidence_count=$((evidence_count + 1))
-        log_info "[EL2-SYSFS] remoteproc/IOMMU/devlink evidence: $path"
-    done
-
-    if [ "$evidence_count" -gt 0 ]; then
-        return 0
-    fi
-
+kvm_sysfs_remoteproc_iommu_evidence() (
+    ksri_out=$(test_create_run_directory "$PWD/results/kvm-iommu") || return 1
+    iommu_validate_runtime_devices "$ksri_out" registered
+    ksri_rc=$?
+    [ "$ksri_rc" -le 1 ] || return 1
+    [ -r "$ksri_out/iommu_contexts.tsv" ] || return 1
+    ksri_nodes=$(kvm_dt_find_remoteproc_nodes) || return 1
+    [ -n "$ksri_nodes" ] || return 1
+    while IFS= read -r ksri_node; do
+        if awk -F '|' -v node="$ksri_node" '
+            ($1 == node || index($1, node "/") == 1) {
+                found=1
+                if ($NF != "PASS") failed=1
+            }
+            END { exit (!found || failed) }
+        ' "$ksri_out/iommu_contexts.tsv"; then
+            log_info "Remoteproc has verified runtime DMA group attachment: $ksri_node"
+            return 0
+        fi
+    done <<KVM_IOMMU_NODES
+$ksri_nodes
+KVM_IOMMU_NODES
     return 1
-}
+)
 
-# Validate dynamic EL2-DTB runtime evidence.
+# Validate runtime remoteproc DMA attachment evidence.
 #
 # This helper reuses functestlib.sh remoteproc discovery when available, but it
 # does not duplicate secure PIL or remoteproc lifecycle validation.
@@ -396,11 +360,11 @@ kvm_sysfs_remoteproc_iommu_evidence() {
 # - live DT identity
 # - remoteproc state summary
 # - remoteproc DT iommus evidence
-# - remoteproc sysfs IOMMU/devlink/platform evidence
+# - exact runtime DMA group and reverse device membership
 #
 # Returns:
-# 0 if EL2 remoteproc/IOMMU runtime evidence is found
-# 1 if remoteproc exists but EL2-style evidence is missing
+# 0 if remoteproc DMA/IOMMU runtime evidence is found
+# 1 if remoteproc exists but verified DMA attachment is missing
 # 2 if no remoteproc DT/sysfs entries exist, so validation is not applicable
 kvm_check_el2_runtime_evidence() {
     dt_rc=1
@@ -419,16 +383,16 @@ kvm_check_el2_runtime_evidence() {
     sysfs_rc=$?
 
     if [ "$rproc_rc" -eq 2 ] && [ "$dt_rc" -eq 2 ]; then
-        log_info "No remoteproc DT/sysfs entries found; EL2 remoteproc validation is not applicable."
+        log_info "No remoteproc DT/sysfs entries found; remoteproc DMA validation is not applicable."
         return 2
     fi
 
-    if [ "$dt_rc" -eq 0 ] || [ "$sysfs_rc" -eq 0 ]; then
-        log_pass "EL2 remoteproc/IOMMU runtime evidence found."
+    if [ "$sysfs_rc" -eq 0 ]; then
+        log_pass "Runtime remoteproc/IOMMU attachment verified, this does not identify a FIT configuration."
         return 0
     fi
 
-    log_fail "Remoteproc entries exist, but no EL2 remoteproc/IOMMU runtime evidence was found."
+    log_fail "Remoteproc entries exist, but no remoteproc DMA/IOMMU runtime evidence was found."
     return 1
 }
 
@@ -477,11 +441,11 @@ kvm_find_qemu_img() {
 # 1 otherwise
 kvm_check_qemu_kvm_accel() {
     qemu_bin="$1"
-    accel_log="/tmp/kvm_qemu_accel_help.$$"
+    accel_log="$PWD/kvm_qemu_accel_help.$$"
 
     [ -n "$qemu_bin" ] || return 1
 
-    "$qemu_bin" -accel help >"$accel_log" 2>&1
+    run_with_bounded_timeout_capture 10 "${accel_log}.process" "$qemu_bin" -accel help >"$accel_log" 2>&1
     rc=$?
 
     if [ "$rc" -ne 0 ]; then
@@ -489,7 +453,6 @@ kvm_check_qemu_kvm_accel() {
         while IFS= read -r line; do
             log_warn "[qemu-accel] $line"
         done <"$accel_log"
-        rm -f "$accel_log" 2>/dev/null || true
         return 1
     fi
 
@@ -498,12 +461,9 @@ kvm_check_qemu_kvm_accel() {
     done <"$accel_log"
 
     if grep -Ei '(^|[[:space:]])kvm($|[[:space:]])' "$accel_log" >/dev/null 2>&1; then
-        rm -f "$accel_log" 2>/dev/null || true
         log_pass "QEMU advertises KVM acceleration"
         return 0
     fi
-
-    rm -f "$accel_log" 2>/dev/null || true
     log_fail "QEMU does not advertise KVM acceleration"
     return 1
 }
@@ -520,26 +480,24 @@ kvm_check_qemu_kvm_accel() {
 # 1 if no binary path is provided
 kvm_qemu_probe() {
     qemu_bin="$1"
-    machine_log="/tmp/kvm_qemu_machine_help.$$"
-    cpu_log="/tmp/kvm_qemu_cpu_help.$$"
+    machine_log="$PWD/kvm_qemu_machine_help.$$"
+    cpu_log="$PWD/kvm_qemu_cpu_help.$$"
 
     [ -n "$qemu_bin" ] || return 1
 
-    "$qemu_bin" -version 2>&1 | while IFS= read -r line; do
+    run_with_bounded_timeout 10 "$qemu_bin" -version 2>&1 | while IFS= read -r line; do
         log_info "[qemu-version] $line"
     done
 
-    "$qemu_bin" -machine help >"$machine_log" 2>&1 || true
+    run_with_bounded_timeout_capture 10 "${machine_log}.process" "$qemu_bin" -machine help >"$machine_log" 2>&1 || true
     head -n 20 "$machine_log" 2>/dev/null | while IFS= read -r line; do
         log_info "[qemu-machine] $line"
     done
-    rm -f "$machine_log" 2>/dev/null || true
 
-    "$qemu_bin" -cpu help >"$cpu_log" 2>&1 || true
+    run_with_bounded_timeout_capture 10 "${cpu_log}.process" "$qemu_bin" -cpu help >"$cpu_log" 2>&1 || true
     head -n 20 "$cpu_log" 2>/dev/null | while IFS= read -r line; do
         log_info "[qemu-cpu] $line"
     done
-    rm -f "$cpu_log" 2>/dev/null || true
 
     return 0
 }

@@ -58,15 +58,15 @@ WIFI_IFACE=wlan0 ./run.sh
 | `WIFI_WAIT_STEP_SECS` | `2` | Poll interval while waiting for the interface |
 | `WIFI_RECOVERY_RELOAD` | `1` | Enable best-effort recovery reload behavior |
 | `WIFI_RECOVERY_RELOAD_AFTER_S` | empty / auto | Time before recovery reload is attempted |
-| `WIFI_PROBE_LOG_DIR` | `./wifi_onoff_dmesg` | Directory used for WiFi probe/runtime log evidence |
+| `WIFI_PROBE_LOG_DIR` | `results/WiFi_OnOff/run-*/initial` | Directory used for WiFi probe/runtime log evidence |
 | `WIFI_PROBE_LOG_TAG` | `WiFi_OnOff/probe` | Log tag used when reporting probe checks |
 | `WIFI_IFACE` | empty | Optional interface override |
-| `WIFI_DT_PATTERNS` | built-in list | Newline-separated DT compatible/name patterns |
-| `WIFI_DRIVER_MODULES` | built-in list | Newline-separated driver module names to log/check |
+| `WIFI_DT_PATTERNS` | empty | Newline-separated DT compatible/name patterns |
+| `WIFI_DRIVER_MODULES` | empty | Newline-separated driver module names to log/check |
 
-Default DT patterns include Qualcomm/WCN and common WiFi identifiers such as `qcom,wcn7850`, `qcom,wcn6855`, `ath12k`, `ath11k`, `ath10k`, `wifi`, `wlan`, and `qca`.
+Runtime drivers, modaliases and registered PHY ownership determine applicability. Caller-supplied DT patterns provide supplemental diagnostics.
 
-Default module names include `ath12k_wifi7`, `ath12k`, `ath11k`, `ath11k_pci`, `ath10k_pci`, `ath10k_snoc`, `cfg80211`, `mac80211`, and `mhi`.
+Caller-supplied module names remain available for supplemental visibility logging.
 
 ## LAVA usage
 
@@ -132,3 +132,24 @@ The test fails when:
 - This test does not connect to an access point.
 - Use `WiFi_Dynamic_IP` or `WiFi_Manual_IP` to validate association, DHCP, and external connectivity.
 - The test logs extra diagnostics when no interface appears or an interface toggle operation fails.
+
+Kernel premerge uses image-only dependency checks. Wi-Fi driver config checks
+follow runtime-bound/aliased families, not sibling modules or old log names.
+
+The selected interface's original administrative state and recorded WLAN
+rfkill soft states are restored on completion or interruption. Other radio
+types are untouched. A one-attempt leaf-driver recovery retains original loaded
+module ownership, failed recovery or restoration remains FAIL. Confirmed kernel
+fault blocks fail even when the interface is subsequently ready. Unavailable
+kernel logs are reported as unverified health, never as a clean scan.
+Confirmed disabled kernel configuration fails applicable hardware, unavailable
+configuration is supplementary evidence rather than a substitute for runtime.
+Configuration values are parsed from the shared helper's `CONFIG_NAME=value`
+output. A confirmed disabled setting fails, unavailable configuration does not
+replace runtime validation.
+
+Global `regulatory.db` lookup failures are retained as regulatory diagnostics
+instead of stopping the interface toggle. Inspect `wifi_regulatory_warnings.log`
+under the initial and final capture directories. The selected interface must
+still complete down/up and restoration successfully. Malformed regulatory data,
+device firmware failures and captured driver crashes remain failures.

@@ -107,3 +107,12 @@ Ethernet_Basic_Validation.results.tsv
 ```
 
 The overall testcase passes when at least one detected Ethernet interface completes link, IPv4, and ping validation. It fails when interfaces are testable but none passes. It skips when no interface can be tested, for example when every port is disconnected.
+
+Final aggregation gives a tested interface failure precedence over other passes.
+Interface presence alone is diagnostic, all no-cable/no-address checks produce
+SKIP. Ping defaults to `8.8.8.8`, use `--ping-target ADDRESS` to override it.
+Failures retain ethtool and link evidence under the invocation CWD and print
+it to stdout. Original interface administrative state and recoverable link
+settings are restored before the final verdict, including forced speed/duplex.
+Restoration failure is FAIL. Missing ethtool limits optional diagnostics, not
+the image-provided connectivity check.

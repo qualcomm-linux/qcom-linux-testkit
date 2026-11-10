@@ -104,6 +104,13 @@ test_result_record() {
 # Writes the final result and exits successfully for LAVA result processing.
 # Without an explicit status, failures take precedence, then passes, then skip.
 test_result_finish() {
+    if [ -n "${TEST_RESULT_CLEANUP:-}" ]; then
+        if ! "$TEST_RESULT_CLEANUP"; then
+            test_result_record FAIL "Test-owned state restoration failed"
+            # A requested PASS/SKIP must not replace cleanup failure.
+            set -- FAIL "Test-owned state restoration failed"
+        fi
+    fi
     test_result_status="${1:-}"
     test_result_message="${2:-}"
 
@@ -162,7 +169,7 @@ get_kernel_log() {
 
 # Locate a kernel module file by name.
 # Supports uncompressed and commonly compressed module formats.
-# Tries the running kernel first, then all module trees.
+# Optional second argument running forbids fallback to another kernel tree.
 find_kernel_module() {
     module_name="$1"
     kver=$(uname -r)
@@ -181,7 +188,7 @@ find_kernel_module() {
         )
     fi
 
-    if [ -z "$module_path" ] && [ -d /lib/modules ]; then
+    if [ "${2:-all}" != running ] && [ -z "$module_path" ] && [ -d /lib/modules ]; then
         log_warn "Module $module_name not found under /lib/modules/$kver, searching all module trees" >&2
         module_path=$(
             find /lib/modules -type f \
@@ -335,6 +342,9 @@ unload_kernel_module() {
 
 # --- Dependency check ---
 check_dependencies() {
+    if [ "${TESTKIT_IMAGE_ONLY:-0}" = 1 ]; then
+        CHECK_DEPS_RECOVER=0
+    fi
     # Support both:
     # check_dependencies date awk sed
     # check_dependencies "$deps" where deps="date awk sed"
@@ -763,7 +773,7 @@ validate_per_cpu_interrupt_active() {
     skip_isolated="$4"
     irq_budget="${5:-0}"
     [ "$irq_budget" = auto ] || is_unsigned_number "$irq_budget" || return 1
-    irq_started=$(date +%s) || return 1
+    irq_started=$(get_monotonic_seconds) || return 1
 
     IRQ_ACTIVE_TESTED=0
     IRQ_ACTIVE_PASSED=0
@@ -873,7 +883,7 @@ validate_per_cpu_interrupt_active() {
 
         while [ "$attempt" -le "$retries" ]; do
             if [ "$irq_budget" -gt 0 ]; then
-                irq_now=$(date +%s) || return 1
+                irq_now=$(get_monotonic_seconds) || return 1
                 if [ "$((irq_now - irq_started + workload_seconds))" -gt "$irq_budget" ]; then
                     log_fail "Active interrupt validation exceeded its ${irq_budget}s budget"
                     return 1
@@ -1148,6 +1158,115 @@ kernel_config_value() {
     fi
 
     return 1
+}
+
+# kaslr_check_runtime <evidence-directory>
+# Check current-boot KASLR activation using shared config and kernel-log capture.
+# Emits diagnostic logs and sets KASLR_REASON for the caller. Do not use command
+# substitution, stdout contains logs rather than a machine-readable result.
+# Returns 0 for activation, 1 for explicit disable, 2 for unavailable proof,
+# or 3 for an artifact/parser failure. Retains evidence below the supplied path.
+# shellcheck disable=SC2034 # KASLR_REASON is consumed by the suite runner.
+kaslr_check_runtime() {
+    kaslr_dir="$1"
+    KASLR_REASON="Cannot retain KASLR evidence under $kaslr_dir"
+    mkdir -p "$kaslr_dir" || return 3
+    kaslr_config=$(kernel_config_value CONFIG_RANDOMIZE_BASE || true)
+    kaslr_config_source=$(kernel_config_source || true)
+    kaslr_cmdline="unknown"
+    if [ -r /proc/cmdline ]; then
+        kaslr_cmdline=$(cat /proc/cmdline 2>/dev/null) || kaslr_cmdline="unknown"
+    fi
+    kaslr_symbol=$(awk '$3 == "_stext" || $3 == "stext" {print $1; exit}' \
+        /proc/kallsyms 2>/dev/null || true)
+    kaslr_kptr=$(cat /proc/sys/kernel/kptr_restrict 2>/dev/null || true)
+    {
+        printf 'kernel=%s\n' "$(uname -r)"
+        printf 'config=%s source=%s\n' "${kaslr_config:-unknown}" \
+            "${kaslr_config_source:-unavailable}"
+        printf 'cmdline=%s\n' "$kaslr_cmdline"
+        printf 'text_symbol=%s kptr_restrict=%s (diagnostic only)\n' \
+            "${kaslr_symbol:-unavailable}" "${kaslr_kptr:-unknown}"
+    } >"$kaslr_dir/kaslr_runtime.log" || return 3
+    log_file_with_label KASLR "$kaslr_dir/kaslr_runtime.log"
+
+    # Capture before any verdict so disabled and inconclusive runs retain logs.
+    scan_dmesg_errors "$kaslr_dir" 'kaslr|randomiz|Kernel Offset' '' || true
+    : >"$kaslr_dir/kaslr_boot_evidence.log" || return 3
+    if [ "${DMESG_ACCESS_STATUS:-unavailable}" = available ]; then
+        # Strip only kernel timestamps or the shared current-boot journal prefix.
+        # Exact message matching avoids treating KPTI or quoted messages as proof.
+        if ! awk '
+            {
+                sub(/^\[journal\][[:space:]]*/, "")
+                sub(/^\[[[:space:]]*[0-9]+([.][0-9]+)?\][[:space:]]*/, "")
+                sub(/^\[[[:space:]]*[TC][[:space:]]*[0-9]+\][[:space:]]*/, "")
+                if ($0 ~ /KASLR|Kernel Offset:/) {
+                    print
+                }
+            }
+        ' "$kaslr_dir/dmesg_snapshot.log" \
+            >"$kaslr_dir/kaslr_boot_evidence.log"; then
+            KASLR_REASON="Cannot parse the captured KASLR boot log, see $kaslr_dir"
+            return 3
+        fi
+    fi
+    log_file_with_label KASLR-BOOT "$kaslr_dir/kaslr_boot_evidence.log"
+
+    printf '%s\n' "$kaslr_cmdline" |
+        grep -Eq '(^|[[:space:]])nokaslr([[:space:]]|$)'
+    kaslr_cmdline_rc=$?
+    case "$kaslr_cmdline_rc" in
+        0)
+            KASLR_REASON="Boot command line disables KASLR, remove nokaslr and reboot"
+            return 1
+            ;;
+        1)
+            ;;
+        *)
+            KASLR_REASON="Cannot evaluate the KASLR boot command line, see $kaslr_dir"
+            return 3
+            ;;
+    esac
+    if [ "$kaslr_config" = CONFIG_RANDOMIZE_BASE=n ]; then
+        KASLR_REASON="Running kernel disables CONFIG_RANDOMIZE_BASE, use a KASLR-enabled kernel"
+        return 1
+    fi
+    grep -Eq '^(KASLR:?[[:space:]]+disabled([[:space:]].*)?|Kernel Offset:[[:space:]]+disabled)[[:space:]]*$' \
+        "$kaslr_dir/kaslr_boot_evidence.log"
+    kaslr_disabled_rc=$?
+    case "$kaslr_disabled_rc" in
+        0)
+            KASLR_REASON="Current-boot log reports KASLR disabled, check the bootloader seed and boot arguments"
+            return 1
+            ;;
+        1)
+            ;;
+        *)
+            KASLR_REASON="Cannot evaluate captured KASLR disable evidence, see $kaslr_dir"
+            return 3
+            ;;
+    esac
+    grep -Eq '^KASLR:?[[:space:]]+enabled[[:space:]]*$' "$kaslr_dir/kaslr_boot_evidence.log"
+    kaslr_enabled_rc=$?
+    case "$kaslr_enabled_rc" in
+        0)
+            KASLR_REASON="Current-boot kernel message confirms KASLR activation, cross-boot randomness was not tested"
+            return 0
+            ;;
+        1)
+            ;;
+        *)
+            KASLR_REASON="Cannot evaluate captured KASLR activation evidence, see $kaslr_dir"
+            return 3
+            ;;
+    esac
+    if [ "${DMESG_ACCESS_STATUS:-unavailable}" != available ]; then
+        KASLR_REASON="KASLR activation cannot be verified because the current-boot kernel log is unavailable, check $kaslr_dir/dmesg_access.log and kernel-log access"
+    else
+        KASLR_REASON="Current-boot KASLR activation message is absent, retain the early boot log or use a kernel that reports activation, config and symbol addresses alone are insufficient"
+    fi
+    return 2
 }
 
 check_dt_nodes() {
@@ -3057,6 +3176,94 @@ wait_for_ip_address() {
     return 1
 }
 
+# net_interface_admin_state <interface>
+# Print up/down from IFF_UP, not carrier or operstate. No network changes.
+# Return 1 for unavailable or malformed flags.
+net_interface_admin_state() (
+    nias_flags=$(cat "/sys/class/net/$1/flags" 2>/dev/null) || return 1
+    case "$nias_flags" in
+        0x*)
+            nias_digits=${nias_flags#0x}
+            case "$nias_digits" in
+                ''|*[!0-9a-fA-F]*)
+                    return 1
+                    ;;
+            esac
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    if [ "$((nias_flags & 1))" -eq 1 ]; then
+        printf '%s\n' up
+    else
+        printf '%s\n' down
+    fi
+)
+
+# net_restore_interface_admin <interface> <up|down>
+# Restore the selected interface's original administrative state and verify it.
+# Diagnostics go to stderr. Return 1 if restoration is incomplete.
+net_restore_interface_admin() (
+    nria_iface="$1"
+    nria_state="$2"
+    case "$nria_state" in
+        up|down)
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    [ "$(net_interface_admin_state "$nria_iface")" = "$nria_state" ] && return 0
+    run_with_managed_timeout 5 "$PWD" net-restore ip link set dev "$nria_iface" "$nria_state" >&2 || return 1
+    [ "$(net_interface_admin_state "$nria_iface")" = "$nria_state" ]
+)
+
+# radio_snapshot_rfkill <type> <file>
+# Save index, canonical device identity and soft block state for this radio type.
+# Missing optional rfkill sysfs produces an empty snapshot. Return 1 on I/O error.
+radio_snapshot_rfkill() (
+    rsr_type="$1"
+    rsr_file="$2"
+    : >"$rsr_file" || return 1
+    for rsr_node in /sys/class/rfkill/rfkill*; do
+        [ -r "$rsr_node/type" ] || continue
+        [ "$(cat "$rsr_node/type")" = "$rsr_type" ] || continue
+        rsr_soft=$(cat "$rsr_node/soft") || return 1
+        rsr_device=$(readlink -f "$rsr_node/device") || return 1
+        case "$rsr_soft" in
+            0|1)
+                printf '%s|%s|%s|%s\n' "$rsr_node" "$rsr_type" "$rsr_device" "$rsr_soft" >>"$rsr_file" || return 1
+                ;;
+            *)
+                return 1
+                ;;
+        esac
+    done
+)
+
+# radio_restore_rfkill <snapshot-file>
+# Restore only recorded soft states whose runtime device identity still matches.
+# Never changes hard blocks or newly registered radios. Return 1 on mismatch/error.
+radio_restore_rfkill() (
+    [ -r "$1" ] || return 1
+    rrr_failed=0
+    while IFS='|' read -r rrr_node rrr_type rrr_device rrr_soft; do
+        [ -n "$rrr_node" ] || continue
+        if [ "$(cat "$rrr_node/type" 2>/dev/null)" != "$rrr_type" ] ||
+           [ "$(readlink -f "$rrr_node/device")" != "$rrr_device" ]; then
+            log_fail "Radio identity changed before restoration: $rrr_node" >&2
+            rrr_failed=1
+            continue
+        fi
+        if [ "$(cat "$rrr_node/soft" 2>/dev/null)" != "$rrr_soft" ]; then
+            printf '%s\n' "$rrr_soft" >"$rrr_node/soft" || rrr_failed=1
+        fi
+        [ "$(cat "$rrr_node/soft" 2>/dev/null)" = "$rrr_soft" ] || rrr_failed=1
+    done <"$1"
+    [ "$rrr_failed" -eq 0 ]
+)
+
 # Get the IPv4 address for a given interface.
 get_ip_address() {
     iface="$1"
@@ -3068,23 +3275,26 @@ get_ip_address() {
 }
 
 # Run a command with a timeout (in seconds)
-run_with_timeout() {
-    timeout="$1"; shift
-    ( "$@" ) &
-    pid=$!
-    ( sleep "$timeout"; kill "$pid" 2>/dev/null ) &
-    watcher=$!
-    wait $pid 2>/dev/null
-    status=$?
-    kill $watcher 2>/dev/null
-    return $status
-}
+run_with_timeout() (
+    rwt_seconds="$1"
+    shift
+    # Legacy callers include sleep-compatible seconds suffixes.
+    rwt_seconds=${rwt_seconds%s}
+    case "$rwt_seconds" in
+        ''|*[!0-9]*|0*)
+            return 125
+            ;;
+    esac
+    [ "${#rwt_seconds}" -le 9 ] || return 125
+    trap 'managed_timeout_cancel_bounded 2 >&2 || true' 0
+    trap 'exit 125' HUP INT TERM
+    run_with_managed_timeout "$rwt_seconds" "$PWD" command "$@"
+)
 
 # Purpose: Opt-in managed timeout runner with explicit watcher lifecycle cleanup.
 #
-# This intentionally does not change run_with_timeout(), which has existing
-# callers and historical behavior. Suites that need stronger lifecycle handling
-# can opt in to this helper without affecting existing users.
+# Keeps command status, stdin and optional session behavior unchanged.
+# Both session and direct-PID cancellation use bounded polling.
 #
 # Usage:
 #   run_with_managed_timeout TIMEOUT_SECS TEMP_DIR LABEL COMMAND [ARG...]
@@ -3093,7 +3303,7 @@ run_with_timeout() {
 #   TIMEOUT_SECS - positive integer to enable timeout enforcement. Empty, zero,
 #                  or non-numeric values run COMMAND directly without a watcher.
 #   TEMP_DIR     - directory for temporary watcher PID and timeout marker files;
-#                  /tmp is used when empty.
+#                  CWD is used when empty.
 #   LABEL        - caller-provided label for temp-file names. Callers should use
 #                  a simple filename-safe value.
 #   COMMAND...   - command and arguments to execute.
@@ -3147,17 +3357,27 @@ run_with_managed_timeout() {
             ;;
     esac
 
-    [ -n "$mt_temp_dir" ] || mt_temp_dir="/tmp"
+    [ -n "$mt_temp_dir" ] || mt_temp_dir="$PWD"
     [ -n "$mt_label" ] || mt_label="managed-timeout"
 
-    (
-        mt_run_pre_exec_hook
-        if [ "$mt_use_session" = 1 ]; then
-            exec setsid "$@"
-        fi
-        exec "$@"
-    ) &
-    mt_cmd_pid=$!
+    {
+        (
+            mt_run_pre_exec_hook
+            if [ "$mt_use_session" = 1 ]; then
+                exec setsid "$@"
+            fi
+            mt_command=$(command -v "$1") || exit 127
+            case "$mt_command" in
+                */*)
+                    exec "$@"
+                    ;;
+                *)
+                    "$@"
+                    ;;
+            esac
+        ) <&3 3<&- &
+        mt_cmd_pid=$!
+    } 3<&0
     # shellcheck disable=SC2034  # Exposed for caller cleanup traps while command is running.
     MANAGED_TIMEOUT_CMD_PID="$mt_cmd_pid"
 
@@ -3196,71 +3416,35 @@ run_with_managed_timeout() {
     # shellcheck disable=SC2034  # Exposed for caller cleanup traps while command is running.
     MANAGED_TIMEOUT_WATCHER_PID="$mt_watcher_pid"
 
-    if [ "$mt_use_session" = 1 ]; then
-        mt_status=0
-        while bounded_timeout_pid_running "$mt_cmd_pid"; do
-            if [ -r "$mt_timeout_marker_file" ]; then
-                mt_status=124
-                break
-            fi
-            if ! bounded_timeout_pid_running "$mt_watcher_pid"; then
-                echo "[ERROR] timeout watcher exited before the owned command" >&2
-                mt_status=125
-                break
-            fi
-            sleep 1
-        done
-        if ! bounded_timeout_pid_running "$mt_cmd_pid"; then
-            wait "$mt_cmd_pid" 2>/dev/null
-            mt_command_status=$?
-            if [ "$mt_status" -eq 0 ]; then
-                mt_status=$mt_command_status
-            fi
-        fi
+    mt_status=0
+    while bounded_timeout_pid_running "$mt_cmd_pid"; do
         if [ -r "$mt_timeout_marker_file" ]; then
             mt_status=124
+            break
         fi
-        if ! managed_timeout_cancel_bounded 2; then
-            echo "[ERROR] owned command session remains active after cleanup" >&2
-            if [ "$mt_status" -eq 0 ]; then
-                mt_status=125
-            fi
+        if ! bounded_timeout_pid_running "$mt_watcher_pid"; then
+            echo "[ERROR] timeout watcher exited before the owned command" >&2
+            mt_status=125
+            break
         fi
-        return "$mt_status"
+        sleep 0.1 2>/dev/null || sleep 1
+    done
+    if ! bounded_timeout_pid_running "$mt_cmd_pid"; then
+        wait "$mt_cmd_pid" 2>/dev/null
+        mt_command_status=$?
+        if [ "$mt_status" -eq 0 ]; then
+            mt_status=$mt_command_status
+        fi
     fi
-
-    wait "$mt_cmd_pid" 2>/dev/null
-    mt_status=$?
-
     if [ -r "$mt_timeout_marker_file" ]; then
         mt_status=124
     fi
-
-    if [ -r "$mt_sleep_pid_file" ]; then
-        MANAGED_TIMEOUT_WATCHER_SLEEP_PID="$(cat "$mt_sleep_pid_file" 2>/dev/null || true)"
+    if ! managed_timeout_cancel_bounded 2; then
+        echo "[ERROR] owned command session remains active after cleanup" >&2
+        if [ "$mt_status" -eq 0 ]; then
+            mt_status=125
+        fi
     fi
-
-    kill "$mt_watcher_pid" >/dev/null 2>&1 || true
-    wait "$mt_watcher_pid" 2>/dev/null || true
-
-    if [ -n "$MANAGED_TIMEOUT_WATCHER_SLEEP_PID" ]; then
-        kill "$MANAGED_TIMEOUT_WATCHER_SLEEP_PID" >/dev/null 2>&1 || true
-        wait "$MANAGED_TIMEOUT_WATCHER_SLEEP_PID" 2>/dev/null || true
-    fi
-
-    rm -f "$mt_sleep_pid_file" "$mt_timeout_marker_file" 2>/dev/null || true
-
-    # shellcheck disable=SC2034  # Clear externally-consumed timeout state after normal return.
-    MANAGED_TIMEOUT_CMD_PID=""
-    # shellcheck disable=SC2034  # Clear externally-consumed timeout state after normal return.
-    MANAGED_TIMEOUT_WATCHER_PID=""
-    # shellcheck disable=SC2034  # Clear externally-consumed timeout state after normal return.
-    MANAGED_TIMEOUT_WATCHER_SLEEP_PID=""
-    # shellcheck disable=SC2034  # Clear externally-consumed timeout state after normal return.
-    MANAGED_TIMEOUT_SLEEP_PID_FILE=""
-    # shellcheck disable=SC2034  # Clear externally-consumed timeout state after normal return.
-    MANAGED_TIMEOUT_MARKER_FILE=""
-
     return "$mt_status"
 }
 
@@ -4274,46 +4458,30 @@ get_remoteproc_by_firmware() {
 #     1 = DT does not describe it
 #     3 = misuse (no argument)
 # ------------------------------------------------------------------------------
-dt_has_remoteproc_fw() {
-    fw="$1"
-    [ -n "$fw" ] || return 3
- 
-    base=""
-    for candidate in /proc/device-tree /sys/firmware/devicetree/base; do
-        if [ -d "$candidate" ]; then
-            base="$candidate"
-            break
+dt_has_remoteproc_fw() (
+    dtfw_name="${1:-}"
+    [ -n "$dtfw_name" ] || return 3
+    dtfw_root=$(dt_runtime_root) || return 1
+    dtfw_files=$(mktemp "$PWD/.remoteproc-dt.XXXXXX") || return 1
+    trap 'rm -f "$dtfw_files"' 0
+    find "$dtfw_root" -type d >"$dtfw_files" || return 1
+    while IFS= read -r dtfw_node; do
+        dtfw_text="${dtfw_node##*/}"
+        for dtfw_property in firmware-name qcom,firmware-name; do
+            dtfw_value=$(dt_property_text "$dtfw_node" "$dtfw_property" 2>/dev/null || true)
+            dtfw_text="$dtfw_text $dtfw_value"
+        done
+        if printf '%s\n' "$dtfw_text" | awk -v wanted="$dtfw_name" '
+            BEGIN { pattern="(^|[^[:alnum:]])" tolower(wanted) "([^[:alnum:]]|$)" }
+            tolower($0) ~ pattern { found=1 }
+            END { exit !found }
+        '; then
+            dt_node_enabled "$dtfw_node" || continue
+            return 0
         fi
-    done
-    [ -n "$base" ] || return 1
- 
-    # lower-case match key
-    fw_lc=$(printf '%s\n' "$fw" | tr '[:upper:]' '[:lower:]')
- 
-    # new fast-path (any smp2p-<fw>* or remoteproc-<fw>* directory)
-    found=0
-    for d in "$base"/smp2p-"$fw"* "$base"/remoteproc-"$fw"*; do
-        [ -d "$d" ] && found=1 && break
-    done
-    [ "$found" -eq 1 ] && return 0
- 
-    # 2) Shallow find (<depth 2) for any node/prop name containing fw
-    if find "$base" -maxdepth 2 -iname "*$fw_lc*" -print -quit 2>/dev/null | grep -q .; then
-        return 0
-    fi
- 
-    # 3) Grep soc@0 and aliases for a first match
-    if grep -Iq -m1 -F "$fw_lc" "$base/soc@0" "$base/aliases" 2>/dev/null; then
-        return 0
-    fi
- 
-    # 4) Fallback: grep entire DT tree
-    if grep -Iq -m1 -F "$fw_lc" "$base" 2>/dev/null; then
-        return 0
-    fi
- 
+    done <"$dtfw_files"
     return 1
-}
+)
 
 ###############################################################################
 # dt_list_compatible_nodes <compatible-pattern> [fixed|regex]
@@ -4350,7 +4518,7 @@ dt_list_compatible_nodes() {
         [ "$dtlc_resolved_root" = "$dtlc_previous_root" ] && continue
         dtlc_previous_root="$dtlc_resolved_root"
 
-        dtlc_matches_file=$(mktemp "${TMPDIR:-/tmp}/dt-compatible.XXXXXX") || return 1
+        dtlc_matches_file=$(mktemp "$PWD/.dt-compatible.XXXXXX") || return 1
         if [ "$dtlc_mode" = "regex" ]; then
             find "$dtlc_resolved_root" -type f -name compatible 2>/dev/null >"$dtlc_matches_file"
         else
@@ -4360,12 +4528,7 @@ dt_list_compatible_nodes() {
         while IFS= read -r dtlc_compatible_file; do
             [ "$(basename "$dtlc_compatible_file")" = "compatible" ] || continue
             dtlc_node_dir=$(dirname "$dtlc_compatible_file")
-            dtlc_status=$(dt_property_text "$dtlc_node_dir" status 2>/dev/null || true)
-            case "$dtlc_status" in
-                disabled|fail|failed)
-                    continue
-                    ;;
-            esac
+            dt_node_enabled "$dtlc_node_dir" || continue
             if [ "$dtlc_mode" = "regex" ]; then
                 dtlc_text=$(dt_property_text "$dtlc_node_dir" compatible 2>/dev/null || true)
                 printf '%s\n' "$dtlc_text" | grep -Eq "$dtlc_pattern" || continue
@@ -4630,26 +4793,49 @@ platform_device_driver_name() {
 
     pddn_driver_path=$(readlink -f "$pddn_device_dir/driver" 2>/dev/null || true)
     [ -n "$pddn_driver_path" ] || return 1
+    [ -d "$pddn_driver_path" ] || return 1
     basename "$pddn_driver_path"
 }
 
-# iommu_validate_runtime_devices <result-directory>
+# iommu_validate_runtime_devices <result-directory> [all|registered]
 # Validate enabled DT DMA contexts against their exact runtime bus devices.
 # Container parents need no group when the DT assigns DMA to child contexts.
+# Default to all enabled DT contexts. Registered scope checks only contexts
+# with a runtime bus device, whose parent can consume other DT children.
+# Driver links are diagnostic, require actual group and reverse membership.
 # Retain DT, device, driver and group evidence. Diagnostics go to stderr.
 # Return 0 for complete attachment, 1 for broken attachment/discovery, 2 when
 # DT context evidence is unavailable, and 3 for invalid input. No state changes.
 iommu_validate_runtime_devices() (
     ivrd_out="$1"
     [ -n "$ivrd_out" ] || exit 3
+    ivrd_scope="${2:-all}"
+    case "$ivrd_scope" in
+        all|registered)
+            ;;
+        *)
+            exit 3
+            ;;
+    esac
     mkdir -p "$ivrd_out" || exit 1
-    ivrd_root=$(dt_runtime_root) || exit 2
     ivrd_index="$ivrd_out/iommu_platform_index.tsv"
     ivrd_candidates="$ivrd_out/iommu_device_candidates.tsv"
     ivrd_nodes="$ivrd_out/iommu_dt_nodes.log"
     ivrd_inventory="$ivrd_out/iommu_contexts.tsv"
+    ivrd_groups="$ivrd_out/iommu_group_members.tsv"
     : >"$ivrd_index" || exit 1
     : >"$ivrd_inventory" || exit 1
+    : >"$ivrd_groups" || exit 1
+    for ivrd_group_dir in /sys/kernel/iommu_groups/*; do
+        [ -d "$ivrd_group_dir" ] || continue
+        for ivrd_member in "$ivrd_group_dir"/devices/*; do
+            [ -e "$ivrd_member" ] || continue
+            ivrd_member_device=$(readlink -f "$ivrd_member") || exit 1
+            printf '%s|%s\n' "${ivrd_group_dir##*/}" "$ivrd_member_device" \
+                >>"$ivrd_groups" || exit 1
+        done
+    done
+    ivrd_root=$(dt_runtime_root) || exit 2
     # The generic provider index does not include iommus. Collect it once here.
     if DT_PROPERTY_INDEX="" dt_list_enabled_property_nodes "$ivrd_root" iommus >"$ivrd_nodes"; then
         :
@@ -4664,7 +4850,7 @@ iommu_validate_runtime_devices() (
     for ivrd_link in /sys/bus/*/devices/*/of_node; do
         [ -e "$ivrd_link" ] || continue
         ivrd_node=$(readlink -f "$ivrd_link") || exit 1
-        ivrd_device=${ivrd_link%/of_node}
+        ivrd_device=$(readlink -f "${ivrd_link%/of_node}") || exit 1
         ivrd_priority=2
         if [ -e "$ivrd_device/iommu_group" ]; then
             ivrd_priority=0
@@ -4690,8 +4876,11 @@ iommu_validate_runtime_devices() (
             ivrd_parent=${ivrd_parent%/*}
         done
         [ "$ivrd_enabled" -eq 1 ] || continue
-        ivrd_count=$((ivrd_count + 1))
         ivrd_device=$(DT_PLATFORM_DEVICE_INDEX="$ivrd_index" find_platform_device_for_dt_node "$ivrd_node") || ivrd_device=""
+        if [ "$ivrd_scope" = registered ] && [ -z "$ivrd_device" ]; then
+            continue
+        fi
+        ivrd_count=$((ivrd_count + 1))
         ivrd_driver="unbound"
         ivrd_group="missing"
         ivrd_status="FAIL"
@@ -4699,7 +4888,12 @@ iommu_validate_runtime_devices() (
             ivrd_driver=$(platform_device_driver_name "$ivrd_device") || ivrd_driver="unbound"
             if [ -e "$ivrd_device/iommu_group" ]; then
                 ivrd_group=$(readlink -f "$ivrd_device/iommu_group") || exit 1
-                ivrd_status="PASS"
+                ivrd_group_id=${ivrd_group##*/}
+                if [ -d "$ivrd_group" ] &&
+                   [ "$ivrd_group" = "$(readlink -f "/sys/kernel/iommu_groups/$ivrd_group_id")" ] &&
+                   grep -Fx "$ivrd_group_id|$ivrd_device" "$ivrd_groups" >/dev/null; then
+                    ivrd_status="PASS"
+                fi
             fi
         fi
         ivrd_iommus=$(dt_property_hex "$ivrd_node" iommus) || ivrd_iommus="unreadable"
@@ -4759,6 +4953,11 @@ kernel_module_runtime_origin() {
 
     if is_module_loaded "$kmro_module"; then
         printf '%s\n' "loaded"
+        return 0
+    fi
+    kmro_sysname=$(printf '%s' "$kmro_module" | tr '-' '_')
+    if [ -d "/sys/module/$kmro_sysname" ]; then
+        printf '%s\n' "builtin"
         return 0
     fi
 
@@ -4844,21 +5043,26 @@ dt_runtime_root() {
 
 ###############################################################################
 # dt_node_enabled <node-directory>
-# Returns success unless the node status explicitly disables or fails the node.
+# Returns success only for available nodes and ancestors, resolving symlinks.
 ###############################################################################
-dt_node_enabled() {
-    dtne_node_dir="$1"
-    [ -n "$dtne_node_dir" ] || return 3
-    dtne_status=$(dt_property_text "$dtne_node_dir" status 2>/dev/null || true)
-
-    case "$dtne_status" in
-        disabled|fail|failed)
-            return 1
-            ;;
-    esac
-
+dt_node_enabled() (
+    dtne_node_dir="${1:-}"
+    [ -d "$dtne_node_dir" ] || return 3
+    dtne_node_dir=$(readlink -f "$dtne_node_dir") || return 3
+    while [ "$dtne_node_dir" != / ]; do
+        dtne_status=$(dt_property_text "$dtne_node_dir" status 2>/dev/null || true)
+        case "$dtne_status" in
+            ''|okay|ok)
+                ;;
+            *)
+                return 1
+                ;;
+        esac
+        dtne_node_dir=${dtne_node_dir%/*}
+        [ -n "$dtne_node_dir" ] || break
+    done
     return 0
-}
+)
 
 ###############################################################################
 # dt_count_enabled_cpu_nodes <dt-root>
@@ -6036,6 +6240,14 @@ pcie_collect_runtime_health() {
         pcrh_vendor=$(cat "$pcrh_device/vendor" 2>/dev/null || true)
         pcrh_device_id=$(cat "$pcrh_device/device" 2>/dev/null || true)
         pcrh_class=$(cat "$pcrh_device/class" 2>/dev/null || true)
+        if ! printf '%s\n' "$pcrh_vendor" "$pcrh_device_id" "$pcrh_class" | awk '
+            NR <= 2 { if (length($0) != 6 || $0 !~ /^0x[[:xdigit:]]+$/) bad=1 }
+            NR == 3 { if (length($0) != 8 || $0 !~ /^0x[[:xdigit:]]+$/) bad=1 }
+            END { exit bad }
+        '; then
+            pcrh_invalid_link_count=$((pcrh_invalid_link_count + 1))
+            log_fail "Malformed PCI identity attributes: $pcrh_device"
+        fi
         pcrh_driver=$(platform_device_driver_name "$pcrh_device" 2>/dev/null || true)
         if [ -n "$pcrh_driver" ]; then
             PCIE_RUNTIME_BOUND_COUNT=$((PCIE_RUNTIME_BOUND_COUNT + 1))
@@ -6060,6 +6272,14 @@ pcie_collect_runtime_health() {
             PCIE_RUNTIME_MSI_DEVICE_COUNT=$((PCIE_RUNTIME_MSI_DEVICE_COUNT + 1))
         fi
 
+        if [ -e "$pcrh_device/current_link_width" ]; then
+            case "$pcrh_current_width" in
+                ''|*[!0-9]*)
+                    pcrh_invalid_link_count=$((pcrh_invalid_link_count + 1))
+                    log_fail "Malformed negotiated PCIe width: $pcrh_device"
+                    ;;
+            esac
+        fi
         if [ -n "$pcrh_current_speed" ] || [ -n "$pcrh_current_width" ]; then
             PCIE_RUNTIME_LINK_COUNT=$((PCIE_RUNTIME_LINK_COUNT + 1))
             pcrh_link_state="up"
@@ -6103,13 +6323,112 @@ pcie_collect_runtime_health() {
     if [ "$pcrh_invalid_link_count" -gt 0 ]; then
         # Exported result for suite orchestration after this helper returns.
         # shellcheck disable=SC2034
-        PCIE_RUNTIME_FAILURE_REASON="$pcrh_invalid_link_count non-bridge PCIe device(s) report zero negotiated link width"
+        PCIE_RUNTIME_FAILURE_REASON="$pcrh_invalid_link_count PCIe device(s) have malformed identity/link evidence or invalid endpoint width"
         return 1
     fi
 
     log_info "PCIe runtime summary: devices=$PCIE_RUNTIME_DEVICE_COUNT links=$PCIE_RUNTIME_LINK_COUNT inactive_bridge_ports=$PCIE_RUNTIME_INACTIVE_PORT_COUNT msi_devices=$PCIE_RUNTIME_MSI_DEVICE_COUNT power_nodes=$PCIE_RUNTIME_POWER_COUNT artifact=$pcrh_result_dir/pcie_runtime.tsv"
     return 0
 }
+
+###############################################################################
+# pcie_classify_kernel_errors <result-dir>
+# Separate a verified empty host's no-device message from captured PCI faults.
+# Reuses sysfs/DT helpers and one captured log, no hardware state is changed.
+# Returns 0 for faults, 1 for clean/advisory-only, 2 for unavailable evidence.
+###############################################################################
+pcie_classify_kernel_errors() (
+    pcke_dir="$1"
+    : >"$pcke_dir/pcie_fatal_errors.log" || return 2
+    : >"$pcke_dir/pcie_empty_ports.log" || return 2
+    [ -s "$pcke_dir/dmesg_snapshot.log" ] || return 2
+    [ -r "$pcke_dir/dmesg_errors.log" ] || return 2
+
+    while IFS= read -r pcke_line || [ -n "$pcke_line" ]; do
+        pcke_empty=0
+        case "$pcke_line" in
+            *": Device not found")
+                pcke_text=$(printf '%s\n' "$pcke_line" | sed -E 's/^(\[[^]]*\][[:space:]]*)*//')
+                pcke_id=${pcke_text%: Device not found}
+                pcke_driver=${pcke_id%% *}
+                pcke_id=${pcke_id#* }
+                case "$pcke_id" in
+                    ''|*[![:alnum:]._-]*)
+                        printf '%s\n' "$pcke_line" >>"$pcke_dir/pcie_fatal_errors.log" || return 2
+                        continue
+                        ;;
+                esac
+                pcke_host=$(readlink -f "/sys/bus/platform/devices/$pcke_id" 2>/dev/null || true)
+                pcke_bound=$(platform_device_driver_name "$pcke_host" 2>/dev/null || true)
+                pcke_host_dt=$(readlink -f "$pcke_host/of_node" 2>/dev/null || true)
+                pcke_bridges=0
+                pcke_endpoints=0
+                pcke_port_dt=""
+                if [ -n "$pcke_host" ] && [ "$pcke_bound" = "$pcke_driver" ] &&
+                   dt_node_enabled "$pcke_host_dt"; then
+                    for pcke_device in /sys/bus/pci/devices/*; do
+                        [ -d "$pcke_device" ] || continue
+                        pcke_path=$(readlink -f "$pcke_device") || return 2
+                        case "$pcke_path" in
+                            "$pcke_host"/*)
+                                ;;
+                            *)
+                                continue
+                                ;;
+                        esac
+                        pcke_class=$(cat "$pcke_device/class" 2>/dev/null || true)
+                        case "$pcke_class" in
+                            0x0604*)
+                                pcke_bridges=$((pcke_bridges + 1))
+                                pcke_port_dt=$(readlink -f "$pcke_device/of_node" 2>/dev/null || true)
+                                ;;
+                            *)
+                                pcke_endpoints=$((pcke_endpoints + 1))
+                                ;;
+                        esac
+                    done
+                    # A registered root port alone does not require a cable or
+                    # endpoint. Enabled descendants declare expected hardware.
+                    pcke_related=0
+                    case "$pcke_port_dt" in
+                        "$pcke_host_dt"/*)
+                            pcke_related=1
+                            ;;
+                    esac
+                    if [ "$pcke_bridges" -eq 1 ] && [ "$pcke_endpoints" -eq 0 ] &&
+                       [ "$pcke_related" -eq 1 ] && dt_node_enabled "$pcke_port_dt"; then
+                        pcke_declarations=$(find "$pcke_port_dt" -mindepth 1 \( -name reg -o -name compatible \) -type f) || return 2
+                        pcke_expected=0
+                        while IFS= read -r pcke_property; do
+                            [ -n "$pcke_property" ] || continue
+                            pcke_node=${pcke_property%/*}
+                            [ "$pcke_node" != "$pcke_port_dt" ] || continue
+                            if dt_node_enabled "$pcke_node"; then
+                                pcke_expected=1
+                                break
+                            fi
+                        done <<PCIE_DECLARATIONS
+$pcke_declarations
+PCIE_DECLARATIONS
+                        if [ "$pcke_expected" -eq 0 ]; then
+                            pcke_empty=1
+                        fi
+                    fi
+                fi
+                ;;
+        esac
+        if [ "$pcke_empty" -eq 1 ]; then
+            printf '%s\n' "$pcke_line" >>"$pcke_dir/pcie_empty_ports.log" || return 2
+        else
+            printf '%s\n' "$pcke_line" >>"$pcke_dir/pcie_fatal_errors.log" || return 2
+        fi
+    done <"$pcke_dir/dmesg_errors.log"
+    if [ -s "$pcke_dir/pcie_empty_ports.log" ]; then
+        log_warn "PCIe host has a registered root port without an enumerated or DT-declared downstream device"
+        log_file_with_label PCIE-EMPTY "$pcke_dir/pcie_empty_ports.log"
+    fi
+    [ -s "$pcke_dir/pcie_fatal_errors.log" ]
+)
 
 ###############################################################################
 # usb_collect_host_inventory <result-dir>
@@ -6134,6 +6453,14 @@ usb_collect_host_inventory() {
     for uchi_hub in /sys/bus/usb/devices/usb*; do
         [ -d "$uchi_hub" ] || continue
         USB_RUNTIME_ROOT_HUB_COUNT=$((USB_RUNTIME_ROOT_HUB_COUNT + 1))
+        for uchi_attr in idVendor idProduct bDeviceClass; do
+            uchi_value=$(cat "$uchi_hub/$uchi_attr" 2>/dev/null || true)
+            if ! printf '%s\n' "$uchi_value" | grep -Eq '^[[:xdigit:]]+$'; then
+                USB_RUNTIME_FAILURE_REASON="malformed root-hub identity attribute $uchi_attr"
+                log_fail "$USB_RUNTIME_FAILURE_REASON: $uchi_hub"
+                return 1
+            fi
+        done
         uchi_speed=$(cat "$uchi_hub/speed" 2>/dev/null || true)
         uchi_runtime=$(cat "$uchi_hub/power/runtime_status" 2>/dev/null || true)
         uchi_path=$(readlink -f "$uchi_hub" 2>/dev/null || true)
@@ -6150,8 +6477,17 @@ usb_collect_host_inventory() {
             [ -r "$uchi_role" ] || continue
             uchi_role_value=$(tr -d '[:space:]' <"$uchi_role" 2>/dev/null)
             [ -n "$uchi_role_value" ] || continue
-            log_info "USB host mode is inactive: role_node=$uchi_role role=$uchi_role_value"
-            return 2
+            case "$uchi_role_value" in
+                host|"[host]device"|"device[host]")
+                    USB_RUNTIME_FAILURE_REASON="host role is active but no root hub is exposed"
+                    log_fail "$USB_RUNTIME_FAILURE_REASON: $uchi_role"
+                    return 1
+                    ;;
+                device|peripheral|none)
+                    log_info "USB host mode is inactive: role_node=$uchi_role role=$uchi_role_value"
+                    return 2
+                    ;;
+            esac
         done
         # Exported result for suite orchestration after this helper returns.
         # shellcheck disable=SC2034
@@ -7432,10 +7768,13 @@ wait_remoteproc_boot_ready() (
     done
 
     set -- "$br_out/initial/dmesg_snapshot.log"
+    br_error_files="$br_out/initial/dmesg_errors.log"
     if [ "$br_state" != "$br_initial" ] || [ "$br_reason" != "ready" ]; then
         scan_dmesg_errors "$br_out/final" 'remoteproc|qcom.*pas|qcom_q6v5' 'not a crash|non-fatal' || true
         br_access="$br_access/$DMESG_ACCESS_STATUS"
         set -- "$@" "$br_out/final/dmesg_snapshot.log"
+        br_error_files="$br_error_files
+$br_out/final/dmesg_errors.log"
     fi
     # Match literal, whole runtime identities, not SoC addresses or sibling IDs.
     # Fatal reason lines can be tagged with the platform controller rather than
@@ -7467,6 +7806,17 @@ wait_remoteproc_boot_ready() (
     ' "$@" >"$br_out/fatal_errors.log"; then
         br_reason="kernel-evidence-read-failed"
     fi
+    while IFS= read -r br_error_file; do
+        [ -r "$br_error_file" ] || continue
+        kernel_log_filter_instance_faults "$br_error_file" 'remoteproc|qcom.*pas|qcom_q6v5' \
+            'remoteproc[0-9]+' "$br_id" >"$br_out/fault_blocks.log" || {
+            br_reason="kernel-evidence-read-failed"
+            break
+        }
+        cat "$br_out/fault_blocks.log" >>"$br_out/fatal_errors.log" || br_reason="kernel-evidence-read-failed"
+    done <<DSP_ERROR_FILES
+$br_error_files
+DSP_ERROR_FILES
     if [ -s "$br_out/fatal_errors.log" ]; then
         br_crashed=1
     fi
@@ -7481,7 +7831,9 @@ wait_remoteproc_boot_ready() (
     elif [ "$br_reason" = "ready" ]; then
         br_outcome="PASS"
         br_class="already-running"
-        if [ "$br_initial" != "running" ]; then
+        if [ "$br_access" != available ] && [ "$br_access" != available/available ]; then
+            br_class="running-health-unverified"
+        elif [ "$br_initial" != "running" ]; then
             br_class="startup-delay"
         fi
     fi
@@ -7501,9 +7853,20 @@ wait_remoteproc_boot_ready() (
     [ "$br_outcome" = "PASS" ]
 ) >&2
 
+# remoteproc_restore_running <path> <timeout> <poll>
+# Restore an instance that the caller explicitly stopped from running state.
+# Return 1 on incomplete restoration, never restart an unowned processor.
+remoteproc_restore_running() (
+    rrr_path="$1"
+    [ "$(get_remoteproc_state "$rrr_path")" = running ] && return 0
+    start_remoteproc "$rrr_path" "$2" "$3"
+)
+
 # Stop remoteproc
 stop_remoteproc() {
     rproc_path="$1"
+    rproc_timeout="${2:-6}"
+    rproc_poll="${3:-1}"
  
     # Resolve to a real sysfs dir if only a name was given
     case "$rproc_path" in
@@ -7518,13 +7881,18 @@ stop_remoteproc() {
         return 1
     fi
  
-    printf 'stop\n' >"$statef" 2>/dev/null || return 1
-    wait_remoteproc_state "$path" offline 6
+    rproc_evidence=$(mktemp "$PWD/remoteproc-stop.XXXXXX") || return 1
+    # shellcheck disable=SC2016 # Positional arguments belong to the child shell.
+    run_with_bounded_timeout_capture "$rproc_timeout" "$rproc_evidence" \
+        sh -c 'printf "%s\n" "$2" >"$1"' sh "$statef" stop || return 1
+    wait_remoteproc_state "$path" offline "$rproc_timeout" "$rproc_poll"
 }
  
 # Start remoteproc
 start_remoteproc() {
     rproc_path="$1"
+    rproc_timeout="${2:-6}"
+    rproc_poll="${3:-1}"
  
     case "$rproc_path" in
         /sys/*) path="$rproc_path" ;;
@@ -7538,8 +7906,11 @@ start_remoteproc() {
         return 1
     fi
  
-    printf 'start\n' >"$statef" 2>/dev/null || return 1
-    wait_remoteproc_state "$path" running 6
+    rproc_evidence=$(mktemp "$PWD/remoteproc-start.XXXXXX") || return 1
+    # shellcheck disable=SC2016 # Positional arguments belong to the child shell.
+    run_with_bounded_timeout_capture "$rproc_timeout" "$rproc_evidence" \
+        sh -c 'printf "%s\n" "$2" >"$1"' sh "$statef" start || return 1
+    wait_remoteproc_state "$path" running "$rproc_timeout" "$rproc_poll"
 }
 # Validate remoteproc running state with retries and logging
 validate_remoteproc_running() {
@@ -7553,7 +7924,8 @@ validate_remoteproc_running() {
         echo "[ERROR] Remoteproc for '$fw_name' not found" >> "$log_file"
         {
             echo "---- Last 20 remoteproc dmesg logs ----"
-            dmesg | grep -i "remoteproc" | tail -n 20
+            scan_dmesg_errors "$PWD/remoteproc-validation" remoteproc "" || true
+            tail -n 20 "$PWD/remoteproc-validation/dmesg_errors.log"
             echo "----------------------------------------"
         } >> "$log_file"
         return 1
@@ -7572,7 +7944,8 @@ validate_remoteproc_running() {
     echo "[ERROR] $fw_name remoteproc did not reach 'running' state within ${max_wait_secs}s (last state: $state)" >> "$log_file"
     {
         echo "---- Last 20 remoteproc dmesg logs ----"
-        dmesg | grep -i "remoteproc" | tail -n 20
+        scan_dmesg_errors "$PWD/remoteproc-validation" remoteproc "" || true
+        tail -n 20 "$PWD/remoteproc-validation/dmesg_errors.log"
         echo "----------------------------------------"
     } >> "$log_file"
     return 1
@@ -7609,69 +7982,95 @@ summary_report() {
 
 # dump_rproc_logs <sysfs-path> <label>
 # Captures debug trace + filtered dmesg into a timestamped log
-dump_rproc_logs() {
-    rpath="$1"; label="$2"
-    ts=$(date +%Y%m%d_%H%M%S)
-    base=$(basename "$rpath")
-    logfile="rproc_${base}_${label}_${ts}.log"
-    log_info "Dumping ${base} [${label}] → ${logfile}"
-    [ -r "$rpath/trace" ] && cat "$rpath/trace" >"$logfile"
-    dmesg | grep -i "$base" >>"$logfile" 2>/dev/null || :
-}
+dump_rproc_logs() (
+    rpath="$1"
+    label="$2"
+    base=${rpath##*/}
+    logfile="$PWD/rproc_${base}_${label}_$(date +%Y%m%d_%H%M%S).log"
+    log_info "Dumping $base [$label] to $logfile"
+    : >"$logfile" || return 1
+    if [ -r "$rpath/trace" ]; then
+        cat "$rpath/trace" >>"$logfile"
+    fi
+    # Callers may provide a snapshot already captured for this operation.
+    snapshot="${3:-}"
+    if [ -z "$snapshot" ]; then
+        scan_dmesg_errors "${logfile}.kernel" 'remoteproc|qcom.*pas|qcom_q6v5' 'not a crash|non-fatal' || true
+        snapshot="${logfile}.kernel/dmesg_snapshot.log"
+    fi
+    if [ -r "$snapshot" ]; then
+        grep -Fi "$base" "$snapshot" >>"$logfile" || true
+    fi
+)
 
 # find_rpmsg_ctrl_for <short-name>
 # e.g. find_rpmsg_ctrl_for adsp
-find_rpmsg_ctrl_for() {
-    want="$1"  # e.g. "adsp"
-
-    for dev in /dev/rpmsg_ctrl*; do
-        [ -e "$dev" ] || continue
-
-        base=$(basename "$dev")
-        sysfs="/sys/class/rpmsg/${base}"
-
-        # resolve the rpmsg_ctrl node’s real path
-        target=$(readlink -f "$sysfs/device")
-        # climb up to the remoteprocX directory
-        remoteproc_dir=$(dirname "$(dirname "$(dirname "$target")")")
-
-        # Try the 'name' file
-        if [ -r "$remoteproc_dir/name" ]; then
-            rpname=$(cat "$remoteproc_dir/name")
-            if echo "$rpname" | grep -qi "^${want}"; then
-                printf '%s\n' "$dev"
-                return 0
-            fi
+find_rpmsg_ctrl_for() (
+    rpc_family="$1"
+    rpc_entries=$(get_remoteproc_by_firmware "$rpc_family" "" all) || return 1
+    # shellcheck disable=SC2034 # Inventory columns retained for its public format.
+    while IFS='|' read -r rpc_path rpc_state rpc_firmware rpc_name; do
+        if rpc_sys=$(find_rpmsg_ctrl_for_rproc "$rpc_path"); then
+            rpc_dev="/dev/${rpc_sys##*/}"
+            [ -c "$rpc_dev" ] || continue
+            printf '%s\n' "$rpc_dev"
+            return 0
         fi
-
-        # Fallback: try the 'firmware' file, strip extension
-        if [ -r "$remoteproc_dir/firmware" ]; then
-            fw=$(basename "$(cat "$remoteproc_dir/firmware")")   # adsp.mbn
-            short="${fw%%.*}"                                    # adsp
-            if echo "$short" | grep -qi "^${want}"; then
-                printf '%s\n' "$dev"
-                return 0
-            fi
-        fi
-    done
-
+    done <<RPMSG_INSTANCES
+$rpc_entries
+RPMSG_INSTANCES
     return 1
-}
+)
 
 # Given a remoteproc *absolute* path (e.g. /sys/class/remoteproc/remoteproc2),
 # return the FIRST matching /sys/class/rpmsg/rpmsg_ctrlN path.
-find_rpmsg_ctrl_for_rproc() {
-    rproc_path="$1"
-    for c in /sys/class/rpmsg/rpmsg_ctrl*; do
-        [ -e "$c" ] || continue
-        # device symlink for ctrl points into ...remoteprocX/...rpmsg_ctrl...
-        devlink=$(readlink -f "$c/device" 2>/dev/null) || continue
-        case "$devlink" in
-            "$rproc_path"/*) printf '%s\n' "$c"; return 0 ;;
+find_rpmsg_ctrl_for_rproc() (
+    rpc_root=$(readlink -f "$1") || return 1
+    [ -d "$rpc_root" ] || return 1
+    for rpc_ctrl in /sys/class/rpmsg/rpmsg_ctrl*; do
+        [ -e "$rpc_ctrl" ] || continue
+        rpc_device=$(readlink -f "$rpc_ctrl/device") || continue
+        case "$rpc_device" in
+            "$rpc_root"/*)
+                printf '%s\n' "$rpc_ctrl"
+                return 0
+                ;;
         esac
     done
     return 1
-}
+)
+
+# rpmsg_validate_echo <remoteproc-path> <output-directory>
+# Run an explicitly configured image client against an existing named echo
+# endpoint owned by this instance. Stdout is diagnostic, logs stay in CWD.
+# RPMSG_ECHO_CLIENT must accept the endpoint path as its sole argument and
+# validate the configured echo protocol. No endpoint is created or probed blindly.
+# Returns 0 for validated echo, 2 for absent optional assets, 1 for execution failure.
+rpmsg_validate_echo() (
+    rve_path=$(readlink -f "$1") || return 1
+    rve_out="$2"
+    [ -n "${RPMSG_ECHO_CLIENT:-}" ] && [ -n "${RPMSG_ECHO_SERVICE:-}" ] || return 2
+    rve_client=$(command -v "$RPMSG_ECHO_CLIENT") || return 2
+    mkdir -p "$rve_out" || return 1
+    for rve_endpoint in /sys/class/rpmsg/rpmsg[0-9]*; do
+        [ -r "$rve_endpoint/name" ] || continue
+        [ "$(cat "$rve_endpoint/name")" = "$RPMSG_ECHO_SERVICE" ] || continue
+        rve_device=$(readlink -f "$rve_endpoint/device") || continue
+        case "$rve_device" in
+            "$rve_path"/*)
+                rve_node="/dev/${rve_endpoint##*/}"
+                [ -c "$rve_node" ] || return 1
+                run_with_bounded_timeout_capture 10 "$rve_out/process.log" \
+                    "$rve_client" "$rve_node" >"$rve_out/echo.log" 2>&1
+                rve_rc=$?
+                log_file_with_label RPMSG "$rve_out/echo.log"
+                [ "$rve_rc" -eq 0 ]
+                return $?
+                ;;
+        esac
+    done
+    return 2
+)
 
 # Ensure /dev node exists for a sysfs rpmsg item (ctrl or data). Echo /dev/… path.
 rpmsg_sys_to_dev() {
@@ -7689,7 +8088,8 @@ rpmsg_sys_to_dev() {
 # Find existing rpmsg data endpoints that belong to this remoteproc path.
 # Echo all matching /dev/rpmsgN (one per line). Return 0 if any, 1 if none.
 find_rpmsg_data_for_rproc() {
-    rproc_path="$1"
+    rproc_path=$(readlink -f "$1") || return 1
+    [ -d "$rproc_path" ] || return 1
     found=0
     for d in /sys/class/rpmsg/rpmsg[0-9]*; do
         [ -e "$d" ] || continue
@@ -8324,26 +8724,352 @@ detect_emmc_partition_block() {
 }
 
 # Auto-detect UFS block device (via udev vendor info or path hint)
-detect_ufs_partition_block() {
-    if command -v lsblk >/dev/null 2>&1 && command -v udevadm >/dev/null 2>&1; then
-        for part in $(lsblk -lnpo NAME,TYPE | awk '$2 == "part" {print $1}'); do
-            if udevadm info --query=all --name="$part" 2>/dev/null | grep -qi "ufs"; then
-                echo "$part"
+# storage_is_ufs <sysfs-block-path>
+# Follow the block device ancestry to a bound UFS host, without udevadm.
+storage_is_ufs() (
+    storage_node=$(readlink -f "$1") || return 1
+    while [ -n "$storage_node" ] && [ "$storage_node" != / ]; do
+        storage_driver=$(readlink -f "$storage_node/driver" 2>/dev/null) || storage_driver=""
+        case "${storage_driver##*/}" in
+            ufshcd*|ufs-qcom)
                 return 0
-            fi
-        done
-    fi
+                ;;
+        esac
+        storage_node=${storage_node%/*}
+    done
+    return 1
+)
 
-    for part in /dev/sd[a-z][0-9]*; do
-        [ -e "$part" ] || continue
-        if command -v udevadm >/dev/null 2>&1 &&
-           udevadm info --query=all --name="$part" 2>/dev/null | grep -qi "ufs"; then
-            echo "$part"
+# detect_ufs_partition_block
+# Print one runtime UFS block device. Whole devices are safe for read-only I/O.
+detect_ufs_partition_block() {
+    for ufs_block in /sys/class/block/*; do
+        [ -e "$ufs_block" ] || continue
+        if storage_is_ufs "$ufs_block" && [ -b "/dev/${ufs_block##*/}" ]; then
+            printf '/dev/%s\n' "${ufs_block##*/}"
             return 0
         fi
     done
     return 1
 }
+
+# storage_path_is_ufs <directory>
+# Check the deepest mount containing the resolved directory. Unknown, overlay,
+# tmpfs and stacked devices are deliberately not accepted as writable UFS proof.
+storage_path_is_ufs() (
+    storage_path=$(cd "$1" && pwd -P) || return 1
+    storage_dev=$(awk -v target="$storage_path" '
+        function decode(s) {
+            gsub(/\\040/, " ", s)
+            gsub(/\\011/, "\t", s)
+            gsub(/\\134/, "\\", s)
+            return s
+        }
+        {
+            mountpoint=decode($5)
+            if (mountpoint == "/" || target == mountpoint ||
+                index(target, mountpoint "/") == 1) {
+                if (length(mountpoint) >= longest) {
+                    longest=length(mountpoint)
+                    device=$3
+                }
+            }
+        }
+        END {print device}
+    ' /proc/self/mountinfo) || return 1
+    [ -n "$storage_dev" ] && storage_is_ufs "/sys/dev/block/$storage_dev"
+)
+
+# rng_restore_selection
+# Restore only the RNG selection changed by this test and report failure.
+rng_restore_selection() {
+    [ "${RNG_CHANGED:-0}" = 1 ] || return 0
+    if ! printf '%s\n' "$RNG_PREVIOUS" >"$RNG_CURRENT_PATH" ||
+       [ "$(cat "$RNG_CURRENT_PATH")" != "$RNG_PREVIOUS" ]; then
+        log_fail "Failed to restore RNG selection to $RNG_PREVIOUS"
+        return 1
+    fi
+    RNG_CHANGED=0
+    log_info "Restored RNG selection: $RNG_PREVIOUS"
+}
+
+# rng_cleanup
+# Cancel test-owned work before restoring RNG state on normal or signal exit.
+rng_cleanup() {
+    managed_timeout_cancel_bounded 2
+    if ! rng_restore_selection; then
+        printf '%s FAIL\n' "$TESTNAME" >"$RES_FILE"
+    fi
+}
+
+# kernel_log_filter_faults SNAPSHOT MODULE_REGEX [EXCLUDE_REGEX]
+# Print retained kernel fault blocks attributed to the selected module through
+# their header or stack symbols. Ignore unrelated module lists and later logs.
+# Accept optional timestamp/thread prefixes, preserving the original evidence.
+# Use image-provided shell and grep, without reading the kernel or changing state.
+kernel_log_filter_faults() (
+    kff_snapshot="$1"
+    kff_module="$2"
+    kff_exclude="${3:-}"
+    [ -r "$kff_snapshot" ] || exit 1
+    kff_block=""
+    kff_matched=0
+    kff_thread=""
+    kff_count=0
+
+    while IFS= read -r kff_raw || [ -n "$kff_raw" ]; do
+        kff_text="$kff_raw"
+        kff_line_thread=""
+        while :; do
+            kff_text=${kff_text#"${kff_text%%[![:space:]]*}"}
+            case "$kff_text" in
+                \[*\]*)
+                    kff_prefix=${kff_text%%]*}
+                    kff_prefix=${kff_prefix#\[}
+                    kff_prefix=${kff_prefix#"${kff_prefix%%[![:space:]]*}"}
+                    case "$kff_prefix" in
+                        T[0-9]*|C[0-9]*)
+                            kff_line_thread="$kff_prefix"
+                            ;;
+                    esac
+                    kff_text=${kff_text#*]}
+                    ;;
+                *)
+                    break
+                    ;;
+            esac
+        done
+        kff_header=0
+        kff_frame=0
+        kff_context=0
+        case "$kff_text" in
+            BUG:*|WARNING:*|Oops:*|Oops\ -*|Internal\ error:*Oops*|Kernel\ panic*|kernel\ BUG\ at*|\
+            Unable\ to\ handle*|Unhandled\ fault*|invalid\ opcode:*)
+                kff_header=1
+                ;;
+            *+0x*|*+0X*|pc\ :*|lr\ :*|PC\ is\ at*|LR\ is\ at*)
+                kff_frame=1
+                ;;
+            Call\ trace:*|Call\ Trace:*)
+                kff_context=1
+                ;;
+            in_atomic\(\):*|preempt_count:*|RCU\ nest\ depth:*|\
+            Preemption\ disabled\ at:*|CPU:*|Hardware\ name:*|\
+            Modules\ linked\ in:*|pstate:*|sp\ :*|x[0-9]*|r[0-9]*|\
+            Mem\ abort\ info:*|ESR\ =*|EC\ =*|SET\ =*|FSC\ =*|\
+            ISV\ =*|ISS\ =*|CM\ =*|user\ pgtable:*|'<TASK>'|'</TASK>')
+                kff_context=1
+                ;;
+        esac
+        # A new fault closes the current block. Other interleaved task output
+        # cannot attribute its module or stack to the current fault.
+        if [ "$kff_header" -eq 0 ] && [ -n "$kff_block" ] && [ -n "$kff_thread" ] &&
+           [ -n "$kff_line_thread" ] && [ "$kff_thread" != "$kff_line_thread" ]; then
+            continue
+        fi
+        if [ -n "$kff_block" ] &&
+           { [ "$kff_header" -eq 1 ] ||
+             { [ "$kff_frame" -eq 0 ] && [ "$kff_context" -eq 0 ]; }; }; then
+            if [ "$kff_matched" -eq 1 ]; then
+                printf '%s\n' "$kff_block"
+            fi
+            kff_block=""
+            kff_matched=0
+            kff_thread=""
+            kff_count=0
+        fi
+        if [ "$kff_header" -eq 1 ]; then
+            if [ -n "$kff_exclude" ] &&
+               printf '%s\n' "$kff_raw" | grep -qiE -- "$kff_exclude"; then
+                continue
+            fi
+            kff_block="$kff_raw"
+            if printf '%s\n' "$kff_raw" | grep -qiE -- "$kff_module"; then
+                kff_matched=1
+            fi
+            kff_thread="$kff_line_thread"
+            kff_count=1
+        elif [ -n "$kff_block" ]; then
+            kff_keep=0
+            if [ "$kff_count" -lt 128 ]; then
+                kff_keep=1
+            fi
+            if [ "$kff_frame" -eq 1 ] && [ "$kff_matched" -eq 0 ] &&
+               printf '%s\n' "$kff_raw" | grep -qiE -- "$kff_module"; then
+                kff_matched=1
+                kff_keep=1
+            fi
+            # Bound retained context, still inspect every later stack symbol
+            # and retain the one that proves attribution. Full input is saved.
+            if [ "$kff_keep" -eq 1 ]; then
+                kff_block="$kff_block
+$kff_raw"
+            fi
+            kff_count=$((kff_count + 1))
+        fi
+    done <"$kff_snapshot"
+    if [ -n "$kff_block" ] && [ "$kff_matched" -eq 1 ]; then
+        printf '%s\n' "$kff_block"
+    fi
+    exit 0
+)
+
+# kernel_log_filter_instance_faults <snapshot> <module-regex> <identity-regex> <selected-id>
+# Reuse captured fault blocks, excluding only blocks explicitly owned by siblings.
+# Unassigned driver faults remain visible. No new kernel read occurs.
+kernel_log_filter_instance_faults() (
+    klif_blocks=$(kernel_log_filter_faults "$1" "$2") || return 1
+    printf '%s\n' "$klif_blocks" | awk -v identity="$3" -v selected="$4" '
+        function emit() {
+            if (block != "" && (!named || matched)) print block
+            block=""; named=0; matched=0
+        }
+        {
+            text=$0
+            sub(/^[[:space:]]*/, "", text)
+            while (text ~ /^\[[^]]*\]/) {
+                sub(/^\[[^]]*\][[:space:]]*/, "", text)
+            }
+            if (text ~ /^(BUG:|WARNING:|Oops[: -]|Internal error:|Kernel panic|kernel BUG at|Unable to handle|Unhandled fault|invalid opcode:)/) emit()
+            if ($0 == "" && block == "") next
+            block=block (block == "" ? "" : "\n") $0
+            rest=$0
+            while (match(rest, identity)) {
+                id=substr(rest, RSTART, RLENGTH)
+                named=1
+                if (id == selected) matched=1
+                rest=substr(rest, RSTART+RLENGTH)
+            }
+        }
+        END { emit() }
+    '
+)
+
+# probe_classify_kernel_failures <result-directory>
+# Classify one retained probe snapshot, preserving genuine kernel fault blocks.
+# Reuse the connectivity/BT lookup contracts only with observed runtime readiness.
+# Source lib_connectivity.sh and lib_bluetooth.sh first. No kernel read, package
+# operation, radio mutation or service startup occurs. All artifacts stay in the
+# supplied CWD run directory. Return 0 for faults, 1 for clean, 2 for unavailable
+# evidence or classification failure. Raw snapshot/scanner files remain intact.
+probe_classify_kernel_failures() (
+    pckf_dir="$1"
+    pckf_snapshot="$pckf_dir/dmesg_snapshot.log"
+    pckf_pending="$pckf_dir/probe_remaining.log"
+    pckf_filtered="$pckf_dir/probe_filtered.log"
+    pckf_warnings="$pckf_dir/probe_warnings.log"
+    pckf_failures="$pckf_dir/probe_failures.log"
+    for pckf_file in probe_candidates.log probe_remaining.log probe_filtered.log \
+        probe_warnings.log probe_failures.log probe_fault_blocks.log \
+        wifi_regulatory_warnings.log probe_bt_adapters.list probe_runtime.tsv; do
+        : >"$pckf_dir/$pckf_file" || return 2
+    done
+    [ "${DMESG_ACCESS_STATUS:-unavailable}" = available ] || return 2
+    [ -s "$pckf_snapshot" ] && [ -r "$pckf_snapshot" ] || return 2
+    command -v wifi_filter_regulatory_warnings >/dev/null 2>&1 || return 2
+    command -v bt_firmware_fallback_pattern >/dev/null 2>&1 || return 2
+
+    # Faults stay independent of optional lookup classification. A later bound
+    # driver or success marker cannot erase a BUG, oops or fault stack.
+    kernel_log_filter_faults "$pckf_snapshot" '.*' \
+        >"$pckf_dir/probe_fault_blocks.log" || return 2
+    pckf_pattern='(failed to (probe|instantiate)|'\
+'probe of .* failed|probe with driver .* failed|deferred probe timeout, ignoring dependency|'\
+'Direct firmware load .* failed|tplg firmware loading .* failed|ASoC error|'\
+'unprobe failed|failed to remove .* driver|component bind error|component unbind error|'\
+'Driver .* failed|cannot register device driver|register_component error|'\
+'sound: ASoC: failed|load_firmware failed|request_firmware failed|device_add failed|'\
+'platform device_add failed|Cannot register component|bind failed|'\
+'lookup_component error|failed to add machine driver|QCA Failed to request file|'\
+'cfg80211:.*regulatory[.]db.*(failed|malformed|invalid)|cfg80211: failed to load regulatory[.]db)'
+    grep -Ei "$pckf_pattern" "$pckf_snapshot" >"$pckf_dir/probe_candidates.log"
+    pckf_status=$?
+    case "$pckf_status" in
+        0|1)
+            ;;
+        *)
+            return 2
+            ;;
+    esac
+    wifi_filter_regulatory_warnings "$pckf_dir/probe_candidates.log" \
+        "$pckf_dir/wifi_regulatory_warnings.log" >"$pckf_pending" || return 2
+    if [ -s "$pckf_dir/wifi_regulatory_warnings.log" ]; then
+        pckf_phy=""
+        for pckf_path in /sys/class/ieee80211/*; do
+            [ -d "$pckf_path/device" ] || continue
+            if pckf_driver=$(platform_device_driver_name "$pckf_path/device"); then
+                pckf_phy=${pckf_path##*/}
+                break
+            fi
+        done
+        if [ -n "$pckf_phy" ]; then
+            cat "$pckf_dir/wifi_regulatory_warnings.log" >>"$pckf_warnings" || return 2
+            printf 'regulatory|optional-global-lookup|phy=%s|driver=%s\n' \
+                "$pckf_phy" "$pckf_driver" >>"$pckf_dir/probe_runtime.tsv" || return 2
+        else
+            cat "$pckf_dir/wifi_regulatory_warnings.log" >>"$pckf_pending" || return 2
+            printf '%s\n' 'regulatory|lookup-failed|no-bound-wireless-PHY' \
+                >>"$pckf_dir/probe_runtime.tsv" || return 2
+        fi
+    fi
+    awk '
+        {
+            text=tolower($0)
+            sub(/^[[:space:]]*/, "", text)
+            while (text ~ /^\[[^]]*\]/) sub(/^\[[^]]*\][[:space:]]*/, "", text)
+            if (text ~ /^bluetooth[ :]+hci[0-9]+:/) {
+                sub(/^bluetooth[ :]+/, "", text)
+                sub(/:.*/, "", text)
+                print text
+            }
+        }
+    ' "$pckf_pending" >"$pckf_dir/probe_bt_adapters.list" || return 2
+    sort -u "$pckf_dir/probe_bt_adapters.list" >"$pckf_filtered" || return 2
+    cp "$pckf_filtered" "$pckf_dir/probe_bt_adapters.list" || return 2
+    while IFS= read -r pckf_adapter; do
+        pckf_fallback=$(bt_firmware_fallback_pattern "$pckf_adapter") || return 2
+        [ "$pckf_fallback" != 'a^' ] || continue
+        grep -Eiq "^[[:space:]]*(\[[^]]+\][[:space:]]*)*bluetooth[ :]+$pckf_adapter:.*($pckf_fallback)" "$pckf_pending"
+        pckf_status=$?
+        case "$pckf_status" in
+            0)
+                ;;
+            1)
+                continue
+                ;;
+            *)
+                return 2
+                ;;
+        esac
+        # Query only adapters named by a candidate lookup. Missing optional
+        # BlueZ/hciconfig or failed readiness leaves the lookup as a failure.
+        if ! bt_adapter_is_usable "$pckf_adapter" \
+            >"$pckf_dir/$pckf_adapter-readiness.log" 2>&1; then
+            printf '%s|lookup-failed|QCA-UART-runtime-not-ready\n' \
+                "$pckf_adapter" >>"$pckf_dir/probe_runtime.tsv" || return 2
+            continue
+        fi
+        awk -v adapter="$pckf_adapter" -v fallback="$pckf_fallback" -v warnings="$pckf_warnings" '
+            {
+                text=tolower($0)
+                sub(/^[[:space:]]*/, "", text)
+                while (text ~ /^\[[^]]*\]/) sub(/^\[[^]]*\][[:space:]]*/, "", text)
+                if (text ~ ("^bluetooth[ :]+" adapter ":") &&
+                    text ~ tolower(fallback)) {
+                    print $0 >> warnings
+                } else {
+                    print
+                }
+            }
+        ' "$pckf_pending" >"$pckf_filtered" || return 2
+        cp "$pckf_filtered" "$pckf_pending" || return 2
+        printf '%s|QCA-UART-ROM-lookup-fallback|runtime-ready|patched-firmware-unverified\n' \
+            "$pckf_adapter" >>"$pckf_dir/probe_runtime.tsv" || return 2
+    done <"$pckf_dir/probe_bt_adapters.list"
+    cat "$pckf_pending" "$pckf_dir/probe_fault_blocks.log" >"$pckf_failures" || return 2
+    [ -s "$pckf_failures" ] && return 0
+    return 1
+)
 
 # scan_dmesg_errors OUTPUT_DIR MODULE_REGEX [EXCLUDE_REGEX]
 # Capture the kernel log once and report non-benign errors for selected modules.
@@ -8359,7 +9085,6 @@ scan_dmesg_errors() {
     prefix="$1"
     module_regex="$2"   # e.g. 'qcom_camss|camss|isp'
     exclude_regex="${3:-"dummy regulator|supply [^ ]+ not found|using dummy regulator"}"
-    shift 3
 
     mkdir -p "$prefix"
 
@@ -8479,8 +9204,10 @@ scan_dmesg_errors() {
 
     # 1. Match lines with correct module and error pattern
     # 2. Exclude lines with harmless patterns (using dummy regulator etc)
-    grep -iE "^\[[^]]+\][[:space:]]+($module_regex):.*($err_patterns)" "$DMESG_SNAPSHOT" \
+    grep -iE "^(\[[^]]+\][[:space:]]*)*($module_regex)([[:space:]][^:]*)?:.*($err_patterns)" "$DMESG_SNAPSHOT" \
         | grep -vEi -- "$exclude_regex" > "$DMESG_ERRORS" || true
+    kernel_log_filter_faults "$DMESG_SNAPSHOT" "$module_regex" "$exclude_regex" \
+        >>"$DMESG_ERRORS"
 
     cp "$DMESG_ERRORS" "$DMESG_HISTORY"
 
@@ -11500,7 +12227,17 @@ cpu_hotplug_write_state() {
 
     rm -f "$err_file" 2>/dev/null
 
-    if (printf '%s\n' "$cpu_state" > "$online_file") 2>"$err_file"; then
+    cpu_write_timeout=6
+    if [ "$cpu_state" = 0 ] && [ -n "${CPU_HOTPLUG_DEADLINE:-}" ]; then
+        cpu_remaining=$((CPU_HOTPLUG_DEADLINE - $(get_monotonic_seconds)))
+        [ "$cpu_remaining" -gt 0 ] || return 1
+        if [ "$cpu_write_timeout" -gt "$cpu_remaining" ]; then
+            cpu_write_timeout="$cpu_remaining"
+        fi
+    fi
+    # shellcheck disable=SC2016 # Positional arguments belong to the child shell.
+    if run_with_bounded_timeout_capture "$cpu_write_timeout" "${err_file}.process" \
+        sh -c 'printf "%s\n" "$2" >"$1"' sh "$online_file" "$cpu_state" 2>"$err_file"; then
         return 0
     fi
 
@@ -11519,22 +12256,11 @@ cpu_hotplug_write_state() {
 # $3 - output directory
 # shellcheck disable=SC2317
 cpu_hotplug_log_dmesg_tail() {
-    cpu_index="$1"
-    tag="$2"
-    out_dir="$3"
-    dmesg_file="$out_dir/hotplug_cpu${cpu_index}_${tag}_dmesg.txt"
-
-    if command -v dmesg >/dev/null 2>&1; then
-        dmesg | tail -n 120 > "$dmesg_file" 2>/dev/null
-        log_info "Saved dmesg tail for CPU$cpu_index $tag: $dmesg_file"
-
-        tail -n 20 "$dmesg_file" 2>/dev/null |
-        while IFS= read -r dmesg_line || [ -n "$dmesg_line" ]; do
-            [ -n "$dmesg_line" ] || continue
-            log_info "[dmesg] $dmesg_line"
-        done
-    else
-        log_warn "dmesg command not available; cannot collect CPU$cpu_index $tag evidence"
+    cpu_log_dir="$3/cpu$1-$2"
+    scan_dmesg_errors "$cpu_log_dir" 'smp|cpuhp|hotplug|CPU[0-9]+' 'not a crash|non-fatal' || true
+    log_file_with_label CPU-HOTPLUG "$cpu_log_dir/dmesg_errors.log"
+    if [ "${DMESG_ACCESS_STATUS:-unavailable}" != available ]; then
+        log_warn "Hotplug kernel health is unverified, see $cpu_log_dir/dmesg_access.log"
     fi
 }
 
@@ -11565,7 +12291,8 @@ cpu_hotplug_restore_best_effort() {
     online_file="$(cpu_hotplug_control_file "$cpu_index")"
 
     if [ -w "$online_file" ]; then
-        if ! (printf '%s\n' 1 > "$online_file") 2>/dev/null; then
+        # shellcheck disable=SC2016 # Positional arguments belong to the child shell.
+        if ! run_with_bounded_timeout 6 sh -c 'printf "1\n" >"$1"' sh "$online_file" 2>/dev/null; then
             :
         fi
     fi
@@ -11574,6 +12301,7 @@ cpu_hotplug_restore_best_effort() {
 # Restore all CPUs recorded by cpu_hotplug_record_offlined_cpu().
 # shellcheck disable=SC2317
 cpu_hotplug_cleanup_registered() {
+    cpu_cleanup_failed=0
     for cpu_index in $CPU_HOTPLUG_OFFLINED_CPUS; do
         cpu_state="$(cpu_hotplug_read_state "$cpu_index")"
 
@@ -11581,7 +12309,12 @@ cpu_hotplug_cleanup_registered() {
             log_warn "Cleanup: CPU$cpu_index is still offline, restoring online"
             cpu_hotplug_restore_best_effort "$cpu_index"
         fi
+        if [ "$(cpu_hotplug_read_state "$cpu_index")" != 1 ]; then
+            log_fail "Cleanup could not restore CPU$cpu_index online"
+            cpu_cleanup_failed=1
+        fi
     done
+    [ "$cpu_cleanup_failed" -eq 0 ]
 }
 
 # Try to offline a CPU with retry handling.
@@ -11605,6 +12338,11 @@ cpu_hotplug_try_offline_with_retry() {
     attempt=1
  
     while [ "$attempt" -le "$retries" ]; do
+        if [ -n "${CPU_HOTPLUG_DEADLINE:-}" ] &&
+           [ "$(get_monotonic_seconds)" -ge "$CPU_HOTPLUG_DEADLINE" ]; then
+            log_fail "CPU hotplug deadline reached before another offline request"
+            return 1
+        fi
         log_info "CPU$cpu_index offline attempt $attempt/$retries"
  
         offline_output="$(cpu_hotplug_write_state "$cpu_index" 0 "offline_attempt${attempt}" "$out_dir" 2>&1)"
@@ -11630,7 +12368,15 @@ cpu_hotplug_try_offline_with_retry() {
  
         if [ "$attempt" -le "$retries" ]; then
             log_info "Waiting ${retry_delay}s before retrying CPU$cpu_index offline"
-            sleep "$retry_delay"
+            cpu_retry_sleep="$retry_delay"
+            if [ -n "${CPU_HOTPLUG_DEADLINE:-}" ]; then
+                cpu_remaining=$((CPU_HOTPLUG_DEADLINE - $(get_monotonic_seconds)))
+                [ "$cpu_remaining" -gt 0 ] || return 1
+                if [ "$cpu_retry_sleep" -gt "$cpu_remaining" ]; then
+                    cpu_retry_sleep="$cpu_remaining"
+                fi
+            fi
+            sleep "$cpu_retry_sleep"
         fi
     done
  
@@ -11721,6 +12467,8 @@ cpu_hotplug_validate_cpu_once() {
         return 1
     fi
 
+    # Register before the write, timeout or interruption can leave it offline.
+    cpu_hotplug_record_offlined_cpu "$cpu_index"
     cpu_hotplug_try_offline_with_retry "$cpu_index" "$retries" "$retry_delay" "$out_dir"
     offline_rc=$?
 
@@ -11735,10 +12483,18 @@ cpu_hotplug_validate_cpu_once() {
         return 1
     fi
 
-    cpu_hotplug_record_offlined_cpu "$cpu_index"
     tested=$((tested + 1))
 
-    sleep "$restore_delay"
+    cpu_restore_sleep="$restore_delay"
+    if [ -n "${CPU_HOTPLUG_DEADLINE:-}" ]; then
+        cpu_remaining=$((CPU_HOTPLUG_DEADLINE - $(get_monotonic_seconds)))
+        if [ "$cpu_remaining" -le 0 ]; then
+            cpu_restore_sleep=0
+        elif [ "$cpu_restore_sleep" -gt "$cpu_remaining" ]; then
+            cpu_restore_sleep="$cpu_remaining"
+        fi
+    fi
+    sleep "$cpu_restore_sleep"
 
     cpu_state="$(cpu_hotplug_read_state "$cpu_index")"
 
@@ -11776,7 +12532,16 @@ cpu_hotplug_validate_cpu_once() {
         return 1
     fi
 
-    sleep "$restore_delay"
+    cpu_restore_sleep="$restore_delay"
+    if [ -n "${CPU_HOTPLUG_DEADLINE:-}" ]; then
+        cpu_remaining=$((CPU_HOTPLUG_DEADLINE - $(get_monotonic_seconds)))
+        if [ "$cpu_remaining" -le 0 ]; then
+            cpu_restore_sleep=0
+        elif [ "$cpu_restore_sleep" -gt "$cpu_remaining" ]; then
+            cpu_restore_sleep="$cpu_remaining"
+        fi
+    fi
+    sleep "$cpu_restore_sleep"
 
     cpu_state="$(cpu_hotplug_read_state "$cpu_index")"
 
@@ -11852,3 +12617,48 @@ cpu_hotplug_log_topology() {
         log_info "Current process Cpus_allowed_list: ${affinity:-<unavailable>}"
     fi
 }
+
+# rng_validate_entropy <source> <blocks> <maximum-failures> <out-dir> <read-seconds> <statistics-seconds>
+# Require complete entropy and statistics from the selected source. No fallback.
+rng_validate_entropy() (
+    trap 'managed_timeout_cancel_bounded 2' 0
+    trap 'exit 1' HUP INT TERM
+    rng_source="$1"
+    rng_blocks="$2"
+    rng_max_failures="$3"
+    rng_output="$4"
+    rng_read_seconds="$5"
+    rng_statistics_seconds="$6"
+    rng_bytes=$((4 + rng_blocks * 2500))
+    if run_with_managed_timeout "$rng_read_seconds" "$rng_output" entropy \
+        head -c "$rng_bytes" "$rng_source" >"$rng_output/entropy.bin" 2>"$rng_output/read.log"; then
+        rng_read_rc=0
+    else
+        rng_read_rc=$?
+    fi
+    rng_actual=$(wc -c <"$rng_output/entropy.bin")
+    log_info "RNG read: source=$rng_source bytes=$rng_actual expected=$rng_bytes exit_status=$rng_read_rc"
+    if [ "$rng_read_rc" -ne 0 ] || [ "$rng_actual" -ne "$rng_bytes" ]; then
+        cat "$rng_output/read.log"
+        return 1
+    fi
+    # shellcheck disable=SC2016 # Expand child positional arguments after launch.
+    run_with_managed_timeout "$rng_statistics_seconds" "$rng_output" statistics \
+        sh -c 'exec rngtest -c "$2" <"$1"' sh "$rng_output/entropy.bin" "$rng_blocks" \
+        >"$rng_output/rngtest.log" 2>&1
+    rng_status=$?
+    cat "$rng_output/rngtest.log"
+    rng_failures=$(awk '/^rngtest: FIPS 140-2 failures:/ {print $NF; exit}' "$rng_output/rngtest.log")
+    rng_successes=$(awk '/^rngtest: FIPS 140-2 successes:/ {print $NF; exit}' "$rng_output/rngtest.log")
+    case "$rng_failures:$rng_successes" in
+        *[!0-9:]*|:*|*:)
+            log_fail "RNG statistics are missing or malformed"
+            return 1
+            ;;
+    esac
+    if [ "$rng_status" -gt 1 ] || [ $((rng_failures + rng_successes)) -ne "$rng_blocks" ] ||
+       [ "$rng_failures" -gt "$rng_max_failures" ]; then
+        log_fail "RNG statistics incomplete or above threshold: successes=$rng_successes failures=$rng_failures exit_status=$rng_status"
+        return 1
+    fi
+)

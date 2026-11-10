@@ -265,12 +265,18 @@ pkg_provider_init() {
 
 # Return success when dependency recovery is enabled.
 pkg_check_dependencies_recover_enabled() {
+    if [ "${TESTKIT_IMAGE_ONLY:-0}" = 1 ]; then
+        return 1
+    fi
     pkg_provider_init
     pkg_bool_true "$PKG_CHECK_DEPS_RECOVER"
 }
 
 # Return success when package installation is allowed and current user is root.
 pkg_can_install() {
+    if [ "${TESTKIT_IMAGE_ONLY:-0}" = 1 ]; then
+        return 1
+    fi
     pkg_provider_init
 
     if ! pkg_bool_true "$PKG_AUTO_INSTALL"; then

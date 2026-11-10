@@ -9,13 +9,15 @@ This test is useful for verifying basic WiFi firmware and driver readiness befor
 ## What the test validates
 
 - Required command-line utilities are available.
-- The SoC model is detected from device tree when available.
 - WiFi firmware is found under `/lib/firmware`, including readable symlinks
   and kernel-supported `.xz` or `.zst` compressed files.
-- The WiFi firmware family is detected.
+- Each WiFi family is discovered from bound runtime drivers or matching device
+  aliases in the running kernel metadata, including DT-instantiated devices.
+  Installed firmware directories alone never select a family.
 - Family-specific runtime preparation succeeds.
-- Family-specific modules are visible.
-- Firmware load or use evidence exists in the kernel log.
+- The family has a bound driver, including built-in drivers without lsmod entries.
+- A PHY bound to that family appears within 15 seconds after preparation.
+  Generic firmware messages or a sibling radio do not prove readiness.
 - Kernel logs do not show WiFi probe/runtime failures.
 
 ## Dependencies
@@ -24,8 +26,8 @@ The target should provide:
 
 - `find`
 - `grep`
-- `modprobe`
-- `lsmod`
+- `readlink`, `sort`, `mktemp`
+- `modprobe` only when an unloaded runtime driver needs activation
 - `cat`
 - `stat`
 - `awk`
@@ -49,7 +51,7 @@ No mandatory CLI arguments are required.
 
 | Variable | Default | Description |
 |---|---|---|
-| `WIFI_FW_PROBE_LOG_DIR` | `./wifi_firmware_driver_dmesg` | Directory used for WiFi probe/runtime log evidence |
+| `WIFI_FW_PROBE_LOG_DIR` | Unique `wifi-firmware.*` directory in CWD | Directory used for WiFi probe/runtime log evidence |
 | `WIFI_FW_PROBE_LOG_TAG` | `WiFi_Firmware_Driver/probe` | Log tag used when reporting probe checks |
 | `WIFI_FW_LOAD_LOG_TAG` | `WiFi_Firmware_Driver/firmware` | Log tag used when reporting firmware load checks |
 
@@ -81,6 +83,10 @@ The test writes the result file:
 WiFi_Firmware_Driver.res
 ```
 
+The result remains beside `run.sh` for both Runner-directory launches and
+direct suite-directory execution. Each invocation clears the previous result.
+Logs and scratch files remain under the invocation CWD.
+
 Depending on helper behavior and failure mode, WiFi probe/runtime log artifacts may be collected under the configured probe log directory.
 
 ## PASS criteria
@@ -98,13 +104,13 @@ The test passes when:
 The test skips when:
 
 - Required tools are missing.
-- No supported uncompressed, `.xz`, or `.zst` WiFi firmware file or readable
-  symlink is found under `/lib/firmware`.
+- No supported WiFi family is identified from runtime drivers or device aliases.
 
 ## FAIL criteria
 
 The test fails when:
 
+- A runtime WiFi family has no readable provisioned firmware asset.
 - Family-specific runtime preparation fails.
 - Expected family modules are not visible.
 - Firmware load/use evidence is not found.
@@ -114,3 +120,12 @@ The test fails when:
 
 - The test currently detects ath12k, ath11k, and ath10k firmware families through common connectivity helpers.
 - This test does not validate association to an access point or IP assignment. Use `WiFi_Dynamic_IP` or `WiFi_Manual_IP` for connection validation.
+
+An unavailable global `regulatory.db` lookup is retained in
+`wifi_regulatory_warnings.log` and printed as `WIFI-REGULATORY`. cfg80211 can
+use its world regulatory domain, so this message alone does not stop driver
+and PHY validation. A malformed database, device firmware failure or captured
+driver crash remains a failure. A runtime PHY confirms driver readiness,
+it does not prove that the regulatory database loaded or that association works.
+The original messages remain in `dmesg_errors.log` and the general probe suite
+can report the image provisioning gap independently.

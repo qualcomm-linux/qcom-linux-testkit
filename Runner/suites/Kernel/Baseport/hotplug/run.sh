@@ -29,10 +29,16 @@ if [ -z "${__INIT_ENV_LOADED:-}" ]; then
     __INIT_ENV_LOADED=1
 fi
 
-# shellcheck disable=SC1090,SC1091
+# shellcheck disable=SC1090
+. "$INIT_ENV"
+# shellcheck disable=SC1091
 . "$TOOLS/functestlib.sh"
 
 TESTNAME="hotplug"
+RES_FILE="$SCRIPT_DIR/$TESTNAME.res"
+test_result_init "$TESTNAME" "$RES_FILE" || exit 1
+# shellcheck disable=SC2034 # Consumed by check_dependencies.
+CHECK_DEPS_RECOVER=0
 
 test_path="$(find_test_case_by_name "$TESTNAME")"
 if [ -n "$test_path" ]; then
@@ -43,18 +49,62 @@ else
     cd "$test_path" || exit 1
 fi
 
-res_file="./$TESTNAME.res"
-out_dir="./out"
+res_file="$RES_FILE"
+deps_list="cat grep awk sed tr sleep taskset mkdir rm id readlink mktemp date cp wc"
+
+log_info "Checking dependencies: $deps_list"
+if ! CHECK_DEPS_NO_EXIT=1 check_dependencies "$deps_list"; then
+    log_skip "$TESTNAME SKIP - missing one or more dependencies: $deps_list"
+    echo "$TESTNAME SKIP" > "$res_file"
+    exit 0
+fi
+
+out_dir=$(test_create_run_directory "$PWD/results/$TESTNAME") || test_result_finish FAIL "Cannot create hotplug evidence in CWD"
+HOTPLUG_SUITE_TIMEOUT_SECONDS="${HOTPLUG_SUITE_TIMEOUT_SECONDS:-300}"
+case "$HOTPLUG_SUITE_TIMEOUT_SECONDS" in
+    ''|*[!0-9]*|0|0[0-9]*)
+        test_result_finish FAIL "Hotplug suite timeout must be positive decimal seconds"
+        ;;
+esac
 
 HOTPLUG_BOOT_SETTLE_SECONDS="${HOTPLUG_BOOT_SETTLE_SECONDS:-10}"
 HOTPLUG_RETRIES="${HOTPLUG_RETRIES:-3}"
 HOTPLUG_RETRY_DELAY_SECONDS="${HOTPLUG_RETRY_DELAY_SECONDS:-5}"
 HOTPLUG_RESTORE_DELAY_SECONDS="${HOTPLUG_RESTORE_DELAY_SECONDS:-1}"
 
+for hotplug_value in "$HOTPLUG_SUITE_TIMEOUT_SECONDS" "$HOTPLUG_BOOT_SETTLE_SECONDS" \
+    "$HOTPLUG_RETRIES" "$HOTPLUG_RETRY_DELAY_SECONDS" "$HOTPLUG_RESTORE_DELAY_SECONDS"; do
+    case "$hotplug_value" in
+        ''|*[!0-9]*|0[0-9]*)
+            test_result_finish FAIL "Hotplug settings must use whole decimal values without leading zeros"
+            ;;
+    esac
+    [ "${#hotplug_value}" -le 5 ] || test_result_finish FAIL "Hotplug setting exceeds the supported range"
+    [ "$hotplug_value" -le 86400 ] || test_result_finish FAIL "Hotplug setting exceeds 86400"
+done
+[ "$HOTPLUG_RETRIES" -gt 0 ] || test_result_finish FAIL "Hotplug retry count must be positive"
+[ "$HOTPLUG_BOOT_SETTLE_SECONDS" -lt "$HOTPLUG_SUITE_TIMEOUT_SECONDS" ] || test_result_finish FAIL "Boot settle must leave time for hotplug validation"
+hotplug_deadline=$(($(get_monotonic_seconds) + HOTPLUG_SUITE_TIMEOUT_SECONDS))
+# shellcheck disable=SC2034 # Optional bound consumed by shared hotplug helpers.
+CPU_HOTPLUG_DEADLINE="$hotplug_deadline"
+
 # If a CPU returns persistent EBUSY during the first pass, do not fail
 # immediately. Continue with other CPUs and retry EBUSY CPUs at the end.
 HOTPLUG_DEFER_EBUSY="${HOTPLUG_DEFER_EBUSY:-1}"
 HOTPLUG_DEFER_PASSES="${HOTPLUG_DEFER_PASSES:-1}"
+case "$HOTPLUG_DEFER_PASSES" in
+    ''|*[!0-9]*|0*)
+        test_result_finish FAIL "Hotplug deferred pass count must be positive decimal"
+        ;;
+esac
+[ "${#HOTPLUG_DEFER_PASSES}" -le 5 ] || test_result_finish FAIL "Hotplug deferred count is too large"
+case "$HOTPLUG_DEFER_EBUSY" in
+    0|1)
+        ;;
+    *)
+        test_result_finish FAIL "Hotplug deferral must be 0 or 1"
+        ;;
+esac
 
 # Optional debug-only override. Empty means runtime-discover all online CPUs.
 HOTPLUG_CPU_LIST="${HOTPLUG_CPU_LIST:-}"
@@ -63,7 +113,19 @@ mkdir -p "$out_dir"
 rm -f "$res_file"
 cpu_hotplug_reset_registry
 
-trap 'cpu_hotplug_cleanup_registered' EXIT INT TERM
+# cleanup
+# Restore only CPUs offlined by this invocation and retain restoration failures.
+cleanup() {
+    if ! cpu_hotplug_cleanup_registered; then
+        log_fail "CPU hotplug restoration failed"
+        printf '%s FAIL\n' "$TESTNAME" >"$RES_FILE"
+        return 1
+    fi
+}
+# shellcheck disable=SC2034 # Consumed by shared finalization.
+TEST_RESULT_CLEANUP=cleanup
+trap cleanup 0
+trap 'test_result_finish FAIL "CPU hotplug interrupted"' HUP INT TERM
 
 log_info "-----------------------------------------------------------------------------------------"
 log_info "-------------------Starting $TESTNAME Testcase----------------------------"
@@ -77,14 +139,6 @@ else
     log_info "CPU selection, using runtime-discovered online CPUs"
 fi
 
-deps_list="cat grep awk sed tr sleep taskset mkdir rm id tail dmesg"
-
-log_info "Checking dependencies: $deps_list"
-if ! CHECK_DEPS_NO_EXIT=1 check_dependencies "$deps_list"; then
-    log_skip "$TESTNAME SKIP - missing one or more dependencies: $deps_list"
-    echo "$TESTNAME SKIP" > "$res_file"
-    exit 0
-fi
 
 if [ "$(id -u)" -ne 0 ]; then
     log_fail "$TESTNAME FAIL - root privilege is required for CPU hotplug validation"
@@ -119,7 +173,7 @@ online_cpus="$(get_online_cpus)"
 online_count="$(printf '%s\n' "$online_cpus" | awk 'NF { count++ } END { print count + 0 }')"
 
 if [ "$online_count" -lt 2 ]; then
-    log_skip "$TESTNAME SKIP - fewer than two online CPUs available; cannot offline the last runnable CPU safely"
+    log_skip "$TESTNAME SKIP - fewer than two online CPUs available, cannot offline the last runnable CPU safely"
     echo "$TESTNAME SKIP" > "$res_file"
     exit 0
 fi
@@ -153,38 +207,14 @@ skipped=0
 deferred=0
 deferred_cpus=""
 
-case "$HOTPLUG_RETRIES" in
-    ''|*[!0-9]*)
-        HOTPLUG_RETRIES=3
-        ;;
-esac
-
-case "$HOTPLUG_RETRY_DELAY_SECONDS" in
-    ''|*[!0-9]*)
-        HOTPLUG_RETRY_DELAY_SECONDS=5
-        ;;
-esac
-
-case "$HOTPLUG_RESTORE_DELAY_SECONDS" in
-    ''|*[!0-9]*)
-        HOTPLUG_RESTORE_DELAY_SECONDS=1
-        ;;
-esac
-
-case "$HOTPLUG_DEFER_PASSES" in
-    ''|*[!0-9]*)
-        HOTPLUG_DEFER_PASSES=1
-        ;;
-esac
-
-if [ "$HOTPLUG_DEFER_PASSES" -lt 1 ] 2>/dev/null; then
-    HOTPLUG_DEFER_PASSES=1
-fi
-
 # Primary pass:
 # Test all selected CPUs once. CPUs that return persistent EBUSY are not failed
 # immediately when deferral is enabled; they are retried after the other CPUs.
 for cpu_index in $selected_cpus; do
+    if [ "$(get_monotonic_seconds)" -ge "$hotplug_deadline" ]; then
+        test_result_record FAIL "Hotplug deadline reached before remaining CPUs could be validated"
+        break
+    fi
     cpu_hotplug_validate_cpu_once \
         "$cpu_index" \
         "primary" \
@@ -197,7 +227,7 @@ for cpu_index in $selected_cpus; do
 
     if [ "$cpu_rc" -eq 2 ]; then
         if [ "$HOTPLUG_DEFER_EBUSY" = "1" ]; then
-            log_warn "CPU$cpu_index EBUSY persisted during primary pass; deferring until after other CPUs"
+            log_warn "CPU$cpu_index EBUSY persisted during primary pass, deferring until after other CPUs"
             deferred_cpus="${deferred_cpus} ${cpu_index}"
             deferred=$((deferred + 1))
         else
@@ -218,6 +248,11 @@ while [ -n "$deferred_cpus" ] && [ "$defer_pass" -le "$HOTPLUG_DEFER_PASSES" ]; 
     log_info "Retrying EBUSY-deferred CPUs, deferred pass ${defer_pass}/${HOTPLUG_DEFER_PASSES}:$retry_cpus"
 
     for cpu_index in $retry_cpus; do
+        if [ "$(get_monotonic_seconds)" -ge "$hotplug_deadline" ]; then
+            test_result_record FAIL "Hotplug deadline reached during deferred CPU validation"
+            deferred_cpus=""
+            break
+        fi
         cpu_hotplug_validate_cpu_once \
             "$cpu_index" \
             "deferred-${defer_pass}" \
@@ -230,7 +265,7 @@ while [ -n "$deferred_cpus" ] && [ "$defer_pass" -le "$HOTPLUG_DEFER_PASSES" ]; 
 
         if [ "$cpu_rc" -eq 2 ]; then
             if [ "$defer_pass" -lt "$HOTPLUG_DEFER_PASSES" ]; then
-                log_warn "CPU$cpu_index still EBUSY; keeping for another deferred pass"
+                log_warn "CPU$cpu_index still EBUSY, keeping for another deferred pass"
                 deferred_cpus="${deferred_cpus} ${cpu_index}"
             else
                 log_fail "CPU$cpu_index remained EBUSY after deferred retry handling"
@@ -248,17 +283,16 @@ log_info "=== CPU hotplug Summary ==="
 log_info "HOTPLUG_SUMMARY: online=$online_count selected=$selected_count controllable=$controllable tested=$tested passed=$passed failed=$failed skipped=$skipped deferred_ebusy=$deferred"
 
 if [ "$failed" -gt 0 ]; then
-    log_fail "$TESTNAME : Test Failed"
-    echo "$TESTNAME FAIL" > "$res_file"
-    exit 1
+    test_result_record FAIL "$failed hotplug validation/restoration checks failed"
+elif [ "$tested" -eq 0 ]; then
+    test_result_record SKIP "No eligible runtime CPU completed hotplug validation"
+else
+    test_result_record PASS "$tested CPU hotplug validations completed"
 fi
-
-if [ "$tested" -eq 0 ]; then
-    log_skip "$TESTNAME SKIP - no runtime-discovered CPU completed hotplug validation"
-    echo "$TESTNAME SKIP" > "$res_file"
-    exit 0
+cleanup || test_result_record FAIL "CPU state restoration failed"
+scan_dmesg_errors "$out_dir/final" 'smp|cpuhp|hotplug|CPU[0-9]+' 'not a crash|non-fatal' || true
+if [ -s "$out_dir/final/dmesg_errors.log" ]; then
+    log_file_with_label HOTPLUG-ERROR "$out_dir/final/dmesg_errors.log"
+    test_result_record FAIL "Captured hotplug kernel errors"
 fi
-
-log_pass "$TESTNAME : Test Passed"
-echo "$TESTNAME PASS" > "$res_file"
-exit 0
+test_result_finish

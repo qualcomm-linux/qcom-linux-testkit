@@ -411,3 +411,10 @@ Audio_Card_Registration.res is always written beside run.sh, including early
 DT/topology failures and applicability skips. Logs and temporary evidence
 remain below invocation CWD. Both suite-directory and Runner launches publish
 the same result path to existing plans.
+
+## Kernel and ramdisk execution
+
+The kbdev plan sets `TESTKIT_IMAGE_ONLY=1` to bypass package preparation.
+Registration uses image-provided ALSA cards, control/PCM nodes and topology
+evidence. Playback and recording clients are not prerequisites for registration.
+This does not add playback or capture coverage, and it does not start PipeWire.

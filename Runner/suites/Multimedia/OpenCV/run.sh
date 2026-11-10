@@ -169,13 +169,19 @@ parse_args() {
                 exit 0
                 ;;
             *)
-                log_warn "Unknown arg: $1"
-                shift
+                test_result_finish FAIL "Unknown option: $1"
                 ;;
         esac
     done
 }
 parse_args "$@"
+case "$SUITE" in
+    all|accuracy|performance|smoke)
+        ;;
+    *)
+        test_result_finish FAIL "Unknown OpenCV suite: $SUITE"
+        ;;
+esac
 if [ "$SUITE" = smoke ]; then
     # These upstream gtest suites construct their own matrices. The installed
     # binary selects its available cases, no board or release mapping is used.
@@ -377,6 +383,11 @@ run_one() {
             ;;
     esac
 
+    if [ "$rc" -eq 0 ] && grep -Eq '\[[[:space:]]*FAILED[[:space:]]*\]' "$run_log"; then
+        log_fail "$bin_short : output reports failed tests despite exit zero"
+        rc=1
+    fi
+
     if [ "$rc" -eq 0 ]; then
         case " $gargs " in
             *" --gtest_list_tests "*|*" --gtest_list_tests=1 "*|*" --gtest_list_tests=true "*)
@@ -396,19 +407,22 @@ run_one() {
         return 2
     fi
 
-    if [ "$rc" -eq 0 ] && [ "$SUITE" = smoke ]; then
-        cv_summary=$(sed -n "s/$(printf '\033')\[[0-9;]*m//g; /\[[[:space:]]*PASSED[[:space:]]*\]/p; /\[[[:space:]]*SKIPPED[[:space:]]*\]/p" "$run_log")
-        if printf '%s\n' "$cv_summary" |
+    if [ "$rc" -eq 0 ]; then
+        cv_summary=$(sed -n "s/$(printf '\033')\[[0-9;]*m//g; /\[[[:space:]]*PASSED[[:space:]]*\]/p; /\[[[:space:]]*SKIPPED[[:space:]]*\]/p; /\[[[:space:]]*FAILED[[:space:]]*\]/p" "$run_log")
+        if printf '%s\n' "$cv_summary" | grep -Eq '\[[[:space:]]*FAILED[[:space:]]*\]'; then
+            log_fail "$bin_short : output reports failed tests despite exit zero"
+            rc=1
+        elif printf '%s\n' "$cv_summary" |
            grep -Eq '\[[[:space:]]*PASSED[[:space:]]*\][[:space:]]+[1-9][0-9]* test'; then
             :
         elif printf '%s\n' "$cv_summary" |
              grep -Eq '\[[[:space:]]*SKIPPED[[:space:]]*\][[:space:]]+[1-9][0-9]* test'; then
-            log_skip "$bin_short : selected gtests skipped, no successful smoke workload"
+            log_skip "$bin_short : selected gtests skipped, no successful workload"
             printf '%s SKIP\n' "$bin_short" >>"$RESLIST_FILE"
             append_summary "$bin_short" "SKIP" "$run_log"
             return 2
         else
-            log_fail "$bin_short : no positive gtest execution summary, smoke validation is incomplete"
+            log_fail "$bin_short : no positive gtest execution summary, validation is incomplete"
             rc=1
         fi
     fi

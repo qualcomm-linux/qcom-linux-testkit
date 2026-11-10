@@ -20,7 +20,7 @@ Unused PCIe bridge ports may legitimately report zero negotiated width. They
 are identified as inactive bridge ports, while a zero-width non-bridge
 endpoint remains a failure.
 
-These checks help confirm that the PCIe root port is properly initialized and ready for use 
+These checks help confirm that the PCIe root port is properly initialized and ready for use
 
 When an enumerated Toshiba `1179:0623` switch identifies QPS615 hardware, the
 suite also validates the discovered downstream PCIe topology, TC956x Ethernet
@@ -60,7 +60,7 @@ cd Runner
 
 ## Prerequisites
 
-1. `lspci` must be available on the target device 
+1. Image-provided shell/sysfs utilities must be available, `lspci` is optional
 2. PCIe interface must be exposed and initialized
 3. Root access may be required depending on system configuration
 
@@ -86,8 +86,10 @@ find /lib/firmware /usr/lib/firmware \
 Generic PCIe runtime and kernel-health evidence is retained in:
 
 ```sh
-cat pcie_runtime/pcie_runtime.tsv
-cat pcie_runtime/dmesg_errors.log
+cat results/PCIe/pcie_runtime/pcie_runtime.tsv
+cat results/PCIe/pcie_runtime/dmesg_errors.log
+cat results/PCIe/pcie_runtime/pcie_fatal_errors.log
+cat results/PCIe/pcie_runtime/pcie_empty_ports.log
 ```
 
 Kernel-log findings are advisory by default because the boot log can contain
@@ -108,3 +110,17 @@ No devices is SKIP unless lspci and sysfs contradict each other. No binding is
 reported as missing functional coverage, not as proof of a healthy endpoint.
 Existing kernel error gating and QPS615 checks retain their configured policy.
 Artifacts are stored under CWD/results/PCIe and diagnostics appear in stdout.
+
+Required discovered PCI identity and link attributes must be well formed.
+The `qcom-next-ci-premerge.yaml` plan enables `PCIE_DMESG_STRICT=1` and includes
+`Ethernet_Inventory_Validation` to validate downstream QPS615 MAC readiness.
+The standalone PCIe advisory default and idle-bridge classification remain.
+`lspci` is optional, sysfs supplies the required runtime inventory.
+
+Strict kernel gating retains the original snapshot and all error messages.
+A `Device not found` message is advisory only when its runtime controller is
+bound, exactly one root bridge is registered, no downstream device is
+enumerated, and the enabled root-port DT has no enabled downstream hardware
+declaration. Controller addresses and DT paths are discovered at runtime.
+Missing topology evidence, a declared endpoint, other controller errors,
+uncorrected AER and captured crashes remain subject to the strict failure gate.
