@@ -1,0 +1,24 @@
+metadata:
+  name: Video_Codec_Quality
+  format: Lava-Test Test Definition 1.0
+  description: Hardware decode reference-frame equality and encode frame-count/PSNR correctness across repeat runs.
+  os:
+  - linux
+  scope:
+  - functional
+params:
+  TIMEOUT: "60"
+  MODE: "decode"
+  CODECS: "h264,hevc,vp9"
+  ROUNDS: "2"
+  SIZE: "320x240"
+  FRAMES: "60"
+  MIN_PSNR: "30"
+  FFMPEG: null
+  STREAMS: null
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Multimedia/Video/Video_Codec_Quality
+    - ./run.sh --timeout "$TIMEOUT" --mode "$MODE" --codecs "$CODECS" --rounds "$ROUNDS" --size "$SIZE" --frames "$FRAMES" --min-psnr "$MIN_PSNR" ${FFMPEG:+--ffmpeg "${FFMPEG}"} ${STREAMS:+--streams "${STREAMS}"} || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh Video_Codec_Quality.res
