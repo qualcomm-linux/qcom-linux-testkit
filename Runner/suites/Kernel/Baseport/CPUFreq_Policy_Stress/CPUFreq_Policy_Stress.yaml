@@ -1,0 +1,20 @@
+metadata:
+  name: CPUFreq_Policy_Stress
+  format: Lava-Test Test Definition 1.0
+  description: Repeated policy frequency feedback, peer-policy coordination and pinned workload timing.
+  os:
+  - linux
+  scope:
+  - functional
+params:
+  TIMEOUT: "60"
+  EXERCISE: "1"
+  SAMPLES: "5"
+  TOLERANCE_PERCENT: "5"
+  LOAD_SECONDS: null
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/CPUFreq_Policy_Stress
+    - ./run.sh --timeout "$TIMEOUT" --exercise "$EXERCISE" --samples "$SAMPLES" --tolerance-percent "$TOLERANCE_PERCENT" ${LOAD_SECONDS:+--load-seconds "${LOAD_SECONDS}"} || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh CPUFreq_Policy_Stress.res
