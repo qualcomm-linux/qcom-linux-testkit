@@ -222,3 +222,14 @@ optee_validate_xtest_log() {
 
     return 1
 }
+
+# ---------- Explicit OP-TEE regression helpers ----------
+# optee_regression_summary <log-file> <case-id>
+# Validate exact selected-case completion and all failure totals, not exit alone.
+optee_regression_summary() {
+    local log="$1" case_id="$2"
+    if ! grep -Eq "regression_${case_id}([[:space:]]|$)" "$log"; then
+        return 1
+    fi
+    optee_validate_xtest_log "$log"
+}
