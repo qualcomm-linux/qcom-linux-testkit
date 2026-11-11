@@ -1,0 +1,20 @@
+metadata:
+  name: Remoteproc_Restart_ADSP
+  format: Lava-Test Test Definition 1.0
+  description: Restart every runtime ADSP instance and verify RPMsg and driver restoration.
+  os:
+  - linux
+  scope:
+  - functional
+params:
+  TIMEOUT: "30"
+  EXERCISE: "1"
+  SUBSYSTEM: "adsp"
+  ROUNDS: "1"
+  PROCESSORS: null
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/Remoteproc_Restart_Validation
+    - ./run.sh --timeout "$TIMEOUT" --exercise "$EXERCISE" --subsystem "$SUBSYSTEM" --rounds "$ROUNDS" ${PROCESSORS:+--processors "${PROCESSORS}"} || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh Remoteproc_Restart_Validation.res
