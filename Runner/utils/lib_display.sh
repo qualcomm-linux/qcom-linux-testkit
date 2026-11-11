@@ -807,9 +807,19 @@ display_adopt_gnome_wayland_session() {
     return 1
 }
 
+# display_run_in_wayland_session [--exec] <command> [args...]
 # Run a command in the user context that owns an adopted GNOME Wayland socket.
-# When no GNOME session was adopted, preserve the caller's existing execution.
+# Default mode returns its status. --exec replaces a dedicated launcher shell
+# so timeout ownership follows the client. Cross-user exec owns runuser, callers
+# must use private-session cleanup for its child. No stdout data is returned.
+# Without an adopted session, preserve the current environment and user.
 display_run_in_wayland_session() {
+    drws_exec=0
+    if [ "${1:-}" = --exec ]; then
+        drws_exec=1
+        shift
+        [ "$#" -gt 0 ] || return 2
+    fi
     drws_user="${DISPLAY_WAYLAND_SESSION_USER:-}"
     drws_home="${DISPLAY_WAYLAND_SESSION_HOME:-/}"
     drws_runtime_dir="${DISPLAY_WAYLAND_SESSION_RUNTIME_DIR:-}"
@@ -818,11 +828,22 @@ display_run_in_wayland_session() {
     if [ -z "$drws_user" ] ||
        [ -z "$drws_runtime_dir" ] ||
        [ -z "$drws_socket" ]; then
+        if [ "$drws_exec" = 1 ]; then
+            exec "$@"
+        fi
         "$@"
         return $?
     fi
 
     if [ "$(id -un 2>/dev/null || true)" = "$drws_user" ]; then
+        if [ "$drws_exec" = 1 ]; then
+            exec env \
+                HOME="$drws_home" \
+                XDG_RUNTIME_DIR="$drws_runtime_dir" \
+                WAYLAND_DISPLAY="$(basename "$drws_socket")" \
+                DBUS_SESSION_BUS_ADDRESS="unix:path=$drws_runtime_dir/bus" \
+                "$@"
+        fi
         env \
             HOME="$drws_home" \
             XDG_RUNTIME_DIR="$drws_runtime_dir" \
@@ -842,12 +863,16 @@ display_run_in_wayland_session() {
         return 1
     fi
 
-    runuser -u "$drws_user" -- env \
+    set -- runuser -u "$drws_user" -- env \
         HOME="$drws_home" \
         XDG_RUNTIME_DIR="$drws_runtime_dir" \
         WAYLAND_DISPLAY="$(basename "$drws_socket")" \
         DBUS_SESSION_BUS_ADDRESS="unix:path=$drws_runtime_dir/bus" \
         "$@"
+    if [ "$drws_exec" = 1 ]; then
+        exec "$@"
+    fi
+    "$@"
 }
 
 adopt_wayland_env_from_socket() {
