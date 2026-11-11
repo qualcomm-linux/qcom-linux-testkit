@@ -1,0 +1,19 @@
+metadata:
+  name: CPU_Feature_Exposure
+  format: Lava-Test Test Definition 1.0
+  description: Per-CPU EL0/KVM feature exposure, PAC key and guest controls, and vector consistency.
+  os:
+  - linux
+  scope:
+  - functional
+params:
+  TIMEOUT: "60"
+  IDREGS: null
+  FEATURE_TABLE: null
+  EXPECT: null
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/CPU_Feature_Exposure
+    - ./run.sh --timeout "$TIMEOUT" ${IDREGS:+--idregs "${IDREGS}"} ${FEATURE_TABLE:+--feature-table "${FEATURE_TABLE}"} ${EXPECT:+--expect "${EXPECT}"} || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh CPU_Feature_Exposure.res
