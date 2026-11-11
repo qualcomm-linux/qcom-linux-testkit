@@ -50,6 +50,40 @@ Examples:
 ./run.sh --auto
 ```
 
+## Controlled runtime and cleanup
+
+`weston-simple-egl` renders continuously until stopped. The test runs it for
+`DURATION` (default `30s`) using the shared managed deadline helper. Exit status
+124 is expected only when that helper confirms that the validation deadline
+expired. A client that exits early, including one that independently returns
+124, reports FAIL. The existing FPS and clock-step policies still apply.
+
+The launcher replaces its shell with the client so cleanup owns the actual
+process. An adopted session belonging to another user runs in a private process
+group and requires image-provided `setsid` and `runuser`. Cleanup stops that
+group, preserving the compositor and unrelated clients. An unavailable optional
+launch capability reports SKIP. Failed cleanup reports FAIL even if a later
+cleanup retry succeeds.
+
+The shared helper uses a two-second termination grace. `STOP_GRACE` (default
+`3s`) controls the runner's final cleanup retry and interruption cleanup.
+`DURATION` and `STOP_GRACE` accept positive integer seconds, with an optional
+`s` suffix.
+The run log includes client status, deadline completion, cleanup status, FPS
+samples, and the selected runtime model.
+
+Run from the suite directory on Yocto or Debian:
+
+```sh
+cd Runner/suites/Multimedia/Graphics/weston-simple-egl
+DURATION=30s STOP_GRACE=3s ./run.sh --auto
+cat weston-simple-egl.res
+tail -n 30 weston-simple-egl_run.log
+```
+
+Repeat the same command to validate a healthy rerun. PASS requires completion
+of the controlled window, successful cleanup, and the selected FPS policy.
+
 On CentOS, `./run.sh --base --allow-relaunch` verifies the Mesa RPM set
 `mesa-libEGL mesa-dri-drivers mesa-libgbm libglvnd-egl libglvnd-gles` through
 the shared package provider, with full-set recovery when needed. The mapping

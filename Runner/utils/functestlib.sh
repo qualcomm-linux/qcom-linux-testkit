@@ -3320,10 +3320,13 @@ run_with_timeout() (
 #   MANAGED_TIMEOUT_WATCHER_SLEEP_PID
 #   MANAGED_TIMEOUT_SLEEP_PID_FILE
 #   MANAGED_TIMEOUT_MARKER_FILE
+#   MANAGED_TIMEOUT_EXPIRED - 1 only when this invocation reached its deadline
 #
 # Return:
 #   COMMAND status on normal completion; 124 when this helper's watcher expires.
 run_with_managed_timeout() {
+    # shellcheck disable=SC2034 # Public deadline evidence, distinct from client exit 124.
+    MANAGED_TIMEOUT_EXPIRED=0
     mt_timeout_secs="$1"
     mt_temp_dir="$2"
     mt_label="$3"
@@ -3419,6 +3422,7 @@ run_with_managed_timeout() {
     mt_status=0
     while bounded_timeout_pid_running "$mt_cmd_pid"; do
         if [ -r "$mt_timeout_marker_file" ]; then
+            MANAGED_TIMEOUT_EXPIRED=1
             mt_status=124
             break
         fi
@@ -3437,6 +3441,8 @@ run_with_managed_timeout() {
         fi
     fi
     if [ -r "$mt_timeout_marker_file" ]; then
+        # shellcheck disable=SC2034 # Must survive marker removal during cleanup.
+        MANAGED_TIMEOUT_EXPIRED=1
         mt_status=124
     fi
     if ! managed_timeout_cancel_bounded 2; then
