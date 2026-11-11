@@ -1,0 +1,20 @@
+metadata:
+  name: OPTEE_Regression_Validation
+  format: Lava-Test Test Definition 1.0
+  description: Opt-in reviewed OP-TEE mutex, crypto, multi-session and basic OS regressions beyond native smoke.
+  os:
+  - linux
+  scope:
+  - functional
+params:
+  TIMEOUT: "60"
+  EXERCISE: "1"
+  CASES: "1003,1004,1005,1006"
+  XTEST: null
+  TA_DIR: null
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/OPTEE_Regression_Validation
+    - ./run.sh --timeout "$TIMEOUT" --exercise "$EXERCISE" --cases "$CASES" ${XTEST:+--xtest "${XTEST}"} ${TA_DIR:+--ta-dir "${TA_DIR}"} || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh OPTEE_Regression_Validation.res
