@@ -2758,3 +2758,38 @@ video_stage_control_override() {
     printf '%s\n' "$vsc_tmp"
     return 0
 }
+
+# ---------- Video codec correctness helpers ----------
+# video_quality_hashes <framemd5-file> <output-file>
+# Normalize and validate every frame, rejecting empty/truncated hash output.
+video_quality_hashes() {
+    awk -F ',' '
+        /^#/ || /^[[:space:]]*$/ {next}
+        {
+            hash = $6
+            gsub(/[[:space:]]/, "", hash)
+            if (NF != 6 || length(hash) != 32 || hash ~ /[^0-9a-fA-F]/) bad = 1
+            print tolower(hash)
+            count++
+        }
+        END { exit bad || !count }
+    ' "$1" >"$2"
+}
+
+# video_quality_hardware_evidence <log-file> <codec-node-file>
+# Require the actual FFmpeg-selected V4L2 node to match runtime codec inventory.
+video_quality_hardware_evidence() {
+    local node nodes found=0
+    nodes=$(sed -n 's/.*Using device \(\/dev\/video[0-9][0-9]*\).*/\1/p' "$1" | sort -u)
+    while IFS= read -r node; do
+        [ -n "$node" ] || continue
+        if grep -qxF "$node" "$2"; then
+            found=1
+        else
+            return 1
+        fi
+    done <<EOF
+$nodes
+EOF
+    [ "$found" = 1 ]
+}
