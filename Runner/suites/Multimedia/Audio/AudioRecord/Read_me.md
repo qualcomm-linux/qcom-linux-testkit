@@ -420,7 +420,7 @@ evidence.
 
 Before backend discovery, the suite enumerates runtime remoteprocs and checks the configured firmware and topology through shared image-firmware discovery. This includes the image's custom firmware root, kernel update paths, `/lib/firmware` and `/usr/lib/firmware`, with compressed assets supported. It recognizes audio DSP identities and the Shikra modem-hosted audio path. A remoteproc named `modem` is ignored on non-Shikra targets because it is not their audio preflight dependency.
 
-If the matching remoteproc is `running`, the suite records its name and firmware evidence. If it is `offline`, the suite starts it only after confirming the corresponding firmware is provisioned. Generic audio DSP paths also require adjacent topology evidence. Shikra's modem-hosted path does not require a topology beside the modem firmware, the selected ALSA card's q6apm topology is validated separately. The suite never stops a remoteproc. Platforms with no applicable audio remoteproc continue normally. Provisioning or start issues on an applicable remoteproc report FAIL with the reason.
+If the matching remoteproc is `running`, the suite records its name and firmware evidence. If it is `offline`, the suite starts it only after confirming the corresponding firmware is provisioned. Legacy audio DSP layouts without an enabled q6apm card also require adjacent topology evidence. For q6apm cards, exact driver/model topology validation remains pending until the matching ALSA card registers. Shikra's modem-hosted path does not require a topology beside the modem firmware, the selected ALSA card's q6apm topology is validated separately. The suite never stops a remoteproc. Platforms with no applicable audio remoteproc continue normally. Provisioning or start issues on an applicable remoteproc report FAIL with the reason.
 
 ## Overlay Build Support
 
@@ -1011,11 +1011,19 @@ remain available for failed attempts.
 ## Runtime topology selection
 
 Base audio validates image-provided topology only when the active DT declares
-a q6apm dependency. Selection uses the registered ALSA card driver when present,
-then an exact matching sound-card DT binding directory. This is a discovery
-hint, the DT compatible and actual ALSA driver name can differ. Firmware symlinks that
-resolve to the same asset do not create an ambiguity. Distinct unresolved assets,
-an empty file, or the actual driver's missing topology still fail. The registered
-card check continues to validate the kernel's exact driver/model firmware name.
+a q6apm dependency. The matching registered ALSA card supplies the driver name,
+and its sound-card DT supplies the model. The required firmware is exactly
+`qcom/<ALSA-driver>/<DT-model>-tplg.bin`, using the existing firmware-root and
+compression precedence. Other directories containing the same basename are
+irrelevant. A DT compatible is not used to guess the ALSA driver name.
+
+Before that card registers, exact topology validation is reported as pending.
+Functional suites can start the image-provisioned DSP and use the existing
+bounded ALSA card/PCM wait. The registered card's exact topology is checked
+before ALSA stream preparation. Passive card registration keeps its configured
+wait and never starts a DSP. Pending discovery is not proof that a topology is
+provisioned. A required card that fails to register follows the existing failure
+policy, and a missing or empty kernel-selected asset fails validation.
+
 No SoC mapping, topology copy, download or package-policy change is introduced.
 Direct-codec and overlay paths retain their existing applicability checks.

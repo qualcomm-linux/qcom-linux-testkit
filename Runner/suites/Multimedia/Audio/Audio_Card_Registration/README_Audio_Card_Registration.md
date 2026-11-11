@@ -104,9 +104,10 @@ used by the functional playback and recording suites.
 
 ## What This Test Validates
 
-Base-mode preflight verifies image topology for enabled runtime q6apm sound-card
-links before waiting for registration. After registration, each matched card's
-driver-specific topology path is checked. CQM/direct-codec and other cards that
+Base-mode preflight identifies enabled runtime q6apm sound-card links and checks
+the exact topology of cards already registered. Unregistered cards keep topology
+validation pending during the configured wait. After registration, each matched
+card's kernel-selected driver/model topology path is checked. CQM/direct-codec and other cards that
 do not consume q6apm topology retain that exemption. Remoteproc inventory is
 retained for diagnosis, but this suite never starts or restarts a DSP, changes
 mixers or opens an audio stream. An offline modem must be prepared by the image
@@ -396,12 +397,20 @@ This test should remain lightweight and non-destructive. It should not attempt t
 ## Runtime topology selection
 
 Base audio validates image-provided topology only when the active DT declares
-a q6apm dependency. Selection uses the registered ALSA card driver when present,
-then an exact matching sound-card DT binding directory. This is a discovery
-hint, the DT compatible and actual ALSA driver name can differ. Firmware symlinks that
-resolve to the same asset do not create an ambiguity. Distinct unresolved assets,
-an empty file, or the actual driver's missing topology still fail. The registered
-card check continues to validate the kernel's exact driver/model firmware name.
+a q6apm dependency. The matching registered ALSA card supplies the driver name,
+and its sound-card DT supplies the model. The required firmware is exactly
+`qcom/<ALSA-driver>/<DT-model>-tplg.bin`, using the existing firmware-root and
+compression precedence. Other directories containing the same basename are
+irrelevant. A DT compatible is not used to guess the ALSA driver name.
+
+Before that card registers, exact topology validation is reported as pending.
+Functional suites can start the image-provisioned DSP and use the existing
+bounded ALSA card/PCM wait. The registered card's exact topology is checked
+before ALSA stream preparation. Passive card registration keeps its configured
+wait and never starts a DSP. Pending discovery is not proof that a topology is
+provisioned. A required card that fails to register follows the existing failure
+policy, and a missing or empty kernel-selected asset fails validation.
+
 No SoC mapping, topology copy, download or package-policy change is introduced.
 Direct-codec and overlay paths retain their existing applicability checks.
 

@@ -385,8 +385,10 @@ if [ "$AUDIO_OVERLAY_REQUESTED" -eq 0 ]; then
     audio_topology_rc=$?
     if [ "$audio_topology_rc" -eq 1 ]; then
         test_result_init "$TESTNAME" "$RES_FILE" || exit 1
-        test_result_record FAIL "$TESTNAME FAIL - required image topology is missing, empty or ambiguous for the active DT"
+        test_result_record FAIL "$TESTNAME FAIL - required kernel-selected image topology is missing, empty or invalid for the active DT"
         test_result_finish
+    elif [ "$audio_topology_rc" -eq 4 ]; then
+        log_info "Exact topology validation is pending ALSA card registration, continuing with the configured card wait"
     fi
 fi
 list_remoteproc_instances >"$LOGDIR/remoteproc_inventory.txt" 2>&1 || true
