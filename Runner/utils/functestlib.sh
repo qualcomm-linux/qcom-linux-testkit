@@ -3617,18 +3617,22 @@ bounded_timeout_pid_running() {
     fi
     kill -0 "$1" 2>/dev/null || return 1
     if [ -r "/proc/$1/status" ]; then
-        while read -r btp_key btp_value; do
-            if [ "$btp_key" = "State:" ]; then
-                case "$btp_value" in
-                    Z*|X*)
-                        return 1
-                        ;;
-                esac
-                break
-            fi
-        done <"/proc/$1/status"
+        # An owned process can exit between the readability check and read.
+        # Recheck its lifetime quietly, command status is collected by wait.
+        {
+            while read -r btp_key btp_value; do
+                if [ "$btp_key" = "State:" ]; then
+                    case "$btp_value" in
+                        Z*|X*)
+                            return 1
+                            ;;
+                    esac
+                    break
+                fi
+            done <"/proc/$1/status"
+        } 2>/dev/null
     fi
-    return 0
+    kill -0 "$1" 2>/dev/null
 }
 
 # bounded_timeout_cancel
@@ -12668,3 +12672,271 @@ rng_validate_entropy() (
         return 1
     fi
 )
+
+# ---------- Test lifecycle and captured kernel evidence ----------
+# is_bounded_positive_integer <value> <maximum>
+# Validate bounded positive CLI values before arithmetic or hardware access.
+is_bounded_positive_integer() {
+    case "$1" in
+        ''|*[!0-9]*|0|0*)
+            return 1
+            ;;
+    esac
+    awk -v value="$1" -v maximum="$2" 'BEGIN { exit !(value <= maximum) }'
+}
+
+# test_require_commands <command>...
+# Report absent image tools without installing packages or changing services.
+test_require_commands() {
+    local tool missing=0
+    for tool in "$@"; do
+        if ! command -v "$tool" >/dev/null 2>&1; then
+            test_result_record SKIP "Image-provided utility is missing: $tool"
+            missing=1
+        fi
+    done
+    [ "$missing" -eq 0 ]
+}
+
+# test_run_command [--stdout-only] <label> <command>...
+# Bound a command and retain CWD output, optionally keep stderr out of parsed stdout.
+test_run_command() {
+    local stdout_only=0 label status
+    if [ "$1" = --stdout-only ]; then
+        stdout_only=1
+        shift
+    fi
+    label="$1"
+    shift
+    test_result_valid_name "$label" || return 3
+    log_info "[$label] command=$* timeout=${TEST_RUN_TIMEOUT}s"
+    if [ "$stdout_only" = 1 ]; then
+        run_with_managed_timeout "$TEST_RUN_TIMEOUT" "$TEST_RUN_DIR" "$label" \
+            "$@" >"$TEST_RUN_DIR/$label.log" 2>"$TEST_RUN_DIR/$label.stderr.log"
+        status=$?
+        log_file_with_label "$label-diagnostics" "$TEST_RUN_DIR/$label.stderr.log" 40
+    else
+        run_with_managed_timeout "$TEST_RUN_TIMEOUT" "$TEST_RUN_DIR" "$label" \
+            "$@" >"$TEST_RUN_DIR/$label.log" 2>&1
+        status=$?
+    fi
+    log_file_with_label "$label" "$TEST_RUN_DIR/$label.log" 40
+    return "$status"
+}
+
+# test_run_start
+# Create fresh evidence and preserve bootstrap stdout cleanup on all exits.
+test_run_start() {
+    TEST_RUN_DIR=$(test_create_run_directory "$PWD/results/$TESTNAME") || {
+        test_result_record FAIL "Cannot create results under CWD=$PWD"
+        test_result_finish
+    }
+    TEST_RUN_CLEANUP=""
+    TEST_RUN_LOAD_PIDS=""
+    TEST_RUN_RACE_PIDS=""
+    TEST_RUN_FINISHED=0
+    TEST_RUN_VALIDATED=0
+    trap 'test_run_exit "$?"' EXIT
+    trap 'test_run_interrupt' INT TERM
+    log_info "Test=$TESTNAME kernel=$(uname -r) arch=$(uname -m) artifacts=$TEST_RUN_DIR"
+}
+
+# test_run_cleanup
+# Stop owned workers before restoration, retaining unfinished cleanup for retry.
+test_run_cleanup() {
+    local pid remaining="" failed=0
+    if ! managed_timeout_cancel_bounded 2; then
+        test_result_record FAIL "Managed command cleanup incomplete, restoration deferred"
+        failed=1
+    fi
+    for pid in $TEST_RUN_LOAD_PIDS; do
+        if ! kill_process "$pid"; then
+            remaining="$remaining $pid"
+            test_result_record FAIL "Owned workload PID=$pid could not be stopped before restoration"
+            failed=1
+        fi
+    done
+    TEST_RUN_LOAD_PIDS="${remaining# }"
+    remaining=""
+    for pid in ${TEST_RUN_RACE_PIDS:-}; do
+        if ! kill_process "$pid"; then
+            remaining="$remaining $pid"
+            test_result_record FAIL "Owned hotplug worker PID=$pid could not be stopped before restoration"
+            failed=1
+        fi
+    done
+    TEST_RUN_RACE_PIDS="${remaining# }"
+    [ "$failed" -eq 0 ] || return 1
+    if [ -n "$TEST_RUN_CLEANUP" ]; then
+        if ! "$TEST_RUN_CLEANUP"; then
+            test_result_record FAIL "State restoration failed, artifacts=$TEST_RUN_DIR"
+            return 1
+        fi
+        TEST_RUN_CLEANUP=""
+    fi
+    return 0
+}
+
+# test_run_finish [PASS|FAIL|SKIP] [message]
+# Restore state before choosing the final shared PASS/FAIL/SKIP result.
+# shellcheck disable=SC2120 # Optional status/message are supplied by sourced runners.
+test_run_finish() {
+    if [ "$#" -gt 0 ]; then
+        test_result_record "$1" "$2"
+    fi
+    test_run_cleanup
+    TEST_RUN_FINISHED=1
+    if [ "$TEST_RESULT_FAIL_COUNT" -eq 0 ] && [ "$TEST_RUN_VALIDATED" -eq 0 ]; then
+        test_result_finish SKIP "$TESTNAME SKIP: no selected functional validation completed, see prerequisite messages"
+    fi
+    test_result_finish
+}
+
+# test_run_interrupt
+# Mark interruptions as failures, restore owned state, and publish the result.
+test_run_interrupt() {
+    trap '' INT TERM
+    test_result_record FAIL "Test interrupted before validation completed"
+    # shellcheck disable=SC2119 # Interrupts finalize counters without CLI arguments.
+    test_run_finish
+}
+
+# test_run_exit <exit-status>
+# Preserve failed early exits and the repository's stdout capture cleanup.
+test_run_exit() {
+    local status="$1" unexpected=0
+    trap - EXIT
+    if [ "$TEST_RUN_FINISHED" -ne 1 ]; then
+        test_run_cleanup
+        test_result_record FAIL "Unexpected exit before validation completed, status=$status"
+        TEST_RUN_FINISHED=1
+        unexpected=1
+    fi
+    # Retry pending cleanup once on final exit, without clearing earlier FAIL.
+    if [ -n "$TEST_RUN_CLEANUP$TEST_RUN_LOAD_PIDS${TEST_RUN_RACE_PIDS:-}${MANAGED_TIMEOUT_CMD_PID:-}${MANAGED_TIMEOUT_WATCHER_PID:-}" ]; then
+        test_run_cleanup || true
+    fi
+    if [ "$unexpected" -eq 1 ]; then
+        # Finalization exits, keep the parent alive for stdout capture cleanup.
+        (test_result_finish)
+    fi
+    if [ "${__RUN_STDOUT_ACTIVE:-0}" = 1 ]; then
+        # Repository bootstrap API, retain its externally defined name.
+        _runner_stdout_cleanup
+    fi
+    if [ "$unexpected" -eq 1 ]; then
+        exit 0
+    fi
+}
+
+# test_capture_kernel_log <label>
+# Keep snapshots through the shared provider, never directly invoke dmesg.
+test_capture_kernel_log() {
+    # Existing provider policy, do not require systemd when dmesg is readable.
+    # shellcheck disable=SC2034 # Consumed dynamically by scan_dmesg_errors.
+    local KERNEL_LOG_JOURNAL_FALLBACK=1
+    scan_dmesg_errors "$TEST_RUN_DIR/$1" '.*' '^$' || true
+    [ "${DMESG_ACCESS_STATUS:-unavailable}" = available ]
+}
+
+# test_check_kernel_delta <before-label> <after-label> <pattern>
+# Extract appended records using an exact retained baseline, including ring rotation.
+# Keep partial newer evidence on lost baselines, return 2 without claiming clean health.
+test_check_kernel_delta() {
+    local before="$TEST_RUN_DIR/$1/dmesg_snapshot.log"
+    local after="$TEST_RUN_DIR/$2/dmesg_snapshot.log"
+    local diagnostics="$TEST_RUN_DIR/$2/kernel_delta_status.log" delta_status match_status
+    if [ ! -r "$before" ] || [ ! -s "$before" ] ||
+        [ ! -r "$after" ] || [ ! -s "$after" ]; then
+        test_result_record SKIP "Kernel health evidence unavailable, artifacts=$TEST_RUN_DIR/$2"
+        return 2
+    fi
+    if ! printf '%s' '' >"$diagnostics"; then
+        test_result_record FAIL "Cannot retain kernel comparison diagnostics under $TEST_RUN_DIR/$2"
+        return 1
+    fi
+    # Compare the complete captured records, not the scanner's filtered errors.
+    # Prefix matching is linear even when many records contain repeated text.
+    awk -v diagnostics="$diagnostics" '
+        BEGIN { last_time = -1 }
+        function timestamp(line, value) {
+            if (!match(line, /^\[[[:space:]]*[0-9]+([.][0-9]+)?\]/)) return -1
+            value = substr(line, RSTART, RLENGTH)
+            gsub(/[\[\][:space:]]/, "", value)
+            return value + 0
+        }
+        FILENAME == ARGV[1] {
+            sub(/\r$/, "")
+            baseline[++before_count] = $0
+            known[$0] = 1
+            value = timestamp($0)
+            if (value > last_time) last_time = value
+            next
+        }
+        {
+            sub(/\r$/, "")
+            captured[++after_count] = $0
+        }
+        END {
+            if (!before_count || !after_count) exit 3
+            matched = 0
+            for (i = 2; i <= after_count; i++) {
+                while (matched && captured[i] != captured[matched + 1]) matched = prefix[matched]
+                if (captured[i] == captured[matched + 1]) matched++
+                prefix[i] = matched
+            }
+            matched = 0
+            for (i = 1; i <= before_count; i++) {
+                while (matched && (matched == after_count || baseline[i] != captured[matched + 1])) matched = prefix[matched]
+                if (baseline[i] == captured[matched + 1]) matched++
+            }
+            # Rotation needs a timestamped record to anchor the retained suffix.
+            anchored = matched == before_count
+            for (i = 1; i <= matched; i++) {
+                if (timestamp(captured[i]) >= 0) anchored = 1
+            }
+            if (matched && anchored) {
+                mode = matched == before_count ? "appended" : "rotated"
+                printf "status=%s before_lines=%d after_lines=%d retained_lines=%d new_lines=%d\n", mode, before_count, after_count, matched, after_count - matched > diagnostics
+                for (i = matched + 1; i <= after_count; i++) print captured[i]
+                exit 0
+            }
+            reason = matched ? "untimestamped-partial-overlap" : "no-exact-overlap"
+            printf "status=unverified reason=%s before_lines=%d after_lines=%d retained_lines=%d baseline_last_time=%s\n", reason, before_count, after_count, matched, last_time > diagnostics
+            print "baseline_tail=" baseline[before_count] >> diagnostics
+            print "capture_head=" captured[1] >> diagnostics
+            # A lost anchor cannot prove health, but must not hide newer faults.
+            newer = 0
+            for (i = 1; i <= after_count; i++) {
+                value = timestamp(captured[i])
+                if (value >= 0) newer = last_time >= 0 && (value > last_time || (value == last_time && !(captured[i] in known)))
+                if (newer) print captured[i]
+            }
+            exit 2
+        }
+    ' "$before" "$after" >"$TEST_RUN_DIR/$2/kernel_delta.log"
+    delta_status=$?
+    log_file_with_label KERNEL-DELTA "$diagnostics" 3
+    if { [ "$delta_status" -ne 0 ] && [ "$delta_status" -ne 2 ]; } ||
+        { [ "$delta_status" -eq 2 ] && ! grep -q '^status=unverified ' "$diagnostics"; }; then
+        test_result_record FAIL "Kernel delta extraction failed, inspect captured snapshots under $TEST_RUN_DIR/$2"
+        return 1
+    fi
+    if grep -Ei "$3" "$TEST_RUN_DIR/$2/kernel_delta.log" \
+        >"$TEST_RUN_DIR/$2/kernel_errors.log"; then
+        log_file_with_label KERNEL-ERROR "$TEST_RUN_DIR/$2/kernel_errors.log" 30
+        test_result_record FAIL "New kernel errors during validation, artifact=$TEST_RUN_DIR/$2/kernel_errors.log"
+        return 1
+    else
+        match_status=$?
+        if [ "$match_status" -ne 1 ]; then
+            test_result_record FAIL "Cannot evaluate kernel fault evidence, inspect $TEST_RUN_DIR/$2"
+            return 1
+        fi
+    fi
+    if [ "$delta_status" -ne 0 ]; then
+        test_result_record SKIP "Kernel baseline continuity is unverified, compare retained snapshots and $diagnostics"
+        return 2
+    fi
+    test_result_record PASS "No new test kernel errors"
+}
