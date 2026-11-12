@@ -78,7 +78,9 @@ dynamic registry discovery. The suite does not maintain per-SoC service lists.
 - `PASS`: the selected kernel or userspace implementation is ready, QRTR service
   `64:1:1` is advertised, registry data is well formed, and the functional QMI
   query returns the exact registry-derived domains when its optional Python
-  transport is available.
+  transport is available. Without the Python `lzma` module the `.jsn.xz` files
+  stay unread, so the reply must contain the domains of the readable files
+  and may hold more (`comparison=readable-registry-subset`).
 - `FAIL`: a kernel auxiliary device is incorrectly bound, a provisioned
   userspace service is inactive, the required QRTR advertisement is missing,
   topology collection fails, registry data is malformed, the functional reply
