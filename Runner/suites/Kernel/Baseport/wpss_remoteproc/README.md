@@ -69,3 +69,8 @@ retained in `driver/wifi_regulatory_warnings.log` and printed to stdout.
 This optional database lookup does not establish a WPSS crash. The discovered
 family must still own a registered wireless PHY. Driver firmware errors,
 malformed regulatory data and captured kernel faults remain failures.
+
+The WiFi-driver fallback also checks the affected radio's bound PHY and valid
+MAC. Country-setting fallback requires usable channels reported by image-provided
+`iw`. Missing required health evidence produces SKIP. Confirmed driver faults
+remain FAIL even after recovery.

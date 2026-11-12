@@ -80,6 +80,12 @@ wifi_initial_state=""
 # Restore original administration/rfkill states, including failure and signals.
 cleanup() {
     cleanup_failed=0
+    # Stop an interrupted toggle before changing the same interface again.
+    if ! managed_timeout_cancel_bounded 2; then
+        log_fail "WiFi toggle command is still active, state restoration is deferred"
+        printf '%s FAIL\n' "$TESTNAME" >"$RES_FILE"
+        return 1
+    fi
     if [ -n "$wifi_iface" ] && [ -n "$wifi_initial_state" ]; then
         net_restore_interface_admin "$wifi_iface" "$wifi_initial_state" || cleanup_failed=1
     fi
@@ -149,13 +155,17 @@ $WIFI_DRIVER_MODULES
 WIFI_MODULE_DIAGNOSTICS
     wifi_log_module_info "$@"
 fi
-wifi_has_probe_failures "${WIFI_PROBE_LOG_DIR:-$OUT_DIR/initial}" "${WIFI_PROBE_LOG_TAG:-$TESTNAME}"
+WIFI_HEALTH_UNVERIFIED=0
+WIFI_INITIAL_LOG_DIR="${WIFI_PROBE_LOG_DIR:-$OUT_DIR/initial}"
+wifi_has_probe_failures "$WIFI_INITIAL_LOG_DIR" "${WIFI_PROBE_LOG_TAG:-$TESTNAME}" initial
 probe_rc=$?
 case "$probe_rc" in
     0)
+        wifi_dump_runtime_info "$OUT_DIR/runtime" || true
         test_result_finish FAIL "Captured WiFi probe/runtime errors"
         ;;
     2)
+        WIFI_HEALTH_UNVERIFIED=1
         test_result_record SKIP "Initial WiFi kernel health is unverified, inspect capture diagnostics"
         ;;
 esac
@@ -165,6 +175,7 @@ if [ "$discovery_rc" -eq 3 ]; then
     test_result_finish FAIL "WiFi recovery or module restoration failed"
 fi
 if [ "$discovery_rc" -ne 0 ] || [ -z "$discovered_iface" ]; then
+    wifi_dump_runtime_info "$OUT_DIR/runtime" || true
     test_result_finish FAIL "Applicable WiFi runtime has no usable interface after bounded discovery"
 fi
 if [ -n "${WIFI_IFACE:-}" ] && [ "$discovered_iface" != "$WIFI_IFACE" ]; then
@@ -175,13 +186,29 @@ if [ -z "$wifi_initial_state" ]; then
     wifi_initial_state=$(net_interface_admin_state "$wifi_iface") || test_result_finish FAIL "Cannot snapshot discovered interface flags"
 fi
 log_info "Selected WiFi interface=$wifi_iface original_admin=$wifi_initial_state"
-if ! bring_interface_up_down "$wifi_iface" down; then
+# ip is an image prerequisite. Track the executable directly so cancellation
+# reaches the netlink operation rather than only a shell-function wrapper.
+if ! run_with_managed_timeout 10 "$OUT_DIR" wifi-down ip link set dev "$wifi_iface" down; then
     test_result_record FAIL "Could not bring $wifi_iface down"
-elif ! bring_interface_up_down "$wifi_iface" up; then
+elif [ "$(net_interface_admin_state "$wifi_iface")" != down ]; then
+    test_result_record FAIL "$wifi_iface did not reach administrative down after a successful command"
+elif ! run_with_managed_timeout 10 "$OUT_DIR" wifi-up ip link set dev "$wifi_iface" up; then
     test_result_record FAIL "Could not bring $wifi_iface up after toggle"
+elif [ "$(net_interface_admin_state "$wifi_iface")" != up ]; then
+    test_result_record FAIL "$wifi_iface did not reach administrative up after a successful command"
 else
     test_result_record PASS "$wifi_iface toggled down/up successfully"
 fi
+wifi_classify_probe_failures "$WIFI_INITIAL_LOG_DIR"
+probe_rc=$?
+case "$probe_rc" in
+    0)
+        test_result_record FAIL "Retained WiFi boot errors or fallback readiness failed"
+        ;;
+    2)
+        WIFI_HEALTH_UNVERIFIED=1
+        ;;
+esac
 wifi_has_probe_failures "$OUT_DIR/final" "$TESTNAME"
 probe_rc=$?
 case "$probe_rc" in
@@ -189,8 +216,15 @@ case "$probe_rc" in
         test_result_record FAIL "Captured WiFi errors after interface toggle"
         ;;
     2)
+        WIFI_HEALTH_UNVERIFIED=1
         test_result_record SKIP "Final kernel health is unverified, inspect capture diagnostics"
         ;;
 esac
 cleanup || test_result_record FAIL "WiFi restoration was incomplete"
+if [ "$TEST_RESULT_FAIL_COUNT" -gt 0 ] || [ "$WIFI_HEALTH_UNVERIFIED" -eq 1 ]; then
+    wifi_dump_runtime_info "$OUT_DIR/runtime" || true
+fi
+if [ "$TEST_RESULT_FAIL_COUNT" -eq 0 ] && [ "$WIFI_HEALTH_UNVERIFIED" -eq 1 ]; then
+    test_result_finish SKIP "WiFi down/up completed but required kernel or fallback health evidence is unavailable"
+fi
 test_result_finish

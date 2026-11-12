@@ -97,7 +97,9 @@ $REPO_PATH/Runner/utils/send-to-lava.sh WiFi_OnOff.res
 The test writes standard test result output through the common result helper. Probe/runtime diagnostics may be collected under:
 
 ```text
-wifi_onoff_dmesg/
+results/WiFi_OnOff/run-*/initial/
+results/WiFi_OnOff/run-*/final/
+results/WiFi_OnOff/run-*/runtime/
 ```
 
 The directory can be changed with `WIFI_PROBE_LOG_DIR`.
@@ -115,6 +117,8 @@ The test passes when:
 ## SKIP criteria
 
 The test skips when no usable WiFi interface or runtime WiFi object is found and no probe/runtime failure is detected.
+Missing required kernel or regulatory health evidence also causes SKIP,
+even if down/up succeeds.
 
 ## FAIL criteria
 
@@ -153,3 +157,8 @@ instead of stopping the interface toggle. Inspect `wifi_regulatory_warnings.log`
 under the initial and final capture directories. The selected interface must
 still complete down/up and restoration successfully. Malformed regulatory data,
 device firmware failures and captured driver crashes remain failures.
+
+Country-setting and random-MAC fallbacks require a usable matching radio,
+a valid MAC and, for country rejection, usable regulatory channels. PASS also
+requires confirmed down/up state changes and restoration. The test does not
+change the country. Confirmed driver crashes remain FAIL even after recovery.

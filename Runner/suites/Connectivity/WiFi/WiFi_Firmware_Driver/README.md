@@ -16,7 +16,7 @@ This test is useful for verifying basic WiFi firmware and driver readiness befor
   Installed firmware directories alone never select a family.
 - Family-specific runtime preparation succeeds.
 - The family has a bound driver, including built-in drivers without lsmod entries.
-- A PHY bound to that family appears within 15 seconds after preparation.
+- A PHY bound to that family appears within the readiness timeout, default 60 seconds.
   Generic firmware messages or a sibling radio do not prove readiness.
 - Kernel logs do not show WiFi probe/runtime failures.
 
@@ -26,11 +26,12 @@ The target should provide:
 
 - `find`
 - `grep`
-- `readlink`, `sort`, `mktemp`
+- `readlink`, `sort`, `mktemp`, `tr`
 - `modprobe` only when an unloaded runtime driver needs activation
 - `cat`
 - `stat`
 - `awk`
+- `iw` when a captured driver country-rejection fallback needs validation
 
 The script sources the common test environment through `init_env`, then uses helpers from:
 
@@ -46,6 +47,11 @@ Run from the test directory:
 ```
 
 No mandatory CLI arguments are required.
+
+The test continues as soon as the radio is ready. For slower startup, use
+`./run.sh --wait-timeout 120` or set `WAIT_TIMEOUT` in the LAVA definition.
+The timeout accepts whole seconds from 1 to 3600. Missing readiness at the
+deadline and captured driver faults remain failures.
 
 ## Optional environment variables
 
@@ -66,7 +72,7 @@ WIFI_FW_PROBE_LOG_DIR=./fw_probe_logs ./run.sh
 The YAML runs the test directly:
 
 ```sh
-./run.sh || true
+./run.sh --wait-timeout "${WAIT_TIMEOUT}" || true
 ```
 
 The final test result is emitted through:
@@ -105,6 +111,7 @@ The test skips when:
 
 - Required tools are missing.
 - No supported WiFi family is identified from runtime drivers or device aliases.
+- Required kernel health or regulatory fallback evidence is unavailable.
 
 ## FAIL criteria
 
@@ -129,3 +136,8 @@ driver crash remains a failure. A runtime PHY confirms driver readiness,
 it does not prove that the regulatory database loaded or that association works.
 The original messages remain in `dmesg_errors.log` and the general probe suite
 can report the image provisioning gap independently.
+
+Documented country-setting or random-MAC fallbacks pass only when the affected
+radio has a bound driver, PHY and valid MAC. Country-setting fallback also
+requires usable regulatory channels. The test does not change the country.
+Confirmed driver crashes remain FAIL even after recovery.

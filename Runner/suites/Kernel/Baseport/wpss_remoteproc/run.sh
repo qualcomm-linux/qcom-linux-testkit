@@ -362,4 +362,10 @@ case "$driver_rc" in
         test_result_record SKIP "Driver kernel health is unverified, see capture diagnostics"
         ;;
 esac
+if [ "$TEST_RESULT_FAIL_COUNT" -gt 0 ] || [ "$driver_rc" -eq 2 ]; then
+    wifi_dump_runtime_info "$OUT_DIR/runtime" || true
+fi
+if [ "$TEST_RESULT_FAIL_COUNT" -eq 0 ] && [ "$driver_rc" -eq 2 ]; then
+    test_result_finish SKIP "WPSS driver ownership is present but required kernel or fallback health evidence is unavailable"
+fi
 test_result_finish
