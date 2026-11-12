@@ -5023,7 +5023,7 @@ dt_property_text() {
     property="$2"
     [ -n "$node_dir" ] && [ -n "$property" ] || return 3
     [ -r "$node_dir/$property" ] || return 1
-    tr '\000' ' ' <"$node_dir/$property" | tr -cd '[:print:] \n' | sed 's/[[:space:]]*$//'
+    tr '\000' ' ' <"$node_dir/$property" | tr -cd '\040-\176\n' | sed 's/[[:space:]]*$//'
 }
 
 ###############################################################################
