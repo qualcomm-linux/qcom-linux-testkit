@@ -12,9 +12,11 @@ params:
   SUBSYSTEM: "cdsp"
   ROUNDS: "1"
   PROCESSORS: null
+  STABLE_SECONDS: null
+  MODE: null
 run:
   steps:
     - REPO_PATH=$PWD
     - cd Runner/suites/Kernel/Baseport/Remoteproc_Restart_Validation
-    - ./run.sh --timeout "$TIMEOUT" --exercise "$EXERCISE" --subsystem "$SUBSYSTEM" --rounds "$ROUNDS" ${PROCESSORS:+--processors "${PROCESSORS}"} || true
+    - ./run.sh --timeout "$TIMEOUT" --exercise "$EXERCISE" --subsystem "$SUBSYSTEM" --rounds "$ROUNDS" ${PROCESSORS:+--processors "${PROCESSORS}"} ${MODE:+--mode "${MODE}"} ${STABLE_SECONDS:+--stable-seconds "${STABLE_SECONDS}"} || true
     - $REPO_PATH/Runner/utils/send-to-lava.sh Remoteproc_Restart_Validation.res
