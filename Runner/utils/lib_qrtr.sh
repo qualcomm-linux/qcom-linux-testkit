@@ -2,6 +2,38 @@
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause
 
+# qrtr_classify_kernel_failures <captured-directory>
+# Separate local QRTR/GLINK/RPMSG transport faults from remoteproc platform
+# diagnostics using one retained snapshot. Preserve attributable fault blocks.
+# Write qrtr_failures.log and remoteproc_errors.log. No target mutation or new
+# kernel read occurs. Return 0 for transport faults, 1 for clean, 2 for unavailable.
+qrtr_classify_kernel_failures() (
+    qck_dir="$1"
+    [ -s "$qck_dir/dmesg_snapshot.log" ] && [ -r "$qck_dir/dmesg_errors.log" ] || return 2
+    : >"$qck_dir/remoteproc_errors.log" || return 2
+    awk -v platform="$qck_dir/remoteproc_errors.log" '
+        {
+            text=tolower($0)
+            sub(/^[[:space:]]*/, "", text)
+            while (text ~ /^\[[^]]*\]/) sub(/^\[[^]]*\][[:space:]]*/, "", text)
+            if (text ~ /^(tqftp|qrtr|qcom_glink|glink|rpmsg)[^[:space:]:]*([[:space:]][^:]*)?:/) {
+                print
+            } else if (text ~ /^(remoteproc|qcom_q6v5|qcom.*pas)[^[:space:]:]*([[:space:]][^:]*)?:/) {
+                if (text ~ /(^|[^[:alnum:]_])(tqftp|qrtr|glink|rpmsg)([^[:alnum:]_]|$)/) print
+                else print $0 >> platform
+            }
+        }
+    ' "$qck_dir/dmesg_errors.log" >"$qck_dir/qrtr_failures.log" || return 2
+    kernel_log_filter_faults "$qck_dir/dmesg_snapshot.log" \
+        'tqftp|qrtr|qcom_glink|glink|rpmsg' >"$qck_dir/qrtr_fault_blocks.log" || return 2
+    cat "$qck_dir/qrtr_fault_blocks.log" >>"$qck_dir/qrtr_failures.log" || return 2
+    kernel_log_filter_faults "$qck_dir/dmesg_snapshot.log" \
+        'remoteproc|qcom_q6v5|qcom.*pas' >"$qck_dir/remoteproc_fault_blocks.log" || return 2
+    cat "$qck_dir/remoteproc_fault_blocks.log" >>"$qck_dir/remoteproc_errors.log" || return 2
+    [ -s "$qck_dir/qrtr_failures.log" ] && return 0
+    return 1
+)
+
 # qrtr_analyze_topology <raw-file> <normalized-file> <summary-file>
 # Validates qrtr-lookup rows, rejects duplicate endpoint tuples, writes a stable
 # TSV representation, and exports bounded topology counts and failure detail.

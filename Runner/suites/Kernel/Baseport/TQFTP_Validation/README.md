@@ -56,10 +56,14 @@ changes probe bounds. Neither option is normally SoC-specific.
 - `PASS`: TQFTP is active, advertises `4096:1:0`, exposed state is usable, and
   an enabled E2E transfer returns the exact staged payload.
 - `FAIL`: TQFTP is provisioned but inactive, advertisement is absent, a query
-  or enabled E2E transfer fails, state access is invalid, or relevant kernel
-  errors are present.
-- `SKIP`: TQFTP is not provisioned. No request in the bounded journal is a
+  or enabled E2E transfer fails, state access is invalid, or TQFTP or
+  QRTR/GLINK/RPMSG transport errors are present.
+- `SKIP`: TQFTP is not provisioned or required QRTR advertisement or kernel
+  health evidence is unavailable. No request in the bounded journal is a
   subcheck skip because remote firmware may make no request during the run.
+
+Independent DSP/modem faults are reported as warnings without failing a
+successful local transfer. This test does not validate those subsystems' health.
 
 Look for `[TQFTP-DISCOVERY]`, `[TQFTP-QRTR]`, `[TQFTP-QRTR-ENDPOINT]`,
 `[TQFTP-E2E]`, `[TQFTP-STATE]`, `[TQFTP-STATE-ENTRY]`, and

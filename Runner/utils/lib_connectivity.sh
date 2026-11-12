@@ -330,8 +330,178 @@ wifi_filter_regulatory_warnings() (
     ' "$wfrw_input" || return 2
 )
 
-# Scan kernel logs for WiFi driver probe/runtime failures and print matched
-# captured faults to stdout. Returns 0 for faults, 1 for clean, 2 for unavailable evidence.
+# wifi_fallback_runtime_ready <driver> <controller> <mac|regulatory> <output-directory>
+# Validate the exact warning owner through bound PHY/netdev state. No mutation.
+# Print readiness diagnostics. Return 0 when usable, 1 when broken, 2 when the
+# image lacks required evidence tools. Retain bounded iw output in the directory.
+wifi_fallback_runtime_ready() (
+    wfr_driver="$1"
+    wfr_controller="$2"
+    wfr_kind="$3"
+    wfr_out="$4"
+    for wfr_phy in /sys/class/ieee80211/*; do
+        [ -d "$wfr_phy" ] || continue
+        wfr_device=$(readlink -f "$wfr_phy/device") || continue
+        [ "${wfr_device##*/}" = "$wfr_controller" ] || continue
+        wfr_bound=$(readlink -f "$wfr_device/driver") || continue
+        [ "${wfr_bound##*/}" = "$wfr_driver" ] || continue
+        wfr_netdev=""
+        for wfr_net in /sys/class/net/*; do
+            [ "$(readlink -f "$wfr_net/phy80211" 2>/dev/null)" = "$(readlink -f "$wfr_phy")" ] || continue
+            wfr_mac=$(cat "$wfr_net/address" 2>/dev/null) || continue
+            if printf '%s\n' "$wfr_mac" | awk -F: '
+                NF != 6 { exit 1 }
+                {
+                    for (part=1; part<=6; part++) {
+                        if ($part !~ /^[[:xdigit:]][[:xdigit:]]$/) exit 1
+                    }
+                    if ($0 == "00:00:00:00:00:00" ||
+                        substr($1, 2, 1) !~ /[02468aAcCeE]/) exit 1
+                }
+            '; then
+                wfr_netdev=${wfr_net##*/}
+                break
+            fi
+        done
+        if [ -z "$wfr_netdev" ]; then
+            log_fail "WiFi fallback owner=$wfr_controller has no matching netdev with a valid unicast MAC"
+            return 1
+        fi
+        log_info "WiFi fallback owner=$wfr_controller driver=$wfr_driver phy=${wfr_phy##*/} interface=$wfr_netdev effective_mac=$wfr_mac"
+        [ "$wfr_kind" = regulatory ] || return 0
+        if ! command -v iw >/dev/null 2>&1; then
+            log_warn "Regulatory fallback health is unverified, image-provided iw is required"
+            return 2
+        fi
+        wfr_name=${wfr_phy##*/}
+        run_with_timeout_log 5 "$wfr_out/$wfr_name-info.log" iw phy "$wfr_name" info || return 1
+        run_with_timeout_log 5 "$wfr_out/$wfr_name-reg.log" iw reg get || return 1
+        # A retained domain must have rules and the selected PHY must expose
+        # usable channels. NO-IR/passive channels are valid, disabled ones are not.
+        awk '/\*.*MHz.*\[[0-9]+\]/ && !/disabled/ { usable=1 }
+             END { exit !usable }' "$wfr_out/$wfr_name-info.log" || return 1
+        awk -v selected="${wfr_name#phy}" '
+            /^global/ { section="global" }
+            /^phy#/ {
+                id=$1
+                sub(/^phy#/, "", id)
+                section=id
+                if (id == selected) found=1
+            }
+            /^[[:space:]]*country ([A-Z][A-Z]|00):/ { country[section]=1 }
+            /^[[:space:]]*\([0-9]+.* - [0-9]+/ { rules[section]=1 }
+            END {
+                key=found ? selected : "global"
+                exit !(country[key] && rules[key])
+            }
+        ' "$wfr_out/$wfr_name-reg.log" || return 1
+        log_info "WiFi regulatory fallback owner=$wfr_controller retains a domain with usable channels, no country change was requested by this test"
+        return 0
+    done
+    log_fail "WiFi fallback owner=$wfr_controller driver=$wfr_driver has no bound wireless PHY"
+    return 1
+)
+
+# wifi_classify_probe_failures <captured-directory> [initial|final]
+# Classify retained scanner candidates without a new kernel read. Initial checks
+# defer only documented fallbacks, final checks require matching runtime proof.
+# Print diagnostics and retain candidates/readiness/failures. Return 0 for faults,
+# 1 for no confirmed faults, 2 for unavailable evidence. Never infer testcase PASS.
+wifi_classify_probe_failures() (
+    wcp_dir="$1"
+    wcp_phase="${2:-final}"
+    case "$wcp_phase" in
+        initial|final)
+            ;;
+        *)
+            return 2
+            ;;
+    esac
+    [ -s "$wcp_dir/dmesg_snapshot.log" ] && [ -r "$wcp_dir/dmesg_errors.log" ] || return 2
+    wifi_filter_regulatory_warnings "$wcp_dir/dmesg_errors.log" \
+        "$wcp_dir/wifi_regulatory_warnings.log" >"$wcp_dir/wifi_candidates.log" || return 2
+    : >"$wcp_dir/wifi_fallbacks.log" || return 2
+    : >"$wcp_dir/wifi_fallback_owners.log" || return 2
+    awk -v warnings="$wcp_dir/wifi_fallbacks.log" \
+        -v owners="$wcp_dir/wifi_fallback_owners.log" '
+        {
+            text=$0
+            sub(/^[[:space:]]*/, "", text)
+            while (text ~ /^\[[^]]*\]/) sub(/^\[[^]]*\][[:space:]]*/, "", text)
+            kind=""
+            if (text ~ /^ath10k[^[:space:]:]* [^[:space:]]+: invalid MAC address; choosing random$/) kind="mac"
+            if (text ~ /^ath11k[^[:space:]:]* [^[:space:]]+: Failed to set the requested Country regulatory setting$/) kind="regulatory"
+            split(text, fields, " ")
+            owner=fields[2]
+            sub(/:$/, "", owner)
+            key=fields[1] "|" owner
+            if (owner !~ /^[[:alnum:]_.:-]+$/) kind=""
+            # Controllers can log concurrently. Pair the next error from this
+            # controller only, never borrow a country warning from another radio.
+            if (text ~ /^ath11k[^[:space:]:]* [^[:space:]]+: failed to process regulatory info -22$/ && pending[key]) kind="regulatory"
+            delete pending[key]
+            if (text ~ /: Failed to set the requested Country regulatory setting$/ && kind == "regulatory") pending[key]=1
+            if (kind != "") {
+                print $0 >> warnings
+                print fields[1] "|" owner "|" kind >> owners
+            } else {
+                print
+            }
+        }
+    ' "$wcp_dir/wifi_candidates.log" >"$wcp_dir/wifi_probe_failures.log" || return 2
+    # Driver crash notifications need not contain the generic scanner error
+    # keywords. Keep these fatal events even when the radio recovered later.
+    awk '
+        {
+            text=tolower($0)
+            sub(/^[[:space:]]*/, "", text)
+            while (text ~ /^\[[^]]*\]/) sub(/^\[[^]]*\][[:space:]]*/, "", text)
+            if (text ~ /^ath(10|11|12)k[^[:space:]:]*([[:space:]][^:]*)?:.*firmware crashed([[:space:][:punct:]]|$)/) print
+        }
+    ' "$wcp_dir/dmesg_snapshot.log" >"$wcp_dir/wifi_crashes.log" || return 2
+    cat "$wcp_dir/wifi_crashes.log" >>"$wcp_dir/wifi_probe_failures.log" || return 2
+    if [ -s "$wcp_dir/wifi_regulatory_warnings.log" ]; then
+        log_warn "Global regulatory database lookup failed, wireless runtime validation is still required"
+        log_file_with_label WIFI-REGULATORY "$wcp_dir/wifi_regulatory_warnings.log"
+    fi
+    wcp_unverified=0
+    sort -u "$wcp_dir/wifi_fallback_owners.log" >"$wcp_dir/wifi_fallback_owners.list" || return 2
+    while IFS='|' read -r wcp_driver wcp_owner wcp_kind; do
+        if [ "$wcp_phase" = initial ]; then
+            log_warn "WiFi $wcp_kind fallback owner=$wcp_owner is pending runtime and functional validation"
+            continue
+        fi
+        wcp_artifact=$(printf '%s' "$wcp_owner" | tr ':' '-') || return 2
+        wifi_fallback_runtime_ready "$wcp_driver" "$wcp_owner" "$wcp_kind" "$wcp_dir" \
+            >"$wcp_dir/$wcp_artifact-$wcp_kind-readiness.log" 2>&1
+        wcp_status=$?
+        log_file_with_label WIFI-FALLBACK-READINESS "$wcp_dir/$wcp_artifact-$wcp_kind-readiness.log"
+        case "$wcp_status" in
+            0)
+                ;;
+            2)
+                wcp_unverified=1
+                ;;
+            *)
+                printf 'WiFi %s fallback validation failed for %s driver=%s\n' \
+                    "$wcp_kind" "$wcp_owner" "$wcp_driver" >>"$wcp_dir/wifi_probe_failures.log" || return 2
+                ;;
+        esac
+    done <"$wcp_dir/wifi_fallback_owners.list"
+    if [ -s "$wcp_dir/wifi_fallbacks.log" ]; then
+        log_file_with_label WIFI-FALLBACK "$wcp_dir/wifi_fallbacks.log"
+    fi
+    if [ -s "$wcp_dir/wifi_probe_failures.log" ]; then
+        log_file_with_label WIFI-ERROR "$wcp_dir/wifi_probe_failures.log"
+        return 0
+    fi
+    [ "$wcp_unverified" -eq 0 ] || return 2
+    return 1
+)
+
+# wifi_has_probe_failures <output-directory> [tag] [initial|final]
+# Capture WiFi kernel health and classify through the shared runtime contract.
+# Return 0 for faults, 1 for no confirmed faults, 2 for unavailable evidence.
 wifi_has_probe_failures() {
     wpf_out="${1:-$PWD/wifi_dmesg}"
     wpf_tag="${2:-wifi-probe-check}"
@@ -344,58 +514,82 @@ wifi_has_probe_failures() {
         log_warn "[$wpf_tag] Kernel health unverified, inspect $wpf_out/dmesg_access.log"
         return 2
     fi
-    # A registered runtime is checked by each caller. Invalid databases, device
-    # firmware errors and captured fault blocks remain failures.
-    wifi_filter_regulatory_warnings "$wpf_out/dmesg_errors.log" \
-        "$wpf_out/wifi_regulatory_warnings.log" >"$wpf_out/wifi_probe_failures.log" || return 2
-    if [ -s "$wpf_out/wifi_regulatory_warnings.log" ]; then
-        log_warn "[$wpf_tag] Global regulatory database lookup failed, continuing with wireless driver and PHY validation"
-        log_file_with_label WIFI-REGULATORY "$wpf_out/wifi_regulatory_warnings.log"
-    fi
-    if [ -s "$wpf_out/wifi_probe_failures.log" ]; then
-        log_file_with_label WIFI-ERROR "$wpf_out/wifi_probe_failures.log"
-        return 0
-    fi
-    return 1
+    wifi_classify_probe_failures "$wpf_out" "${3:-final}"
 }
 
-# Print wireless runtime state from iw, sysfs, ip, and rfkill so missing
-# interface cases are diagnosable directly from testcase stdout.
+# wifi_dump_runtime_info [output-directory]
+# Print bounded iw/ip and sysfs diagnostics, retaining full command output in CWD.
+# No radio changes or kernel reads occur. Return 1 only for artifact setup failure.
 wifi_dump_runtime_info() {
-    log_info "--- iw dev ---"
-    iw dev 2>/dev/null || true
-
-    log_info "--- iw phy ---"
-    iw phy 2>/dev/null || true
-
-    log_info "--- /sys/class/ieee80211 ---"
-    ls -l /sys/class/ieee80211 2>/dev/null || true
-
-    log_info "--- /sys/class/net ---"
-    ls -l /sys/class/net 2>/dev/null || true
-
-    log_info "--- ip -o link show ---"
-    ip -o link show 2>/dev/null || true
-
-    log_info "--- wireless markers ---"
+    wdr_out="${1:-$PWD/wifi_runtime}"
+    mkdir -p "$wdr_out" || return 1
+    for wdr_label in iw-dev iw-phy iw-reg ip-link; do
+        case "$wdr_label" in
+            iw-dev)
+                set -- iw dev
+                ;;
+            iw-phy)
+                set -- iw phy
+                ;;
+            iw-reg)
+                set -- iw reg get
+                ;;
+            ip-link)
+                set -- ip -details link show
+                ;;
+        esac
+        if command -v "$1" >/dev/null 2>&1; then
+            run_with_timeout_log 5 "$wdr_out/$wdr_label.log" "$@"
+            wdr_status=$?
+            log_info "WiFi diagnostic=$wdr_label exit_status=$wdr_status artifact=$wdr_out/$wdr_label.log"
+            log_file_with_label "$wdr_label" "$wdr_out/$wdr_label.log" 80
+        else
+            log_warn "WiFi diagnostic=$wdr_label unavailable, image has no $1"
+        fi
+    done
+    : >"$wdr_out/sysfs.log" || return 1
+    for wdr_phy_path in /sys/class/ieee80211/*; do
+        [ -d "$wdr_phy_path" ] || continue
+        wdr_phy_device=$(readlink -f "$wdr_phy_path/device" 2>/dev/null || true)
+        wdr_phy_driver=$(readlink -f "$wdr_phy_path/device/driver" 2>/dev/null || true)
+        printf 'phy=%s driver=%s device=%s\n' "${wdr_phy_path##*/}" \
+            "${wdr_phy_driver:-unbound}" "${wdr_phy_device:-unavailable}" >>"$wdr_out/sysfs.log"
+        wdr_parent="$wdr_phy_device"
+        while [ -n "$wdr_parent" ] && [ "$wdr_parent" != / ]; do
+            wdr_dt=$(readlink -f "$wdr_parent/of_node" 2>/dev/null || true)
+            if [ -d "$wdr_dt" ]; then
+                wdr_compatible=$(dt_property_text "$wdr_dt" compatible 2>/dev/null || true)
+                printf 'phy=%s dt=%s compatible=%s\n' "${wdr_phy_path##*/}" \
+                    "$wdr_dt" "$wdr_compatible" >>"$wdr_out/sysfs.log"
+                break
+            fi
+            wdr_parent=${wdr_parent%/*}
+        done
+    done
     for n in /sys/class/net/*; do
         [ -e "$n" ] || continue
-        i="$(basename "$n")"
+        [ -e "$n/phy80211" ] || [ -d "$n/wireless" ] || continue
+        i="${n##*/}"
         marker="$i:"
-
-        if [ -d "$n/wireless" ]; then
-            marker="$marker wireless-dir=yes"
-        fi
-        if [ -e "$n/phy80211" ]; then
-            marker="$marker phy80211=yes"
-        fi
-
+        for wdr_property in address addr_assign_type flags operstate; do
+            wdr_value=$(cat "$n/$wdr_property" 2>/dev/null || printf '%s' unavailable)
+            marker="$marker $wdr_property=$wdr_value"
+        done
+        wdr_driver=$(readlink -f "$n/device/driver" 2>/dev/null || true)
+        wdr_phy=$(readlink -f "$n/phy80211" 2>/dev/null || true)
         dev_path="$(readlink -f "$n/device" 2>/dev/null || true)"
-        log_info "[wireless-marker] $marker ${dev_path:-<no-device-path>}"
+        printf '%s driver=%s phy=%s device=%s\n' "$marker" \
+            "${wdr_driver:-unbound}" "${wdr_phy:-unavailable}" "${dev_path:-unavailable}" >>"$wdr_out/sysfs.log"
     done
-
-    log_info "--- rfkill list ---"
-    rfkill list 2>/dev/null || true
+    for wdr_radio in /sys/class/rfkill/*; do
+        [ -r "$wdr_radio/type" ] || continue
+        [ "$(cat "$wdr_radio/type")" = wlan ] || continue
+        printf 'rfkill=%s name=%s soft=%s hard=%s\n' "${wdr_radio##*/}" \
+            "$(cat "$wdr_radio/name" 2>/dev/null)" "$(cat "$wdr_radio/soft" 2>/dev/null)" \
+            "$(cat "$wdr_radio/hard" 2>/dev/null)" >>"$wdr_out/sysfs.log"
+    done
+    log_file_with_label WIFI-SYSFS "$wdr_out/sysfs.log" 80
+    return 0
 }
 
 # Emit a compact WiFi debug bundle to stdout using existing DT and runtime
@@ -801,15 +995,39 @@ wifi_verify_family_modules() {
     esac
 }
 
-# Check kernel logs and runtime wireless state for evidence that WiFi firmware
-# was consumed by the driver. Returns success when firmware load/use evidence exists.
-wifi_firmware_loaded() {
+# wifi_firmware_loaded <family> [log-tag] [timeout-seconds]
+# Poll for a PHY bound to the selected family without restarting hardware.
+# Returns 0 when ready, 1 on timeout and 2 for invalid input or interrupted wait.
+# Diagnostics go to stderr. Callers must validate retained kernel health too.
+wifi_firmware_loaded() (
+    wifi_phy_limit="${3:-60}"
+    if ! is_unsigned_number "$wifi_phy_limit" ||
+       ! [ "$wifi_phy_limit" -gt 0 ] 2>/dev/null ||
+       ! [ "$wifi_phy_limit" -le 3600 ] 2>/dev/null; then
+        log_fail "WiFi readiness timeout must be a whole number from 1 to 3600 seconds" >&2
+        return 2
+    fi
+    wifi_phy_limit=$(printf '%s\n' "$wifi_phy_limit" | awk '{ printf "%d", $1 }')
     wifi_phy_started=$(get_monotonic_seconds)
-    while [ "$(($(get_monotonic_seconds) - wifi_phy_started))" -lt 15 ]; do
+    wifi_phy_polls=0
+    wifi_phy_progress=0
+    while :; do
+        wifi_phy_elapsed=$(($(get_monotonic_seconds) - wifi_phy_started))
         if wifi_family_has_phy "$1"; then
+            log_info "[WIFI-READINESS] family=$1 status=ready elapsed=${wifi_phy_elapsed}s timeout=${wifi_phy_limit}s" >&2
             return 0
         fi
-        sleep 1
+        # Bound the poll count too if no usable monotonic clock is exposed.
+        if [ "$wifi_phy_elapsed" -ge "$wifi_phy_limit" ] ||
+           [ "$wifi_phy_polls" -ge "$wifi_phy_limit" ]; then
+            log_fail "[WIFI-READINESS] family=$1 status=timeout elapsed=${wifi_phy_elapsed}s timeout=${wifi_phy_limit}s, no bound wireless PHY appeared" >&2
+            return 1
+        fi
+        if [ "$wifi_phy_polls" -ge "$wifi_phy_progress" ]; then
+            log_info "[WIFI-READINESS] family=$1 status=waiting elapsed=${wifi_phy_elapsed}s timeout=${wifi_phy_limit}s" >&2
+            wifi_phy_progress=$((wifi_phy_polls + 10))
+        fi
+        sleep 1 || return 2
+        wifi_phy_polls=$((wifi_phy_polls + 1))
     done
-    return 1
-}
+)

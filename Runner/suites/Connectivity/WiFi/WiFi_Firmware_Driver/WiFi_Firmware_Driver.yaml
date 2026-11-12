@@ -7,10 +7,13 @@ metadata:
   scope:
     - functional
 
+params:
+  WAIT_TIMEOUT: 60
+
 run:
   steps:
     - REPO_PATH=$PWD
     - cd Runner/suites/Connectivity/WiFi/WiFi_Firmware_Driver
-    - ./run.sh || true
+    - ./run.sh --wait-timeout "${WAIT_TIMEOUT}" || true
     - $REPO_PATH/Runner/utils/send-to-lava.sh WiFi_Firmware_Driver.res
 

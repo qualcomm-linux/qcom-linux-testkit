@@ -43,7 +43,7 @@ RES_FILE="$SCRIPT_DIR/$TESTNAME.res"
 TQFTP_TIMEOUT="${TQFTP_TIMEOUT:-10}"
 TQFTP_STATE_DIR="${TQFTP_STATE_DIR:-/var/lib/tqftpserv}"
 TQFTP_E2E_ENABLE="${TQFTP_E2E_ENABLE:-1}"
-RESULT_DIR="$SCRIPT_DIR/results/$TESTNAME/run-$(date '+%Y%m%d-%H%M%S')-$$"
+RESULT_DIR="$PWD/results/$TESTNAME/run-$(date '+%Y%m%d-%H%M%S')-$$"
 TOPOLOGY_FILE="$RESULT_DIR/qrtr_lookup.log"
 REQUEST_REPORT="$RESULT_DIR/request_markers.log"
 TQFTP_CORE_UNVERIFIED=0
@@ -347,20 +347,36 @@ fi
 export KERNEL_LOG_JOURNAL_FALLBACK=1
 scan_dmesg_errors \
     "$RESULT_DIR/kernel" \
-    'tqftp|qrtr|qcom_glink|glink|rpmsg|remoteproc' \
+    'tqftp[^[:space:]:]*|qrtr[^[:space:]:]*|qcom_glink[^[:space:]:]*|glink[^[:space:]:]*|rpmsg[^[:space:]:]*|remoteproc|qcom_q6v5[^[:space:]:]*' \
     'endpoint is not connected'
 dmesg_rc=$?
 if [ "${DMESG_ACCESS_STATUS:-unavailable}" != "available" ]; then
+    TQFTP_CORE_UNVERIFIED=1
     test_result_record "SKIP" "Kernel log access is unavailable for TQFTP health validation, status=${DMESG_ACCESS_STATUS:-unknown} provider=${DMESG_ACCESS_PROVIDER:-none} rc=${DMESG_ACCESS_RC:-unknown} artifact=$RESULT_DIR/kernel/dmesg_access.log"
-elif [ "$dmesg_rc" -eq 0 ]; then
-    log_file_with_label "TQFTP-KERNEL-ERROR" "$RESULT_DIR/kernel/dmesg_errors.log" 25
-    test_result_record "FAIL" "TQFTP, QRTR, or remoteproc kernel errors were detected, artifact=$RESULT_DIR/kernel/dmesg_errors.log"
 else
-    test_result_record "PASS" "No persistent TQFTP, QRTR, or remoteproc kernel errors were found"
+    qrtr_classify_kernel_failures "$RESULT_DIR/kernel"
+    dmesg_rc=$?
+    if [ -s "$RESULT_DIR/kernel/remoteproc_errors.log" ]; then
+        log_warn "DSP/modem platform faults were captured, inspect remoteproc suites independently of the local TQFTP transfer"
+        log_file_with_label "TQFTP-PLATFORM-ERROR" "$RESULT_DIR/kernel/remoteproc_errors.log" 25
+    fi
+    case "$dmesg_rc" in
+        0)
+            log_file_with_label "TQFTP-KERNEL-ERROR" "$RESULT_DIR/kernel/qrtr_failures.log" 25
+            test_result_record "FAIL" "TQFTP or QRTR/GLINK/RPMSG transport errors were detected, artifact=$RESULT_DIR/kernel/qrtr_failures.log"
+            ;;
+        1)
+            test_result_record "PASS" "No attributable TQFTP or QRTR/GLINK/RPMSG transport errors were found"
+            ;;
+        *)
+            TQFTP_CORE_UNVERIFIED=1
+            test_result_record "SKIP" "TQFTP transport kernel health could not be classified, inspect retained kernel evidence"
+            ;;
+    esac
 fi
 
 if [ "$TEST_RESULT_FAIL_COUNT" -eq 0 ] && [ "$TQFTP_CORE_UNVERIFIED" -eq 1 ]; then
-    test_result_finish "SKIP" "$TESTNAME SKIP: TQFTP is active but its required QRTR service advertisement could not be verified"
+    test_result_finish "SKIP" "$TESTNAME SKIP: TQFTP is active but required QRTR advertisement or kernel health evidence is unverified"
 fi
 
 test_result_finish
