@@ -295,11 +295,19 @@ selection is required by the fixture.
 ## Runtime topology selection
 
 Base audio validates image-provided topology only when the active DT declares
-a q6apm dependency. Selection uses the registered ALSA card driver when present,
-then an exact matching sound-card DT binding directory. This is a discovery
-hint, the DT compatible and actual ALSA driver name can differ. Firmware symlinks that
-resolve to the same asset do not create an ambiguity. Distinct unresolved assets,
-an empty file, or the actual driver's missing topology still fail. The registered
-card check continues to validate the kernel's exact driver/model firmware name.
+a q6apm dependency. The matching registered ALSA card supplies the driver name,
+and its sound-card DT supplies the model. The required firmware is exactly
+`qcom/<ALSA-driver>/<DT-model>-tplg.bin`, using the existing firmware-root and
+compression precedence. Other directories containing the same basename are
+irrelevant. A DT compatible is not used to guess the ALSA driver name.
+
+Before that card registers, exact topology validation is reported as pending.
+Functional suites can start the image-provisioned DSP and use the existing
+bounded ALSA card/PCM wait. The registered card's exact topology is checked
+before ALSA stream preparation. Passive card registration keeps its configured
+wait and never starts a DSP. Pending discovery is not proof that a topology is
+provisioned. A required card that fails to register follows the existing failure
+policy, and a missing or empty kernel-selected asset fails validation.
+
 No SoC mapping, topology copy, download or package-policy change is introduced.
 Direct-codec and overlay paths retain their existing applicability checks.

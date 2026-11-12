@@ -4432,13 +4432,10 @@ audio_alsa_card_driver() {
 }
 
 # audio_topology_for_dt_model <model> [sound-card-DT-node]
-# Before ALSA registers, discover the installed driver directory containing the
-# exact DT-model topology basename. Print its nonempty image-provided path.
-# Prefer the registered card's driver, then an exact DT binding directory match.
-# A compatible is only a pre-registration hint, its name can differ from the
-# ALSA driver. Registration validates the actual driver's exact firmware path.
-# Canonical aliases are one asset, unrelated ambiguous assets remain failures.
-# Use find_image_firmware precedence. Diagnostics go to stderr, path to stdout.
+# Print the exact kernel driver/model topology for the matching registered card.
+# Return 4 when registration has not exposed the driver, 1 for invalid identity
+# or a missing/empty selected asset. A DT compatible does not name the ALSA
+# driver. Use find_image_firmware, never infer the path from installed copies.
 audio_topology_for_dt_model() {
   atfdm_model="$1"
   atfdm_node="${2:-}"
@@ -4470,77 +4467,8 @@ audio_topology_for_dt_model() {
       return 0
     done
   fi
-  atfdm_release="$(uname -r)"
-  atfdm_drivers=""
-  for atfdm_root in \
-      "/lib/firmware/$atfdm_release" \
-      "/usr/lib/firmware/$atfdm_release" \
-      /lib/firmware /usr/lib/firmware; do
-    for atfdm_dir in "$atfdm_root"/qcom/*; do
-      [ -d "$atfdm_dir" ] || continue
-      for atfdm_suffix in '' .xz .zst; do
-        if [ -f "$atfdm_dir/$atfdm_model-tplg.bin$atfdm_suffix" ]; then
-          atfdm_drivers="${atfdm_drivers}${atfdm_dir##*/}
-"
-          break
-        fi
-      done
-    done
-  done
-  atfdm_drivers="$(printf '%s' "$atfdm_drivers" | sort -u)"
-  if [ -z "$atfdm_drivers" ]; then
-    printf '%s\n' "Required DT-model topology '$atfdm_model-tplg.bin' is missing from the image firmware qcom/<driver>/ directories, provision it in the build" >&2
-    return 1
-  fi
-  atfdm_binding_drivers=""
-  if [ -n "$atfdm_node" ]; then
-    atfdm_compatibles=$(dt_property_text "$atfdm_node" compatible) || atfdm_compatibles=""
-    for atfdm_compatible in $atfdm_compatibles; do
-      case "$atfdm_compatible" in
-        qcom,*-sndcard)
-          atfdm_binding=${atfdm_compatible#qcom,}
-          atfdm_binding=${atfdm_binding%-sndcard}
-          if printf '%s\n' "$atfdm_drivers" | grep -F -x "$atfdm_binding" >/dev/null; then
-            atfdm_binding_drivers="${atfdm_binding_drivers}${atfdm_binding}
-"
-          fi
-          ;;
-      esac
-    done
-  fi
-  atfdm_binding_drivers=$(printf '%s' "$atfdm_binding_drivers" | sort -u)
-  if [ -n "$atfdm_binding_drivers" ] &&
-     [ "$(printf '%s\n' "$atfdm_binding_drivers" | wc -l)" -eq 1 ]; then
-    atfdm_drivers="$atfdm_binding_drivers"
-  fi
-  if [ "$(printf '%s\n' "$atfdm_drivers" | wc -l)" -ne 1 ]; then
-    atfdm_target=""
-    atfdm_selected=""
-    while IFS= read -r atfdm_driver; do
-      atfdm_path=$(find_image_firmware "qcom/$atfdm_driver/$atfdm_model-tplg.bin") || return 1
-      [ -s "$atfdm_path" ] || return 1
-      atfdm_canonical=$(readlink -f "$atfdm_path") || return 1
-      if [ -n "$atfdm_target" ] && [ "$atfdm_target" != "$atfdm_canonical" ]; then
-        printf '%s\n' "Ambiguous image topology assets for DT model '$atfdm_model': $atfdm_drivers. Check the active sound DT and ALSA driver." >&2
-        return 1
-      fi
-      atfdm_target="$atfdm_canonical"
-      atfdm_selected="$atfdm_path"
-    done <<EOF
-$atfdm_drivers
-EOF
-    printf '%s\n' "$atfdm_selected"
-    return 0
-  fi
-  if ! atfdm_path=$(find_image_firmware "qcom/$atfdm_drivers/$atfdm_model-tplg.bin"); then
-    printf '%s\n' "Required topology 'qcom/$atfdm_drivers/$atfdm_model-tplg.bin' is missing from the image, provision the selected driver/model asset in the build" >&2
-    return 1
-  fi
-  if [ ! -s "$atfdm_path" ]; then
-    printf '%s\n' "Required audio topology is empty: $atfdm_path, provision a valid topology in the build" >&2
-    return 1
-  fi
-  printf '%s\n' "$atfdm_path"
+  printf '%s\n' "Audio topology pending: DT=$atfdm_node model=$atfdm_model, waiting for the matching ALSA card to expose its kernel-selected driver" >&2
+  return 4
 }
 
 # audio_dt_fit_candidates
@@ -4787,9 +4715,9 @@ audio_dt_fit_preflight() {
 
 # audio_base_topology_preflight
 # Discover enabled sound cards through runtime DT platform sound-dai links,
-# before any ALSA card exists. Print validated topology paths, diagnostics to
-# stderr. Return 0 when all q6apm dependencies are provisioned, 2 when none are
-# declared, 3 when DT is unavailable, and 1 for an unmet topology requirement.
+# before any ALSA card exists. Print only validated paths, diagnostics to stderr.
+# Return 0 when all q6apm assets are validated, 4 while matching cards are pending,
+# 2 when none are declared, 3 when DT is unavailable, 1 for an unmet requirement.
 audio_base_topology_preflight() {
   abtp_root="$(dt_runtime_root)" || return 3
   abtp_discovery_rc=0
@@ -4810,19 +4738,34 @@ audio_base_topology_preflight() {
       done | sort -u
   )"
   abtp_paths=""
+  abtp_pending=0
   while IFS= read -r abtp_card; do
     [ -n "$abtp_card" ] || continue
     audio_dt_requires_topology "$abtp_card" || continue
     abtp_model="$(dt_property_text "$abtp_card" model)"
-    abtp_path="$(audio_topology_for_dt_model "$abtp_model" "$abtp_card")" || return 1
-    printf '%s\n' "Audio topology preflight: DT=$abtp_card model=$abtp_model file=$abtp_path, exact ALSA driver path will be checked after card registration" >&2
+    abtp_path_rc=0
+    abtp_path="$(audio_topology_for_dt_model "$abtp_model" "$abtp_card")" || abtp_path_rc=$?
+    case "$abtp_path_rc" in
+      0)
+        ;;
+      4)
+        abtp_pending=1
+        continue
+        ;;
+      *)
+        return 1
+        ;;
+    esac
+    printf '%s\n' "Audio topology preflight: DT=$abtp_card model=$abtp_model file=$abtp_path, kernel-selected ALSA driver path validated" >&2
     abtp_paths="${abtp_paths}${abtp_path}
 "
   done <<EOF
 $abtp_cards
 EOF
-  [ -n "$abtp_paths" ] || return 2
   printf '%s' "$abtp_paths"
+  [ "$abtp_pending" -eq 0 ] || return 4
+  [ -n "$abtp_paths" ] || return 2
+  return 0
 }
 
 # audio_wait_for_capture_payload <WAV> <owner-pid> <seconds>
@@ -5040,8 +4983,9 @@ EOF
 }
 
 # Check the audio-bearing remoteproc before audio tests begin. A matching
-# remoteproc needs image-provided firmware and topology evidence before an
-# offline instance is started. Return 2 when no applicable remoteproc exists.
+# remoteproc needs image-provided firmware before startup. Exact q6apm topology
+# validation waits for its ALSA driver identity. Legacy layouts retain their
+# adjacent-topology check. Return 2 when no applicable remoteproc exists.
 audio_prepare_audio_remoteproc() {
   AUDIO_REMOTE_PROC_REASON=""
   AUDIO_REMOTE_PROC_STARTED=0
@@ -5124,13 +5068,15 @@ audio_prepare_audio_remoteproc() {
       arpr_topology_path="$(audio_base_topology_preflight)"
       arpr_topology_rc=$?
       if [ "$arpr_topology_rc" -eq 1 ]; then
-        AUDIO_REMOTE_PROC_REASON="required base audio topology is missing, empty or ambiguous, see the runtime DT-model diagnostic above"
+        AUDIO_REMOTE_PROC_REASON="required kernel-selected base audio topology is missing, empty or invalid, see the runtime DT-model diagnostic above"
         export AUDIO_REMOTE_PROC_REASON
         return 1
       fi
     fi
     if [ "$arpr_topology_rc" -eq 0 ]; then
       :
+    elif [ "$arpr_topology_rc" -eq 4 ]; then
+      arpr_topology_path="pending ALSA registration, exact driver/model topology validation follows"
     elif [ "$arpr_is_shikra_modem" -eq 1 ]; then
       if [ "${AUDIO_OVERLAY_ACTIVE:-${AUDIO_OVERLAY_REQUESTED:-0}}" -eq 1 ]; then
         arpr_topology_path="managed-overlay, base ALSA topology check not applicable"
@@ -7541,6 +7487,21 @@ audio_wait_for_alsa_registration() {
         log_info "ALSA $awfar_direction PCM registration is ready"
         if [ -n "${LOGDIR:-}" ]; then
           audio_collect_remoteproc_diagnostics "$LOGDIR/remoteproc-preflight" || return 1
+        fi
+        if [ "${AUDIO_OVERLAY_ACTIVE:-${AUDIO_OVERLAY_REQUESTED:-0}}" -eq 0 ]; then
+          awfar_topology_rc=0
+          audio_base_topology_preflight >/dev/null || awfar_topology_rc=$?
+          case "$awfar_topology_rc" in
+            1)
+              AUDIO_REMOTE_PROC_REASON="ALSA $awfar_direction PCM is present but required q6apm topology validation failed, check matching sound-card registration and the kernel-selected driver/model asset"
+              export AUDIO_REMOTE_PROC_REASON
+              log_fail "$AUDIO_REMOTE_PROC_REASON"
+              return 1
+              ;;
+            4)
+              log_info "Topology validation for unregistered cards remains pending, the selected ALSA card will be checked before stream preparation"
+              ;;
+          esac
         fi
         return 0
       fi
