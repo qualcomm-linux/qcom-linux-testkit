@@ -10,13 +10,13 @@ The test script performs these functional checks:
    - Validates presence of `CONFIG_IOMMU_SUPPORT` and `CONFIG_ARM_SMMU*` entries in `/proc/config.gz`.
 
 2. **Driver Loading**:
-   - Confirms SMMU/IOMMU-related drivers are loaded via `/proc/modules`.
+   - Confirms an IOMMU in `/sys/class/iommu` has a bound driver (built in or module).
 
 3. **Device Tree Nodes**:
    - Verifies IOMMU/SMMU-related nodes in `/proc/device-tree`.
 
 4. **Runtime Verification**:
-   - Checks `dmesg` for any runtime IOMMU initialization or fault logs.
+   - Confirms devices are attached: `/sys/kernel/iommu_groups` is not empty.
 
 ## How to Run
 
@@ -28,7 +28,7 @@ cd suites/Kernel/FunctionalArea/IOMMU_Validation
 
 ## Prerequisites
 
-- `dmesg`, `grep`, `zgrep`, `lsmod` must be available
+- `grep` and `zgrep` must be available
 - Root access may be required for complete validation
 
 ## Result Format
