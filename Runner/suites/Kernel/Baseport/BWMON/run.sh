@@ -54,6 +54,7 @@ log_info "$initial_votes"
 
 log_info "Running bw_mem tool..." 
 bw_mem 4000000000 frd &
+bw_pid=$!
 
 sleep 2
 
@@ -61,7 +62,7 @@ log_info "Vote check while bw_mem tool is running:"
 final_votes=$(extract_votes)
 log_info "$final_votes"
 
-wait
+wait "$bw_pid"
 
 log_info "Comparing votes"
 
