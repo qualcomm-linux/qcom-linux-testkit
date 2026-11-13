@@ -12686,13 +12686,87 @@ is_bounded_positive_integer() {
 }
 
 # test_require_commands <command>...
-# Report absent image tools without installing packages or changing services.
+# Recover mapped distro utilities, preserving image-only and explicit-path policy.
+# Package failures record FAIL, unavailable or disabled prerequisites record SKIP.
 test_require_commands() {
-    local tool missing=0
+    local tool missing=0 os_id provider packages dependency_log dependency_rc
+    local PKG_APT_UPDATED_MARK PKG_APT_UPGRADED_MARK
+    local PKG_RPM_UPDATED_MARK PKG_RPM_UPGRADED_MARK
     for tool in "$@"; do
-        if ! command -v "$tool" >/dev/null 2>&1; then
-            test_result_record SKIP "Image-provided utility is missing: $tool"
+        if command -v "$tool" >/dev/null 2>&1; then
+            continue
+        fi
+        case " ${TEST_RUN_FAILED_DEPENDENCIES:-} " in
+            *" $tool "*)
+                log_info "Utility=$tool recovery already failed in this run, retaining FAIL without another transaction"
+                missing=1
+                continue
+                ;;
+        esac
+        case "$tool" in
+            */*)
+                test_result_record SKIP "Requested executable is unavailable: $tool, provide the executable at this path"
+                missing=1
+                continue
+                ;;
+        esac
+        if [ "${TESTKIT_IMAGE_ONLY:-0}" = 1 ] ||
+           [ "${CHECK_DEPS_RECOVER:-1}" != 1 ] ||
+           ! command -v pkg_ensure_command >/dev/null 2>&1; then
+            test_result_record SKIP "Utility=$tool is missing and package recovery is disabled, provide it in the image or PATH"
             missing=1
+            continue
+        fi
+        os_id=$(pkg_detect_os_id)
+        if ! pkg_package_recovery_supported_os "$os_id"; then
+            test_result_record SKIP "Image-provided utility=$tool is missing on os=$os_id, package installation is not enabled"
+            missing=1
+            continue
+        fi
+        if ! pkg_check_dependencies_recover_enabled || ! pkg_can_install; then
+            test_result_record SKIP "Utility=$tool is missing on os=$os_id, recovery requires root and enabled provider recovery/auto_install settings"
+            missing=1
+            continue
+        fi
+        provider=$(pkg_active_provider)
+        case "$provider" in
+            apt|rpm)
+                ;;
+            *)
+                test_result_record SKIP "Utility=$tool is missing on os=$os_id, provider=$provider cannot recover distro packages"
+                missing=1
+                continue
+                ;;
+        esac
+        packages=$(pkg_lookup_packages_for_command "$tool" || true)
+        if [ -z "$packages" ]; then
+            test_result_record SKIP "Utility=$tool is missing on os=$os_id with no verified package mapping, provide the installed executable or configure pkg_command_map.conf"
+            missing=1
+            continue
+        fi
+        # Keep provider session markers and retained transaction output in CWD.
+        PKG_APT_UPDATED_MARK="${TEST_RUN_DIR:-$PWD}/.apt-updated"
+        # shellcheck disable=SC2034 # Consumed by the separately sourced package provider.
+        PKG_APT_UPGRADED_MARK="${TEST_RUN_DIR:-$PWD}/.apt-upgraded"
+        # shellcheck disable=SC2034 # Consumed by the separately sourced package provider.
+        PKG_RPM_UPDATED_MARK="${TEST_RUN_DIR:-$PWD}/.rpm-updated"
+        # shellcheck disable=SC2034 # Consumed by the separately sourced package provider.
+        PKG_RPM_UPGRADED_MARK="${TEST_RUN_DIR:-$PWD}/.rpm-upgraded"
+        dependency_log=$(mktemp "${TEST_RUN_DIR:-$PWD}/dependency.XXXXXX.log") || {
+            test_result_record FAIL "Cannot create package recovery evidence under ${TEST_RUN_DIR:-$PWD}"
+            missing=1
+            continue
+        }
+        log_info "Recovering utility=$tool os=$os_id packages=$packages, artifact=$dependency_log"
+        pkg_ensure_command "$tool" "$packages" >"$dependency_log" 2>&1
+        dependency_rc=$?
+        log_file_with_label PACKAGE-RECOVERY "$dependency_log" 80
+        if [ "$dependency_rc" -ne 0 ] || ! command -v "$tool" >/dev/null 2>&1; then
+            test_result_record FAIL "Package recovery failed for utility=$tool packages=$packages os=$os_id status=$dependency_rc, inspect configured repositories and artifact=$dependency_log"
+            TEST_RUN_FAILED_DEPENDENCIES="${TEST_RUN_FAILED_DEPENDENCIES:+$TEST_RUN_FAILED_DEPENDENCIES }$tool"
+            missing=1
+        else
+            log_info "Recovered utility=$tool through provider=$provider"
         fi
     done
     [ "$missing" -eq 0 ]
@@ -12732,6 +12806,7 @@ test_run_start() {
         test_result_finish
     }
     TEST_RUN_CLEANUP=""
+    TEST_RUN_FAILED_DEPENDENCIES=""
     TEST_RUN_CLEANUP_KERNEL_PATTERN=""
     TEST_RUN_CLEANUP_LOG_SEQUENCE=0
     TEST_RUN_LOAD_PIDS=""
