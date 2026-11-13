@@ -47,12 +47,12 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout trusted controller
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
 
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         with:
           python-version: '3.11'
 
@@ -69,7 +69,7 @@ jobs:
 
       - name: Download prepared request
         if: steps.request.outputs.prepared == 'true'
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           github-token: ${{ github.token }}
           run-id: ${{ steps.request.outputs.run_id }}
@@ -87,7 +87,7 @@ jobs:
 
       - name: Save results and evidence
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: lava-results-${{ inputs.validation_run }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
