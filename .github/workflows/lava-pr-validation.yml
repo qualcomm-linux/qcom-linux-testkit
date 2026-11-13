@@ -62,25 +62,25 @@ jobs:
       VALIDATION_RUN_ID: ${{ github.run_id }}
     steps:
       - name: Checkout trusted controller
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
 
       - name: Checkout meta-qcom PR templates
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: qualcomm-linux/lava-test-plans
           ref: 188770122773733a46370b71dab12b5a1023c630
           path: lava-test-plans
           persist-credentials: false
 
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         with:
           python-version: '3.11'
 
       - name: Install controller dependencies
-        run: python -m pip install -r ci/lava-pr-requirements.txt ./lava-test-plans
+        run: python -m pip install -r .github/ci/lava-pr-requirements.txt ./lava-test-plans
 
       - name: Prepare mandatory baseline and PR additions
         env:
@@ -102,7 +102,7 @@ jobs:
       # Publish before submitting. The independent finalizer can recover IDs
       # from LAVA metadata even if this runner disappears during a POST.
       - name: Save immutable request
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: lava-request-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
@@ -121,7 +121,7 @@ jobs:
 
       - name: Save controller progress
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: lava-progress-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
@@ -140,7 +140,7 @@ jobs:
       contents: read
       actions: read
       issues: write
-    uses: ./.github/workflows/lava-pr-results.yml
+    uses: $/.github/workflows/lava-pr-results.yml
     with:
       validation_run: ${{ github.run_id }}
       validation_attempt: ${{ github.run_attempt }}

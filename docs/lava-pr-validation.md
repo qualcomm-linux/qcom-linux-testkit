@@ -4,7 +4,7 @@
 compile images or run on pushes. Every selected target runs the applicable
 meta-qcom pre-merge groups, then uncovered PR test definitions in the matching
 group. Device exclusions and baseline parameters come from the pinned
-`qualcomm-linux/lava-test-plans` revision in `ci/lava-pr-validation.json`.
+`qualcomm-linux/lava-test-plans` revision in `.github/ci/lava-pr-validation.json`.
 All baseline and added Testkit definitions use the PR repository and full SHA.
 
 ## Configure once
@@ -25,7 +25,7 @@ All baseline and added Testkit definitions use the PR repository and full SHA.
   that lab. Preparation does not establish that a board has passed validation.
 
 OSS invokes QDL through `to: flasher` and `flash.settings`, as kernel-config's
-Yocto validation does. The small template adapter under `ci/lava-oss` uses the
+Yocto validation does. The small template adapter under `.github/ci/lava-oss` uses the
 existing meta-qcom flasher template, preserving media and camera postprocessing.
 It does not use Foundries' direct `to: qdl` action.
 OSS also uses `from: git` with the full PR SHA, since its current schema does
