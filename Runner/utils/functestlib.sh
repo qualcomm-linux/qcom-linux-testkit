@@ -3617,18 +3617,22 @@ bounded_timeout_pid_running() {
     fi
     kill -0 "$1" 2>/dev/null || return 1
     if [ -r "/proc/$1/status" ]; then
-        while read -r btp_key btp_value; do
-            if [ "$btp_key" = "State:" ]; then
-                case "$btp_value" in
-                    Z*|X*)
-                        return 1
-                        ;;
-                esac
-                break
-            fi
-        done <"/proc/$1/status"
+        # An owned process can exit between the readability check and read.
+        # Recheck its lifetime quietly, command status is collected by wait.
+        {
+            while read -r btp_key btp_value; do
+                if [ "$btp_key" = "State:" ]; then
+                    case "$btp_value" in
+                        Z*|X*)
+                            return 1
+                            ;;
+                    esac
+                    break
+                fi
+            done <"/proc/$1/status"
+        } 2>/dev/null
     fi
-    return 0
+    kill -0 "$1" 2>/dev/null
 }
 
 # bounded_timeout_cancel
@@ -12668,3 +12672,996 @@ rng_validate_entropy() (
         return 1
     fi
 )
+
+# ---------- Test lifecycle and captured kernel evidence ----------
+# is_bounded_positive_integer <value> <maximum>
+# Validate bounded positive CLI values before arithmetic or hardware access.
+is_bounded_positive_integer() {
+    case "$1" in
+        ''|*[!0-9]*|0|0*)
+            return 1
+            ;;
+    esac
+    awk -v value="$1" -v maximum="$2" 'BEGIN { exit !(value <= maximum) }'
+}
+
+# test_require_commands <command>...
+# Recover mapped distro utilities, preserving image-only and explicit-path policy.
+# Package failures record FAIL, unavailable or disabled prerequisites record SKIP.
+test_require_commands() {
+    local tool missing=0 os_id provider packages dependency_log dependency_rc
+    local PKG_APT_UPDATED_MARK PKG_APT_UPGRADED_MARK
+    local PKG_RPM_UPDATED_MARK PKG_RPM_UPGRADED_MARK
+    for tool in "$@"; do
+        if command -v "$tool" >/dev/null 2>&1; then
+            continue
+        fi
+        case " ${TEST_RUN_FAILED_DEPENDENCIES:-} " in
+            *" $tool "*)
+                log_info "Utility=$tool recovery already failed in this run, retaining FAIL without another transaction"
+                missing=1
+                continue
+                ;;
+        esac
+        case "$tool" in
+            */*)
+                test_result_record SKIP "Requested executable is unavailable: $tool, provide the executable at this path"
+                missing=1
+                continue
+                ;;
+        esac
+        if [ "${TESTKIT_IMAGE_ONLY:-0}" = 1 ] ||
+           [ "${CHECK_DEPS_RECOVER:-1}" != 1 ] ||
+           ! command -v pkg_ensure_command >/dev/null 2>&1; then
+            test_result_record SKIP "Utility=$tool is missing and package recovery is disabled, provide it in the image or PATH"
+            missing=1
+            continue
+        fi
+        os_id=$(pkg_detect_os_id)
+        if ! pkg_package_recovery_supported_os "$os_id"; then
+            test_result_record SKIP "Image-provided utility=$tool is missing on os=$os_id, package installation is not enabled"
+            missing=1
+            continue
+        fi
+        if ! pkg_check_dependencies_recover_enabled || ! pkg_can_install; then
+            test_result_record SKIP "Utility=$tool is missing on os=$os_id, recovery requires root and enabled provider recovery/auto_install settings"
+            missing=1
+            continue
+        fi
+        provider=$(pkg_active_provider)
+        case "$provider" in
+            apt|rpm)
+                ;;
+            *)
+                test_result_record SKIP "Utility=$tool is missing on os=$os_id, provider=$provider cannot recover distro packages"
+                missing=1
+                continue
+                ;;
+        esac
+        packages=$(pkg_lookup_packages_for_command "$tool" || true)
+        if [ -z "$packages" ]; then
+            test_result_record SKIP "Utility=$tool is missing on os=$os_id with no verified package mapping, provide the installed executable or configure pkg_command_map.conf"
+            missing=1
+            continue
+        fi
+        # Keep provider session markers and retained transaction output in CWD.
+        PKG_APT_UPDATED_MARK="${TEST_RUN_DIR:-$PWD}/.apt-updated"
+        # shellcheck disable=SC2034 # Consumed by the separately sourced package provider.
+        PKG_APT_UPGRADED_MARK="${TEST_RUN_DIR:-$PWD}/.apt-upgraded"
+        # shellcheck disable=SC2034 # Consumed by the separately sourced package provider.
+        PKG_RPM_UPDATED_MARK="${TEST_RUN_DIR:-$PWD}/.rpm-updated"
+        # shellcheck disable=SC2034 # Consumed by the separately sourced package provider.
+        PKG_RPM_UPGRADED_MARK="${TEST_RUN_DIR:-$PWD}/.rpm-upgraded"
+        dependency_log=$(mktemp "${TEST_RUN_DIR:-$PWD}/dependency.XXXXXX.log") || {
+            test_result_record FAIL "Cannot create package recovery evidence under ${TEST_RUN_DIR:-$PWD}"
+            missing=1
+            continue
+        }
+        log_info "Recovering utility=$tool os=$os_id packages=$packages, artifact=$dependency_log"
+        pkg_ensure_command "$tool" "$packages" >"$dependency_log" 2>&1
+        dependency_rc=$?
+        log_file_with_label PACKAGE-RECOVERY "$dependency_log" 80
+        if [ "$dependency_rc" -ne 0 ] || ! command -v "$tool" >/dev/null 2>&1; then
+            test_result_record FAIL "Package recovery failed for utility=$tool packages=$packages os=$os_id status=$dependency_rc, inspect configured repositories and artifact=$dependency_log"
+            TEST_RUN_FAILED_DEPENDENCIES="${TEST_RUN_FAILED_DEPENDENCIES:+$TEST_RUN_FAILED_DEPENDENCIES }$tool"
+            missing=1
+        else
+            log_info "Recovered utility=$tool through provider=$provider"
+        fi
+    done
+    [ "$missing" -eq 0 ]
+}
+
+# test_run_command [--stdout-only] <label> <command>...
+# Bound a command and retain CWD output, optionally keep stderr out of parsed stdout.
+test_run_command() {
+    local stdout_only=0 label status
+    if [ "$1" = --stdout-only ]; then
+        stdout_only=1
+        shift
+    fi
+    label="$1"
+    shift
+    test_result_valid_name "$label" || return 3
+    log_info "[$label] command=$* timeout=${TEST_RUN_TIMEOUT}s"
+    if [ "$stdout_only" = 1 ]; then
+        run_with_managed_timeout "$TEST_RUN_TIMEOUT" "$TEST_RUN_DIR" "$label" \
+            "$@" >"$TEST_RUN_DIR/$label.log" 2>"$TEST_RUN_DIR/$label.stderr.log"
+        status=$?
+        log_file_with_label "$label-diagnostics" "$TEST_RUN_DIR/$label.stderr.log" 40
+    else
+        run_with_managed_timeout "$TEST_RUN_TIMEOUT" "$TEST_RUN_DIR" "$label" \
+            "$@" >"$TEST_RUN_DIR/$label.log" 2>&1
+        status=$?
+    fi
+    log_file_with_label "$label" "$TEST_RUN_DIR/$label.log" 40
+    return "$status"
+}
+
+# test_run_start
+# Create fresh evidence and preserve bootstrap stdout cleanup on all exits.
+test_run_start() {
+    TEST_RUN_DIR=$(test_create_run_directory "$PWD/results/$TESTNAME") || {
+        test_result_record FAIL "Cannot create results under CWD=$PWD"
+        test_result_finish
+    }
+    TEST_RUN_CLEANUP=""
+    TEST_RUN_FAILED_DEPENDENCIES=""
+    TEST_RUN_CLEANUP_KERNEL_PATTERN=""
+    TEST_RUN_CLEANUP_LOG_SEQUENCE=0
+    TEST_RUN_LOAD_PIDS=""
+    TEST_RUN_RACE_PIDS=""
+    TEST_RUN_FINISHED=0
+    TEST_RUN_VALIDATED=0
+    trap 'test_run_exit "$?"' EXIT
+    trap 'test_run_interrupt' INT TERM
+    log_info "Test=$TESTNAME kernel=$(uname -r) arch=$(uname -m) artifacts=$TEST_RUN_DIR"
+}
+
+# test_run_cleanup
+# Stop owned workers before restoration, retaining unfinished cleanup for retry.
+# An opted-in kernel pattern captures every cleanup attempt, including deferred restoration.
+test_run_cleanup() {
+    local pid remaining="" failed=0 evidence_failed=0 cleanup_label=""
+    if [ -n "${TEST_RUN_CLEANUP_KERNEL_PATTERN:-}" ]; then
+        TEST_RUN_CLEANUP_LOG_SEQUENCE=$((${TEST_RUN_CLEANUP_LOG_SEQUENCE:-0} + 1))
+        cleanup_label="cleanup-$TEST_RUN_CLEANUP_LOG_SEQUENCE"
+        if ! test_capture_kernel_log "$cleanup_label-before"; then
+            test_result_record FAIL "Cleanup requires readable kernel evidence before restoration, artifacts=$TEST_RUN_DIR/$cleanup_label-before"
+            evidence_failed=1
+        fi
+    fi
+    if ! managed_timeout_cancel_bounded 2; then
+        test_result_record FAIL "Managed command cleanup incomplete, restoration deferred"
+        failed=1
+    fi
+    for pid in $TEST_RUN_LOAD_PIDS; do
+        if ! kill_process "$pid"; then
+            remaining="$remaining $pid"
+            test_result_record FAIL "Owned workload PID=$pid could not be stopped before restoration"
+            failed=1
+        fi
+    done
+    TEST_RUN_LOAD_PIDS="${remaining# }"
+    remaining=""
+    for pid in ${TEST_RUN_RACE_PIDS:-}; do
+        if ! kill_process "$pid"; then
+            remaining="$remaining $pid"
+            test_result_record FAIL "Owned hotplug worker PID=$pid could not be stopped before restoration"
+            failed=1
+        fi
+    done
+    TEST_RUN_RACE_PIDS="${remaining# }"
+    if [ "$failed" -eq 0 ] && [ -n "$TEST_RUN_CLEANUP" ]; then
+        if "$TEST_RUN_CLEANUP"; then
+            TEST_RUN_CLEANUP=""
+        else
+            test_result_record FAIL "State restoration failed, artifacts=$TEST_RUN_DIR"
+            failed=1
+        fi
+    fi
+    if [ -n "$cleanup_label" ]; then
+        if ! test_capture_kernel_log "$cleanup_label-after"; then
+            test_result_record FAIL "Cleanup requires readable kernel evidence after restoration, artifacts=$TEST_RUN_DIR/$cleanup_label-after"
+            evidence_failed=1
+        fi
+        if ! test_check_kernel_delta "$cleanup_label-before" "$cleanup_label-after" \
+            "$TEST_RUN_CLEANUP_KERNEL_PATTERN"; then
+            test_result_record FAIL "Cleanup kernel evidence is faulty or incomplete, artifacts=$TEST_RUN_DIR/$cleanup_label-after"
+            evidence_failed=1
+        fi
+    fi
+    [ "$failed" -eq 0 ] && [ "$evidence_failed" -eq 0 ]
+}
+
+# test_run_finish [PASS|FAIL|SKIP] [message]
+# Restore state before choosing the final shared PASS/FAIL/SKIP result.
+# shellcheck disable=SC2120 # Optional status/message are supplied by sourced runners.
+test_run_finish() {
+    if [ "$#" -gt 0 ]; then
+        test_result_record "$1" "$2"
+    fi
+    test_run_cleanup
+    TEST_RUN_FINISHED=1
+    if [ "$TEST_RESULT_FAIL_COUNT" -eq 0 ] && [ "$TEST_RUN_VALIDATED" -eq 0 ]; then
+        test_result_finish SKIP "$TESTNAME SKIP: no selected functional validation completed, see prerequisite messages"
+    fi
+    test_result_finish
+}
+
+# test_run_interrupt
+# Mark interruptions as failures, restore owned state, and publish the result.
+test_run_interrupt() {
+    trap '' INT TERM
+    test_result_record FAIL "Test interrupted before validation completed"
+    # shellcheck disable=SC2119 # Interrupts finalize counters without CLI arguments.
+    test_run_finish
+}
+
+# test_run_exit <exit-status>
+# Preserve failed early exits and the repository's stdout capture cleanup.
+test_run_exit() {
+    local status="$1" unexpected=0
+    trap - EXIT
+    if [ "$TEST_RUN_FINISHED" -ne 1 ]; then
+        test_run_cleanup
+        test_result_record FAIL "Unexpected exit before validation completed, status=$status"
+        TEST_RUN_FINISHED=1
+        unexpected=1
+    fi
+    # Retry pending cleanup once on final exit, without clearing earlier FAIL.
+    if [ -n "$TEST_RUN_CLEANUP$TEST_RUN_LOAD_PIDS${TEST_RUN_RACE_PIDS:-}${MANAGED_TIMEOUT_CMD_PID:-}${MANAGED_TIMEOUT_WATCHER_PID:-}" ]; then
+        test_run_cleanup || true
+    fi
+    if [ "$unexpected" -eq 1 ]; then
+        # Finalization exits, keep the parent alive for stdout capture cleanup.
+        (test_result_finish)
+    fi
+    if [ "${__RUN_STDOUT_ACTIVE:-0}" = 1 ]; then
+        # Repository bootstrap API, retain its externally defined name.
+        _runner_stdout_cleanup
+    fi
+    if [ "$unexpected" -eq 1 ]; then
+        exit 0
+    fi
+}
+
+# test_capture_kernel_log <label>
+# Keep snapshots through the shared provider, never directly invoke dmesg.
+test_capture_kernel_log() {
+    # Existing provider policy, do not require systemd when dmesg is readable.
+    # shellcheck disable=SC2034 # Consumed dynamically by scan_dmesg_errors.
+    local KERNEL_LOG_JOURNAL_FALLBACK=1
+    scan_dmesg_errors "$TEST_RUN_DIR/$1" '.*' '^$' || true
+    [ "${DMESG_ACCESS_STATUS:-unavailable}" = available ]
+}
+
+# test_check_kernel_delta <before-label> <after-label> <pattern>
+# Extract appended records using an exact retained baseline, including ring rotation.
+# Keep partial newer evidence on lost baselines, return 2 without claiming clean health.
+test_check_kernel_delta() {
+    local before="$TEST_RUN_DIR/$1/dmesg_snapshot.log"
+    local after="$TEST_RUN_DIR/$2/dmesg_snapshot.log"
+    local diagnostics="$TEST_RUN_DIR/$2/kernel_delta_status.log" delta_status match_status
+    if [ ! -r "$before" ] || [ ! -s "$before" ] ||
+        [ ! -r "$after" ] || [ ! -s "$after" ]; then
+        test_result_record SKIP "Kernel health evidence unavailable, artifacts=$TEST_RUN_DIR/$2"
+        return 2
+    fi
+    if ! printf '%s' '' >"$diagnostics"; then
+        test_result_record FAIL "Cannot retain kernel comparison diagnostics under $TEST_RUN_DIR/$2"
+        return 1
+    fi
+    # Compare the complete captured records, not the scanner's filtered errors.
+    # Prefix matching is linear even when many records contain repeated text.
+    awk -v diagnostics="$diagnostics" '
+        BEGIN { last_time = -1 }
+        function timestamp(line, value) {
+            if (!match(line, /^\[[[:space:]]*[0-9]+([.][0-9]+)?\]/)) return -1
+            value = substr(line, RSTART, RLENGTH)
+            gsub(/[\[\][:space:]]/, "", value)
+            return value + 0
+        }
+        FILENAME == ARGV[1] {
+            sub(/\r$/, "")
+            baseline[++before_count] = $0
+            known[$0] = 1
+            value = timestamp($0)
+            if (value > last_time) last_time = value
+            next
+        }
+        {
+            sub(/\r$/, "")
+            captured[++after_count] = $0
+        }
+        END {
+            if (!before_count || !after_count) exit 3
+            matched = 0
+            for (i = 2; i <= after_count; i++) {
+                while (matched && captured[i] != captured[matched + 1]) matched = prefix[matched]
+                if (captured[i] == captured[matched + 1]) matched++
+                prefix[i] = matched
+            }
+            matched = 0
+            for (i = 1; i <= before_count; i++) {
+                while (matched && (matched == after_count || baseline[i] != captured[matched + 1])) matched = prefix[matched]
+                if (baseline[i] == captured[matched + 1]) matched++
+            }
+            # Rotation needs a timestamped record to anchor the retained suffix.
+            anchored = matched == before_count
+            for (i = 1; i <= matched; i++) {
+                if (timestamp(captured[i]) >= 0) anchored = 1
+            }
+            if (matched && anchored) {
+                mode = matched == before_count ? "appended" : "rotated"
+                printf "status=%s before_lines=%d after_lines=%d retained_lines=%d new_lines=%d\n", mode, before_count, after_count, matched, after_count - matched > diagnostics
+                for (i = matched + 1; i <= after_count; i++) print captured[i]
+                exit 0
+            }
+            reason = matched ? "untimestamped-partial-overlap" : "no-exact-overlap"
+            printf "status=unverified reason=%s before_lines=%d after_lines=%d retained_lines=%d baseline_last_time=%s\n", reason, before_count, after_count, matched, last_time > diagnostics
+            print "baseline_tail=" baseline[before_count] >> diagnostics
+            print "capture_head=" captured[1] >> diagnostics
+            # A lost anchor cannot prove health, but must not hide newer faults.
+            newer = 0
+            for (i = 1; i <= after_count; i++) {
+                value = timestamp(captured[i])
+                if (value >= 0) newer = last_time >= 0 && (value > last_time || (value == last_time && !(captured[i] in known)))
+                if (newer) print captured[i]
+            }
+            exit 2
+        }
+    ' "$before" "$after" >"$TEST_RUN_DIR/$2/kernel_delta.log"
+    delta_status=$?
+    log_file_with_label KERNEL-DELTA "$diagnostics" 3
+    if { [ "$delta_status" -ne 0 ] && [ "$delta_status" -ne 2 ]; } ||
+        { [ "$delta_status" -eq 2 ] && ! grep -q '^status=unverified ' "$diagnostics"; }; then
+        test_result_record FAIL "Kernel delta extraction failed, inspect captured snapshots under $TEST_RUN_DIR/$2"
+        return 1
+    fi
+    if grep -Ei "$3" "$TEST_RUN_DIR/$2/kernel_delta.log" \
+        >"$TEST_RUN_DIR/$2/kernel_errors.log"; then
+        log_file_with_label KERNEL-ERROR "$TEST_RUN_DIR/$2/kernel_errors.log" 30
+        test_result_record FAIL "New kernel errors during validation, artifact=$TEST_RUN_DIR/$2/kernel_errors.log"
+        return 1
+    else
+        match_status=$?
+        if [ "$match_status" -ne 1 ]; then
+            test_result_record FAIL "Cannot evaluate kernel fault evidence, inspect $TEST_RUN_DIR/$2"
+            return 1
+        fi
+    fi
+    if [ "$delta_status" -ne 0 ]; then
+        test_result_record SKIP "Kernel baseline continuity is unverified, compare retained snapshots and $diagnostics"
+        return 2
+    fi
+    test_result_record PASS "No new test kernel errors"
+}
+
+# ---------- Remoteproc lifecycle helpers ----------
+# remoteproc_subsystem <dt-node>
+# Identify a DSP family, rejecting radio, mixed identities and thermal auxiliary roles.
+# Prints the family without instance digits, returns 1 for no DSP or 2 for ambiguity.
+remoteproc_subsystem() {
+    local compatible identity family parent parent_family
+    compatible=$(dt_property_text "$1" compatible) || return 1
+    identity=$(printf '%s\n' "$compatible" | awk -v node="$1" '
+        {
+            count_compatible = split(tolower($0), compatibles, /[[:space:]]+/)
+            for (entry = 1; entry <= count_compatible; entry++) {
+                auxiliary = 0
+                n = split(compatibles[entry], tokens, /[^[:alnum:]]+/)
+                for (i = 1; i <= n; i++) {
+                    if (tokens[i] ~ /^(modem|mdsp|mss|mpss|wcss|wcnss|wifi|wlan)$/) radio = 1
+                    if (tokens[i] ~ /^(cooling|thermal)$/) auxiliary = 1
+                }
+                # Interpret only processor tokens, not words in sibling fallbacks.
+                if (compatibles[entry] !~ /(^|[,-])[[:alpha:]]*dsp[0-9]*(-(pas|pil|rproc|remoteproc))?$/) continue
+                if (auxiliary) {
+                    print "[DSP-DT] Auxiliary compatible=" compatibles[entry] " DT=" node > "/dev/stderr"
+                    continue
+                }
+                for (i = 1; i <= n; i++) {
+                    if (tokens[i] ~ /^[[:alpha:]]*dsp[0-9]*$/) {
+                        family = tokens[i]
+                        sub(/[0-9]+$/, "", family)
+                        families[family] = 1
+                        if (compatibles[entry] ~ /-(pas|pil|rproc|remoteproc)$/) processors[family] = 1
+                    }
+                }
+            }
+        }
+        END {
+            for (family in families) { count++; result = family }
+            if (radio || !count) exit 1
+            if (count != 1) exit 2
+            print result "|" (result in processors)
+        }
+    ') || return $?
+    family=${identity%|*}
+    # Preserve processor-owned cooling controls. Thermal compatible roles above
+    # do not require #cooling-cells on the same node as their compatible property.
+    if [ "${identity#*|}" = 1 ] || [ -e "$1/reg" ] ||
+        [ -e "$1/memory-region" ] || [ -e "$1/firmware-name" ]; then
+        printf '%s\n' "$family"
+        return 0
+    fi
+    if [ -e "$1/#cooling-cells" ]; then
+        parent=${1%/*}
+        while [ -n "$parent" ] && [ "$parent" != / ]; do
+            if [ -r "$parent/compatible" ]; then
+                parent_family=$(remoteproc_subsystem "$parent")
+                if [ "$parent_family" = "$family" ]; then
+                    log_info "[DSP-DT] Auxiliary DT=$1 belongs to DSP=$family owner=$parent, no independent remoteproc required" >&2
+                    return 1
+                fi
+            fi
+            parent=${parent%/*}
+        done
+    fi
+    printf '%s\n' "$family"
+}
+
+# remoteproc_select_subsystem <family|dsp>
+# Restrict the existing runtime inventory to enabled DT DSPs and verify registration.
+remoteproc_select_subsystem() {
+    local subsystem="$1" root property node family status path name firmware state owner bound matched
+    : >"$TEST_RUN_DIR/remoteprocs.selected" || return 1
+    root=$(dt_runtime_root) || {
+        test_result_record SKIP "Automatic DSP selection requires readable runtime DT, use --processors for known runtime identities"
+        return 1
+    }
+    if ! find "$root" -type f -name compatible >"$TEST_RUN_DIR/remoteproc-dt-properties"; then
+        test_result_record FAIL "Cannot enumerate runtime DT=$root, no automatic restart allowed"
+        return 1
+    fi
+    : >"$TEST_RUN_DIR/remoteprocs.expected"
+    while IFS= read -r property; do
+        node=${property%/*}
+        dt_node_enabled "$node" || continue
+        family=$(remoteproc_subsystem "$node")
+        status=$?
+        if [ "$status" = 2 ]; then
+            if [ "$subsystem" = dsp ] || dt_property_text "$node" compatible | awk -v family="$subsystem" '
+                BEGIN { pattern = "(^|[,-])" family "[0-9]*(-(pas|pil|rproc|remoteproc))?([[:space:]]|$)" }
+                tolower($0) ~ pattern {found=1}
+                END {exit !found}
+            '; then
+                test_result_record FAIL "Ambiguous DSP compatible identities at DT=$node, no automatic restart allowed"
+            fi
+            continue
+        fi
+        [ "$status" = 0 ] || continue
+        if [ "$subsystem" = dsp ] || [ "$family" = "$subsystem" ]; then
+            printf '%s|%s\n' "$node" "$family" >>"$TEST_RUN_DIR/remoteprocs.expected"
+        fi
+    done <"$TEST_RUN_DIR/remoteproc-dt-properties"
+    : >"$TEST_RUN_DIR/remoteprocs.selected"
+    while IFS='|' read -r path name firmware state; do
+        [ -n "$path" ] || continue
+        owner=$(readlink -f "$path/device" 2>/dev/null)
+        node=$(readlink -f "$owner/of_node" 2>/dev/null)
+        [ -n "$node" ] || continue
+        matched=$(awk -F '|' -v node="$node" '$1 == node {print $2}' "$TEST_RUN_DIR/remoteprocs.expected")
+        [ -n "$matched" ] || continue
+        bound=$(readlink -f "$owner/driver" 2>/dev/null)
+        if [ ! -L "$owner/driver" ] || [ ! -d "$bound" ]; then
+            bound=""
+        fi
+        log_info "DSP selection family=$matched name=$name firmware=$firmware owner=$owner DT=$node driver=${bound:-unbound} state=$state"
+        if [ -z "$bound" ]; then
+            test_result_record FAIL "Enabled DSP=$matched DT=$node has no bound driver, repair image/driver probing"
+        fi
+        printf '%s|%s|%s|%s|%s\n' "$path" "$name" "$firmware" "$state" "$owner" \
+            >>"$TEST_RUN_DIR/remoteprocs.selected"
+    done <"$TEST_RUN_DIR/remoteprocs.raw"
+    while IFS='|' read -r node family; do
+        matched=0
+        while IFS='|' read -r path name firmware state owner; do
+            if [ "$(readlink -f "$owner/of_node" 2>/dev/null)" = "$node" ]; then
+                matched=1
+                break
+            fi
+        done <"$TEST_RUN_DIR/remoteprocs.selected"
+        if [ "$matched" = 0 ]; then
+            test_result_record FAIL "Enabled DSP=$family DT=$node has no registered remoteproc, check kernel driver and probe logs"
+        fi
+    done <"$TEST_RUN_DIR/remoteprocs.expected"
+    if [ ! -s "$TEST_RUN_DIR/remoteprocs.expected" ]; then
+        test_result_record SKIP "No enabled runtime DT DSP matches subsystem=$subsystem, inventory=$TEST_RUN_DIR/remoteprocs.raw"
+    fi
+    [ -s "$TEST_RUN_DIR/remoteprocs.selected" ]
+}
+
+# remoteproc_inventory
+# Reuse runtime enumeration, resolve stable device owners, and select by name/id.
+remoteproc_inventory() {
+    local path name firmware state owner token selected
+    : >"$TEST_RUN_DIR/remoteprocs.raw"
+    list_remoteproc_instances "$TEST_RUN_DIR/remoteprocs.raw" || true
+    : >"$TEST_RUN_DIR/remoteprocs.selected"
+    while IFS='|' read -r path name firmware state; do
+        [ -n "$path" ] || continue
+        owner=$(readlink -f "$path/device" 2>/dev/null)
+        selected=0
+        if [ "$TEST_RUN_PROCESSORS" = auto ]; then
+            selected=1
+        else
+            for token in $(printf '%s\n' "$TEST_RUN_PROCESSORS" | tr ',' ' '); do
+                if [ "$token" = "$name" ] || [ "$token" = "${owner##*/}" ]; then
+                    selected=1
+                fi
+            done
+        fi
+        if [ "$selected" = 1 ]; then
+            printf '%s|%s|%s|%s|%s\n' "$path" "$name" "$firmware" "$state" "$owner" \
+                >>"$TEST_RUN_DIR/remoteprocs.selected"
+        fi
+    done <"$TEST_RUN_DIR/remoteprocs.raw"
+    if [ "$TEST_RUN_PROCESSORS" != auto ]; then
+        for token in $(printf '%s\n' "$TEST_RUN_PROCESSORS" | tr ',' ' '); do
+            if ! awk -F '|' -v token="$token" '
+                $2 == token { found = 1 }
+                { owner = $5; sub(/^.*\//, "", owner); if (owner == token) found = 1 }
+                END { exit !found }
+            ' "$TEST_RUN_DIR/remoteprocs.selected"; then
+                test_result_record FAIL "Requested processor=$token was not registered, artifact=$TEST_RUN_DIR/remoteprocs.raw"
+            fi
+        done
+    fi
+    [ -s "$TEST_RUN_DIR/remoteprocs.selected" ]
+}
+
+
+# remoteproc_channels <remoteproc-path>
+# Snapshot stable RPMsg channel names and bound drivers, preserving multiplicity.
+remoteproc_channels() (
+    owner=$(readlink -f "$1/device") || exit 1
+    for channel in /sys/bus/rpmsg/devices/*; do
+        [ -e "$channel" ] || continue
+        resolved=$(readlink -f "$channel") || continue
+        case "$resolved" in
+            "$owner"/*)
+                ;;
+            *)
+                continue
+                ;;
+        esac
+        name=$(cat "$channel/name" 2>/dev/null)
+        if [ -z "$name" ]; then
+            name=${channel##*/}
+            name=$(printf '%s\n' "$name" | sed 's/^virtio[0-9][0-9]*\.//')
+        fi
+        driver=$(readlink -f "$channel/driver" 2>/dev/null)
+        printf '%s|%s\n' "$name" "${driver##*/}"
+    done | sort
+)
+
+# remoteproc_children <remoteproc-path> <identity-file>
+# Print sorted descendant bindings/registered device endpoints and retain log identities.
+# Resolve ownership before walking sysfs, ignore volatile virtio numbering only.
+# Return 1 on inventory/storage errors, no state changes or kernel reads occur.
+remoteproc_children() (
+    owner=$(readlink -f "$1/device") || exit 1
+    [ -d "$owner" ] || exit 1
+    properties="$TEST_RUN_DIR/${1##*/}-child-properties"
+    records="$TEST_RUN_DIR/${1##*/}-child-records"
+    printf '%s' '' >"$2" || exit 1
+    printf '%s' '' >"$records" || exit 1
+    printf '%s\n' "${owner##*/}" >>"$2" || exit 1
+    find "$owner" -type f -name uevent >"$properties" || exit 1
+    while IFS= read -r property; do
+        device=${property%/*}
+        [ "$device" != "$owner" ] || continue
+        [ -L "$device/subsystem" ] || continue
+        printf '%s\n' "${device##*/}" >>"$2" || exit 1
+        driver=""
+        if [ -L "$device/driver" ]; then
+            driver=$(readlink -f "$device/driver") || exit 1
+            [ -d "$driver" ] || exit 1
+            driver=${driver##*/}
+        fi
+        exposed=0
+        if [ -r "$device/dev" ]; then
+            exposed=1
+        fi
+        [ -n "$driver" ] || [ "$exposed" = 1 ] || continue
+        relative=${device#"$owner"/}
+        printf '%s|%s|%s\n' "$relative" "$driver" "$exposed" >>"$records" || exit 1
+    done <"$properties"
+    # Preserve duplicate endpoints after normalizing the regenerated transport ID.
+    awk -F "|" '
+        {
+            count = split($1, parts, "/")
+            relative = ""
+            for (part = 1; part <= count; part++) {
+                sub(/^virtio[0-9]+[.]/, "virtio.", parts[part])
+                sub(/^virtio[0-9]+$/, "virtio", parts[part])
+                relative = relative (part == 1 ? "" : "/") parts[part]
+            }
+            print relative "|" $2 "|" $3
+        }
+    ' "$records" >"$properties" || exit 1
+    sort "$properties"
+)
+
+# remoteproc_wait_restored <path> <channel-baseline> <child-baseline> <label> <observe> [wait-running] [stable-seconds]
+# Reuse both inventories within one deadline, retaining observed child identities.
+# observe=1 checks through the full timeout to cover asynchronous probing.
+# Cleanup uses observe=0 to return immediately when owned state is restored.
+# wait-running=1 permits crash/offline transitions within the same deadline.
+# Crash callers must separately verify one captured recovery sequence, including repeats.
+# Default callers still fail immediately when running state is lost.
+# stable-seconds defaults to 0 for existing consumers, changes reset the interval.
+# Empty baselines collect a stable inventory, first observed channels/children remain required.
+# Return 1 on lost state, missing endpoints or evidence errors, no mutations occur.
+remoteproc_wait_restored() {
+    local path="$1" channels="$2" children="$3" label="$4" observe="$5"
+    local wait_running="${6:-0}" stable_seconds="${7:-0}" collecting=0 seeded=0
+    local start elapsed state previous="" ready identities sample inventory changed
+    local stable_since=-1 stable_elapsed=0
+    local last_channels="$TEST_RUN_DIR/$label.channels-previous"
+    local last_children="$TEST_RUN_DIR/$label.children-previous"
+    identities="$TEST_RUN_DIR/$label.child-identities"
+    sample="$TEST_RUN_DIR/$label.child-identities-current"
+    printf '%s' '' >"$identities" || return 1
+    printf '%s' '' >"$TEST_RUN_DIR/$label.recovery.log" || return 1
+    if [ "$stable_seconds" != 0 ] &&
+        ! is_bounded_positive_integer "$stable_seconds" "$TEST_RUN_TIMEOUT"; then
+        return 1
+    fi
+    if [ -z "$channels" ] && [ -z "$children" ]; then
+        collecting=1
+        channels="$TEST_RUN_DIR/$label.channels-first"
+        children="$TEST_RUN_DIR/$label.children-first"
+    fi
+    start=$(get_monotonic_seconds)
+    log_info "[DSP-CHILD] instance=${path##*/} recovery_deadline=${TEST_RUN_TIMEOUT}s observe=$observe stable_required=${stable_seconds}s"
+    while :; do
+        state=$(get_remoteproc_state "$path")
+        inventory=0
+        if remoteproc_channels "$path" >"$TEST_RUN_DIR/$label.channels-after" &&
+            remoteproc_children "$path" "$sample" >"$TEST_RUN_DIR/$label.children-after"; then
+            cat "$sample" >>"$identities" || return 1
+            inventory=1
+        fi
+        if [ "$collecting" = 1 ] && [ "$seeded" = 0 ] &&
+            [ "$inventory" = 1 ] && [ "$state" = running ]; then
+            if ! {
+                cat "$TEST_RUN_DIR/$label.channels-after" >"$channels" &&
+                    cat "$TEST_RUN_DIR/$label.children-after" >"$children"
+            }; then
+                return 1
+            fi
+            seeded=1
+        fi
+        ready=0
+        if [ "$inventory" = 1 ] && [ "$state" = running ] &&
+            {
+                if [ "$collecting" = 1 ]; then
+                    awk '
+                        FILENAME == ARGV[1] { required[$0]++; next }
+                        { current[$0]++ }
+                        END {
+                            for (key in required) if (current[key] < required[key]) exit 1
+                            exit 0
+                        }
+                    ' "$channels" "$TEST_RUN_DIR/$label.channels-after"
+                else
+                    cmp -s "$channels" "$TEST_RUN_DIR/$label.channels-after"
+                fi
+            } &&
+            awk -F "|" '
+                FILENAME == ARGV[1] {
+                    if ($2 != "") bindings[$1 "|" $2]++
+                    if ($3 == 1) endpoints[$1]++
+                    next
+                }
+                {
+                    if ($2 != "") restored_bindings[$1 "|" $2]++
+                    if ($3 == 1) restored_endpoints[$1]++
+                }
+                END {
+                    for (key in bindings) if (restored_bindings[key] < bindings[key]) exit 1
+                    for (key in endpoints) if (restored_endpoints[key] < endpoints[key]) exit 1
+                    exit 0
+                }
+            ' "$children" "$TEST_RUN_DIR/$label.children-after"; then
+            ready=1
+        fi
+        elapsed=$(($(get_monotonic_seconds) - start))
+        changed=1
+        if [ "$inventory" = 1 ]; then
+            if cmp -s "$last_channels" "$TEST_RUN_DIR/$label.channels-after" &&
+                cmp -s "$last_children" "$TEST_RUN_DIR/$label.children-after"; then
+                changed=0
+            else
+                cat "$TEST_RUN_DIR/$label.channels-after" >"$last_channels" || return 1
+                cat "$TEST_RUN_DIR/$label.children-after" >"$last_children" || return 1
+            fi
+        fi
+        if [ "$ready" != 1 ]; then
+            stable_since=-1
+            stable_elapsed=0
+        else
+            if [ "$stable_since" -lt 0 ] || [ "$changed" = 1 ]; then
+                stable_since="$elapsed"
+            fi
+            stable_elapsed=$((elapsed - stable_since))
+        fi
+        if [ "$state|$ready|$inventory" != "$previous" ] || [ "$changed" = 1 ]; then
+            printf 'elapsed=%s state=%s inventory_available=%s endpoints_restored=%s inventory_changed=%s stable_elapsed=%s\n' \
+                "$elapsed" "$state" "$inventory" "$ready" "$changed" "$stable_elapsed" \
+                >>"$TEST_RUN_DIR/$label.recovery.log" || return 1
+            previous="$state|$ready|$inventory"
+        fi
+        if [ "$state" != running ] && {
+            [ "$wait_running" != 1 ] ||
+            {
+                [ "$state" != crashed ] && [ "$state" != offline ]
+            }
+        }; then
+            log_warn "[DSP-CHILD] instance=${path##*/} lost running state=$state during recovery"
+            log_file_with_label DSP-CHILD "$TEST_RUN_DIR/$label.recovery.log" 10
+            return 1
+        fi
+        if [ "$observe" = 0 ] && [ "$ready" = 1 ] &&
+            [ "$stable_elapsed" -ge "$stable_seconds" ]; then
+            break
+        fi
+        [ "$elapsed" -lt "$TEST_RUN_TIMEOUT" ] || break
+        sleep 1
+    done
+    printf 'final_elapsed=%s state=%s endpoints_restored=%s stable_elapsed=%s stable_required=%s\n' \
+        "$elapsed" "$state" "$ready" "$stable_elapsed" "$stable_seconds" \
+        >>"$TEST_RUN_DIR/$label.recovery.log" || return 1
+    log_file_with_label DSP-CHILD "$TEST_RUN_DIR/$label.recovery.log" 10
+    [ "$ready" = 1 ] && [ "$stable_elapsed" -ge "$stable_seconds" ]
+}
+
+# remoteproc_wait_quiescent <path> <label> <stable-seconds>
+# Require offline state and no owned RPMsg channels continuously within the timeout.
+# Static descendant drivers can remain bound, no processor or client is reset here.
+remoteproc_wait_quiescent() {
+    local path="$1" label="$2" stable_seconds="$3"
+    local start elapsed state inventory quiet previous="" stable_since=-1 stable_elapsed=0
+    local log="$TEST_RUN_DIR/$label.quiescence.log"
+    local channels="$TEST_RUN_DIR/$label.channels-offline"
+    printf '%s' '' >"$log" || return 1
+    if [ "$stable_seconds" != 0 ] &&
+        ! is_bounded_positive_integer "$stable_seconds" "$TEST_RUN_TIMEOUT"; then
+        return 1
+    fi
+    start=$(get_monotonic_seconds)
+    while :; do
+        state=$(get_remoteproc_state "$path")
+        inventory=0
+        if remoteproc_channels "$path" >"$channels"; then
+            inventory=1
+        fi
+        elapsed=$(($(get_monotonic_seconds) - start))
+        quiet=0
+        if [ "$state" = offline ] && [ "$inventory" = 1 ] && [ ! -s "$channels" ]; then
+            quiet=1
+            if [ "$stable_since" -lt 0 ]; then
+                stable_since="$elapsed"
+            fi
+            stable_elapsed=$((elapsed - stable_since))
+        else
+            stable_since=-1
+            stable_elapsed=0
+        fi
+        if [ "$state|$inventory|$quiet" != "$previous" ]; then
+            printf 'elapsed=%s state=%s inventory_available=%s channels_removed=%s stable_elapsed=%s\n' \
+                "$elapsed" "$state" "$inventory" "$quiet" "$stable_elapsed" >>"$log" || return 1
+            previous="$state|$inventory|$quiet"
+        fi
+        if [ "$state" != offline ]; then
+            log_warn "[DSP-STOP] instance=${path##*/} lost offline state=$state before start"
+            log_file_with_label DSP-STOP "$log" 10
+            return 1
+        fi
+        if [ "$quiet" = 1 ] && [ "$stable_elapsed" -ge "$stable_seconds" ]; then
+            break
+        fi
+        [ "$elapsed" -lt "$TEST_RUN_TIMEOUT" ] || break
+        sleep 1
+    done
+    printf 'final_elapsed=%s state=%s channels_removed=%s stable_elapsed=%s stable_required=%s\n' \
+        "$elapsed" "$state" "$quiet" "$stable_elapsed" "$stable_seconds" >>"$log" || return 1
+    log_file_with_label DSP-STOP "$log" 10
+    [ "$quiet" = 1 ] && [ "$stable_elapsed" -ge "$stable_seconds" ]
+}
+
+# remoteproc_debugfs_dir <remoteproc-path>
+# Resolve an already mounted debugfs control by runtime instance and verified name.
+# Print only the control directory, return 2 when absent and 1 on conflicting evidence.
+# Never mount debugfs, select the first same-name DSP or change target state.
+remoteproc_debugfs_dir() (
+    instance=$(readlink -f "$1") || exit 1
+    name=$(cat "$1/name") || exit 1
+    [ -n "$name" ] || exit 1
+    mounts="$TEST_RUN_DIR/${instance##*/}-debugfs-mounts"
+    awk '$3 == "debugfs" {gsub(/\\040/, " ", $2); gsub(/\\134/, "\\", $2); print $2}' \
+        /proc/mounts >"$mounts" || exit 1
+    control=""
+    while IFS= read -r mountpoint; do
+        candidate="$mountpoint/remoteproc/${instance##*/}"
+        [ -d "$candidate" ] || continue
+        candidate_name=$(cat "$candidate/name") || exit 1
+        if [ "$candidate_name" != "$name" ]; then
+            log_error "Remoteproc debugfs identity mismatch, sysfs=$name debugfs=$candidate_name directory=$candidate" >&2
+            exit 1
+        fi
+        resolved=$(readlink -f "$candidate") || exit 1
+        # Repeated debugfs mounts expose the same kernel instance, not another DSP.
+        [ -n "$control" ] || control="$resolved"
+    done <"$mounts"
+    [ -n "$control" ] || exit 2
+    printf '%s\n' "$control"
+)
+
+# remoteproc_check_crash_events <path> <name> <kernel-delta> <evidence> <unexpected> [owner]
+# Require one selected synthetic watchdog report, handling, recovery and completed boot.
+# Retain unrelated/duplicate remoteproc faults and host faults, never whitelist a DSP.
+# Return 1 on missing sequence, unexpected faults or unreadable evidence, no kernel reads.
+remoteproc_check_crash_events() {
+    local owner="${6:-}"
+    if [ -z "$owner" ]; then
+        owner=$(readlink -f "$1/device") || return 1
+    fi
+    owner=${owner##*/}
+    [ -n "$owner" ] && [ -r "$3" ] || return 1
+    printf '%s' '' >"$4" || return 1
+    printf '%s' '' >"$5" || return 1
+    awk -v instance="${1##*/}" -v name="$2" -v owner="$owner" \
+        -v evidence="$4" -v unexpected="$5" '
+        {
+            line = $0
+            sub(/^(\[[^]]*\][[:space:]]*)+/, "", line)
+            prefix = "remoteproc " instance ": "
+            expected = 0
+            if (index(line, prefix) == 1) {
+                message = substr(line, length(prefix) + 1)
+                if (message == "crash detected in " name ": type watchdog") {
+                    reports++
+                    expected = 1
+                } else if (message ~ /^handling crash #[0-9]+ in /) {
+                    remainder = message
+                    sub(/^handling crash #[0-9]+ in /, "", remainder)
+                    if (remainder == name) {
+                        handled++
+                        if (reports != 1) sequence_error = 1
+                        expected = 1
+                    }
+                } else if (message == "recovering " name) {
+                    recoveries++
+                    if (handled != 1) sequence_error = 1
+                    expected = 1
+                } else if (message == "remote processor " name " is now up") {
+                    boots++
+                    if (recoveries != 1) sequence_error = 1
+                    expected = 1
+                }
+            }
+            if (expected) {
+                print $0 >> evidence
+                next
+            }
+            text = tolower(line)
+            split(line, fields, /[[:space:]]+/)
+            selected_owner = index(fields[2], owner ":") == 1
+            shutdown_error = text ~ /failed to shutdown.*-[1-9][0-9]*([^0-9]|$)/
+            stop_error = text ~ /can.t (stop rproc|start rproc|reset resource table).*-[1-9][0-9]*([^0-9]|$)/
+            if (text ~ /crash detected|handling crash|recovering |watchdog (bite|received|interrupt|without)|fatal error|bug:|warning:|oops:|panic|call trace:|internal error|unable to handle|external abort|hard lockup|rcu:.*detected.*stalls/ ||
+                (text ~ /^remoteproc / && (text ~ /fail|error|timed out|timeout/ || stop_error)) ||
+                (selected_owner && shutdown_error)) {
+                print $0 >> unexpected
+                faults++
+            }
+        }
+        END {
+            printf "reports=%d handled=%d recoveries=%d boots=%d sequence_error=%d unexpected_faults=%d\n", reports, handled, recoveries, boots, sequence_error, faults >> evidence
+            exit !(reports == 1 && handled == 1 && recoveries == 1 && boots == 1 && !sequence_error && !faults)
+        }
+    ' "$3"
+}
+
+# remoteproc_child_faults <captured-delta> <identities> <diagnostics>
+# Print terminal child probe/PCM failures attributed to observed device identities.
+# Retain timeout/deferred-probe candidates as diagnostics, no fresh kernel read.
+# Return 1 on evidence errors, otherwise 0 even when printed faults are present.
+remoteproc_child_faults() {
+    [ -r "$1" ] && [ -s "$2" ] || return 1
+    printf '%s' '' >"$3" || return 1
+    awk -v diagnostics="$3" '
+        FILENAME == ARGV[1] {
+            if ($0 != "") identities[$0] = 1
+            next
+        }
+        {
+            scoped = 0
+            for (identity in identities) {
+                rest = $0
+                while ((position = index(rest, identity)) > 0) {
+                    left = position == 1 ? "" : substr(rest, position - 1, 1)
+                    right = substr(rest, position + length(identity), 1)
+                    if (left !~ /[[:alnum:]_.-]/ && right !~ /[[:alnum:]_.-]/) scoped = 1
+                    rest = substr(rest, position + length(identity))
+                }
+            }
+            if (!scoped) next
+            text = tolower($0)
+            terminal = text ~ /asoc error[[:space:]]*\(-[1-9][0-9]*\)/ ||
+                text ~ /buffer allocation failed rc[[:space:]]*=[[:space:]]*-[1-9][0-9]*/ ||
+                text ~ /can.t create pcm.*-[1-9][0-9]*/ ||
+                text ~ /probe.*failed.*-[1-9][0-9]*/ ||
+                text ~ /failed to register.*-[1-9][0-9]*/
+            deferred = text ~ /probe.*failed( with)?[[:space:]:=]+(error[[:space:]:=]+)?-517([^[:digit:]]|$)/
+            if (terminal && !deferred) print
+            else if (deferred || text ~ /cmd timeout|command timed out|probe.*failed/) print $0 > diagnostics
+        }
+    ' "$2" "$1"
+}
+
+# remoteproc_restore
+# Restore only processors whose state this test changed.
+# shellcheck disable=SC2016
+remoteproc_restore() {
+    local path name firmware state owner failed=0 baseline children recovery coredump policy dump current
+    while IFS='|' read -r path name firmware state owner; do
+        [ -n "$path" ] || continue
+        if [ "${TEST_RUN_MODE:-stop-start}" = crash ]; then
+            IFS='|' read -r recovery coredump policy dump \
+                <"$TEST_RUN_DIR/${path##*/}-initial-controls" || return 1
+            if [ "$(readlink -f "$path/device")" != "$owner" ] ||
+                [ "$(cat "$path/name")" != "$name" ] ||
+                [ "$(cat "$path/firmware")" != "$firmware" ]; then
+                failed=1
+                continue
+            fi
+            current=$(get_remoteproc_state "$path")
+            if [ "$current" != running ]; then
+                # Late restoration must not erase a failed functional window.
+                failed=1
+            fi
+            baseline="$TEST_RUN_DIR/${path##*/}-initial-channels"
+            children="$TEST_RUN_DIR/${path##*/}-initial-children"
+            # A crashed/offline state can reflect partly completed kernel teardown.
+            # Only wait for automatic restoration, no second recovery or start write.
+            if ! remoteproc_wait_restored "$path" "$baseline" "$children" \
+                "${path##*/}-restored" 0 1; then
+                current=$(get_remoteproc_state "$path")
+                log_error "[DSP-CLEANUP] Processor=$name automatic restoration incomplete, state=$current, reset/recovery must be handled outside this test"
+                failed=1
+            fi
+            if [ "$(get_remoteproc_state "$path")" != "$state" ] ||
+                [ "$(readlink -f "$path/device")" != "$owner" ] ||
+                [ "$(cat "$path/name")" != "$name" ] ||
+                [ "$(cat "$path/firmware")" != "$firmware" ] ||
+                [ "$(cat "$recovery")" != "$policy" ] || [ "$(cat "$coredump")" != "$dump" ]; then
+                failed=1
+            fi
+            continue
+        fi
+        if [ "$(cat "$path/state" 2>/dev/null)" != "$state" ]; then
+            if [ "$state" = running ]; then
+                if ! test_run_command "restore-${path##*/}" sh -c \
+                    '
+                        . "$1"
+                        start_remoteproc "$2" "$3"
+                    ' sh "$TOOLS/functestlib.sh" "$path" "$TEST_RUN_TIMEOUT"; then
+                    failed=1
+                fi
+            else
+                failed=1
+            fi
+        fi
+        [ "$(cat "$path/state" 2>/dev/null)" = "$state" ] || failed=1
+        baseline="$TEST_RUN_DIR/${path##*/}-initial-channels"
+        children="$TEST_RUN_DIR/${path##*/}-initial-children"
+        remoteproc_wait_restored "$path" "$baseline" "$children" \
+            "${path##*/}-restored" 0 || failed=1
+    done <"$TEST_RUN_DIR/remoteprocs.changed"
+    [ "$failed" -eq 0 ]
+}
