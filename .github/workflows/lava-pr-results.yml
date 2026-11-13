@@ -65,7 +65,7 @@ jobs:
           VALIDATION_RUN_ID: ${{ inputs.validation_run }}
           VALIDATION_RUN_ATTEMPT: ${{ inputs.validation_attempt }}
           VALIDATION_RESULT: ${{ inputs.validation_result }}
-        run: python scripts/lava_pr_validation.py resolve
+        run: python .github/workflows/lava_pr_validation.py resolve
 
       - name: Download prepared request
         if: steps.request.outputs.prepared == 'true'
@@ -83,7 +83,7 @@ jobs:
           LAVA_OSS_USER: ${{ secrets.LAVA_OSS_USER }}
           LAVA_OSS_TOKEN: ${{ secrets.LAVA_OSS_TOKEN }}
           VALIDATION_RUN_ID: ${{ steps.request.outputs.run_id }}
-        run: python scripts/lava_pr_validation.py finish
+        run: python .github/workflows/lava_pr_validation.py finish
 
       - name: Save results and evidence
         if: always()

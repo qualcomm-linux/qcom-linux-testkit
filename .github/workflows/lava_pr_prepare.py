@@ -12,6 +12,7 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import subprocess
+import sys
 import tarfile
 from urllib.parse import urlsplit
 import zipfile
@@ -19,12 +20,14 @@ import zipfile
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 import requests
 import yaml
+from lava_test_plans.utils import compression
+
+ROOT = Path(__file__).resolve().parents[2]
+# Reuse the trusted repository's inventory parser, independent of the launch directory.
+sys.path.insert(1, str(ROOT / "scripts"))
 
 import generate_test_inventory_html as inventory
 from lava_pr_validation import API, GITHUB, REPOSITORY, digest, github, save_json
-from lava_test_plans.utils import compression
-
-ROOT = Path(__file__).resolve().parents[1]
 
 
 def git(directory, *arguments):
