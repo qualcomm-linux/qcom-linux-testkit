@@ -130,7 +130,7 @@ def validate_target_templates(plans, targets, config):
         if not config["targets"].get(target):
             gaps.append(f"{target}: OSS device mapping is not confirmed")
         relative = Path("projects/meta-qcom/devices") / target
-        if not ((ROOT / "ci/lava-oss" / relative).is_file() or
+        if not ((ROOT / ".github/ci/lava-oss" / relative).is_file() or
                 (plans / "lava_test_plans" / relative).is_file()):
             gaps.append(f"{target}: device template is absent from the pinned lava-test-plans")
     if gaps:
@@ -266,10 +266,12 @@ def render_baseline(plans, target, context, config):
     if plan_groups != set(config["groups"]):
         raise ValueError("Configured groups must cover the complete pinned meta-qcom PR plan")
     # Pinned LAVA templates produce YAML and shell, HTML escaping corrupts their values.
-    # nosemgrep: python.flask.security.xss.audit.direct-use-of-jinja2.direct-use-of-jinja2
-    environment = Environment(loader=FileSystemLoader([
-        str(ROOT / "ci/lava-oss"), str(templates), str(templates / "testplans"), str(templates / "testcases"),
-        str(templates / "devices")]), undefined=StrictUndefined, autoescape=False,
+    environment = Environment(  # nosemgrep: python.flask.security.xss.audit.direct-use-of-jinja2.direct-use-of-jinja2
+        loader=FileSystemLoader([
+            str(ROOT / ".github/ci/lava-oss"), str(templates), str(templates / "testplans"),
+            str(templates / "testcases"), str(templates / "devices")]),
+        undefined=StrictUndefined,
+        autoescape=False,
         extensions=["jinja2.ext.loopcontrols"])
     environment.globals["compression"] = compression
     context["device_type"] = f"projects/meta-qcom/devices/{target}"
@@ -403,7 +405,7 @@ def append_tests(jobs, affected, documents, by_suite, selections, config, source
 def prepare(folder):
     folder = folder.resolve()
     folder.mkdir(parents=True, exist_ok=True)
-    config = json.loads((ROOT / "ci/lava-pr-validation.json").read_text(encoding="utf-8"))
+    config = json.loads((ROOT / ".github/ci/lava-pr-validation.json").read_text(encoding="utf-8"))
     gh = github()
     number = int(os.environ["PR_NUMBER"])
     pr = gh.get(f"/repos/{REPOSITORY}/pulls/{number}")

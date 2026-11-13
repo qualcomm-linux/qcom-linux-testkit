@@ -80,7 +80,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install controller dependencies
-        run: python -m pip install -r ci/lava-pr-requirements.txt ./lava-test-plans
+        run: python -m pip install -r .github/ci/lava-pr-requirements.txt ./lava-test-plans
 
       - name: Prepare mandatory baseline and PR additions
         env:
