@@ -97,7 +97,7 @@ jobs:
           NIGHTLY_RUN_ID: ${{ inputs.nightly_run }}
           TEST_SELECTIONS: ${{ inputs.selections }}
           SUBMIT_REQUEST: ${{ inputs.submit }}
-        run: python scripts/lava_pr_validation.py prepare
+        run: python .github/workflows/lava_pr_validation.py prepare
 
       # Publish before submitting. The independent finalizer can recover IDs
       # from LAVA metadata even if this runner disappears during a POST.
@@ -117,7 +117,7 @@ jobs:
         env:
           LAVA_OSS_USER: ${{ secrets.LAVA_OSS_USER }}
           LAVA_OSS_TOKEN: ${{ secrets.LAVA_OSS_TOKEN }}
-        run: python scripts/lava_pr_validation.py run
+        run: python .github/workflows/lava_pr_validation.py run
 
       - name: Save controller progress
         if: always()
