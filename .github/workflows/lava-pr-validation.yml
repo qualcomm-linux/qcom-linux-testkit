@@ -1,0 +1,147 @@
+# Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+# SPDX-License-Identifier: BSD-3-Clause
+name: LAVA PR validation
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: Testkit PR number
+        required: true
+        type: string
+      targets:
+        description: meta-qcom uses its pre-merge targets except qcm6490-idp, or enter comma-separated machines
+        required: true
+        default: meta-qcom
+        type: string
+      revision:
+        description: Full PR commit SHA, empty resolves current PR head
+        type: string
+      distro:
+        description: qcom-distro or qcom-distro_linux-qcom-6.18
+        default: qcom-distro
+        type: string
+      image_type:
+        description: Published image variant, never substituted with another variant
+        default: multimedia
+        type: choice
+        options:
+          - multimedia
+          - proprietary
+      nightly_run:
+        description: Optional successful meta-qcom nightly or extended build run ID
+        type: string
+      selections:
+        description: Optional JSON mapping suite paths to YAML/group/params selections
+        default: '{}'
+        type: string
+      submit:
+        description: Submit hardware jobs after preparation and validation
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  actions: read
+
+# Keep the total queued/running job cap across manual invocations, too.
+concurrency:
+  group: testkit-lava-oss
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    if: github.repository == 'qualcomm-linux/qcom-linux-testkit' && github.ref == 'refs/heads/main'
+    environment: lava-oss
+    runs-on:
+      group: GHA-Kernel-SelfHosted-RG
+      labels: kernel-prd-u2404-x64-large-od-ephem
+    timeout-minutes: 1320
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      VALIDATION_RUN_ID: ${{ github.run_id }}
+    steps:
+      - name: Checkout trusted controller
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Checkout meta-qcom PR templates
+        uses: actions/checkout@v7
+        with:
+          repository: qualcomm-linux/lava-test-plans
+          ref: 188770122773733a46370b71dab12b5a1023c630
+          path: lava-test-plans
+          persist-credentials: false
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+
+      - name: Install controller dependencies
+        run: python -m pip install -r ci/lava-pr-requirements.txt ./lava-test-plans
+
+      - name: Prepare mandatory baseline and PR additions
+        env:
+          GH_TOKEN: ${{ github.token }}
+          META_QCOM_READ_TOKEN: ${{ secrets.META_QCOM_READ_TOKEN }}
+          QLI_ARTIFACT_TOKEN: ${{ secrets.QLI_ARTIFACT_TOKEN }}
+          LAVA_ARTIFACT_TOKEN_NAME: ${{ vars.LAVA_ARTIFACT_TOKEN_NAME }}
+          LAVA_PLANS_PATH: lava-test-plans
+          PR_NUMBER: ${{ inputs.pr }}
+          TARGETS: ${{ inputs.targets }}
+          PR_REVISION: ${{ inputs.revision }}
+          IMAGE_DISTRO: ${{ inputs.distro }}
+          IMAGE_TYPE: ${{ inputs.image_type }}
+          NIGHTLY_RUN_ID: ${{ inputs.nightly_run }}
+          TEST_SELECTIONS: ${{ inputs.selections }}
+          SUBMIT_REQUEST: ${{ inputs.submit }}
+        run: python scripts/lava_pr_validation.py prepare
+
+      # Publish before submitting. The independent finalizer can recover IDs
+      # from LAVA metadata even if this runner disappears during a POST.
+      - name: Save immutable request
+        uses: actions/upload-artifact@v6
+        with:
+          name: lava-request-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            lava-output/manifest.json
+            lava-output/target-matrix.json
+            lava-output/jobs/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Submit and await bounded LAVA jobs
+        if: inputs.submit
+        env:
+          LAVA_OSS_USER: ${{ secrets.LAVA_OSS_USER }}
+          LAVA_OSS_TOKEN: ${{ secrets.LAVA_OSS_TOKEN }}
+        run: python scripts/lava_pr_validation.py run
+
+      - name: Save controller progress
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: lava-progress-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            lava-output/execution.json
+            lava-output/target-matrix.json
+          if-no-files-found: ignore
+          retention-days: 30
+
+  results:
+    needs: validate
+    if: >-
+      always() &&
+      github.repository == 'qualcomm-linux/qcom-linux-testkit' &&
+      github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+    uses: ./.github/workflows/lava-pr-results.yml
+    with:
+      validation_run: ${{ github.run_id }}
+      validation_attempt: ${{ github.run_attempt }}
+      validation_result: ${{ needs.validate.result }}
