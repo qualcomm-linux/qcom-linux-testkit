@@ -936,6 +936,11 @@ gstreamer_playback_rendered() {
 #
 # Sends SIGINT (not SIGTERM) to trigger proper EOS handling via -e flag.
 # This ensures pipelines with muxers (mp4mux, etc.) can finalize output files.
+# Enforces SIGINT grace period (GST_KILL_GRACE) followed by SIGKILL to prevent wedged V4L2 ioctls.
+# REJECTS unbounded fallback when timeout command is unavailable.
+#
+# Uses gstreamer_run_bounded() for portable timeout handling across GNU coreutils
+# and BusyBox implementations.
 gstreamer_run_gstlaunch_timeout() {
   secs="$1"
   pipe="$2"
@@ -949,22 +954,25 @@ gstreamer_run_gstlaunch_timeout() {
 
   gstreamer_print_cmd_multiline "$pipe"
 
+  # Use gstreamer_run_bounded for portable timeout handling
+  # Send SIGINT to trigger EOS via -e flag, with GST_KILL_GRACE period before SIGKILL
+  # This prevents wedged V4L2 ioctls from consuming entire LAVA action timeout
   # shellcheck disable=SC2086
-  # Send SIGINT instead of SIGTERM to trigger EOS via -e flag
   gstreamer_run_bounded "$secs" INT "$GSTBIN" $GSTLAUNCHFLAGS $pipe
-  gstlaunch_rc=$?
+  gst_rc=$?
 
-  if gstreamer_bounded_no_timeout "$gstlaunch_rc"; then
-    log_error "Refusing to run $GSTBIN unbounded: no timeout(1) supporting -s/-k"
-  elif gstreamer_bounded_timed_out "$gstlaunch_rc"; then
-    if [ "$GST_BOUNDED_RAW_RC" = "137" ]; then
-      log_warn "$GSTBIN ignored SIGINT and was killed after ${secs}s + ${GST_KILL_GRACE}s (wedged codec device?)"
-    else
-      log_warn "$GSTBIN did not finish within ${secs}s"
-    fi
+  # Check if timeout was unavailable
+  if gstreamer_bounded_no_timeout "$gst_rc"; then
+    log_fail "timeout command required but not available - cannot enforce bounded execution"
+    return 1
   fi
 
-  return "$gstlaunch_rc"
+  # Log raw exit status for diagnostics (especially SIGKILL escalation)
+  if [ "${GST_BOUNDED_RAW_RC:-}" != "$gst_rc" ]; then
+    log_info "gst-launch raw exit status: ${GST_BOUNDED_RAW_RC:-unknown} (normalized: $gst_rc)"
+  fi
+
+  return "$gst_rc"
 }
 
 # -------------------- Audio Record/Playback pipeline builders --------------------
@@ -1342,6 +1350,21 @@ gstreamer_v4l2_decoder_for_codec() {
   return "$GST_ELEM_MISSING"
 }
 
+# gstreamer_v4l2_decoder_args <video_stack>
+# Returns stack-dependent decoder arguments for V4L2 decoders
+# Prints: decoder arguments string (e.g., "capture-io-mode=4 output-io-mode=4") or empty
+gstreamer_v4l2_decoder_args() {
+  video_stack="$1"
+  case "$video_stack" in
+    downstream)
+      printf '%s\n' "capture-io-mode=4 output-io-mode=4"
+      ;;
+    *)
+      printf '%s\n' ""
+      ;;
+  esac
+}
+
 # gstreamer_container_ext_for_codec <codec>
 # Returns the default container file extension for the given video codec.
 # This standardizes container format selection across encode/decode operations:
@@ -1508,25 +1531,22 @@ gstreamer_build_v4l2_decode_pipeline() {
       ;;
   esac
   
-  # Build decoder parameters
-  decoder_params=""
-  if [ "$video_stack" = "downstream" ]; then
-    decoder_params="capture-io-mode=4 output-io-mode=4"
-  fi
+  # Get stack-dependent decoder arguments
+  decoder_args=$(gstreamer_v4l2_decoder_args "$video_stack")
   
   # Build pipeline based on parser availability
   # All supported formats (h264, h265, vp9) have containers (MP4 or WebM)
   if [ -n "$parser" ]; then
     # Use parser if available
-    if [ -n "$decoder_params" ]; then
-      printf '%s\n' "filesrc location=${input_file} ! ${container} ! ${parser} ! ${decoder} ${decoder_params} ! videoconvert ! fakesink"
+    if [ -n "$decoder_args" ]; then
+      printf '%s\n' "filesrc location=${input_file} ! ${container} ! ${parser} ! ${decoder} ${decoder_args} ! videoconvert ! fakesink"
     else
       printf '%s\n' "filesrc location=${input_file} ! ${container} ! ${parser} ! ${decoder} ! videoconvert ! fakesink"
     fi
   else
     # Skip parser if not available (e.g. VP9 without vp9parse)
-    if [ -n "$decoder_params" ]; then
-      printf '%s\n' "filesrc location=${input_file} ! ${container} ! ${decoder} ${decoder_params} ! videoconvert ! fakesink"
+    if [ -n "$decoder_args" ]; then
+      printf '%s\n' "filesrc location=${input_file} ! ${container} ! ${decoder} ${decoder_args} ! videoconvert ! fakesink"
     else
       printf '%s\n' "filesrc location=${input_file} ! ${container} ! ${decoder} ! videoconvert ! fakesink"
     fi
@@ -1535,52 +1555,65 @@ gstreamer_build_v4l2_decode_pipeline() {
   return 0
 }
 
-prepare_vp9_from_local_path() {
-  src="$1"
-  outdir="$2"
-  ivf_out="$3"
-  webm_out="$4"
-
-  [ -n "$src" ] || return 1
-  [ -e "$src" ] || return 1
-
-  # If directory: search inside for clips
-  if [ -d "$src" ]; then
-    found_webm=$(find "$src" -type f -name '*.webm' 2>/dev/null | head -n 1 || true)
-    found_ivf=$(find "$src" -type f -name '*.ivf' 2>/dev/null | head -n 1 || true)
-
-    if [ -n "$found_webm" ] && [ ! -f "$webm_out" ]; then
-      cp "$found_webm" "$webm_out" 2>/dev/null || true
+# gstreamer_provision_clip_from_local <src_path> <clip_name> <dest_path>
+# Generic clip provisioning from local path (directory or archive)
+# Handles any codec by matching filename patterns
+# Args:
+#   src_path: Local directory or archive file
+#   clip_name: Requested clip filename (e.g., "h264_1080p.mp4")
+#   dest_path: Destination path for the clip
+# Returns: 0 if clip provisioned, 1 otherwise
+gstreamer_provision_clip_from_local() {
+  src_path="$1"
+  clip_name="$2"
+  dest_path="$3"
+  
+  [ -n "$src_path" ] || return 1
+  [ -n "$clip_name" ] || return 1
+  [ -n "$dest_path" ] || return 1
+  [ -e "$src_path" ] || return 1
+  
+  # If destination already exists, nothing to do
+  [ -f "$dest_path" ] && return 0
+  
+  # Case 1: src_path is a directory - search for exact filename match
+  if [ -d "$src_path" ]; then
+    if [ -f "$src_path/$clip_name" ]; then
+      cp "$src_path/$clip_name" "$dest_path" 2>/dev/null || return 1
+      return 0
     fi
-    if [ -n "$found_ivf" ] && [ ! -f "$ivf_out" ]; then
-      cp "$found_ivf" "$ivf_out" 2>/dev/null || true
-    fi
-
-    [ -f "$webm_out" ] || [ -f "$ivf_out" ]
-    return $?
+    return 1
   fi
-
-  # If file: extract to a staging dir (tar/tar.gz/tgz/tar.xz/txz supported)
-  if [ -f "$src" ]; then
-    stage="$outdir/local_clip_stage"
-    mkdir -p "$stage" >/dev/null 2>&1 || true
-
-    case "$src" in
+  
+  # Case 2: src_path is a file - could be archive or direct clip
+  if [ -f "$src_path" ]; then
+    # Check if it's the clip itself (direct file match)
+    src_basename=$(basename "$src_path")
+    if [ "$src_basename" = "$clip_name" ]; then
+      cp "$src_path" "$dest_path" 2>/dev/null || return 1
+      return 0
+    fi
+    
+    # Try extracting from archive
+    dest_dir=$(dirname "$dest_path")
+    stage="$dest_dir/local_clip_stage"
+    mkdir -p "$stage" >/dev/null 2>&1 || return 1
+    
+    case "$src_path" in
       *.tar)
-        tar -xf "$src" -C "$stage" >/dev/null 2>&1 || return 1
+        tar -xf "$src_path" -C "$stage" >/dev/null 2>&1 || return 1
         ;;
       *.tar.gz|*.tgz)
-        tar -xzf "$src" -C "$stage" >/dev/null 2>&1 || return 1
+        tar -xzf "$src_path" -C "$stage" >/dev/null 2>&1 || return 1
         ;;
       *.tar.xz|*.txz)
-        tar -xJf "$src" -C "$stage" >/dev/null 2>&1 || return 1
+        tar -xJf "$src_path" -C "$stage" >/dev/null 2>&1 || return 1
         ;;
       *.xz)
-        # Could be .tar.xz already handled above, else try decompressing single file
         if command -v xz >/dev/null 2>&1; then
-          base=$(basename "$src" .xz)
+          base=$(basename "$src_path" .xz)
           out="$stage/$base"
-          xz -dc "$src" >"$out" 2>/dev/null || return 1
+          xz -dc "$src_path" >"$out" 2>/dev/null || return 1
           case "$out" in
             *.tar)
               tar -xf "$out" -C "$stage" >/dev/null 2>&1 || return 1
@@ -1591,27 +1624,24 @@ prepare_vp9_from_local_path() {
         fi
         ;;
       *)
-        # Unknown file type; still try as a direct clip file
-        stage="$src"
+        # Unknown archive type
+        return 1
         ;;
     esac
-
-    found_webm=$(find "$stage" -type f -name '*.webm' 2>/dev/null | head -n 1 || true)
-    found_ivf=$(find "$stage" -type f -name '*.ivf' 2>/dev/null | head -n 1 || true)
-
-    if [ -n "$found_webm" ] && [ ! -f "$webm_out" ]; then
-      cp "$found_webm" "$webm_out" 2>/dev/null || true
+    
+    # Search extracted content for exact filename match
+    found_clip=$(find "$stage" -type f -name "$clip_name" 2>/dev/null | head -n 1 || true)
+    if [ -n "$found_clip" ]; then
+      cp "$found_clip" "$dest_path" 2>/dev/null || return 1
+      return 0
     fi
-    if [ -n "$found_ivf" ] && [ ! -f "$ivf_out" ]; then
-      cp "$found_ivf" "$ivf_out" 2>/dev/null || true
-    fi
-
-    [ -f "$webm_out" ] || [ -f "$ivf_out" ]
-    return $?
+    
+    return 1
   fi
-
+  
   return 1
 }
+
 # --------------------------------------------------------------
 # download_resource
 #   $1  url   – URL to download
@@ -1771,43 +1801,318 @@ run_pipeline_with_logs() {
     cmd=$2
     logdir=${3:-logs}
     TIMEOUT=${4:-60} # default 60 seconds
+    test_type=${5:-}      # Optional: uvc, drc, concurrency-h264, etc. for extended validation
+    expected_count=${6:-1} # Optional: For concurrency tests
 
     console_log="${logdir}/${name}_console.log"
     gst_debug_log="${logdir}/${name}_gst_debug.log"
 
+    # Set GST_DEBUG level to capture caps negotiation and buffer activity
+    # Level 2 (FIXME) captures caps events needed for extended validation
+    export GST_DEBUG="${GST_DEBUG:-2}"
     export GST_DEBUG_FILE="${gst_debug_log}"
 
-    log_info "Running ${name} (timeout=${TIMEOUT}s)"
+    log_info "Running ${name} (timeout=${TIMEOUT}s, GST_DEBUG=${GST_DEBUG})"
     gstreamer_run_gstlaunch_timeout "$TIMEOUT" "$cmd" >"$console_log" 2>&1
     rc=$?
 
-    # Look for a successful PLAYING state and the absence of ERROR messages.
+    # Check 1: PLAYING state reached
     playing=$(grep -c "Setting pipeline to PLAYING" "$console_log" || true)
+    if [ "$playing" -eq 0 ]; then
+        log_fail "${name} FAIL: Pipeline never reached PLAYING state"
+        return 1
+    fi
+    
+    # Check 2: No ERROR messages (original check)
     error_present=$(grep -c "ERROR:" "$console_log" || true)
-
-    if [ "$playing" -gt 0 ] && [ "$error_present" -eq 0 ]; then
-        log_pass "${name} PASS"
-        return 0
-    fi
-
-    # Special case: timeout (rc = 124) but PLAYING was already reached.
-    if [ "$rc" -eq 124 ] && [ "$playing" -gt 0 ]; then
-        log_pass "${name} PASS (completed before timeout)"
-        return 0
-    fi
-
-    # Anything else is a failure.
-    log_fail "${name} FAIL (rc=${rc})"
-    log_info "=== ERROR DETAILS ==="
-    if [ "$error_present" -gt 0 ]; then
-        grep -A10 -B5 "ERROR:" "$console_log" | tail -n 30 |
-            while IFS= read -r line; do log_info "$line"; done
+    
+    # Extended validation for timeout-based tests (if test_type provided)
+    if [ -n "$test_type" ]; then
+        log_info "${name}: ✓ PLAYING state reached"
+        
+        # Check 2b: Negotiated video caps observed (extended check)
+        # Caps from gst-launch -v go to console_log, not gst_debug_log (GST_DEBUG=2 only logs warnings/errors)
+        # For DRC tests, caps validation is done in the DRC-specific logic below, so skip generic check
+        if [ "$test_type" != "drc" ]; then
+            # Check console_log (from -v flag) for caps evidence
+            if ! grep -q "caps.*video/x-raw\|caps.*video/x-h264\|caps.*video/x-h265\|caps.*image/jpeg" "$console_log" 2>/dev/null; then
+                log_fail "${name} FAIL: No video caps negotiation detected in console log"
+                log_info "=== CONSOLE LOG SAMPLE (first 50 lines) ==="
+                head -n 50 "$console_log" | while IFS= read -r line; do log_info "$line"; done
+                log_info "=========================================="
+                return 1
+            fi
+            log_info "${name}: ✓ Video caps negotiated"
+        fi
+        
+        # Check 3: No fatal/error patterns (extended check - more comprehensive)
+        # Search both console and debug logs for errors
+        if grep -q "ERROR\|CRITICAL\|FATAL" "$console_log" "$gst_debug_log"; then
+            log_fail "${name} FAIL: Fatal errors detected in log"
+            log_info "=== ERROR DETAILS ==="
+            grep -q "ERROR\|CRITICAL\|FATAL" "$console_log" "$gst_debug_log" | tail -n 20 |
+                while IFS= read -r line; do log_info "$line"; done
+            log_info "====================="
+            return 1
+        fi
+        log_info "${name}: ✓ No fatal errors"
+        
+        # Check 4: Test-specific activity evidence
+        case "$test_type" in
+            uvc)
+                # For UVC: REQUIRE positive rendered frame count or actual buffer chain event
+                # Extract rendered frame count and verify it's positive, or look for buffer chain events
+                # Use grep -h to suppress filename prefixes when reading multiple files
+                rendered_count=$(grep -h -o "rendered [0-9][0-9]* frames" "$gst_debug_log" "$console_log" 2>/dev/null | tail -n 1 | grep -o "[0-9][0-9]*" || echo "0")
+                case "$rendered_count" in ''|*[!0-9]*) rendered_count=0 ;; esac
+                
+                has_buffer_activity=0
+                if grep -q "chain.*buffer" "$gst_debug_log" "$console_log" 2>/dev/null; then
+                    has_buffer_activity=1
+                fi
+                
+                if [ "$rendered_count" -gt 0 ] || [ "$has_buffer_activity" -eq 1 ]; then
+                    log_info "${name}: ✓ Frame activity detected (rendered: $rendered_count frames, buffer chain: $has_buffer_activity)"
+                else
+                    log_fail "${name}: FAIL - No positive frame/buffer activity detected (rendered: $rendered_count frames)"
+                    log_fail "${name}:   Expected: 'rendered N frames' (N>0) or 'chain' buffer events"
+                    return 1
+                fi
+                ;;
+                
+            drc)
+                # For DRC: REQUIRE ordered 1080p→720p caps transition and frame activity after second caps
+                # Expected: 1080p (1920x1080) → 720p (1280x720) transition with frames after 720p
+                
+                # Try console_log first (from gst-launch -v), fallback to gst_debug_log
+                # Use whichever log has caps information
+                drc_log=""
+                if grep -q "caps.*video/x-raw" "$console_log" 2>/dev/null; then
+                    drc_log="$console_log"
+                    log_info "${name}: Using console_log for DRC validation (caps from -v flag)"
+                elif grep -q "caps.*video/x-raw" "$gst_debug_log" 2>/dev/null; then
+                    drc_log="$gst_debug_log"
+                    log_info "${name}: Using gst_debug_log for DRC validation (caps from GST_DEBUG)"
+                else
+                    log_fail "${name}: FAIL - No video caps events found in any log"
+                    return 1
+                fi
+                
+                # Extract all video caps lines with line numbers to preserve order
+                caps_with_lines=$(grep -n "caps.*video/x-raw" "$drc_log" || true)
+                
+                if [ -z "$caps_with_lines" ]; then
+                    log_fail "${name}: FAIL - No video caps events found in selected log"
+                    return 1
+                fi
+                
+                # Find first 1080p caps event (line number)
+                first_1080p_line=$(printf '%s\n' "$caps_with_lines" | grep "width.*1920.*height.*1080\|width=1920.*height=1080\|width=(int)1920.*height=(int)1080" | head -n 1 | cut -d: -f1 || echo "0")
+                
+                # Find first 720p caps event (line number)
+                first_720p_line=$(printf '%s\n' "$caps_with_lines" | grep "width.*1280.*height.*720\|width=1280.*height=720\|width=(int)1280.*height=(int)720" | head -n 1 | cut -d: -f1 || echo "0")
+                
+                # Sanitize line numbers
+                case "$first_1080p_line" in ''|*[!0-9]*) first_1080p_line=0 ;; esac
+                case "$first_720p_line" in ''|*[!0-9]*) first_720p_line=0 ;; esac
+                
+                log_info "${name}: DRC transition analysis:"
+                log_info "${name}:   First 1080p caps at line: $first_1080p_line"
+                log_info "${name}:   First 720p caps at line: $first_720p_line"
+                
+                # Verify both resolutions were detected
+                if [ "$first_1080p_line" -eq 0 ]; then
+                    log_fail "${name}: FAIL - No 1920x1080 caps event found"
+                    return 1
+                fi
+                
+                if [ "$first_720p_line" -eq 0 ]; then
+                    log_fail "${name}: FAIL - No 1280x720 caps event found"
+                    return 1
+                fi
+                
+                # Verify ordered transition: 1080p must come before 720p
+                if [ "$first_1080p_line" -ge "$first_720p_line" ]; then
+                    log_fail "${name}: FAIL - Invalid transition order (1080p at line $first_1080p_line, 720p at line $first_720p_line)"
+                    log_fail "${name}:   Expected: 1080p → 720p (1080p line < 720p line)"
+                    return 1
+                fi
+                
+                log_info "${name}: ✓ Ordered transition verified (1080p → 720p)"
+                
+                # REQUIRE frame activity after the 720p caps event (second resolution)
+                # Extract all lines after the 720p caps event from THE SAME LOG we used for caps
+                lines_after_720p=$(tail -n +$((first_720p_line + 1)) "$drc_log" || true)
+                
+                # Extract rendered frame count and verify it's positive, or look for buffer chain events
+                rendered_count=$(printf '%s\n' "$lines_after_720p" | grep -o "rendered [0-9][0-9]* frames" | tail -n 1 | grep -o "[0-9][0-9]*" || echo "0")
+                case "$rendered_count" in ''|*[!0-9]*) rendered_count=0 ;; esac
+                
+                has_buffer_activity=0
+                if printf '%s\n' "$lines_after_720p" | grep -q "chain.*buffer"; then
+                    has_buffer_activity=1
+                fi
+                
+                if [ "$rendered_count" -gt 0 ] || [ "$has_buffer_activity" -eq 1 ]; then
+                    log_info "${name}: ✓ Frame activity detected after 720p transition (rendered: $rendered_count frames, buffer chain: $has_buffer_activity)"
+                else
+                    log_fail "${name}: FAIL - No positive frame activity detected after 720p caps event (line $first_720p_line)"
+                    log_fail "${name}:   Frame activity is required after the second resolution to verify DRC completed"
+                    log_fail "${name}:   Expected: 'rendered N frames' (N>0) or 'chain' buffer events"
+                    log_fail "${name}:   Found: rendered $rendered_count frames, buffer chain: $has_buffer_activity"
+                    return 1
+                fi
+                ;;
+                
+            concurrency-*)
+                # For concurrency: REQUIRE per-branch caps negotiation
+                # Verify that each decoder branch negotiated caps
+                codec="${test_type#concurrency-}"
+                
+                # Determine decoder element name pattern based on codec
+                case "$codec" in
+                    h264)
+                        decoder_pattern="v4l2h264dec[0-9]\+"
+                        ;;
+                    h265)
+                        decoder_pattern="v4l2h265dec[0-9]\+"
+                        ;;
+                    mjpeg)
+                        decoder_pattern="jpegdec[0-2]\+"
+                        ;;
+                    *)
+                        log_fail "${name}: FAIL - Unknown codec for concurrency test: $codec"
+                        return 1
+                        ;;
+                esac
+                
+                # Extract all unique decoder instance names
+                # Search gst_debug_log since element names appear in GST_DEBUG output during pipeline construction
+                decoder_instances=$(grep -o "$decoder_pattern" "$console_log" 2>/dev/null | sort -u || true)
+                decoder_count=$(printf '%s\n' "$decoder_instances" | grep -c . || echo 0)
+                
+                # Sanitize decoder_count
+                case "$decoder_count" in
+                    ''|*[!0-9]*) decoder_count=0 ;;
+                esac
+                
+                log_info "${name}: Detected $decoder_count distinct decoder instances (expected: $expected_count)"
+                
+                # Verify correct number of decoder instances
+                if [ "$decoder_count" -ne "$expected_count" ]; then
+                    log_fail "${name}: FAIL - Decoder instance count mismatch (found: $decoder_count, expected: $expected_count)"
+                    return 1
+                fi
+                
+                log_info "${name}: ✓ Correct number of decoder instances constructed"
+                
+                # Verify per-branch caps negotiation AND buffer activity (REQUIRED for PASS)
+                # Each decoder branch must:
+                # 1. Negotiate caps (proves branch was constructed)
+                # 2. Process buffers (proves branch actually decoded frames)
+                # The pipeline builder adds identity elements (branch0, branch1, etc.) with silent=false
+                # to emit reliable per-branch buffer activity evidence at all debug levels.
+                log_info "${name}: Verifying per-branch caps negotiation and buffer activity..."
+                
+                failed_branches=0
+                branch_idx=0
+                while [ "$branch_idx" -lt "$expected_count" ]; do
+                    branch_name="branch${branch_idx}"
+                    
+                    # Check 1: Caps negotiation evidence
+                    # Accept raw-video caps from either:
+                    # A. Identity element: GstIdentity:branchN ... video/x-raw
+                    # B. Corresponding qtivcomposer sink: GstVideoComposerSinkPad:sink_N: caps = video/x-raw
+                    # This handles log interleaving in concurrent pipelines
+                    identity_caps=$(grep -c "GstIdentity:${branch_name}.*video/x-raw" "$console_log" 2>/dev/null || echo "0")
+                    composer_caps=$(grep -c "GstVideoComposerSinkPad:sink_${branch_idx}: caps = video/x-raw" "$console_log" 2>/dev/null || echo "0")
+                    
+                    case "$identity_caps" in
+                        ''|*[!0-9]*) identity_caps=0 ;;
+                    esac
+                    
+                    case "$composer_caps" in
+                        ''|*[!0-9]*) composer_caps=0 ;;
+                    esac
+                    
+                    if [ "$identity_caps" -eq 0 ] && [ "$composer_caps" -eq 0 ]; then
+                        log_fail "${name}:   ✗ ${branch_name}: No raw-video caps negotiation detected"
+                        failed_branches=$((failed_branches + 1))
+                        branch_idx=$((branch_idx + 1))
+                        continue
+                    fi
+                    
+                    # Check 2: Buffer activity evidence (REQUIRED)
+                    # identity elements with silent=false emit chain messages
+                    # Pattern: "chain ******* (branchN:sink)" or similar identity output
+                    # Verify at least one chain event exists for this specific branch
+                    if ! grep -q "chain.*${branch_name}" "$console_log" 2>/dev/null; then
+                        log_fail "${name}:   ✗ ${branch_name}: No buffer activity detected"
+                        failed_branches=$((failed_branches + 1))
+                        branch_idx=$((branch_idx + 1))
+                        continue
+                    fi
+                    
+                    log_info "${name}:   ✓ ${branch_name}: caps negotiated, buffer activity detected"
+                    branch_idx=$((branch_idx + 1))
+                done
+                
+                if [ "$failed_branches" -gt 0 ]; then
+                    log_fail "${name}: FAIL - $failed_branches/$expected_count branches failed validation (caps or buffer activity missing)"
+                    return 1
+                else
+                    log_info "${name}: ✓ All $expected_count branches validated (caps + buffer activity)"
+                fi
+        esac
+        
+        # Check for SIGKILL escalation (137 normalized to 124)
+        # A SIGKILL means the pipeline hung and had to be force-killed - this is a failure
+        if [ "${GST_BOUNDED_RAW_RC:-}" = "137" ]; then
+            log_fail "${name} FAIL: Pipeline hung and required SIGKILL (raw exit: 137, normalized: $rc)"
+            return 1
+        fi
+        
+        # Accept timeout (124) or success (0) if all extended checks passed
+        if [ "$rc" -eq 124 ] || [ "$rc" -eq 0 ]; then
+            log_pass "${name} PASS"
+            return 0
+        else
+            log_fail "${name} FAIL (unexpected exit code: $rc)"
+            return 1
+        fi
     else
-        tail -n 30 "$console_log" |
-            while IFS= read -r line; do log_info "$line"; done
+        # Original validation logic (backward compatible)
+        
+        # Check for SIGKILL escalation even in backward compatible mode
+        if [ "${GST_BOUNDED_RAW_RC:-}" = "137" ]; then
+            log_fail "${name} FAIL: Pipeline hung and required SIGKILL (raw exit: 137, normalized: $rc)"
+            return 1
+        fi
+        
+        if [ "$playing" -gt 0 ] && [ "$error_present" -eq 0 ]; then
+            log_pass "${name} PASS"
+            return 0
+        fi
+
+        # Special case: timeout (rc = 124) but PLAYING was already reached.
+        if [ "$rc" -eq 124 ] && [ "$playing" -gt 0 ]; then
+            log_pass "${name} PASS (completed before timeout)"
+            return 0
+        fi
+
+        # Anything else is a failure.
+        log_fail "${name} FAIL (rc=${rc})"
+        log_info "=== ERROR DETAILS ==="
+        if [ "$error_present" -gt 0 ]; then
+            grep -A10 -B5 "ERROR:" "$console_log" | tail -n 30 |
+                while IFS= read -r line; do log_info "$line"; done
+        else
+            tail -n 30 "$console_log" |
+                while IFS= read -r line; do log_info "$line"; done
+        fi
+        log_info "====================="
+        return 1
     fi
-    log_info "====================="
-    return 1
 }
 # ------------------------------------------------------------------
 # Function:  check_file_size
@@ -2030,6 +2335,7 @@ camera_build_libcamera_snapshot_pipeline() {
 # camera_setup_wayland_environment <test_name>
 # Sets up Wayland/Weston environment for camera preview tests
 # Sets wayland_ready=1 if successful, 0 otherwise
+# Tracks whether Weston was started and registers cleanup trap
 # Parameters:
 #   test_name: Name of the test for logging purposes
 # Returns: 0 if Wayland is ready, 1 otherwise
@@ -2038,6 +2344,23 @@ camera_setup_wayland_environment() {
   
   wayland_ready=0
   sock=""
+  
+  # Track initial Weston state ONLY on first call (preserve across multiple setup calls)
+  # This ensures we remember the original compositor state before any test modifications
+  if [ -z "${GSTREAMER_WESTON_INITIAL_STATE:-}" ]; then
+    GSTREAMER_WESTON_INITIAL_STATE=0
+    if command -v weston_is_running >/dev/null 2>&1; then
+      if weston_is_running >/dev/null 2>&1; then
+        GSTREAMER_WESTON_INITIAL_STATE=1
+      fi
+    elif command -v pgrep >/dev/null 2>&1; then
+      if pgrep -x weston >/dev/null 2>&1; then
+        GSTREAMER_WESTON_INITIAL_STATE=1
+      fi
+    fi
+    export GSTREAMER_WESTON_INITIAL_STATE
+    log_info "Captured initial Weston state: $([ "$GSTREAMER_WESTON_INITIAL_STATE" -eq 1 ] && echo 'running' || echo 'not running')"
+  fi
   
   # Try to find existing Wayland socket
   if command -v discover_wayland_socket_anywhere >/dev/null 2>&1; then
@@ -2058,6 +2381,10 @@ camera_setup_wayland_environment() {
     if command -v weston_pick_env_or_start >/dev/null 2>&1; then
       log_info "No Wayland socket found, attempting to start Weston..."
       if weston_pick_env_or_start "$test_name"; then
+        # Track that we started Weston (for cleanup by runner)
+        GSTREAMER_STARTED_WESTON=1
+        export GSTREAMER_STARTED_WESTON
+        
         # Re-discover socket after Weston start
         if command -v discover_wayland_socket_anywhere >/dev/null 2>&1; then
           sock=$(discover_wayland_socket_anywhere | head -n 1 || true)
@@ -2096,3 +2423,1030 @@ camera_setup_wayland_environment() {
   
   return $((1 - wayland_ready))
 }
+
+# gstreamer_adopt_wayland_session_only
+# Adopt-only version: ONLY adopts existing Wayland sessions, never starts Weston
+# Use this for tests that should not alter desktop sessions (e.g., Video_Encode_Decode)
+# Returns: 0 if existing session adopted, 1 if no session available
+gstreamer_adopt_wayland_session_only() {
+  wayland_ready=0
+  sock=""
+  
+  # Try to find existing Wayland socket
+  if command -v discover_wayland_socket_anywhere >/dev/null 2>&1; then
+    sock=$(discover_wayland_socket_anywhere | head -n 1 || true)
+    if [ -n "$sock" ]; then
+      log_info "Found existing Wayland socket: $sock"
+      
+      # Get socket owner for running client as correct user
+      if [ -S "$sock" ]; then
+        sock_owner=$(stat -c '%U' "$sock" 2>/dev/null || stat -f '%Su' "$sock" 2>/dev/null || echo "")
+        if [ -n "$sock_owner" ]; then
+          log_info "Socket owner: $sock_owner"
+        fi
+      fi
+      
+      if command -v adopt_wayland_env_from_socket >/dev/null 2>&1; then
+        if adopt_wayland_env_from_socket "$sock"; then
+          wayland_ready=1
+          log_info "Adopted existing Wayland session"
+          
+          # Verify connection
+          if command -v wayland_connection_ok >/dev/null 2>&1; then
+            if wayland_connection_ok; then
+              log_info "Wayland connection verified: OK"
+            else
+              wayland_ready=0
+              log_warn "Wayland connection test failed"
+            fi
+          fi
+        fi
+      fi
+    fi
+  fi
+  
+  if [ "$wayland_ready" -eq 0 ]; then
+    log_info "No active Wayland session available to adopt"
+    return 1
+  fi
+  
+  # Export wayland_ready for caller
+  export wayland_ready
+  return 0
+}
+
+# camera_cleanup_wayland_environment
+# Cleanup function to restore Weston state if it was started by camera_setup_wayland_environment
+# This function should be called from the runner's existing cleanup function (not via trap).
+# The runner should check GSTREAMER_STARTED_WESTON and call this if needed.
+camera_cleanup_wayland_environment() {
+  # Only cleanup if we started Weston
+  if [ "${GSTREAMER_STARTED_WESTON:-0}" -eq 1 ]; then
+    log_info "Cleaning up Weston (started by camera_setup_wayland_environment)"
+    
+    # Use captured initial state to decide cleanup action
+    # If Weston was not running initially, just stop it
+    # If Weston was running initially, restore it using weston_restore_runtime
+    # shellcheck disable=SC2153  # GSTREAMER_WESTON_INITIAL_STATE is set in camera_setup_wayland_environment
+    if [ "${GSTREAMER_WESTON_INITIAL_STATE:-0}" -eq 0 ]; then
+      # Weston was not running initially - just stop it
+      if command -v weston_stop >/dev/null 2>&1; then
+        weston_stop >/dev/null 2>&1 || true
+        log_info "Stopped Weston (was not running initially)"
+      fi
+    else
+      # Weston was running initially - restore it
+      if command -v weston_restore_runtime >/dev/null 2>&1; then
+        if ! weston_restore_runtime 15; then
+          log_warn "Weston restoration failed"
+        else
+          log_info "Restored Weston (was running initially)"
+        fi
+      fi
+    fi
+    
+    # Clear the flags
+    GSTREAMER_STARTED_WESTON=0
+    export GSTREAMER_STARTED_WESTON
+    unset GSTREAMER_WESTON_INITIAL_STATE
+  fi
+}
+
+# -------------------- Downstream-Only Test Detection --------------------
+# gstreamer_is_downstream_stack
+# Checks if current video stack is downstream
+# Returns: 0 if downstream, 1 otherwise
+gstreamer_is_downstream_stack() {
+  if ! command -v video_stack_status >/dev/null 2>&1; then
+    return 1
+  fi
+  stack=$(video_stack_status "" 2>/dev/null || echo "unknown")
+  [ "$stack" = "downstream" ]
+}
+
+# -------------------- UVC Camera Detection --------------------
+# gstreamer_detect_uvc_camera_with_caps
+# Detects UVC camera device with capture capability and supported resolution
+# Checks kernel driver via sysfs and queries supported formats with v4l2-ctl
+# Prints: "device|format|width|height" or empty if not found
+# Example output: "/dev/video2|YUYV|640|480" or "/dev/video2|MJPG|1920|1080"
+#
+# Framerate is omitted from output to let v4l2src auto-negotiate with the device.
+# This avoids rounding issues where v4l2-ctl reports approximate FPS (e.g., 29.970
+# for 30000/1001) that don't match the device's exact fraction, which would cause
+# caps negotiation failures.
+#
+# Priority order for mode selection:
+#   1. Resolution
+#      - 1920x1080
+#      - 1280x720
+#      - 640x480
+#      - other supported resolutions
+#
+#   2. Frame rate
+#      - >= 30 fps
+#      - >= 15 fps
+#      - >= 10 fps
+#      - >= 5 fps
+#      - lower supported rates
+#
+#   3. Format preference
+#      - YUYV
+#      - UYVY
+#      - NV12
+#      - MJPG/MJPEG
+#
+# Supported FOURCC formats:
+#   YUYV, UYVY, NV12, MJPG, MJPEG
+#
+# Unsupported FOURCC formats are ignored.
+#
+# Resolution and frame rate have higher priority than raw/compressed
+# format preference, so a higher-frame-rate MJPEG mode can be selected
+# over a slower raw mode at the same target resolution.
+#
+# Returns: 0 if camera found with supported caps, 1 otherwise
+gstreamer_detect_uvc_camera_with_caps() {
+  # Require v4l2-ctl for capability detection
+  if ! command -v v4l2-ctl >/dev/null 2>&1; then
+    log_warn "v4l2-ctl not available - cannot detect UVC camera capabilities"
+    return 1
+  fi
+  
+  for dev in /dev/video*; do
+    [ -c "$dev" ] || continue
+    
+    # Check if device uses uvcvideo driver via sysfs
+    drv=$(readlink -f "/sys/class/video4linux/${dev##*/}/device/driver" 2>/dev/null)
+    
+    if ! printf '%s\n' "$drv" | grep -q "/uvcvideo$"; then
+      continue
+    fi
+    
+    # Get full v4l2-ctl output for this device
+    v4l2_output=$(v4l2-ctl -d "$dev" --all 2>/dev/null || true)
+    
+    if [ -z "$v4l2_output" ]; then
+      log_info "UVC device $dev: v4l2-ctl query failed" >&2
+      continue
+    fi
+    
+    # Extract Device Caps section (device-specific capabilities)
+    # v4l2-ctl --all output format:
+    #   Device Caps      : 0x04200001
+    #                      Video Capture
+    #                      Metadata Capture
+    #                      Streaming
+    # Parse from "Device Caps" line until next non-indented section
+    # Keep both the hex value line AND the indented capability lines
+    device_caps=$(printf '%s\n' "$v4l2_output" | awk '
+      /^[[:space:]]*Device Caps[[:space:]]*:/ { in_section = 1; print; next }
+      in_section && /^[A-Z]/ { exit }
+      in_section && /^[[:space:]]/ { print }
+    ')
+    
+    # Check for video capture capability (accept both standard and multiplanar)
+    if ! printf '%s\n' "$device_caps" | grep -q -E "Video Capture|Video Capture Multiplanar"; then
+      log_info "UVC device $dev: not a video capture node (Device Caps: $(printf '%s' "$device_caps" | tr '\n' ' '))" >&2
+      continue
+    fi
+    
+    # Reject metadata-only nodes
+    if printf '%s\n' "$device_caps" | grep -q "Metadata Capture" && \
+       ! printf '%s\n' "$device_caps" | grep -q -E "Video Capture|Video Capture Multiplanar"; then
+      log_info "UVC device $dev: metadata-only node, skipping" >&2
+      continue
+    fi
+    
+    # Query supported formats and find best match
+    formats=$(v4l2-ctl -d "$dev" --list-formats-ext 2>/dev/null || true)
+    
+    if [ -z "$formats" ]; then
+      log_info "UVC device $dev: no formats detected" >&2
+      continue
+    fi
+    
+    # Check if jpegdec is available for MJPEG support
+    has_jpegdec=0
+    if has_element jpegdec; then
+      has_jpegdec=1
+    fi
+    
+    # Parse formats with POSIX awk - extract format and size only
+    # Output: format|width|height
+    # Framerate is omitted to let v4l2src auto-negotiate (avoids rounding issues)
+    # Priority: resolution match > usable framerate > format compatibility
+    # Filter MJPEG formats if jpegdec is not available
+    best_mode=$(printf '%s\n' "$formats" | awk -v has_jpegdec="$has_jpegdec" '
+      BEGIN {
+        best_priority = 999999999
+        current_format = ""
+      }
+      
+      # Match format line: [0]: '\''YUYV'\'' (YUYV 4:2:2) OR '\''MJPG'\'' (Motion-JPEG)
+      /^[[:space:]]*\[[0-9][0-9]*\]:/ || /^[[:space:]]*'\''[A-Z0-9]+'\''/ {
+        # Extract format between single quotes
+        format_line = $0
+        start = index(format_line, "'\''")
+        if (start > 0) {
+          rest = substr(format_line, start + 1)
+          end = index(rest, "'\''")
+          if (end > 0) {
+            current_format = substr(rest, 1, end - 1)
+          }
+        }
+      }
+      
+      # Match size line: Size: Discrete 1920x1080
+      /Size:.*[0-9]+x[0-9]+/ {
+        size_line = $0
+        # Find position of resolution pattern
+        x_pos = index(size_line, "x")
+        if (x_pos > 0) {
+          # Extract width: scan backwards from x to find start of number
+          before_x = substr(size_line, 1, x_pos - 1)
+          width = ""
+          for (i = length(before_x); i >= 1; i--) {
+            c = substr(before_x, i, 1)
+            if (c >= "0" && c <= "9") {
+              width = c width
+            } else if (width != "") {
+              break
+            }
+          }
+          
+          # Extract height: scan forwards from x to find end of number
+          after_x = substr(size_line, x_pos + 1)
+          height = ""
+          for (i = 1; i <= length(after_x); i++) {
+            c = substr(after_x, i, 1)
+            if (c >= "0" && c <= "9") {
+              height = height c
+            } else if (height != "") {
+              break
+            }
+          }
+          
+          current_width = width + 0
+          current_height = height + 0
+        }
+      }
+      
+      # Match interval line: Interval: Discrete 0.133s (7.500 fps)
+      /Interval:.*fps/ {
+        if (current_format == "" || current_width == 0 || current_height == 0) next
+        
+        # Filter MJPEG if decoder unavailable
+        if ((current_format == "MJPG" || current_format == "MJPEG") && has_jpegdec == 0) {
+          next
+        }
+        
+        # Only process supported formats
+        # Supported: YUYV, UYVY, NV12, MJPG, MJPEG
+        if (current_format != "YUYV" && 
+            current_format != "UYVY" && 
+            current_format != "NV12" && 
+            current_format != "MJPG" && 
+            current_format != "MJPEG") {
+          next
+        }
+        
+        # Extract FPS value for priority calculation only
+        fps_line = $0
+        paren_start = index(fps_line, "(")
+        paren_end = index(fps_line, "fps)")
+        fps_decimal = 0
+        if (paren_start > 0 && paren_end > 0) {
+          fps_str = substr(fps_line, paren_start + 1, paren_end - paren_start - 1)
+          gsub(/ /, "", fps_str)
+          fps_decimal = fps_str + 0
+        }
+        
+        # Priority: resolution match > usable framerate > format compatibility
+        # Resolution priority (lower is better)
+        res_priority = 999
+        if (current_width == 1920 && current_height == 1080) res_priority = 1
+        else if (current_width == 1280 && current_height == 720) res_priority = 2
+        else if (current_width == 640 && current_height == 480) res_priority = 3
+        else res_priority = 4
+        
+        # Framerate priority within resolution (lower is better)
+        fps_int = int(fps_decimal)
+        fps_priority = 999
+        if (fps_int >= 30) fps_priority = 1
+        else if (fps_int >= 15) fps_priority = 2
+        else if (fps_int >= 10) fps_priority = 3
+        else if (fps_int >= 5) fps_priority = 4
+        else fps_priority = 5
+        
+        # Format priority (lower is better)
+        # Prefer raw formats when decoder available, otherwise skip MJPEG
+        format_priority = 999
+        if (current_format == "YUYV") format_priority = 1
+        else if (current_format == "UYVY") format_priority = 2
+        else if (current_format == "NV12") format_priority = 3
+        else if (current_format == "MJPG" || current_format == "MJPEG") format_priority = 4
+        
+        # Combined priority: resolution > framerate > format
+        combined_priority = (res_priority * 1000000) + (fps_priority * 1000) + format_priority
+        
+        if (combined_priority < best_priority) {
+          best_priority = combined_priority
+          best_format = current_format
+          best_width = current_width
+          best_height = current_height
+        }
+      }
+      
+      END {
+        if (best_format != "") {
+          print best_format "|" best_width "|" best_height
+        }
+      }
+    ')
+    
+    if [ -n "$best_mode" ]; then
+      log_info "UVC camera detected: $dev with mode: $best_mode" >&2
+      printf '%s|%s\n' "$dev" "$best_mode"
+      return 0
+    fi
+  done
+  
+  log_info "No UVC camera found with supported capture capabilities" >&2
+  return 1
+}
+
+# gstreamer_detect_uvc_camera (LEGACY - simple detection without caps check)
+# Detects UVC camera device by checking kernel driver via sysfs
+# Prints: device path (e.g., /dev/video2) or empty if not found
+# NOTE: This function does NOT check supported capture modes.
+#       Use gstreamer_detect_uvc_camera_with_caps() for production tests.
+gstreamer_detect_uvc_camera() {
+  for dev in /dev/video*; do
+    [ -c "$dev" ] || continue
+    
+    # Check if device uses uvcvideo driver via sysfs
+    drv=$(readlink -f "/sys/class/video4linux/${dev##*/}/device/driver" 2>/dev/null)
+    
+    if printf '%s\n' "$drv" | grep -q "/uvcvideo$"; then
+      printf '%s\n' "$dev"
+      return 0
+    fi
+  done
+  
+  return 1
+}
+
+# -------------------- Advanced Test Pipeline Builders --------------------
+
+# gstreamer_build_uvc_preview_pipeline
+# Build pipeline for UVC camera live preview with waylandsink
+# REQUIRES: An existing Wayland session (WAYLAND_DISPLAY must be set)
+#           Use gstreamer_adopt_wayland_session_only() before calling this
+# Args: device format width height
+# Returns: pipeline string or empty on error
+#
+# Supports both raw and compressed formats:
+#   - Raw formats (YUYV, UYVY, NV12): Direct to waylandsink with videoconvert
+#   - MJPEG: Adds jpegparse ! jpegdec before videoconvert
+#
+# Framerate is omitted from caps to let v4l2src auto-negotiate with the device.
+# This avoids rounding issues where v4l2-ctl reports approximate FPS (e.g., 29.970
+# for 30000/1001) that don't match the device's exact fraction.
+#
+# Example usage:
+#   if gstreamer_adopt_wayland_session_only; then
+#     pipeline=$(gstreamer_build_uvc_preview_pipeline "$dev" "YUYV" "640" "480")
+#     gstreamer_run_gstlaunch_timeout 30 "$pipeline"
+#   fi
+gstreamer_build_uvc_preview_pipeline() {
+  device="$1"
+  format="$2"
+  width="$3"
+  height="$4"
+  
+  [ -n "$device" ] || return 1
+  [ -n "$format" ] || return 1
+  [ -n "$width" ] || return 1
+  [ -n "$height" ] || return 1
+  
+  # Map V4L2 fourcc to GStreamer caps format
+  case "$format" in
+    YUYV)
+      gst_format="YUY2"
+      caps_type="video/x-raw"
+      decode_chain=""
+      ;;
+    UYVY)
+      gst_format="UYVY"
+      caps_type="video/x-raw"
+      decode_chain=""
+      ;;
+    NV12)
+      gst_format="NV12"
+      caps_type="video/x-raw"
+      decode_chain=""
+      ;;
+    MJPG|MJPEG)
+      gst_format=""
+      caps_type="image/jpeg"
+      # Add JPEG decoder chain if elements available
+      if has_element jpegparse && has_element jpegdec; then
+        decode_chain="jpegparse ! jpegdec ! "
+      elif has_element jpegdec; then
+        decode_chain="jpegdec ! "
+      else
+        # Cannot decode MJPEG without jpegdec
+        return 1
+      fi
+      ;;
+    *)
+      # Unsupported format
+      return 1
+      ;;
+  esac
+  
+  # Build caps string WITHOUT framerate (let v4l2src auto-negotiate)
+  if [ "$caps_type" = "video/x-raw" ]; then
+    caps="${caps_type},format=${gst_format},width=${width},height=${height}"
+  else
+    # MJPEG: image/jpeg
+    caps="${caps_type},width=${width},height=${height}"
+  fi
+  
+  # Build pipeline with optional qtivtransform
+  # For raw formats, add identity after caps to prove capture succeeded
+  if has_element qtivtransform; then
+    printf 'v4l2src device=%s ! %s ! %sidentity name=uvc_activity silent=false ! qtivtransform rotate=0 ! videoconvert ! waylandsink fullscreen=true' \
+      "$device" "$caps" "$decode_chain"
+  else
+    printf 'v4l2src device=%s ! %s ! %sidentity name=uvc_activity silent=false ! videoconvert ! waylandsink fullscreen=true' \
+      "$device" "$caps" "$decode_chain"
+  fi
+}
+
+# gstreamer_build_drc_decode_pipeline
+# Build pipeline for Dynamic Resolution Change H.264 decode test
+# Args: clip_path video_stack
+# Returns: pipeline string or empty on error
+gstreamer_build_drc_decode_pipeline() {
+  clip_path="$1"
+  video_stack="${2:-upstream}"
+  
+  [ -n "$clip_path" ] || return 1
+  [ -f "$clip_path" ] || return 1
+  
+  # Get stack-dependent decoder arguments
+  decoder_args=$(gstreamer_v4l2_decoder_args "$video_stack")
+  
+  if [ -n "$decoder_args" ]; then
+    printf 'filesrc location=%s ! qtdemux ! queue ! h264parse ! v4l2h264dec %s ! video/x-raw,format=NV12 ! fpsdisplaysink video-sink="waylandsink fullscreen=true" text-overlay=false' \
+      "$clip_path" "$decoder_args"
+  else
+    printf 'filesrc location=%s ! qtdemux ! queue ! h264parse ! v4l2h264dec ! video/x-raw,format=NV12 ! fpsdisplaysink video-sink="waylandsink fullscreen=true" text-overlay=false' \
+      "$clip_path"
+  fi
+}
+
+# gstreamer_build_concurrency_decode_pipeline
+# Build pipeline for concurrent decode tests (H.264, H.265, MJPEG)
+# Supports configurable session count with dynamic grid layout
+# Args: codec clip_path video_stack session_count
+# Returns: pipeline string or empty on error
+gstreamer_build_concurrency_decode_pipeline() {
+  codec="$1"
+  clip_path="$2"
+  video_stack="${3:-upstream}"
+  sessions="${4:-8}"
+  
+  [ -n "$codec" ] || return 1
+  [ -n "$clip_path" ] || return 1
+  [ -f "$clip_path" ] || return 1
+  
+  # Validate session count is numeric and supported (only 2 or 8)
+  case "$sessions" in
+    ''|*[!0-9]*) 
+      # Invalid: not numeric
+      return 1
+      ;;
+    2|8)
+      # Valid session counts - now validate against codec
+      ;;
+    *)
+      # Invalid: unsupported session count (must be 2 or 8)
+      return 1
+      ;;
+  esac
+  
+  # Validate session count matches codec requirements
+  # H.264/H.265 require 8 sessions, MJPEG requires 2 sessions
+  case "$codec" in
+    h264|h265)
+      if [ "$sessions" -ne 8 ]; then
+        # H.264/H.265 must use 8 sessions
+        return 1
+      fi
+      ;;
+    mjpeg)
+      if [ "$sessions" -ne 2 ]; then
+        # MJPEG must use 2 sessions
+        return 1
+      fi
+      ;;
+    *)
+      # Unknown codec
+      return 1
+      ;;
+  esac
+  
+  # Get stack-dependent decoder arguments (only for H.264/H.265, not MJPEG)
+  decoder_args=""
+  case "$codec" in
+    h264|h265)
+      decoder_args=$(gstreamer_v4l2_decoder_args "$video_stack")
+      ;;
+  esac
+  
+  # Build qtivcomposer with grid layout based on session count
+  # Display: 1920x1080
+  pipeline="qtivcomposer name=mix"
+  
+  case "$sessions" in
+    2)
+      # 2x1 grid: 960x1080 each
+      pipeline="$pipeline sink_0::position=\"<0,0>\" sink_0::dimensions=\"<960,1080>\""
+      pipeline="$pipeline sink_1::position=\"<960,0>\" sink_1::dimensions=\"<960,1080>\""
+      ;;
+    8)
+      # 4x2 grid: 480x540 each
+      pipeline="$pipeline sink_0::position=\"<0,0>\" sink_0::dimensions=\"<480,540>\""
+      pipeline="$pipeline sink_1::position=\"<480,0>\" sink_1::dimensions=\"<480,540>\""
+      pipeline="$pipeline sink_2::position=\"<960,0>\" sink_2::dimensions=\"<480,540>\""
+      pipeline="$pipeline sink_3::position=\"<1440,0>\" sink_3::dimensions=\"<480,540>\""
+      pipeline="$pipeline sink_4::position=\"<0,540>\" sink_4::dimensions=\"<480,540>\""
+      pipeline="$pipeline sink_5::position=\"<480,540>\" sink_5::dimensions=\"<480,540>\""
+      pipeline="$pipeline sink_6::position=\"<960,540>\" sink_6::dimensions=\"<480,540>\""
+      pipeline="$pipeline sink_7::position=\"<1440,540>\" sink_7::dimensions=\"<480,540>\""
+      ;;
+  esac
+  
+  # Different output for MJPEG (needs mix. before waylandsink)
+  case "$codec" in
+    mjpeg)
+      pipeline="$pipeline mix. ! queue ! waylandsink fullscreen=true"
+      ;;
+    *)
+      pipeline="$pipeline ! queue ! waylandsink fullscreen=true"
+      ;;
+  esac
+  
+  # Add decode chains based on codec and session count
+  i=0
+  while [ "$i" -lt "$sessions" ]; do
+    case "$codec" in
+      h264)
+        if [ -n "$decoder_args" ]; then
+          pipeline="$pipeline filesrc location=${clip_path} ! qtdemux ! queue ! h264parse ! v4l2h264dec ${decoder_args} ! video/x-raw,format=NV12 ! identity name=branch${i} silent=false ! queue ! mix."
+        else
+          pipeline="$pipeline filesrc location=${clip_path} ! qtdemux ! queue ! h264parse ! v4l2h264dec ! video/x-raw,format=NV12 ! identity name=branch${i} silent=false ! queue ! mix."
+        fi
+        ;;
+      h265)
+        if [ -n "$decoder_args" ]; then
+          pipeline="$pipeline filesrc location=${clip_path} ! qtdemux ! queue ! h265parse ! v4l2h265dec ${decoder_args} ! video/x-raw,format=NV12 ! identity name=branch${i} silent=false ! queue ! mix."
+        else
+          pipeline="$pipeline filesrc location=${clip_path} ! qtdemux ! queue ! h265parse ! v4l2h265dec ! video/x-raw,format=NV12 ! identity name=branch${i} silent=false ! queue ! mix."
+        fi
+        ;;
+      mjpeg)
+        # MJPEG uses jpegdec (software decoder), no stack-specific args needed
+        # Add identity element for per-branch validation (silent=false emits buffer chain events)
+        pipeline="$pipeline filesrc location=${clip_path} ! avidemux ! queue ! jpegdec ! videoconvert ! video/x-raw,format=RGB ! identity name=branch${i} silent=false ! queue ! mix."
+        ;;
+      *)
+        return 1
+        ;;
+    esac
+    i=$((i + 1))
+  done
+  
+  printf '%s' "$pipeline"
+}
+
+# gstreamer_build_smart_encode_pipeline
+# Build pipeline for HEVC Smart Encode with dual camera streams
+# Args: output_file
+# Returns: pipeline string or empty on error
+gstreamer_build_smart_encode_pipeline() {
+  output_file="$1"
+  
+  [ -n "$output_file" ] || return 1
+  
+  printf 'qtiqmmfsrc camera=0 noise-reduction=2 video_0::extra-buffers=20 video_0::type=preview name=camsrc video_0::type=video ! video/x-raw,format=NV12_Q08C,width=1280,height=720,framerate=30/1 ! queue ! scb.sink qtismartvencbin default-gop=30 max-gop=600 smart-framerate=true smart-gop=true max-bitrate=4200000 name=scb encoder=v4l2h265enc ! queue ! h265parse ! queue ! mp4mux ! queue ! filesink location=%s camsrc. ! video/x-raw,format=NV12,width=640,height=480,framerate=15/1 ! queue ! scb.sink_ctrl' \
+    "$output_file"
+}
+
+# gstreamer_build_camera_encode_pipeline
+# Build pipeline for camera-based encoding with custom controls
+# Args: codec width height output_file extra_controls video_stack
+# Returns: pipeline string or empty on error
+gstreamer_build_camera_encode_pipeline() {
+  codec="$1"
+  width="$2"
+  height="$3"
+  output_file="$4"
+  extra_controls="$5"
+  video_stack="$6"
+  
+  [ -n "$codec" ] || return 1
+  [ -n "$width" ] || return 1
+  [ -n "$height" ] || return 1
+  [ -n "$output_file" ] || return 1
+  
+  # Determine encoder and parser
+  case "$codec" in
+    h264)
+      encoder="v4l2h264enc"
+      parser="h264parse"
+      ;;
+    h265|hevc)
+      encoder="v4l2h265enc"
+      parser="h265parse"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+  
+  # Build pipeline
+  if [ -n "$extra_controls" ]; then
+    printf 'qtiqmmfsrc name=qmmf ! video/x-raw,format=NV12,width=%s,height=%s,framerate=30/1 ! %s extra-controls="%s" capture-io-mode=4 output-io-mode=4 ! %s ! mp4mux ! filesink location=%s' \
+      "$width" "$height" "$encoder" "$extra_controls" "$parser" "$output_file"
+  else
+    printf 'qtiqmmfsrc name=qmmf ! video/x-raw,format=NV12,width=%s,height=%s,framerate=30/1 ! %s capture-io-mode=4 output-io-mode=4 ! %s ! mp4mux ! filesink location=%s' \
+      "$width" "$height" "$encoder" "$parser" "$output_file"
+  fi
+}
+
+# -------------------- Advanced Encode Output Validation --------------------
+# gstreamer_validate_encode_output <testname> <output_file> <gstRc> <expected_codec> <expected_width> <expected_height> <min_duration>
+# Comprehensive validation for camera-based encode tests
+# Validates: exit code, file creation, file size, container, codec, resolution, duration
+# Returns: 0 if all validations pass, 1 otherwise
+#
+# Parameters:
+#   testname: Test name for logging
+#   output_file: Path to encoded output file
+#   gstRc: GStreamer exit code
+#   expected_codec: Expected codec (h264, H.264, h265, H.265, hevc, HEVC)
+#   expected_width: Expected video width in pixels
+#   expected_height: Expected video height in pixels
+#   min_duration: Minimum expected duration in seconds (optional, default: 5)
+#
+# Example usage:
+#   gstreamer_validate_encode_output "HEVC_Encode_720p" "$output_file" "$gstRc" "h265" "1280" "720" "10"
+gstreamer_validate_encode_output() {
+  testname="$1"
+  output_file="$2"
+  gstRc="$3"
+  expected_codec="$4"
+  expected_width="$5"
+  expected_height="$6"
+  # shellcheck disable=SC2034  # min_duration is used later in duration validation
+  min_duration="${7:-5}"
+  
+  # 1. Check for SIGKILL escalation (137 normalized to 124)
+  # A SIGKILL means the pipeline hung and had to be force-killed - this is a failure
+  if [ "${GST_BOUNDED_RAW_RC:-}" = "137" ]; then
+    log_fail "$testname: FAIL (pipeline hung and required SIGKILL, raw exit: 137, normalized: $gstRc)"
+    return 1
+  fi
+  
+  # 2. Verify exit code is expected (0 or timeout 124)
+  if [ "$gstRc" -ne 0 ] && [ "$gstRc" -ne 124 ]; then
+    log_fail "$testname: FAIL (unexpected exit code: $gstRc)"
+    return 1
+  fi
+  log_info "$testname: ✓ Exit code acceptable ($gstRc)"
+  
+  # 2. Verify file was created
+  if [ ! -f "$output_file" ]; then
+    log_fail "$testname: FAIL (output file not created: $output_file)"
+    return 1
+  fi
+  log_info "$testname: ✓ Output file created"
+  
+  # 3. Verify file size exceeds minimum (1MB for camera-based encodes)
+  # EXCEPTION: Skip file size check for smart GOP tests (adaptive encoding can produce KB-sized files)
+  case "$testname" in
+    *Smart*|*smart*)
+      log_info "$testname: ⚠ Skipping file size validation (smart encoding can produce small files)"
+      file_size=$(gstreamer_file_size_bytes "$output_file")
+      log_info "$testname: ✓ File size: $file_size bytes (validation skipped for smart encode)"
+      ;;
+    *)
+      file_size=$(gstreamer_file_size_bytes "$output_file")
+      min_size=1048576  # 1MB minimum for camera encodes
+      if [ "$file_size" -lt "$min_size" ]; then
+        log_fail "$testname: FAIL (file too small: $file_size bytes < $min_size bytes)"
+        return 1
+      fi
+      log_info "$testname: ✓ File size acceptable ($file_size bytes)"
+      ;;
+  esac
+  
+  # 4. REQUIRE gst-discoverer-1.0 to verify container, codec, resolution, duration
+  if ! command -v gst-discoverer-1.0 >/dev/null 2>&1; then
+    log_fail "$testname: FAIL (gst-discoverer-1.0 required for validation but not available)"
+    return 1
+  fi
+  
+  # REQUIRE timeout command for bounded discovery
+  if ! command -v timeout >/dev/null 2>&1; then
+    log_fail "$testname: FAIL (timeout command required for bounded discovery)"
+    return 1
+  fi
+  
+  discover_log="${output_file}.discover.log"
+  # Run gst-discoverer with timeout and SIGKILL escalation (30s timeout, 10s grace)
+  gstreamer_run_bounded "$GST_PROBE_TIMEOUT" TERM gst-discoverer-1.0 "$output_file" >"$discover_log" 2>&1
+  discover_rc=$?
+  if gstreamer_bounded_no_timeout "$discover_rc"; then
+    log_fail "$testname: FAIL (timeout command required but not available)"
+    return 1
+  fi
+  if gstreamer_bounded_timed_out "$discover_rc"; then
+    log_fail "$testname: FAIL (gst-discoverer-1.0 timed out - malformed artifact)"
+    return 1
+  fi
+  if [ "$discover_rc" -ne 0 ]; then
+    log_fail "$testname: FAIL (gst-discoverer-1.0 failed to analyze file, rc=$discover_rc)"
+    return 1
+  fi
+  
+  # Log full gst-discoverer output for debugging
+  log_info "$testname: === gst-discoverer output ==="
+  while IFS= read -r line; do
+    log_info "$testname:   $line"
+  done < "$discover_log"
+  log_info "$testname: ==================================="
+  
+  # Extract and log detected properties
+  # Pattern matches both "container: Quicktime" and "container #0: Quicktime"
+  detected_container=$(grep -i "container" "$discover_log" | head -n1 | sed -n 's/.*container[^:]*:[[:space:]]*\(.*\)/\1/p' || echo "Unknown")
+  detected_codec=$(grep -E "video.*:" "$discover_log" | head -n1 | sed -n 's/.*video[^:]*:[[:space:]]*\([^(]*\).*/\1/p' | sed 's/[[:space:]]*$//' || echo "Unknown")
+  detected_width=$(grep -E "^[[:space:]]*Width:" "$discover_log" | head -n1 | sed -n 's/.*Width:[[:space:]]*\([0-9][0-9]*\).*/\1/p' || echo "0")
+  detected_height=$(grep -E "^[[:space:]]*Height:" "$discover_log" | head -n1 | sed -n 's/.*Height:[[:space:]]*\([0-9][0-9]*\).*/\1/p' || echo "0")
+  
+  log_info "$testname: Detected properties:"
+  log_info "$testname:   Container: $detected_container"
+  log_info "$testname:   Codec: $detected_codec"
+  log_info "$testname:   Resolution: ${detected_width}x${detected_height}"
+  
+  # Start validation section
+  log_info "$testname: === Validation Results ==="
+  validation_failed=0
+  
+  # Verify container (MP4) - STRICT: return failure if mismatch
+  # Match both "container: Quicktime" and "container #0: Quicktime"
+  log_info "$testname: Validating Container..."
+  log_info "$testname:   Expected: Quicktime (MP4 container)"
+  log_info "$testname:   Detected: $detected_container"
+  if ! grep -q -i "quicktime" "$discover_log"; then
+    log_fail "$testname:   Result: ✗ FAIL - Container mismatch (expected Quicktime, got $detected_container)"
+    validation_failed=1
+  else
+    log_pass "$testname:   Result: ✓ PASS - Container matches (Quicktime)"
+  fi
+  
+  # Verify codec - STRICT: return failure if mismatch
+  log_info "$testname: Validating Codec..."
+  case "$expected_codec" in
+    h264|H.264)
+      log_info "$testname:   Expected: H.264"
+      log_info "$testname:   Detected: $detected_codec"
+      if grep -q "H\.264" "$discover_log"; then
+        log_pass "$testname:   Result: ✓ PASS - Codec matches"
+      else
+        log_fail "$testname:   Result: ✗ FAIL - Codec mismatch"
+        validation_failed=1
+      fi
+      ;;
+    h265|H.265|hevc|HEVC)
+      log_info "$testname:   Expected: H.265/HEVC"
+      log_info "$testname:   Detected: $detected_codec"
+      if grep -q "H\.265\|HEVC" "$discover_log"; then
+        log_pass "$testname:   Result: ✓ PASS - Codec matches"
+      else
+        log_fail "$testname:   Result: ✗ FAIL - Codec mismatch"
+        validation_failed=1
+      fi
+      ;;
+  esac
+  
+  # Verify resolution - STRICT: return failure if mismatch
+  log_info "$testname: Validating Resolution..."
+  log_info "$testname:   Expected: ${expected_width}x${expected_height}"
+  log_info "$testname:   Detected: ${detected_width}x${detected_height}"
+  if [ "$detected_width" = "$expected_width" ] && [ "$detected_height" = "$expected_height" ]; then
+    log_pass "$testname:   Result: ✓ PASS - Resolution matches"
+  else
+    log_fail "$testname:   Result: ✗ FAIL - Resolution mismatch"
+    validation_failed=1
+  fi
+  
+  # Verify duration - STRICT: parse to seconds and enforce min_duration
+  log_info "$testname: Validating Duration..."
+  duration_line=$(grep "Duration:" "$discover_log" | head -n 1)
+  if [ -z "$duration_line" ]; then
+    log_fail "$testname:   Result: ✗ FAIL - No duration information found"
+    log_info "$testname: ==================================="
+    rm -f "$discover_log" 2>/dev/null || true
+    return 1
+  fi
+  
+  # Extract duration in format like "0:00:30.123456789"
+  duration_str=$(printf '%s' "$duration_line" | sed -n 's/.*Duration: \([0-9:\.]*\).*/\1/p')
+  if [ -z "$duration_str" ]; then
+    log_fail "$testname:   Result: ✗ FAIL - Could not parse duration"
+    log_info "$testname: ==================================="
+    rm -f "$discover_log" 2>/dev/null || true
+    return 1
+  fi
+  
+  # Parse duration to seconds using awk to avoid octal interpretation issues
+  # Format: H:MM:SS.nanoseconds or M:SS.nanoseconds or SS.nanoseconds
+  # awk handles leading zeros correctly (e.g., 08, 09) without treating them as octal
+  total_seconds=$(printf '%s' "$duration_str" | awk -F: '
+    {
+      # Remove fractional seconds from last field
+      gsub(/\..*/, "", $NF)
+      
+      # Calculate based on number of fields
+      if (NF == 3) {
+        # H:MM:SS format
+        print ($1 * 3600) + ($2 * 60) + $3
+      } else if (NF == 2) {
+        # M:SS or MM:SS format
+        print ($1 * 60) + $2
+      } else if (NF == 1) {
+        # SS format
+        print $1
+      } else {
+        # Invalid format
+        print 0
+      }
+    }
+  ')
+  
+  # Sanitize result to ensure it's numeric
+  case "$total_seconds" in
+    ''|*[!0-9]*) total_seconds=0 ;;
+  esac
+  
+  log_info "$testname:   Expected: >= ${min_duration}s (minimum)"
+  log_info "$testname:   Detected: ${total_seconds}s (from $duration_str)"
+  
+  # Enforce minimum duration
+  if [ "$total_seconds" -lt "$min_duration" ]; then
+    log_fail "$testname:   Result: ✗ FAIL - Duration too short (${total_seconds}s < ${min_duration}s)"
+    validation_failed=1
+  else
+    log_pass "$testname:   Result: ✓ PASS - Duration meets minimum requirement"
+  fi
+  
+  log_info "$testname: ==================================="
+  
+  # Final validation result
+  if [ "$validation_failed" -eq 1 ]; then
+    log_fail "$testname: Overall validation: FAILED"
+    rm -f "$discover_log" 2>/dev/null || true
+    return 1
+  else
+    log_pass "$testname: Overall validation: PASSED"
+    rm -f "$discover_log" 2>/dev/null || true
+    return 0
+  fi
+}
+
+# gstreamer_verify_rotation <testname> <output_file> <input_width> <input_height> <rotation_degrees>
+# Verify that video rotation was applied by checking output dimensions
+# For 90° or 270° rotation, dimensions should be swapped
+# Returns: 0 if rotation verified, 1 otherwise
+# REQUIRES gst-discoverer-1.0 and usable dimension evidence
+#
+# Parameters:
+#   testname: Test name for logging
+#   output_file: Path to encoded output file
+#   input_width: Original input width before rotation
+#   input_height: Original input height before rotation
+#   rotation_degrees: Expected rotation (90, 180, 270)
+#
+# Example usage:
+#   gstreamer_verify_rotation "HEVC_Encode_4K_Rotate90" "$output_file" "3840" "2160" "90"
+gstreamer_verify_rotation() {
+  testname="$1"
+  output_file="$2"
+  input_width="$3"
+  input_height="$4"
+  rotation_degrees="$5"
+  
+  [ -n "$testname" ] || return 1
+  [ -f "$output_file" ] || return 1
+  [ -n "$input_width" ] || return 1
+  [ -n "$input_height" ] || return 1
+  [ -n "$rotation_degrees" ] || return 1
+  
+  # REQUIRE gst-discoverer - fail if not available
+  if ! command -v gst-discoverer-1.0 >/dev/null 2>&1; then
+    log_fail "$testname: FAIL (gst-discoverer-1.0 required for rotation verification)"
+    return 1
+  fi
+  
+  log_info "$testname: Verifying ${rotation_degrees}° rotation..."
+  
+  # Get discoverer output and save to log file for debugging
+  discover_log="${output_file}.rotation_discover.log"
+  
+  # Run gst-discoverer with bounded execution using gstreamer_run_bounded
+  gstreamer_run_bounded "$GST_PROBE_TIMEOUT" TERM gst-discoverer-1.0 "$output_file" >"$discover_log" 2>&1
+  discover_rc=$?
+  
+  if gstreamer_bounded_no_timeout "$discover_rc"; then
+    log_fail "$testname: FAIL (timeout command required but not available)"
+    rm -f "$discover_log" 2>/dev/null || true
+    return 1
+  fi
+  
+  if gstreamer_bounded_timed_out "$discover_rc"; then
+    log_fail "$testname: FAIL (gst-discoverer-1.0 timed out during rotation verification - malformed artifact)"
+    rm -f "$discover_log" 2>/dev/null || true
+    return 1
+  fi
+  
+  if [ "$discover_rc" -ne 0 ]; then
+    log_fail "$testname: FAIL (gst-discoverer-1.0 failed to analyze file for rotation verification, rc=$discover_rc)"
+    rm -f "$discover_log" 2>/dev/null || true
+    return 1
+  fi
+  
+  # Log discoverer output for debugging
+  log_info "$testname: === gst-discoverer output (rotation check) ==="
+  while IFS= read -r line; do
+    log_info "$testname:   $line"
+  done < "$discover_log"
+  log_info "$testname: ==================================="
+  
+  # Extract video dimensions using same robust parsing as validation function
+  # Handles indented format: "  Width: 1280"
+  actual_width=$(grep -E "^[[:space:]]*Width:" "$discover_log" | head -n1 | sed -n 's/.*Width:[[:space:]]*\([0-9][0-9]*\).*/\1/p' || echo "")
+  actual_height=$(grep -E "^[[:space:]]*Height:" "$discover_log" | head -n1 | sed -n 's/.*Height:[[:space:]]*\([0-9][0-9]*\).*/\1/p' || echo "")
+  
+  # REQUIRE usable dimension evidence - fail if cannot extract
+  if [ -z "$actual_width" ] || [ -z "$actual_height" ]; then
+    log_fail "$testname: FAIL (Could not extract dimensions from output file - no usable evidence)"
+    rm -f "$discover_log" 2>/dev/null || true
+    return 1
+  fi
+  
+  log_info "$testname: Extracted dimensions: ${actual_width}x${actual_height}"
+  
+  # Determine expected dimensions based on rotation
+  case "$rotation_degrees" in
+    90|270)
+      # Dimensions should be swapped
+      expected_width="$input_height"
+      expected_height="$input_width"
+      log_info "$testname: Expected dimensions after ${rotation_degrees}° rotation: ${expected_width}x${expected_height}"
+      ;;
+    180)
+      # Dimensions should remain the same
+      expected_width="$input_width"
+      expected_height="$input_height"
+      log_info "$testname: Expected dimensions after ${rotation_degrees}° rotation: ${expected_width}x${expected_height}"
+      ;;
+    *)
+      log_fail "$testname: FAIL (Unsupported rotation angle: ${rotation_degrees}°)"
+      return 1
+      ;;
+  esac
+  
+  # Verify dimensions match expected
+  log_info "$testname: === Rotation Validation ==="
+  log_info "$testname:   Expected dimensions: ${expected_width}x${expected_height}"
+  log_info "$testname:   Actual dimensions:   ${actual_width}x${actual_height}"
+  
+  if [ "$actual_width" = "$expected_width" ] && [ "$actual_height" = "$expected_height" ]; then
+    log_pass "$testname:   Result: ✓ PASS - Rotation verified (dimensions correctly transformed)"
+    log_info "$testname: ==================================="
+    rm -f "$discover_log" 2>/dev/null || true
+    return 0
+  else
+    log_fail "$testname:   Result: ✗ FAIL - Rotation not applied correctly"
+    log_fail "$testname:   Expected: ${expected_width}x${expected_height}, Got: ${actual_width}x${actual_height}"
+    log_info "$testname: ==================================="
+    rm -f "$discover_log" 2>/dev/null || true
+    return 1
+  fi
+}
+
