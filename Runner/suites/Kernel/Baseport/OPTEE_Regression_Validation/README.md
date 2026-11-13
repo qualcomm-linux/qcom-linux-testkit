@@ -2,7 +2,7 @@
 
 Opt-in reviewed OP-TEE mutex, crypto, multi-session and basic OS regressions beyond native smoke.
 
-This is a separate suite. Existing runners, plans and shared helper interfaces retain their current behavior. It uses runtime capability discovery on Yocto, Debian, Ubuntu and CentOS, including shell-only images. Required utilities and optional payloads must be supplied by the image or job. It does not install packages, change boot selection or start services.
+Uses runtime discovery on Yocto, Debian, Ubuntu and CentOS. Missing mapped tools can be installed on Ubuntu, Debian and CentOS through the shared package provider, with installed tools reused. Yocto and `TESTKIT_IMAGE_ONLY=1` use image-provided tools only. Recovery respects `CHECK_DEPS_RECOVER=0` and `Runner/config/pkg_provider.conf`. Native helpers and test assets still require provisioning.
 
 | Option | Default |
 |---|---|

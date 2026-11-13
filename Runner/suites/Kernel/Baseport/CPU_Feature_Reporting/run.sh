@@ -36,6 +36,8 @@ fi
 # shellcheck disable=SC1091
 . "$TOOLS/functestlib.sh"
 # shellcheck disable=SC1091
+. "$TOOLS/lib_pkg_provider.sh"
+# shellcheck disable=SC1091
 . "$TOOLS/lib_kvm.sh"
 
 TESTNAME="CPU_Feature_Reporting"
@@ -176,7 +178,7 @@ for token in $(printf '%s\n' "$CPU_REPORT_EXPECTED" | tr ',' ' '); do
         test_result_record FAIL "Expected kernel-reported flag=$flag $expected, observed=$present"
     fi
 done
-if command -v od >/dev/null 2>&1; then
+if test_require_commands od; then
     # shellcheck disable=SC2016 # Child PID selects the same interpreter ABI for both files.
     if ! test_run_command auxv sh -c '
         od -An -tx1 -N6 "/proc/$$/exe" >"$1/elf.bytes" || exit 1
@@ -206,9 +208,12 @@ if command -v od >/dev/null 2>&1; then
         esac
     fi
 else
-    test_result_record SKIP "Auxiliary-vector comparison requires image-provided od, CPU flag reporting still executed"
+    log_info "Auxiliary-vector comparison was not executed without od, CPU flag reporting remains independently assessed"
 fi
 allowed=$(awk '/^Cpus_allowed_list:/ {print $2}' /proc/self/status)
+if [ -n "$allowed" ]; then
+    test_require_commands taskset || true
+fi
 for cpu in $cpus; do
     for node in /sys/devices/system/cpu/cpu"$cpu"/regs/identification/*; do
         [ -f "$node" ] || continue
@@ -246,7 +251,7 @@ if [ "$schedulable" -gt 0 ]; then
 else
     test_result_record SKIP "No affinity assertion executed, requires image-provided taskset and readable process CPU allowance"
 fi
-if command -v lscpu >/dev/null 2>&1; then
+if test_require_commands lscpu; then
     if ! test_run_command lscpu lscpu; then
         log_warn "Optional lscpu diagnostics failed, CPU assertions use procfs/sysfs evidence"
     fi
@@ -264,6 +269,10 @@ else
         requested=idregs-arm64
     fi
     binary=$(command -v "$requested" 2>/dev/null)
+    if [ -z "$binary" ]; then
+        test_require_commands "$requested" || true
+        binary=$(command -v "$requested" 2>/dev/null)
+    fi
     if [ -z "$binary" ] || [ ! -x "$binary" ] || [ -d "$binary" ]; then
         if [ "$CPU_REPORT_IDREGS" != auto ] || [ -n "$CPU_REPORT_FEATURE_TABLE" ]; then
             test_result_record FAIL "Requested native CPU helper=$requested is unavailable or not executable, provide an image-installed helper"

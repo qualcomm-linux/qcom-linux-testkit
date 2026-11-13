@@ -2,7 +2,7 @@
 
 Hardware decode reference-frame equality and encode frame-count/PSNR correctness across repeat runs.
 
-This is a separate suite. Existing runners, plans and shared helper interfaces retain their current behavior. It uses runtime capability discovery on Yocto, Debian, Ubuntu and CentOS, including shell-only images. Required utilities and optional payloads must be supplied by the image or job. It does not install packages, change boot selection or start services.
+Uses runtime discovery on Yocto, Debian, Ubuntu and CentOS. Missing mapped tools can be installed on Ubuntu, Debian and CentOS through the shared package provider, with installed tools reused. Yocto and `TESTKIT_IMAGE_ONLY=1` use image-provided tools only. Recovery respects `CHECK_DEPS_RECOVER=0` and `Runner/config/pkg_provider.conf`. Native helpers and test assets still require provisioning.
 
 | Option | Default |
 |---|---|
@@ -26,7 +26,7 @@ Run from this suite directory:
 ./run.sh --mode both --streams ./clips --rounds 3 --timeout 120
 ```
 
-Requires image-provided `ffmpeg` and `v4l2-ctl`, an accessible V4L2 memory-to-memory device and the corresponding FFmpeg v4l2m2m codec. Decode clips are read from `<codec>-*` under `--streams`, for example `h264-validation.h264`. All hardware-decoded NV12 frame hashes must equal an explicit software decode of the same clip. Encode creates a synthetic reference, then checks complete software decode frame count and PSNR. Every hardware result requires FFmpeg verbose evidence of the actual V4L2 node. This suite never reloads a driver or changes firmware. Resolution and codecs can be overridden to match the running device capability.
+Requires available `ffmpeg` and `v4l2-ctl`, an accessible V4L2 memory-to-memory device and the corresponding FFmpeg v4l2m2m codec. Decode clips are read from `<codec>-*` under `--streams`, for example `h264-validation.h264`. All hardware-decoded NV12 frame hashes must equal an explicit software decode of the same clip. Encode creates a synthetic reference, then checks complete software decode frame count and PSNR. Every hardware result requires FFmpeg verbose evidence of the actual V4L2 node. CentOS recovery requires an already configured repository providing `ffmpeg`, no multimedia repository is added automatically. This suite never reloads a driver or changes firmware. Resolution and codecs can be overridden to match the running device capability.
 
 Kernel health uses an exact retained baseline, including a timestamped suffix
 after ring rotation. `kernel-after/kernel_delta.log`, `kernel_delta_status.log`

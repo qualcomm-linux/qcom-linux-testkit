@@ -35,6 +35,8 @@ fi
 . "$INIT_ENV"
 # shellcheck disable=SC1091
 . "$TOOLS/functestlib.sh"
+# shellcheck disable=SC1091
+. "$TOOLS/lib_pkg_provider.sh"
 
 TESTNAME="Remoteproc_Restart_Validation"
 RES_FILE="$PWD/$TESTNAME.res"

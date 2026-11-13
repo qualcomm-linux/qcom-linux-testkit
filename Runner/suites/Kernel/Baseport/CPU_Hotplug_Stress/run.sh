@@ -36,6 +36,8 @@ fi
 # shellcheck disable=SC1091
 . "$TOOLS/functestlib.sh"
 # shellcheck disable=SC1091
+. "$TOOLS/lib_pkg_provider.sh"
+# shellcheck disable=SC1091
 . "$TOOLS/lib_performance.sh"
 
 TESTNAME="CPU_Hotplug_Stress"
@@ -182,10 +184,7 @@ if [ -z "$targets" ]; then
     test_run_finish
 fi
 if [ "$TEST_RUN_LOAD_SECONDS" -gt 0 ]; then
-    if ! command -v stress-ng >/dev/null 2>&1; then
-        test_result_record SKIP "Loaded hotplug requires image-provided stress-ng"
-        test_run_finish
-    fi
+    test_require_commands stress-ng || test_run_finish
     stress-ng --cpu 0 --timeout "${TEST_RUN_LOAD_SECONDS}s" --metrics-brief \
         >"$TEST_RUN_DIR/hotplug-load.log" 2>&1 &
     TEST_RUN_LOAD_PIDS=$!

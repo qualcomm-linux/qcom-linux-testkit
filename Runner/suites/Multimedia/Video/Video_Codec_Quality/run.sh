@@ -36,6 +36,8 @@ fi
 # shellcheck disable=SC1091
 . "$TOOLS/functestlib.sh"
 # shellcheck disable=SC1091
+. "$TOOLS/lib_pkg_provider.sh"
+# shellcheck disable=SC1091
 . "$TOOLS/lib_video.sh"
 
 TESTNAME="Video_Codec_Quality"

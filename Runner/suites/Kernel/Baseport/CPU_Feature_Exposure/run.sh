@@ -36,6 +36,8 @@ fi
 # shellcheck disable=SC1091
 . "$TOOLS/functestlib.sh"
 # shellcheck disable=SC1091
+. "$TOOLS/lib_pkg_provider.sh"
+# shellcheck disable=SC1091
 . "$TOOLS/lib_kvm.sh"
 
 TESTNAME="CPU_Feature_Exposure"
@@ -130,6 +132,7 @@ case "$(uname -m)" in
         test_run_finish
         ;;
 esac
+test_require_commands awk grep cat cut sort "$TEST_RUN_IDREGS" || test_run_finish
 binary=$(command -v "$TEST_RUN_IDREGS" 2>/dev/null)
 if [ -z "$binary" ]; then
     test_result_record SKIP "Image-provided idregs-arm64 helper is missing, supply --idregs"

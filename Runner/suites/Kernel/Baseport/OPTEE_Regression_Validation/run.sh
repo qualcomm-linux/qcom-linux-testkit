@@ -36,6 +36,8 @@ fi
 # shellcheck disable=SC1091
 . "$TOOLS/functestlib.sh"
 # shellcheck disable=SC1091
+. "$TOOLS/lib_pkg_provider.sh"
+# shellcheck disable=SC1091
 . "$TOOLS/lib_optee.sh"
 
 TESTNAME="OPTEE_Regression_Validation"
@@ -134,6 +136,7 @@ if [ "$TEST_RUN_EXERCISE" != 1 ] || [ -z "$TEST_RUN_CASES" ]; then
     test_result_record SKIP "Additional TA regressions require --exercise --cases with reviewed case IDs, native smoke defaults remain separate"
     test_run_finish
 fi
+test_require_commands awk cat cut find grep readlink sort tr || test_run_finish
 optee_capture_device_inventory "$TEST_RUN_DIR/tee-devices.tsv" || test_run_finish FAIL "OPTEE_Regression_Validation could not complete, inspect artifacts=$TEST_RUN_DIR"
 optee_log_device_inventory "$TEST_RUN_DIR/tee-devices.tsv" 16
 selection=$(optee_select_device "$TEST_RUN_DIR/tee-devices.tsv")
@@ -142,6 +145,7 @@ if [ -z "$selection" ]; then
     test_run_finish
 fi
 device=$(printf '%s\n' "$selection" | cut -f1)
+test_require_commands "$TEST_RUN_XTEST" || test_run_finish
 binary=$(command -v "$TEST_RUN_XTEST" 2>/dev/null)
 if [ -z "$binary" ]; then
     test_result_record SKIP "Native OP-TEE device=$device has no image-provided xtest binary"

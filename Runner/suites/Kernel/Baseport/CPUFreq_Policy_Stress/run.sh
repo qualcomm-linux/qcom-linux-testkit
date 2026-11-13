@@ -36,6 +36,8 @@ fi
 # shellcheck disable=SC1091
 . "$TOOLS/functestlib.sh"
 # shellcheck disable=SC1091
+. "$TOOLS/lib_pkg_provider.sh"
+# shellcheck disable=SC1091
 . "$TOOLS/lib_performance.sh"
 
 TESTNAME="CPUFreq_Policy_Stress"
@@ -263,8 +265,8 @@ for saved in "$TEST_RUN_DIR"/policies/*; do
         test_result_record FAIL "${policy##*/} low-frequency workload could not execute"
     fi
     if [ "$TEST_RUN_LOAD_SECONDS" -gt 0 ]; then
-        if command -v stress-ng >/dev/null 2>&1 &&
-           grep -qw schedutil "$policy/scaling_available_governors"; then
+        if grep -qw schedutil "$policy/scaling_available_governors" &&
+           test_require_commands stress-ng; then
             # shellcheck disable=SC2016 # Child positional arguments expand in the bounded shell.
             if ! test_run_command "${policy##*/}-load-governor" sh -c \
                 'printf "schedutil\n" >"$1/scaling_governor"' sh "$policy"; then
@@ -306,7 +308,7 @@ for saved in "$TEST_RUN_DIR"/policies/*; do
                 TEST_RUN_LOAD_PIDS=""
             fi
         else
-            test_result_record SKIP "${policy##*/} load phase requires image-provided stress-ng and schedutil"
+            test_result_record SKIP "${policy##*/} load phase requires available stress-ng and schedutil"
         fi
     fi
 done
