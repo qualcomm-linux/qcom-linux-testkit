@@ -1,0 +1,4 @@
+{# Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries. #}
+{# SPDX-License-Identifier: BSD-3-Clause #}
+{# Reuse the flasher device's camera CDT preparation on OSS. #}
+{% extends "devices/rb3gen2-core-kit" %}
