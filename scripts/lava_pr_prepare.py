@@ -265,9 +265,12 @@ def render_baseline(plans, target, context, config):
     plan_groups = {path.stem for path in (templates / "testplans/meta-qcom/qcom-distro/pre-merge").glob("*.yaml")}
     if plan_groups != set(config["groups"]):
         raise ValueError("Configured groups must cover the complete pinned meta-qcom PR plan")
+    # Pinned LAVA templates produce YAML and shell, HTML escaping corrupts their values.
+    # nosemgrep: python.flask.security.xss.audit.direct-use-of-jinja2.direct-use-of-jinja2
     environment = Environment(loader=FileSystemLoader([
         str(ROOT / "ci/lava-oss"), str(templates), str(templates / "testplans"), str(templates / "testcases"),
-        str(templates / "devices")]), undefined=StrictUndefined, extensions=["jinja2.ext.loopcontrols"])
+        str(templates / "devices")]), undefined=StrictUndefined, autoescape=False,
+        extensions=["jinja2.ext.loopcontrols"])
     environment.globals["compression"] = compression
     context["device_type"] = f"projects/meta-qcom/devices/{target}"
     device = environment.get_template(context["device_type"]).make_module(context)
@@ -282,6 +285,8 @@ def render_baseline(plans, target, context, config):
         namespace = template.make_module(context)
         excluded.extend(f"{target}/{group}/{test['name']}" for test in namespace.all_tests
                         if test["name"] in context["EXCLUDED_TESTS"] or not test.get("include", True))
+        # This output is parsed as a LAVA job, never served as HTML.
+        # nosemgrep: python.flask.security.xss.audit.direct-use-of-jinja2.direct-use-of-jinja2
         job = yaml.safe_load(template.render(context))
         if not any(action.get("test", {}).get("definitions") for action in job["actions"]):
             raise ValueError(f"Mandatory group {group} rendered no tests")
