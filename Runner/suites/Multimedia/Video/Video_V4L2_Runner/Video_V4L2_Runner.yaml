@@ -28,6 +28,10 @@ params:
   # 'bundled' restricts Level-4.0 rewrite to the four bundled encoder fixtures.
   # 'all' applies the rewrite to every config including user-supplied ones.
   VIDEO_POLICY_SCOPE: "bundled"
+  # output check against an FFmpeg software decode: off (default) | on
+  # (SKIPs without ffmpeg); VIDEO_MIN_PSNR applies to encodes
+  VIDEO_VERIFY: "off"
+  VIDEO_MIN_PSNR: 25
   LOGLEVEL: 15
   RETRY_ON_FAIL: 5
   POST_TEST_SLEEP: 10
@@ -36,5 +40,5 @@ run:
   steps:
     - REPO_PATH=$PWD
     - cd Runner/suites/Multimedia/Video/Video_V4L2_Runner/
-    - VIDEO_POLICY_SCOPE="${VIDEO_POLICY_SCOPE}" ./run.sh --app "${APP_PATH}" --config "${CONFIG_PATH}" --platform "${PLATFORM}" --stack "${VIDEO_STACK}" --loglevel "${LOGLEVEL}" --retry-on-fail "${RETRY_ON_FAIL}" --post-test-sleep "${POST_TEST_SLEEP}" || true
+    - VIDEO_POLICY_SCOPE="${VIDEO_POLICY_SCOPE}" VIDEO_VERIFY="${VIDEO_VERIFY}" VIDEO_MIN_PSNR="${VIDEO_MIN_PSNR}" ./run.sh --app "${APP_PATH}" --config "${CONFIG_PATH}" --platform "${PLATFORM}" --stack "${VIDEO_STACK}" --loglevel "${LOGLEVEL}" --retry-on-fail "${RETRY_ON_FAIL}" --post-test-sleep "${POST_TEST_SLEEP}" || true
     - $REPO_PATH/Runner/utils/send-to-lava.sh Video_V4L2_Runner.res || true

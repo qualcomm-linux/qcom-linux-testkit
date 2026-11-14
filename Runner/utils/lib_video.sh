@@ -1881,6 +1881,281 @@ video_iris_output_has_failure() {
         "$output_file"
 }
 
+# -----------------------------------------------------------------------------
+# Output verification against a software decode (FFmpeg)
+# -----------------------------------------------------------------------------
+# VIDEO_VERIFY    off (default): judge on the app's exit status and log, as
+#                 before; on: a case passes only when its output matches an
+#                 FFmpeg software decode, and the suites SKIP without ffmpeg.
+# VIDEO_FFMPEG    reference decoder (default: ffmpeg in PATH)
+# VIDEO_MIN_PSNR  minimum average luma PSNR of an encode, in dB (default 25)
+# VIDEO_VERIFY_TIMEOUT  bound of each FFmpeg run, in seconds (default 600)
+VIDEO_VERIFY="${VIDEO_VERIFY:-off}"
+VIDEO_FFMPEG="${VIDEO_FFMPEG:-ffmpeg}"
+VIDEO_MIN_PSNR="${VIDEO_MIN_PSNR:-25}"
+VIDEO_VERIFY_TIMEOUT="${VIDEO_VERIFY_TIMEOUT:-600}"
+
+# video_verify_settings_valid: 0 when VIDEO_VERIFY is on or off,
+# VIDEO_MIN_PSNR is a number and VIDEO_VERIFY_TIMEOUT a positive integer.
+video_verify_settings_valid() {
+    case "$VIDEO_VERIFY" in
+        on|off) ;;
+        *) return 1 ;;
+    esac
+    printf '%s\n' "$VIDEO_MIN_PSNR" | grep -Eq '^[0-9]+([.][0-9]+)?$' &&
+        printf '%s\n' "$VIDEO_VERIFY_TIMEOUT" | grep -Eq '^[1-9][0-9]*$'
+}
+
+# video_verify_active: 0 when outputs are verified in this run.
+video_verify_active() {
+    if [ "$VIDEO_VERIFY" != "on" ]; then
+        return 1
+    fi
+    video_exist_cmd "$VIDEO_FFMPEG"
+}
+
+# video_ffmpeg <args...>: FFmpeg bounded by VIDEO_VERIFY_TIMEOUT where
+# run_with_timeout is available.
+video_ffmpeg() {
+    if video_exist_cmd run_with_timeout; then
+        run_with_timeout "$VIDEO_VERIFY_TIMEOUT" "$VIDEO_FFMPEG" "$@"
+    else
+        "$VIDEO_FFMPEG" "$@"
+    fi
+}
+
+# video_ffmpeg_has_decoder <h264|hevc|vp9>: 0 when VIDEO_FFMPEG can decode it.
+video_ffmpeg_has_decoder() {
+    if [ -z "${VIDEO_FFMPEG_DECODERS:-}" ]; then
+        VIDEO_FFMPEG_DECODERS=$(video_ffmpeg -hide_banner -decoders 2>/dev/null | awk '$1 ~ /^V/ { print $2 }')
+    fi
+    printf '%s\n' "$VIDEO_FFMPEG_DECODERS" | grep -qx "$1"
+}
+
+# video_cfg_ffmpeg_codec <cfg>: the FFmpeg decoder a config's stream needs.
+video_cfg_ffmpeg_codec() {
+    case "$(video_canon_codec "$(video_guess_codec_from_cfg "$1")")" in
+        *265*|*[Hh][Ee][Vv][Cc]*) echo hevc ;;
+        *[Vv][Pp]9*) echo vp9 ;;
+        *) echo h264 ;;
+    esac
+}
+
+# video_verify_cfg_supported <cfg>: 0 when the output of <cfg> can be
+# checked; otherwise prints why not.
+video_verify_cfg_supported() {
+    if [ "$(grep -o '"Outputpath"' "$1" | wc -l)" -ne 1 ]; then
+        echo "needs exactly one Outputpath (one test case per config)"
+        return 1
+    fi
+    case "$(video_extract_scalar PixelFormat "$1" | head -n 1)" in
+        NV12|nv12|"") ;;
+        *) echo "only NV12 output is compared"; return 1 ;;
+    esac
+    vcs_dec=$(video_cfg_ffmpeg_codec "$1")
+    if ! video_ffmpeg_has_decoder "$vcs_dec"; then
+        echo "$VIDEO_FFMPEG has no $vcs_dec decoder"
+        return 1
+    fi
+    return 0
+}
+
+# video_framemd5 <out> <pix_fmt> <frames> <ffmpeg input args...>
+# Decode the first video stream in software and write one md5 per frame in
+# <pix_fmt> to <out> (FFmpeg framemd5). <frames> <= 0 means all frames.
+video_framemd5() {
+    vfm_out="$1"
+    vfm_fmt="$2"
+    vfm_frames="$3"
+    shift 3
+    vfm_lim=""
+    if [ "$vfm_frames" -gt 0 ] 2>/dev/null; then
+        vfm_lim="-frames:v $vfm_frames"
+    fi
+    # shellcheck disable=SC2086
+    video_ffmpeg -nostdin -hide_banner -v error -y "$@" -map 0:v:0 $vfm_lim \
+        -pix_fmt "$vfm_fmt" -f framemd5 "$vfm_out"
+}
+
+# video_framemd5_hashes <framemd5 file>: the md5 column, one line per frame.
+video_framemd5_hashes() {
+    awk -F',' '!/^#/ && NF >= 6 { gsub(/[[:space:]]/, "", $6); print $6 }' "$1"
+}
+
+# video_md5_compare <reference list> <output list> <tag>
+# Lists hold one md5 per frame. 0 when both have the same frames.
+video_md5_compare() {
+    vmc_ref="$1"
+    vmc_out="$2"
+    vmc_tag="$3"
+    vmc_nref=$(wc -l <"$vmc_ref" | tr -d ' ')
+    vmc_nout=$(wc -l <"$vmc_out" | tr -d ' ')
+    if [ "$vmc_nref" -eq 0 ]; then
+        log_fail "[$vmc_tag] verify: reference decode produced no frames"
+        return 1
+    fi
+    if [ "$vmc_nref" -ne "$vmc_nout" ]; then
+        log_fail "[$vmc_tag] verify: $vmc_nout frames, reference decode has $vmc_nref"
+        return 1
+    fi
+    vmc_bad=$(awk 'NR == FNR { r[FNR] = $0; next }
+        $0 != r[FNR] { n++; if (!f) f = FNR } END { printf "%d %d", n, f }' "$vmc_ref" "$vmc_out")
+    if [ "${vmc_bad% *}" -ne 0 ]; then
+        log_fail "[$vmc_tag] verify: ${vmc_bad% *} of $vmc_nref frames differ from the reference decode (first: frame ${vmc_bad#* })"
+        return 1
+    fi
+    log_info "[$vmc_tag] verify: $vmc_nref frames match the reference decode"
+    return 0
+}
+
+# video_psnr_y <log> <test input args> -- <reference input args>
+# Average luma PSNR of the test stream against the reference, frames paired
+# by index. Prints the value ("inf" when identical); FFmpeg's report goes
+# to <log>.
+video_psnr_y() {
+    vpy_log="$1"
+    shift
+    vpy_n=0
+    for vpy_arg in "$@"; do
+        [ "$vpy_arg" = "--" ] && break
+        vpy_n=$((vpy_n + 1))
+    done
+    if [ "$vpy_n" -eq $# ]; then
+        log_fail "video_psnr_y: no -- between the test and reference inputs"
+        return 1
+    fi
+    # Rotate the test arguments behind the reference ones, keeping each
+    # argument intact: FFmpeg input 0 is then the reference, 1 the test.
+    while [ "$vpy_n" -gt 0 ]; do
+        set -- "$@" "$1"
+        shift
+        vpy_n=$((vpy_n - 1))
+    done
+    shift
+    # psnr pairs frames by timestamp and raw YUV has no rate of its own:
+    # give both inputs the same timebase and index-based timestamps, and
+    # stop at the shorter one (an encode of the first NumFrames frames).
+    video_ffmpeg -nostdin -hide_banner -v info -y "$@" -lavfi \
+        "[1:v]settb=1/30,setpts=N[a];[0:v]settb=1/30,setpts=N[b];[a][b]psnr=shortest=1" \
+        -f null - >"$vpy_log" 2>&1 || return 1
+    sed -n 's/.*PSNR y:\([0-9.inf]*\) .*/\1/p' "$vpy_log" | tail -n 1
+}
+
+# video_psnr_frames <log>: the number of frames video_psnr_y compared.
+video_psnr_frames() {
+    tr '\r' '\n' <"$1" | sed -n 's/^frame= *\([0-9][0-9]*\) .*/\1/p' | tail -n 1
+}
+
+# video_psnr_ok <value> <minimum>: 0 when value >= minimum ("inf" passes).
+video_psnr_ok() {
+    if [ "$1" = "inf" ]; then
+        return 0
+    fi
+    awk -v v="$1" -v m="$2" 'BEGIN { exit !(v != "" && v + 0 >= m + 0) }'
+}
+
+# video_frame_count <framemd5 file>
+video_frame_count() {
+    video_framemd5_hashes "$1" | wc -l | tr -d ' '
+}
+
+# video_cfg_number <key> <cfg>: an unquoted numeric value of a JSON config.
+video_cfg_number() {
+    sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\(-\{0,1\}[0-9][0-9]*\).*/\1/p" "$2" | head -n 1
+}
+
+# video_verify_stage_cfg <cfg> <outfile> <staged cfg>
+# Copy <cfg> with its Outputpath pointed at <outfile>, which is escaped as
+# a JSON string and then as sed replacement text. A newline is refused.
+video_verify_stage_cfg() {
+    case "$2" in
+        *"
+"*)
+            log_fail "video_verify_stage_cfg: newline in output path: $2"
+            return 1
+            ;;
+    esac
+    vvsc_path=$(printf '%s\n' "$2" | sed -e 's/[\\"]/\\&/g' -e 's/[\\&|]/\\&/g')
+    sed "s|\"Outputpath\"[[:space:]]*:[[:space:]]*\"[^\"]*\"|\"Outputpath\": \"$vvsc_path\"|" "$1" >"$3"
+}
+
+# video_verify_iris_output <cfg> <outfile> <tag>
+# Check what iris_v4l2_test wrote for <cfg>: a decode must match a software
+# decode of InputPath frame for frame (NV12 md5); an encode must hold one
+# frame per input frame and reach VIDEO_MIN_PSNR against the NV12 input.
+video_verify_iris_output() {
+    vio_cfg="$1"
+    vio_outf="$2"
+    vio_tag="$3"
+    vio_in=$(video_extract_scalar InputPath "$vio_cfg" | head -n 1)
+    vio_fmt=$(video_extract_scalar PixelFormat "$vio_cfg" | head -n 1)
+    vio_w=$(video_cfg_number Width "$vio_cfg")
+    vio_h=$(video_cfg_number Height "$vio_cfg")
+    vio_n=$(video_cfg_number NumFrames "$vio_cfg")
+    vio_dir=$(dirname "$vio_outf")
+
+    if [ ! -s "$vio_outf" ]; then
+        log_fail "[$vio_tag] verify: no output written to $vio_outf"
+        return 1
+    fi
+    case "$vio_fmt" in
+        NV12|nv12|"") ;;
+        *)
+            log_fail "[$vio_tag] verify: $vio_fmt output cannot be compared (NV12 only)"
+            return 1
+            ;;
+    esac
+    if [ -z "$vio_w" ] || [ -z "$vio_h" ] || [ ! -f "$vio_in" ]; then
+        log_fail "[$vio_tag] verify: need Width, Height and a readable InputPath ($vio_in)"
+        return 1
+    fi
+
+    if video_is_decode_cfg "$vio_cfg"; then
+        video_framemd5 "$vio_dir/$vio_tag.ref.framemd5" nv12 "${vio_n:--1}" -i "$vio_in" || {
+            log_fail "[$vio_tag] verify: reference decode of $vio_in failed"
+            return 1
+        }
+        video_framemd5 "$vio_dir/$vio_tag.out.framemd5" nv12 -1 -f rawvideo -pix_fmt nv12 \
+            -s "${vio_w}x${vio_h}" -i "$vio_outf" || {
+            log_fail "[$vio_tag] verify: cannot read $vio_outf as ${vio_w}x${vio_h} NV12"
+            return 1
+        }
+        video_framemd5_hashes "$vio_dir/$vio_tag.ref.framemd5" >"$vio_dir/$vio_tag.ref.md5"
+        video_framemd5_hashes "$vio_dir/$vio_tag.out.framemd5" >"$vio_dir/$vio_tag.out.md5"
+        video_md5_compare "$vio_dir/$vio_tag.ref.md5" "$vio_dir/$vio_tag.out.md5" "$vio_tag"
+        return $?
+    fi
+
+    vio_es=$(video_cfg_ffmpeg_codec "$vio_cfg")
+    vio_fsz=$((vio_w * vio_h * 3 / 2))
+    vio_want=$(( $(wc -c <"$vio_in") / vio_fsz ))
+    if [ "${vio_n:--1}" -gt 0 ] 2>/dev/null && [ "$vio_n" -lt "$vio_want" ]; then
+        vio_want="$vio_n"
+    fi
+    video_framemd5 "$vio_dir/$vio_tag.out.framemd5" nv12 -1 -f "$vio_es" -i "$vio_outf" || {
+        log_fail "[$vio_tag] verify: software decode of $vio_outf failed"
+        return 1
+    }
+    vio_got=$(video_frame_count "$vio_dir/$vio_tag.out.framemd5")
+    if [ "$vio_got" -ne "$vio_want" ]; then
+        log_fail "[$vio_tag] verify: encoded $vio_got frames, input has $vio_want"
+        return 1
+    fi
+    vio_psnr=$(video_psnr_y "$vio_dir/$vio_tag.psnr.log" -f "$vio_es" -i "$vio_outf" -- \
+        -f rawvideo -pix_fmt nv12 -s "${vio_w}x${vio_h}" -i "$vio_in")
+    vio_cmp=$(video_psnr_frames "$vio_dir/$vio_tag.psnr.log")
+    if [ "${vio_cmp:-0}" -ne "$vio_got" ]; then
+        log_fail "[$vio_tag] verify: PSNR compared ${vio_cmp:-0} of $vio_got frames"
+        return 1
+    fi
+    if ! video_psnr_ok "$vio_psnr" "$VIDEO_MIN_PSNR"; then
+        log_fail "[$vio_tag] verify: luma PSNR ${vio_psnr:-unknown} dB below $VIDEO_MIN_PSNR dB"
+        return 1
+    fi
+    log_info "[$vio_tag] verify: $vio_got frames, luma PSNR $vio_psnr dB (min $VIDEO_MIN_PSNR)"
+    return 0
+}
+
 video_run_once() {
     cfg="$1"
     logf="$2"
@@ -1892,6 +2167,22 @@ video_run_once() {
     video_prepare_app || true
 
     : > "$logf"
+
+    # Point the app's Outputpath at a file in the log dir so what it wrote can
+    # be checked; the bundled configs leave it empty. The caller has checked
+    # video_verify_cfg_supported.
+    vro_outf=""
+    if video_verify_active; then
+        vro_base="${logf%.log}"
+        if video_is_decode_cfg "$cfg"; then
+            vro_outf="$vro_base.out.yuv"
+        else
+            vro_outf="$vro_base.out.bit"
+        fi
+        rm -f "$vro_outf"
+        video_verify_stage_cfg "$cfg" "$vro_outf" "$vro_base.verify.json"
+        cfg="$vro_base.verify.json"
+    fi
 
     {
         iso_now="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo now)"
@@ -1940,6 +2231,17 @@ video_run_once() {
         log_fail "[run] $VIDEO_APP did not report the required success marker"
         printf 'VALIDATION=FAIL reason=success-marker-missing\n' >>"$logf"
         return 1
+    fi
+
+    if [ -n "$vro_outf" ]; then
+        if ! video_verify_iris_output "$cfg" "$vro_outf" "$(basename "${logf%.log}")"; then
+            printf 'VALIDATION=FAIL reason=output-mismatch\n' >>"$logf"
+            # shellcheck disable=SC2034  # read by the runner's retry guard
+            VIDEO_OUTPUT_MISMATCH=1
+            return 1
+        fi
+        # Decoded YUV is large; a mismatch keeps it as evidence.
+        rm -f "$vro_outf"
     fi
 
     printf 'VALIDATION=PASS\n' >>"$logf"
