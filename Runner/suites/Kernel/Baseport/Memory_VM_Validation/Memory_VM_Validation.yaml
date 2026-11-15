@@ -1,0 +1,14 @@
+metadata:
+  name: memory-vm-validation
+  format: "Lava-Test Test Definition 1.0"
+  description: "Validate core MM sysfs/proc: meminfo consistency, buddyinfo, overcommit, optional THP and hugepages."
+  os:
+    - linux
+  scope:
+    - functional
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/Memory_VM_Validation
+    - ./run.sh
+    - $REPO_PATH/Runner/utils/send-to-lava.sh Memory_VM_Validation.res

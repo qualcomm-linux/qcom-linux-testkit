@@ -1,0 +1,14 @@
+metadata:
+  name: vdso-validation
+  format: "Lava-Test Test Definition 1.0"
+  description: "Validate that the current process maps a vDSO segment, used for fast timekeeping syscalls."
+  os:
+    - linux
+  scope:
+    - functional
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/VDSO_Validation
+    - ./run.sh
+    - $REPO_PATH/Runner/utils/send-to-lava.sh VDSO_Validation.res

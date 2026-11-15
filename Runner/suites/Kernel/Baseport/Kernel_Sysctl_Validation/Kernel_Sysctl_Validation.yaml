@@ -1,0 +1,14 @@
+metadata:
+  name: kernel-sysctl-validation
+  format: "Lava-Test Test Definition 1.0"
+  description: "Validate essential kernel sysctls: pid_max, threads-max, printk, panic, and sysrq (read-only)."
+  os:
+    - linux
+  scope:
+    - functional
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/Kernel_Sysctl_Validation
+    - ./run.sh
+    - $REPO_PATH/Runner/utils/send-to-lava.sh Kernel_Sysctl_Validation.res

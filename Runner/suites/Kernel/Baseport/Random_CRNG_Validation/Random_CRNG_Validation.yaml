@@ -1,0 +1,14 @@
+metadata:
+  name: random-crng-validation
+  format: "Lava-Test Test Definition 1.0"
+  description: "Validate kernel CRNG sysfs/proc and that /dev/urandom yields data. Complements rngtest/qcom_hwrng suites."
+  os:
+    - linux
+  scope:
+    - functional
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/Random_CRNG_Validation
+    - ./run.sh
+    - $REPO_PATH/Runner/utils/send-to-lava.sh Random_CRNG_Validation.res
