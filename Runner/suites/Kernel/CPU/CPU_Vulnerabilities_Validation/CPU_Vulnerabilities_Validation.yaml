@@ -1,0 +1,14 @@
+metadata:
+  name: cpu-vulnerabilities-validation
+  format: "Lava-Test Test Definition 1.0"
+  description: "Validate that CPU vulnerability sysfs files exist and report a non-empty mitigation/status string."
+  os:
+    - linux
+  scope:
+    - functional
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/CPU/CPU_Vulnerabilities_Validation
+    - ./run.sh
+    - $REPO_PATH/Runner/utils/send-to-lava.sh CPU_Vulnerabilities_Validation.res
