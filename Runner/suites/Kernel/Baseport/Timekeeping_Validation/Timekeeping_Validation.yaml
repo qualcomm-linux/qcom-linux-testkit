@@ -1,0 +1,14 @@
+metadata:
+  name: timekeeping-validation
+  format: "Lava-Test Test Definition 1.0"
+  description: "Validate monotonic timekeeping: /proc/uptime advances, CLOCK-like counters do not go backwards, and nanosleep sleeps at least the requested interval."
+  os:
+    - linux
+  scope:
+    - functional
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/Timekeeping_Validation
+    - ./run.sh
+    - $REPO_PATH/Runner/utils/send-to-lava.sh Timekeeping_Validation.res

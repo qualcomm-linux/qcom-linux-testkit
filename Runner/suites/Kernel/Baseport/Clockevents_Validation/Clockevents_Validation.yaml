@@ -1,0 +1,14 @@
+metadata:
+  name: clockevents-validation
+  format: "Lava-Test Test Definition 1.0"
+  description: "Validate clockevents sysfs (broadcast, per-CPU devices) used by hrtimers and the tick."
+  os:
+    - linux
+  scope:
+    - functional
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/Clockevents_Validation
+    - ./run.sh
+    - $REPO_PATH/Runner/utils/send-to-lava.sh Clockevents_Validation.res
