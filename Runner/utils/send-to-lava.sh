@@ -11,7 +11,9 @@
 #
 # <<<LAVA_SIGNAL_TESTCASE TEST_CASE_ID=OpenCV [ 192.9] qcom,... RESULT=PASS>>>
 #
-# This script minimizes that risk by:
+# LAVA's optional lava-signal: kmsg transport serializes protocol messages with
+# kernel output. Honor its KMSG environment flag for testcase signals too.
+# Without that flag this script minimizes stdout interleaving by:
 # - validating/sanitizing result-file content before emitting signals
 # - lowering kernel console_loglevel only for the tiny critical section where
 # the LAVA signal line is printed, when /proc/sys/kernel/printk is writable
@@ -241,9 +243,22 @@ if [ -s "$SIGNAL_FILE" ]; then
     while IFS= read -r signal_line || [ -n "$signal_line" ]; do
         [ -n "$signal_line" ] || continue
 
-        save_and_quiet_kernel_console
-        printf '\n%s\n\n' "$signal_line"
-        restore_kernel_console
+        if [ -n "${KMSG:-}" ]; then
+            # Match lava-common-functions, including the priority that keeps
+            # protocol records visible at a reduced console loglevel. Do not
+            # echo another signal to stdout, LAVA would count it twice.
+            if ! printf '<0>%s\n' "$signal_line" > /dev/kmsg; then
+                echo "[ERROR] LAVA kmsg publication failed, result retained in $RESULT_FILE" >&2
+                exit 1
+            fi
+        else
+            save_and_quiet_kernel_console
+            if ! printf '\n%s\n\n' "$signal_line"; then
+                echo "[ERROR] LAVA stdout publication failed, result retained in $RESULT_FILE" >&2
+                exit 1
+            fi
+            restore_kernel_console
+        fi
     done < "$SIGNAL_FILE"
 fi
 

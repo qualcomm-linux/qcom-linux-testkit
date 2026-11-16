@@ -142,6 +142,10 @@ uncompressed, `.xz` and `.zst` assets and does not install or copy firmware.
 
 Per-suite YAML files launch the test and publish its result using
 [send-to-lava.sh](Runner/utils/send-to-lava.sh).
+For noisy Linux serial consoles, set `lava-signal: kmsg` on each job's test
+definition entry, alongside `repository` and `path`. This routes testcase and
+run-boundary signals through `/dev/kmsg`, which must be writable. The default
+stdout transport is unchanged. Retain the `.res` file if publication fails.
 The [plans directory](Runner/plans) contains grouped test definitions, including:
 
 - [meta-qcom nightly config1](Runner/plans/meta-qcom-nightly_config1.yaml)
