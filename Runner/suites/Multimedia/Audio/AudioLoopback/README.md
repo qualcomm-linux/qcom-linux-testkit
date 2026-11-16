@@ -123,7 +123,7 @@ path. Base images, non-modem platforms and Debian/Ubuntu/CentOS/RHEL desktop
 paths keep their existing behavior. Without systemd, a running image-provided
 audio server is required, the test does not install services or packages.
 
-Before topology checks and test-driven DSP startup, the runner reports the live DT model, complete
+Before test-driven DSP startup, the runner reports the live DT model, complete
 compatible list and sound-card identities. CQS, CQM, IQS and future boards are
 discovered from runtime data, not a fixed variant/PCM table. EFI
 `VendorDtbOverlays` is read separately without mounting, writing or rebooting.
@@ -185,13 +185,17 @@ option, it can use an already running managed audio backend.
 
 Expected outcomes: a matching DT permits the normal test to run, it does not
 itself produce PASS. An explicit DT mismatch or unverifiable explicit FIT
-produces FAIL before topology validation. Missing optional automatic FIT/EFI
+produces FAIL before audio validation. Missing optional automatic FIT/EFI
 evidence reports unverified detection and preserves the suite's normal
 PASS/FAIL/SKIP policy. Inspect `dt-fit-preflight/report.txt` and the accompanying
 inventory/tool logs under the suite's retained log directory.
 
+The kernel selects and loads any required topology. Loopback validates the
+registered PCMs, routes and captured signal without a topology-file preflight.
+Kernel-reported errors remain in the retained diagnostics.
+
 For direct ALSA on Shikra, the existing runtime platform detector selects the
-shared modem/topology preparation before any stream probe, followed by playback
+shared modem preparation before any stream probe, followed by playback
 and capture registration waits. Other platforms retain their existing lazy DSP
 recovery. The final captured kernel snapshot is checked for a selected DSP crash.
 The loopback still requires an acoustic/electrical fixture and does not force
@@ -291,23 +295,3 @@ and endpoint discovery. A CI device still needs an acoustic or electrical path
 from the selected playback endpoint to the selected capture endpoint. Set
 `PLAYBACK_DEVICE` and `CAPTURE_DEVICE` in the job parameters when direct ALSA
 selection is required by the fixture.
-
-## Runtime topology selection
-
-Base audio validates image-provided topology only when the active DT declares
-a q6apm dependency. The matching registered ALSA card supplies the driver name,
-and its sound-card DT supplies the model. The required firmware is exactly
-`qcom/<ALSA-driver>/<DT-model>-tplg.bin`, using the existing firmware-root and
-compression precedence. Other directories containing the same basename are
-irrelevant. A DT compatible is not used to guess the ALSA driver name.
-
-Before that card registers, exact topology validation is reported as pending.
-Functional suites can start the image-provisioned DSP and use the existing
-bounded ALSA card/PCM wait. The registered card's exact topology is checked
-before ALSA stream preparation. Passive card registration keeps its configured
-wait and never starts a DSP. Pending discovery is not proof that a topology is
-provisioned. A required card that fails to register follows the existing failure
-policy, and a missing or empty kernel-selected asset fails validation.
-
-No SoC mapping, topology copy, download or package-policy change is introduced.
-Direct-codec and overlay paths retain their existing applicability checks.

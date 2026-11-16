@@ -16,7 +16,7 @@ audio `data` chunk are reported as metadata rather than as trailing audio.
 
 ### Active DT and FIT preflight
 
-Before topology checks and test-driven DSP startup, the runner reports the live DT model, complete
+Before test-driven DSP startup, the runner reports the live DT model, complete
 compatible list and sound-card identities. CQS, CQM, IQS and future boards are
 discovered from runtime data, not a fixed variant/PCM table. EFI
 `VendorDtbOverlays` is read separately without mounting, writing or rebooting.
@@ -79,7 +79,7 @@ Suite-specific examples, with an active non-silent microphone source:
 
 Expected outcomes: a matching DT permits the normal test to run, it does not
 itself produce PASS. An explicit DT mismatch or unverifiable explicit FIT
-produces FAIL before topology validation. Missing optional automatic FIT/EFI
+produces FAIL before audio validation. Missing optional automatic FIT/EFI
 evidence reports unverified detection and preserves the suite's normal
 PASS/FAIL/SKIP policy. Inspect `dt-fit-preflight/report.txt` and the accompanying
 inventory/tool logs under the suite's retained log directory.
@@ -98,22 +98,10 @@ Conflicting backends or ambiguous PCM mappings for a single frontend still fail
 instead of probing an unrelated headset input. Failed mixer writes
 and missing required VA-DMIC controls fail preparation with diagnostics.
 
-Before remoteproc startup, base preflight discovers enabled sound-card DT links
-to `qcom,q6apm`. It requires a nonempty `<DT-model>-tplg.bin` in one unambiguous
-image firmware `qcom/<driver>/` directory, including running-kernel directories
-and compressed firmware supported by the shared resolver. A missing, empty or
-ambiguous file fails before the DSP starts. No card registration is needed for
-this prerequisite check, and no SoC-to-file lookup table is used. Once a card
-registers, the exact ALSA driver-directory check runs before mixer preparation.
-
-Base coverage for issue #624 includes CQS, CQM and IQS. CQS and IQS require the
-matching topology in the build. CQM's direct-codec path does not require a
-q6apm topology. The helper follows the selected card's runtime DT links and the
-kernel `qcom/<driver>/<model>-tplg.bin` naming contract, not a variant table.
-It only checks build-provided assets, it never transfers or downloads topology,
-UCM, firmware, or calibration. Applicable remoteproc preparation failures and
-missing required topology are FAIL, not SKIP. Generic capture and UCM selection
-remain available on other images.
+The kernel selects and loads any required topology. The test checks registered
+cards, PCMs, routing and actual streams without requiring a topology file at a
+guessed path. Provision audio assets and clients in the build. Kernel-reported
+errors remain in the retained diagnostics.
 
 For base ALSA or automatic backend selection, an applicable audio remoteproc is
 followed by a bounded registration wait, up to 30 seconds for a card and another
@@ -148,13 +136,13 @@ when no window was established. Missing or empty kernel evidence is unverified,
 not clean. These diagnostics do not change functional PASS policy or the
 separate selected-DSP crash gate.
 
-ALSA preparation announces its start before discovery, topology and mixer checks.
+ALSA preparation announces its start before discovery, route and mixer checks.
 Each attempt's diagnostics are replayed on completion and retained in
 `alsa_capture_probe.log` under the suite result directory. Each candidate logs
 its PCM, format, rate, channels, exit status, elapsed stream time and byte count.
 Total preparation time is reported separately. Media invocation and WAV validation
 policy are unchanged. `[AUDIO-PHASE]` lines show discovery, per-device
-topology/mixer preparation and each mixer write with elapsed seconds and status.
+route/mixer preparation and each mixer write with elapsed seconds and status.
 These phases are nested, not additive, and do not change stream command timeouts.
 The post-execution snapshot can show inactive streams after
 a valid capture. These counters are not continuous monitoring, and existing
@@ -418,9 +406,13 @@ evidence.
 
 ## Audio Remoteproc Preflight
 
-Before backend discovery, the suite enumerates runtime remoteprocs and checks the configured firmware and topology through shared image-firmware discovery. This includes the image's custom firmware root, kernel update paths, `/lib/firmware` and `/usr/lib/firmware`, with compressed assets supported. It recognizes audio DSP identities and the Shikra modem-hosted audio path. A remoteproc named `modem` is ignored on non-Shikra targets because it is not their audio preflight dependency.
-
-If the matching remoteproc is `running`, the suite records its name and firmware evidence. If it is `offline`, the suite starts it only after confirming the corresponding firmware is provisioned. Legacy audio DSP layouts without an enabled q6apm card also require adjacent topology evidence. For q6apm cards, exact driver/model topology validation remains pending until the matching ALSA card registers. Shikra's modem-hosted path does not require a topology beside the modem firmware, the selected ALSA card's q6apm topology is validated separately. The suite never stops a remoteproc. Platforms with no applicable audio remoteproc continue normally. Provisioning or start issues on an applicable remoteproc report FAIL with the reason.
+Before backend discovery, the suite identifies audio remoteprocs from runtime
+inventory, including Shikra's modem-hosted audio path. A running instance is
+reused without requiring its firmware file to remain accessible. An offline
+instance is started only when its firmware is provisioned, using shared firmware
+discovery. Preparation or startup failures on an applicable instance remain FAIL.
+The suite never stops a remoteproc. Non-Shikra modems are not audio dependencies,
+and targets with no applicable audio remoteproc continue normal backend discovery.
 
 ## Overlay Build Support
 
@@ -1007,23 +999,3 @@ summaries from that workload. For direct execution, for example:
 ALSA and PulseAudio attempts print their WAV summary without assuming that
 PipeWire services or journal tools exist. Existing detailed failure artifacts
 remain available for failed attempts.
-
-## Runtime topology selection
-
-Base audio validates image-provided topology only when the active DT declares
-a q6apm dependency. The matching registered ALSA card supplies the driver name,
-and its sound-card DT supplies the model. The required firmware is exactly
-`qcom/<ALSA-driver>/<DT-model>-tplg.bin`, using the existing firmware-root and
-compression precedence. Other directories containing the same basename are
-irrelevant. A DT compatible is not used to guess the ALSA driver name.
-
-Before that card registers, exact topology validation is reported as pending.
-Functional suites can start the image-provisioned DSP and use the existing
-bounded ALSA card/PCM wait. The registered card's exact topology is checked
-before ALSA stream preparation. Passive card registration keeps its configured
-wait and never starts a DSP. Pending discovery is not proof that a topology is
-provisioned. A required card that fails to register follows the existing failure
-policy, and a missing or empty kernel-selected asset fails validation.
-
-No SoC mapping, topology copy, download or package-policy change is introduced.
-Direct-codec and overlay paths retain their existing applicability checks.
