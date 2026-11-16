@@ -27,7 +27,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(1, str(ROOT / "scripts"))
 
 import generate_test_inventory_html as inventory
-from lava_pr_validation import API, GITHUB, REPOSITORY, digest, github, save_json
+from lava_pr_validation import API, GITHUB, REPOSITORY, artifact_token_name, digest, github, previous_request, save_json
 
 
 def git(directory, *arguments):
@@ -80,11 +80,15 @@ def snapshot(folder, pr, requested):
 
 
 def check_download(url):
-    """Check exact objects without transferring rootfs images or leaking tokens."""
+    """Probe exact objects when runner credentials exist, otherwise defer to LAVA."""
     parsed = urlsplit(url)
     if parsed.scheme != "https" or parsed.hostname != "qli-prod-artifacts.qualcomm.com":
         raise ValueError("Artifact URL is outside the configured HTTPS artifact service")
-    headers = {"QLIAuthorization": os.environ["QLI_ARTIFACT_TOKEN"]}
+    token = os.environ.get("QLI_S3_TOKEN") or os.environ.get("QLI_ARTIFACT_TOKEN", "")
+    if not token:
+        print(f"Artifact access awaits authenticated LAVA download: {parsed.path}")
+        return
+    headers = {"QLIAuthorization": token}
     with requests.get(url, headers=headers, stream=True, allow_redirects=False,
                       timeout=(15, 60)) as response:
         if response.status_code not in (200, 206):
@@ -406,17 +410,24 @@ def append_tests(jobs, affected, documents, by_suite, selections, config, source
 
 
 def prepare(folder):
+    token_name = artifact_token_name()
+    run_id = os.environ["VALIDATION_RUN_ID"]
+    attempt = os.environ.get("GITHUB_RUN_ATTEMPT", "1")
+    if not re.fullmatch(r"[1-9][0-9]*", run_id) or not re.fullmatch(r"[1-9][0-9]*", attempt):
+        raise ValueError("Invalid workflow run or attempt ID")
     folder = folder.resolve()
     folder.mkdir(parents=True, exist_ok=True)
     config = json.loads((ROOT / ".github/ci/lava-pr-validation.json").read_text(encoding="utf-8"))
     gh = github()
+    previous = previous_request(gh, run_id, attempt)
     number = int(os.environ["PR_NUMBER"])
     pr = gh.get(f"/repos/{REPOSITORY}/pulls/{number}")
     if pr["state"] != "open" or pr["base"]["ref"] != "main":
         raise ValueError("Select an open PR targeting main")
     distro = os.environ.get("IMAGE_DISTRO", "qcom-distro")
     producer = API(GITHUB, os.environ.get("META_QCOM_READ_TOKEN") or os.environ.get("GH_TOKEN", ""))
-    target_matrix = select_targets(producer, config, distro, os.environ.get("TARGETS", "meta-qcom"))
+    target_matrix = (previous["target_matrix"] if previous else
+                     select_targets(producer, config, distro, os.environ.get("TARGETS", "meta-qcom")))
     targets = target_matrix["selected"]
     save_json(folder / "target-matrix.json", target_matrix)
     plans = Path(os.environ["LAVA_PLANS_PATH"]).resolve()
@@ -426,8 +437,17 @@ def prepare(folder):
     image_type = os.environ.get("IMAGE_TYPE", "multimedia")
     if image_type not in {"multimedia", "proprietary"}:
         raise ValueError("Choose the multimedia or proprietary image variant")
+    if previous and (previous["pr"] != number or previous["distro"] != distro or
+                     previous["image_type"] != image_type or
+                     previous["plans_revision"] != config["plans_revision"]):
+        raise ValueError("Rerun inputs differ from the saved request, use a new manual validation run")
     image_name = "qcom-multimedia-image" if image_type == "multimedia" else "qcom-multimedia-proprietary-image"
-    source, sha, base, changes, repository = snapshot(folder, pr, os.environ.get("PR_REVISION", ""))
+    source, sha, base, changes, repository = snapshot(
+        folder, pr, previous["sha"] if previous else os.environ.get("PR_REVISION", ""))
+    if previous:
+        if repository != previous["repository"]:
+            raise ValueError("The PR source repository changed, use a new manual validation run")
+        base, changes = previous["merge_base"], previous["changes"]
     owners, documents, by_suite = catalogue(source)
     affected = affected_suites(source, changes, owners, config)
     selections = config["selections"] | json.loads(os.environ.get("TEST_SELECTIONS", "{}"))
@@ -435,19 +455,23 @@ def prepare(folder):
         if suite not in owners:
             raise ValueError(f"Unknown suite in selections: {suite}")
         affected[suite].add("explicit maintainer selection")
-    build = select_build(producer, config, targets, distro, os.environ.get("NIGHTLY_RUN_ID", ""), image_name)
+    if previous:
+        build = previous["build"]
+        for url in build["images"].values():
+            check_download(url)
+    else:
+        build = select_build(producer, config, targets, distro, os.environ.get("NIGHTLY_RUN_ID", ""), image_name)
     check_download(config["audio_url"])
-    run_id = os.environ["VALIDATION_RUN_ID"]
-    if not re.fullmatch(r"[1-9][0-9]*", run_id):
-        raise ValueError("Invalid workflow run ID")
-    if not re.fullmatch(r"[A-Za-z0-9_-]+", os.environ["LAVA_ARTIFACT_TOKEN_NAME"]):
-        raise ValueError("Configure the registered OSS artifact token name")
     source_url = f"https://github.com/{repository}/archive/{sha}.tar.gz"
     manifest = dict(pr=number, sha=sha, merge_base=base, repository=repository,
-                    distro=distro, image_type=image_type, build=build, run_id=run_id, changes=changes,
+                    distro=distro, image_type=image_type, build=build, run_id=run_id,
+                    run_attempt=attempt, changes=changes,
                     target_matrix=target_matrix,
                     plans_revision=config["plans_revision"], jobs=[], selections=[], exclusions=[],
-                    artifact_token_name=os.environ["LAVA_ARTIFACT_TOKEN_NAME"],
+                    artifact_token_name=token_name,
+                    artifact_verification=("controller" if (os.environ.get("QLI_S3_TOKEN") or
+                                                             os.environ.get("QLI_ARTIFACT_TOKEN"))
+                                           else "awaiting-lava-download"),
                     submit_requested=os.environ.get("SUBMIT_REQUEST", "false").lower() == "true",
                     request_minutes=config["request_minutes"], max_active_jobs=config["max_active_jobs"])
     (folder / "jobs").mkdir()
@@ -459,7 +483,7 @@ def prepare(folder):
                        IMAGE_FILE_NAME=f"{image_name}-{target}.rootfs.qcomflash.tar.gz",
                        AUTO_LOGIN_PASSWORD_PROMPT="Password", AUTO_LOGIN_PASSWORD="oelinux123",
                        AUDIO_CLIPS_BASE_DIR="/home/AudioClips/", AUDIO_CLIPS_URL=config["audio_url"],
-                       AUTH_HEADER_NAME="QLIAuthorization", AUTH_HEADER_TOKEN=os.environ["LAVA_ARTIFACT_TOKEN_NAME"],
+                       AUTH_HEADER_NAME="QLIAuthorization", AUTH_HEADER_TOKEN=token_name,
                        DOCKER_IMAGE_POSTPROCESS=config["postprocess_image"],
                        target_downloads_timeout=40, target_deploy_timeout=20, TARGET_BOOT_TIMEOUT=10,
                        TEST_DEFINITIONS_REPOSITORY=f"https://github.com/{repository}",
@@ -497,7 +521,7 @@ def prepare(folder):
                         f'echo "PORT={config["flasher_port"]}" >> $IMAGE_PATH/flash.settings'])
                 if "audio" in deploy.get("images", {}):
                     deploy["images"]["audio"]["headers"] = {
-                        "QLIAuthorization": os.environ["LAVA_ARTIFACT_TOKEN_NAME"]}
+                        "QLIAuthorization": token_name}
             definitions = entries(job)
             if any(item.get("repository") != source_url for item in definitions):
                 raise ValueError("All test definitions must use the exact PR archive")
@@ -512,10 +536,12 @@ def prepare(folder):
             job["job_name"] = key
             job.setdefault("metadata", {}).update({"testkit-request-key": key,
                                                      "testkit-workflow-run": run_id,
+                                                     "testkit-workflow-attempt": attempt,
                                                      "testkit-sha": sha})
             filename = f"jobs/{target}-{group}.yaml"
             (folder / filename).write_text(yaml.safe_dump(job, sort_keys=False), encoding="utf-8")
             manifest["jobs"].append(dict(file=filename, key=key, target=target, group=group,
+                                         run_id=run_id, run_attempt=attempt,
                                          device_type=job["device_type"], definition_hash=digest(job),
                                          definitions=[dict(name=item["name"], path=item["path"],
                                                            params=item.get("params", {}), expected=item.get("expected", []),
@@ -526,4 +552,7 @@ def prepare(folder):
     save_json(folder / "manifest.json", manifest)
     if len(manifest["jobs"]) > job_limit:
         raise ValueError(f"Prepared {len(manifest['jobs'])} jobs exceeds the {job_limit} job budget")
+    if os.environ.get("GITHUB_OUTPUT"):
+        with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+            output.write(f"request_attempt={attempt}\n")
     print(f"Prepared {len(manifest['jobs'])} jobs for PR #{number} at {sha}. No jobs submitted.")
