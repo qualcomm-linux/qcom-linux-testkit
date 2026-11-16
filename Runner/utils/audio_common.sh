@@ -404,6 +404,8 @@ audio_kernel_diagnostic_summary() {
   : >"$akds_out/audio_kernel_warnings.log"
   if [ "${DMESG_ACCESS_STATUS:-unavailable}" != available ] ||
      [ ! -s "$akds_out/dmesg_snapshot.log" ]; then
+    printf '%s\n' 'AUDIO_KERNEL_HEALTH status=unverified reason=snapshot-unavailable attribution=unverified' >"$akds_out/audio_kernel_health.log"
+    log_file_with_label AUDIO-KERNEL "$akds_out/audio_kernel_health.log" 1
     log_warn "[AUDIO-KERNEL] Evidence unavailable, kernel health is unverified. See $akds_out/dmesg_access.log and kernel_capture.log"
     return 0
   fi
@@ -413,6 +415,7 @@ audio_kernel_diagnostic_summary() {
     {
       if (since ~ /^[0-9]+$/) {
         if ($0 !~ /^\[[[:space:]]*[0-9]+([.][0-9]+)?\]/) next
+        timestamped++
         stamp = $0
         sub(/^\[[[:space:]]*/, "", stamp)
         sub(/\].*$/, "", stamp)
@@ -427,12 +430,24 @@ audio_kernel_diagnostic_summary() {
       else if (line ~ /unknown pin|no backend dais|underrun|overrun|xrun/)
         print $0 > warnings
     }
+    END {
+      if (since ~ /^[0-9]+$/ && !timestamped) exit 1
+    }
   ' "$akds_out/dmesg_snapshot.log"; then
+    printf '%s\n' 'AUDIO_KERNEL_HEALTH status=unverified reason=classification-failed attribution=unverified' >"$akds_out/audio_kernel_health.log"
+    log_file_with_label AUDIO-KERNEL "$akds_out/audio_kernel_health.log" 1
     log_warn "[AUDIO-KERNEL] Snapshot classification failed, kernel health is unverified. Retain $akds_out/dmesg_snapshot.log for triage"
     return 0
   fi
   akds_errors="$(wc -l <"$akds_out/audio_kernel_errors.log")"
   akds_warnings="$(wc -l <"$akds_out/audio_kernel_warnings.log")"
+  akds_status=no-matched-diagnostics
+  if [ "$akds_errors" -gt 0 ] || [ "$akds_warnings" -gt 0 ]; then
+    akds_status=needs-triage
+  fi
+  printf 'AUDIO_KERNEL_HEALTH status=%s errors=%s warnings=%s since_uptime=%s attribution=unverified\n' \
+    "$akds_status" "$akds_errors" "$akds_warnings" "${AUDIO_REMOTE_PROC_SINCE:-boot}" >"$akds_out/audio_kernel_health.log"
+  log_file_with_label AUDIO-KERNEL "$akds_out/audio_kernel_health.log" 1
   log_info "[AUDIO-KERNEL] Captured audio diagnostics: errors=$akds_errors warnings=$akds_warnings since_uptime=${AUDIO_REMOTE_PROC_SINCE:-boot}, independent of stream execution result"
   if [ "$akds_errors" -gt 0 ] || [ "$akds_warnings" -gt 0 ]; then
     log_warn "[AUDIO-KERNEL] Audio messages require triage even when playback/recording passes, artifacts: $akds_out/audio_kernel_errors.log and audio_kernel_warnings.log"
@@ -2394,6 +2409,7 @@ audio_record_pipewire_capture() {
   if [ "$arpc_route" = null ]; then
     arpc_identity_mode=""
   fi
+  printf 'AUDIO_ROUTE_ATTEMPT requested=%s\n' "$arpc_route" >>"$arpc_log.route"
   if ! arpc_identity="$(audio_run_helper_as_test_user --require-session \
       audio_pipewire_capture_target "$arpc_route" "$arpc_identity_mode" 2>>"$arpc_log.route")"; then
     # shellcheck disable=SC2034
@@ -10475,7 +10491,7 @@ audio_check_stream_server_errors() {
   fi
 }
 
-# audio_record_attempt_summary <recorder-log> <backend> <WAV-validation-summary>
+# audio_record_attempt_summary <recorder-log> <backend> <WAV-validation-summary> [WAV]
 # Print compact current-attempt evidence on PASS and FAIL without new DUT probes.
 # Preserve capture timing, server snapshots and operation-window calibration
 # messages for full nightly comparisons. Diagnostics do not change verdicts.
@@ -10483,6 +10499,7 @@ audio_record_attempt_summary() (
   aras_log="$1"
   aras_backend="$2"
   aras_validation="$3"
+  aras_wav="${4:-}"
   aras_out="$aras_log.capture-summary"
   if ! {
     printf 'backend=%s\n%s\n' "$aras_backend" "$aras_validation"
@@ -10494,6 +10511,46 @@ audio_record_attempt_summary() (
       ' "$aras_log"
     fi
     if [ "$aras_backend" = pipewire ]; then
+      printf '\n%s\n' '---- selected source properties ----'
+      if [ -r "$aras_log.route" ]; then
+        # The route resolver already inspected the selected node. Retain only
+        # the last attempt when a legacy caller appends to the same log.
+        awk '
+          /^AUDIO_ROUTE_ATTEMPT / || /^[[:space:]]*id [0-9]+,/ {
+            properties=""
+            selected=""
+            count=0
+          }
+          /^[[:space:]*]*(node[.]|object[.]serial|device[.]|api[.]alsa[.]|audio[.])/ {
+            if (count++ < 30) properties=properties $0 "\n"
+          }
+          /^PipeWire capture route=/ { selected=$0 }
+          END {
+            if (properties != "") printf "%s", properties
+            else print "Source properties unavailable"
+            if (selected != "") print selected
+          }
+        ' "$aras_log.route"
+      else
+        printf '%s\n' 'Source properties unavailable'
+      fi
+      for aras_sidecar in source-format links; do
+        printf '\n---- live %s ----\n' "$aras_sidecar"
+        if [ -n "$aras_wav" ] && [ -r "$aras_wav.$aras_sidecar" ]; then
+          awk '
+            NR <= 40 { print }
+            { last=$0 }
+            END {
+              if (NR > 40) {
+                print "Snapshot excerpt truncated, full artifact retained"
+                print last
+              }
+            }
+          ' "$aras_wav.$aras_sidecar"
+        else
+          printf '%s\n' 'Live snapshot unavailable'
+        fi
+      done
       for aras_phase in before after; do
         printf '\n---- server-%s ----\n' "$aras_phase"
         if [ ! -r "$aras_log.server-$aras_phase" ]; then
@@ -10536,7 +10593,7 @@ audio_record_attempt_summary() (
     log_warn "Could not write capture summary: $aras_out"
     return 0
   fi
-  log_file_with_label AUDIO-RECORD-SUMMARY "$aras_out" 100
+  log_file_with_label AUDIO-RECORD-SUMMARY "$aras_out" 220
   case "$aras_validation" in
     *" warnings="*)
       aras_warnings="${aras_validation#* warnings=}"
@@ -11601,6 +11658,10 @@ audio_validate_recorded_wav_od() {
   avrwo_threshold_lsb="${AUDIO_RECORD_SAMPLE_THRESHOLD_LSB:-${AUDIO_RECORD_SAMPLE_THRESHOLD:-8}}"
   avrwo_strict_signal="${AUDIO_RECORD_STRICT_SIGNAL:-0}"
   avrwo_min_rms_dbfs="${AUDIO_RECORD_MIN_RMS_DBFS:--60}"
+  avrwo_signal_policy=diagnostic
+  if [ "$avrwo_strict_signal" = 1 ]; then
+    avrwo_signal_policy=global-rms
+  fi
 
   avrwo_meta="$(audio_wav_header_metadata "$avrwo_file")" || return 1
 
@@ -11676,7 +11737,7 @@ EOF
   fi
 
   if [ "$avrwo_source_kind" = "null" ]; then
-    avrwo_fields="status=PASS reason=valid-null-source-recording validator=od payload_bytes=$avrwo_usable"
+    avrwo_fields="status=PASS reason=valid-null-source-recording validator=od payload_bytes=$avrwo_usable strict_signal=$avrwo_strict_signal signal_policy=not-applicable signal_evaluated=0 min_rms_dbfs=$avrwo_min_rms_dbfs analysis_method=none analyzed_bytes=0"
     AUDIO_WAV_VALIDATION_SUMMARY="AUDIO_WAV_VALIDATION $avrwo_fields"
     AUDIO_VALIDATION_SUMMARY="AUDIO_VALIDATION scope=$avrwo_scope policy=basic-integrity $avrwo_fields"
     export AUDIO_WAV_VALIDATION_SUMMARY AUDIO_VALIDATION_SUMMARY
@@ -11690,6 +11751,10 @@ EOF
   fi
   avrwo_count=$((avrwo_count - (avrwo_count % avrwo_block_align)))
   [ "$avrwo_count" -gt 0 ] 2>/dev/null || return 1
+  avrwo_analysis_method=prefix
+  if [ "$avrwo_count" -eq "$avrwo_usable" ]; then
+    avrwo_analysis_method=full
+  fi
 
   avrwo_stats="$({
     dd if="$avrwo_file" \
@@ -11788,10 +11853,16 @@ EOF
       if (silence_samples > longest_silence_samples) longest_silence_samples = silence_samples
       silent_channels = 0
       for (channel = 1; channel <= channels; channel++) {
-        if (channel_active[channel] == 0) silent_channels++
+        separator = channel == 1 ? "" : ","
+        active_counts = active_counts separator sprintf("%d", channel_active[channel])
+        active_ratios = active_ratios separator sprintf("%.8f", samples > 0 ? channel_active[channel] / (samples / channels) : 0)
+        if (channel_active[channel] == 0) {
+          silent_indices = silent_indices (silent_channels ? "," : "") channel
+          silent_channels++
+        }
       }
       longest_silence_ms = rate > 0 && channels > 0 ? (1000 * longest_silence_samples / (rate * channels)) : 0
-      printf "%d|%d|%d|%d|%d|%.2f|%.8f|%d|%d|%.2f|%d|%d\n", samples, payload_nonzero_bytes, nonzero_samples, active_samples, distinct_samples, rms_dbfs, dc_offset, clipped_samples, silence_runs, longest_silence_ms, glitch_candidates, silent_channels
+      printf "%d|%d|%d|%d|%d|%.2f|%.8f|%d|%d|%.2f|%d|%d|%s|%s|%s\n", samples, payload_nonzero_bytes, nonzero_samples, active_samples, distinct_samples, rms_dbfs, dc_offset, clipped_samples, silence_runs, longest_silence_ms, glitch_candidates, silent_channels, active_counts, active_ratios, silent_channels ? silent_indices : "none"
       if (samples <= 0 || payload_nonzero_bytes <= 0 || nonzero_samples <= 0) {
         exit 1
       }
@@ -11812,12 +11883,21 @@ EOF
     avrwo_silence_runs \
     avrwo_longest_silence_ms \
     avrwo_glitch_candidates \
-    avrwo_silent_channels <<EOF
+    avrwo_silent_channels \
+    avrwo_active_counts \
+    avrwo_active_ratios \
+    avrwo_silent_indices <<EOF
 $avrwo_stats
 EOF
 
+  avrwo_evaluated=0
+  if [ "${avrwo_samples:-0}" -gt 0 ] 2>/dev/null; then
+    avrwo_evaluated=1
+  fi
+  avrwo_diagnostics="signal_policy=$avrwo_signal_policy signal_evaluated=$avrwo_evaluated analysis_method=$avrwo_analysis_method analyzed_bytes=$(( ${avrwo_samples:-0} * avrwo_bytes_per_sample )) analyzed_frames=$(( ${avrwo_samples:-0} / avrwo_actual_channels )) usable_data_bytes=$avrwo_usable channel_index_base=1 channel_active_samples=${avrwo_active_counts:-unavailable} channel_active_ratio=${avrwo_active_ratios:-unavailable} silent_channel_indices=${avrwo_silent_indices:-unavailable}"
   if [ "$avrwo_stats_rc" -ne 0 ]; then
     avrwo_fields="status=FAIL reason=pcm-signal-validation-failed validator=od analyzed_samples=${avrwo_samples:-0} nonzero_storage_bytes=${avrwo_nonzero_storage_bytes:-0} nonzero_samples=${avrwo_nonzero_samples:-0} active_samples=${avrwo_active_samples:-0} distinct_samples=${avrwo_distinct_samples:-0} rms_dbfs=${avrwo_rms_dbfs:--999} dc_offset=${avrwo_dc_offset:-0} clipped_samples=${avrwo_clipped_samples:-0} silence_runs=${avrwo_silence_runs:-0} longest_silence_ms=${avrwo_longest_silence_ms:-0} glitch_candidates=${avrwo_glitch_candidates:-0} silent_channels=${avrwo_silent_channels:-0} strict_signal=$avrwo_strict_signal min_rms_dbfs=$avrwo_min_rms_dbfs"
+    avrwo_fields="$avrwo_fields $avrwo_diagnostics"
     AUDIO_WAV_VALIDATION_SUMMARY="AUDIO_WAV_VALIDATION $avrwo_fields"
     AUDIO_VALIDATION_SUMMARY="AUDIO_VALIDATION scope=$avrwo_scope policy=basic-integrity $avrwo_fields"
     export AUDIO_WAV_VALIDATION_SUMMARY AUDIO_VALIDATION_SUMMARY
@@ -11825,6 +11905,7 @@ EOF
   fi
 
   avrwo_fields="status=PASS reason=pcm-signal-activity-present validator=od analyzed_samples=$avrwo_samples nonzero_storage_bytes=$avrwo_nonzero_storage_bytes nonzero_samples=$avrwo_nonzero_samples active_samples=$avrwo_active_samples distinct_samples=$avrwo_distinct_samples rms_dbfs=$avrwo_rms_dbfs dc_offset=$avrwo_dc_offset clipped_samples=$avrwo_clipped_samples silence_runs=$avrwo_silence_runs longest_silence_ms=$avrwo_longest_silence_ms glitch_candidates=$avrwo_glitch_candidates silent_channels=$avrwo_silent_channels strict_signal=$avrwo_strict_signal min_rms_dbfs=$avrwo_min_rms_dbfs"
+  avrwo_fields="$avrwo_fields $avrwo_diagnostics"
   AUDIO_WAV_VALIDATION_SUMMARY="AUDIO_WAV_VALIDATION $avrwo_fields"
   AUDIO_VALIDATION_SUMMARY="AUDIO_VALIDATION scope=$avrwo_scope policy=basic-integrity $avrwo_fields"
   export AUDIO_WAV_VALIDATION_SUMMARY AUDIO_VALIDATION_SUMMARY
@@ -11834,7 +11915,7 @@ EOF
 # audio_validate_wav_file <file> <source-kind> <rate> <channels> <bits>
 #                         <seconds> <log-file> <scope> [min-distinct-samples]
 # Validate WAV structure and basic signal integrity. Advanced signal metrics
-# remain diagnostic unless strict-signal mode is explicitly enabled.
+# remain diagnostic. Explicit strict-signal mode additionally gates global RMS.
 audio_validate_wav_file() {
   avrw_file="$1"
   avrw_source_kind="${2:-mic}"
