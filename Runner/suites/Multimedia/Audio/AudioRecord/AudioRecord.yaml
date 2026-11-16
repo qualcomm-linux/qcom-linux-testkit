@@ -8,6 +8,7 @@ metadata:
     - functional
 
 params:
+  REGISTRATION_TIMEOUT: null  # Optional ALSA card/PCM deadline in seconds, runner default: 90
   AUDIO_BACKEND: ""  # Selects backend: pipewire, pulseaudio, or alsa, default: auto-detect
   SOURCE_CHOICE: "mic"  # Recording source: mic or null, default: mic
   CONFIG_NAMES: "record_config1"  # Test specific configs (e.g., "record_config1 record_config2"), default: record_config1
@@ -27,5 +28,5 @@ run:
   steps:
     - REPO_PATH=$PWD
     - cd Runner/suites/Multimedia/Audio/AudioRecord/
-    - ./run.sh --backend "${AUDIO_BACKEND}" --source "${SOURCE_CHOICE}" --config-name "${CONFIG_NAMES}" --config-filter "${CONFIG_FILTER}" --record-seconds "${RECORD_SECONDS}" --loops "${LOOPS}" --timeout "${TIMEOUT}" --start-grace "${AUDIO_RECORD_START_GRACE}" --strict "${STRICT}" --res-suffix "${RES_SUFFIX}" --lava-testcase-id "${LAVA_TESTCASE_ID}" || true
+    - ./run.sh ${REGISTRATION_TIMEOUT:+--registration-timeout "${REGISTRATION_TIMEOUT}"} --backend "${AUDIO_BACKEND}" --source "${SOURCE_CHOICE}" --config-name "${CONFIG_NAMES}" --config-filter "${CONFIG_FILTER}" --record-seconds "${RECORD_SECONDS}" --loops "${LOOPS}" --timeout "${TIMEOUT}" --start-grace "${AUDIO_RECORD_START_GRACE}" --strict "${STRICT}" --res-suffix "${RES_SUFFIX}" --lava-testcase-id "${LAVA_TESTCASE_ID}" || true
     - $REPO_PATH/Runner/utils/send-to-lava.sh AudioRecord${RES_SUFFIX:+_${RES_SUFFIX}}.res

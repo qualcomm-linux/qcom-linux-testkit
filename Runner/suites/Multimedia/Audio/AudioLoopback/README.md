@@ -196,7 +196,9 @@ Kernel-reported errors remain in the retained diagnostics.
 
 For direct ALSA on Shikra, the existing runtime platform detector selects the
 shared modem preparation before any stream probe, followed by playback
-and capture registration waits. Other platforms retain their existing lazy DSP
+and capture registration waits, each with a 90-second deadline. Use
+`--registration-timeout 120` to override it, or `0` to check once. Other platforms
+retain their existing lazy DSP
 recovery. The final captured kernel snapshot is checked for a selected DSP crash.
 The loopback still requires an acoustic/electrical fixture and does not force
 mono or change the WAV validation policy.

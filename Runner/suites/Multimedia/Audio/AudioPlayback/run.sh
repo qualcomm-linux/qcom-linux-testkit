@@ -120,6 +120,7 @@ FORMATS="" # Will be set to default only if using legacy mode
 DURATIONS="" # Will be set to default only if using legacy mode
 LOOPS="${LOOPS:-1}"
 TIMEOUT="${TIMEOUT:-0}" # 0 = no timeout (recommended)
+REGISTRATION_TIMEOUT=90
 STRICT="${STRICT:-0}"
 DMESG_SCAN="${DMESG_SCAN:-1}"
 VERBOSE=0
@@ -182,6 +183,7 @@ Usage: $0 [options]
                                      # Generates AudioPlayback_SUFFIX.res instead of AudioPlayback.res
   --loops N
   --timeout SECS # 0 uses clip duration plus grace in discovery mode
+  --registration-timeout SECS # ALSA card/PCM deadline, default: 90 (0=check once)
   --enable-network-download
   --audio-clips-path PATH # Custom location for audio clips (CI use)
   --audio-bootstrap {auto|true|false}
@@ -420,6 +422,15 @@ parse_args() {
       ;;
     --timeout)
       TIMEOUT="$2"
+      shift 2
+      ;;
+    --registration-timeout)
+      if [ "$#" -lt 2 ] || ! is_unsigned_number "$2" ||
+         ! [ "$2" -le 3600 ] 2>/dev/null; then
+        log_fail "--registration-timeout requires an integer from 0 to 3600 seconds"
+        return 1
+      fi
+      REGISTRATION_TIMEOUT="$2"
       shift 2
       ;;
     --audio-bootstrap)
@@ -794,7 +805,7 @@ case "$audio_remoteproc_rc" in
     if [ "$AUDIO_OVERLAY_ACTIVE" -eq 0 ] &&
        [ "$SINK_CHOICE" != "null" ] &&
        { [ -z "$AUDIO_BACKEND" ] || [ "$AUDIO_BACKEND" = "alsa" ]; } &&
-       ! audio_wait_for_alsa_registration playback; then
+       ! audio_wait_for_alsa_registration playback "$REGISTRATION_TIMEOUT"; then
       log_fail "$TESTNAME FAIL - ${AUDIO_REMOTE_PROC_REASON:-audio remoteproc prepared but ALSA playback registration is incomplete}, inspect the diagnostic artifacts and inventory above"
       echo "$RESULT_TESTNAME FAIL" >"$RES_FILE"
       exit 1

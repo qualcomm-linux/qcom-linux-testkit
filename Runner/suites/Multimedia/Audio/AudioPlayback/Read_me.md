@@ -99,8 +99,8 @@ guessed path. Provision audio assets and clients in the build. Kernel-reported
 errors remain in the retained diagnostics.
 
 For base ALSA or automatic backend selection, an applicable audio remoteproc is
-followed by a bounded registration wait, up to 30 seconds for a card and another
-10 seconds for a playback PCM. A timeout reports registration failure with ALSA
+followed by a single 90-second deadline for a card and playback PCM. Use
+`--registration-timeout 120` to override it, or `0` to check once. A timeout reports registration failure with ALSA
 and remoteproc inventory. Explicit managed backends, overlay and null routes
 do not acquire this ALSA readiness requirement.
 

@@ -8,6 +8,7 @@ metadata:
     - functional
 
 params:
+  REGISTRATION_TIMEOUT: null  # Optional ALSA card/PCM deadline in seconds, runner default: 90
   DURATION: 5
   PLAYBACK_DEVICE: ""
   CAPTURE_DEVICE: ""
@@ -17,5 +18,5 @@ run:
   steps:
     - REPO_PATH=$PWD
     - cd Runner/suites/Multimedia/Audio/AudioLoopback/
-    - ./run.sh --duration "${DURATION}" --playback-device "${PLAYBACK_DEVICE}" --capture-device "${CAPTURE_DEVICE}" --dmesg-scan "${DMESG_SCAN}" || true
+    - ./run.sh ${REGISTRATION_TIMEOUT:+--registration-timeout "${REGISTRATION_TIMEOUT}"} --duration "${DURATION}" --playback-device "${PLAYBACK_DEVICE}" --capture-device "${CAPTURE_DEVICE}" --dmesg-scan "${DMESG_SCAN}" || true
     - $REPO_PATH/Runner/utils/send-to-lava.sh AudioLoopback.res
