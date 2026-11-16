@@ -1515,7 +1515,7 @@ if [ "$USE_CONFIG_DISCOVERY" = "true" ]; then
       fi
 
       audio_record_validate_final_output
-      audio_record_attempt_summary "$logf" "$AUDIO_BACKEND" "$AUDIO_WAV_VALIDATION_SUMMARY"
+      audio_record_attempt_summary "$logf" "$AUDIO_BACKEND" "$AUDIO_WAV_VALIDATION_SUMMARY" "$record_out"
 
       # Evidence
       pw_ev="$(audio_run_helper_as_test_user --require-session audio_evidence_pw_streaming || echo 0)"
@@ -1755,7 +1755,7 @@ else
       fi
 
       audio_record_validate_final_output
-      audio_record_attempt_summary "$logf" "$AUDIO_BACKEND" "$AUDIO_WAV_VALIDATION_SUMMARY"
+      audio_record_attempt_summary "$logf" "$AUDIO_BACKEND" "$AUDIO_WAV_VALIDATION_SUMMARY" "$record_out"
 
       # Evidence
       pw_ev="$(audio_run_helper_as_test_user --require-session audio_evidence_pw_streaming || echo 0)"

@@ -254,6 +254,9 @@ policy. The generated two-level square-wave reference is validated with its
 known signal shape, so it does not produce a near-constant diagnostic. Complete
 RIFF chunks after a WAV `data` chunk are reported as metadata rather than as
 trailing audio.
+Signal summaries also identify inactive channels using one-based indices and
+report the analysis coverage, without assuming that each WAV channel represents
+a physical microphone.
 
 ## Options
 

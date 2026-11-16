@@ -8,8 +8,13 @@ The default CI policy blocks corrupt or empty WAV files, header-only payloads,
 all-zero audio, materially short captures, and explicitly requested format
 mismatches. RMS, peak, clipping, digital-silence runs, DC offset, large sample
 transitions, and silent-channel counts are emitted as diagnostic
-`AUDIO_VALIDATION` metrics. These metrics do not fail the default policy unless
-strict signal validation is explicitly enabled. Complete RIFF chunks after the
+`AUDIO_VALIDATION` metrics. Strict signal mode adds only a global minimum-RMS
+check, it does not require every channel to carry a signal or reject clipping.
+The summary reports the selected signal policy, one-based inactive channel
+indices and each channel's activity ratio. Analysis covers the full payload or
+a bounded sample, distributed windows with Python and a prefix without Python.
+These measurements do not establish physical microphone count or acoustic quality.
+Complete RIFF chunks after the
 audio `data` chunk are reported as metadata rather than as trailing audio.
 
 ## Features
@@ -135,6 +140,9 @@ streams pass. Counts cover the recorded preparation window, or boot history
 when no window was established. Missing or empty kernel evidence is unverified,
 not clean. These diagnostics do not change functional PASS policy or the
 separate selected-DSP crash gate.
+`audio_kernel_health.log` records whether diagnostics need triage or evidence
+is unavailable. Codec-to-stream attribution remains unverified until the saved
+route and kernel evidence establish it.
 
 ALSA preparation announces its start before discovery, route and mixer checks.
 Each attempt's diagnostics are replayed on completion and retained in
@@ -977,7 +985,9 @@ capture delays have been resolved.
 Every recording attempt writes `<client-log>.capture-summary` and prints it to
 stdout, including successful attempts. It contains the final WAV validation,
 available capture-progress measurements, and existing PipeWire service snapshots
-before and after capture. It also retains a bounded selection and count of ACDB
+before and after capture. Saved selected-source properties, live source format
+and links are included when available, so requested WAV channels can be compared
+with the actual source. It also retains a bounded selection and count of ACDB
 calibration errors from the captured operation-window journal. Missing optional
 server evidence remains a diagnostic limitation. No additional service query,
 reset, package installation or sleep is introduced by the summary.
