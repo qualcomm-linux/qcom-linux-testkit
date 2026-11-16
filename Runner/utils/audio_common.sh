@@ -4742,6 +4742,7 @@ audio_loopback_prepare_overlay() {
 # platforms' existing lazy recovery unchanged, only the existing runtime
 # Shikra modem-audio gate opts into eager startup. Return 1 on failure, 0 otherwise.
 audio_loopback_prepare_alsa() {
+  alpa_registration_timeout="${1:-90}"
   AUDIO_REMOTE_PROC_PATH=""
   AUDIO_REMOTE_PROC_REASON=""
   if ! audio_platform_is_shikra; then
@@ -4751,8 +4752,8 @@ audio_loopback_prepare_alsa() {
   alpa_rc=$?
   case "$alpa_rc" in
     0)
-      audio_wait_for_alsa_registration playback || return 1
-      audio_wait_for_alsa_registration capture || return 1
+      audio_wait_for_alsa_registration playback "$alpa_registration_timeout" || return 1
+      audio_wait_for_alsa_registration capture "$alpa_registration_timeout" || return 1
       ;;
     2)
       log_info "Loopback remoteproc preparation not applicable: $AUDIO_REMOTE_PROC_REASON"
@@ -7088,46 +7089,88 @@ audio_card_dt_audio_expected() (
     return 1
 )
 
-# Wait for at least one valid ALSA card, optionally matching AUDIO_CARD_MATCH.
+# audio_card_wait_for_cards <seconds> <card-match> [playback|capture]
+# Wait for a valid card and, when requested, a directional PCM within one budget.
+# Keep the two-argument card-only interface for Audio_Card_Registration.
 audio_card_wait_for_cards() {
-  wait_secs="$1"
-  card_match="$2"
-  elapsed=0
+  acwfc_wait="$1"
+  acwfc_match="$2"
+  acwfc_direction="${3:-}"
+  acwfc_elapsed=0
+  acwfc_polls=0
+  acwfc_previous=""
 
-  case "$wait_secs" in
+  case "$acwfc_wait" in
     ''|*[!0-9]*)
-      wait_secs=30
+      acwfc_wait=30
       ;;
   esac
+  acwfc_wait="$(printf '%s' "$acwfc_wait" | sed 's/^0*//')"
+  acwfc_wait="${acwfc_wait:-0}"
+  case "$acwfc_direction" in
+    ''|playback|capture)
+      ;;
+    *)
+      log_fail "Invalid ALSA PCM direction '$acwfc_direction'"
+      return 1
+      ;;
+  esac
+  acwfc_started="$(get_monotonic_seconds)"
+  log_info "Waiting up to ${acwfc_wait}s for ALSA registration, direction=${acwfc_direction:-card-only}"
 
-  log_info "Waiting up to ${wait_secs}s for ALSA sound card registration"
-
-  while [ "$elapsed" -le "$wait_secs" ]; do
-    if [ -n "$card_match" ]; then
-      if audio_card_find_matching_cards "$card_match" | grep -q .; then
-        return 0
+  while :; do
+    acwfc_state=waiting-card
+    acwfc_card_ready=0
+    if [ -n "$acwfc_match" ]; then
+      if audio_card_find_matching_cards "$acwfc_match" | grep -q .; then
+        acwfc_card_ready=1
       fi
     else
-      card_count="$(audio_card_count_valid_cards)"
-      if [ "$card_count" -gt 0 ] 2>/dev/null; then
-        return 0
+      acwfc_count="$(audio_card_count_valid_cards)"
+      if [ "$acwfc_count" -gt 0 ] 2>/dev/null; then
+        acwfc_card_ready=1
       fi
     fi
-
-    if [ "$elapsed" -eq "$wait_secs" ]; then
+    if [ "$acwfc_card_ready" -eq 1 ]; then
+      acwfc_state=ready
+      if [ -n "$acwfc_direction" ] &&
+         ! grep -E "^[0-9]+-[0-9]+:.*${acwfc_direction}[[:space:]]+[1-9][0-9]*" \
+             /proc/asound/pcm >/dev/null 2>&1; then
+        acwfc_state=waiting-pcm
+      fi
+    fi
+    # A prepared DSP that crashes must not pass after automatic recovery.
+    # Keep ordinary card-only discovery independent of remoteproc state.
+    if [ -n "$acwfc_direction" ] && [ -n "${AUDIO_REMOTE_PROC_PATH:-}" ] &&
+       [ "$(cat "$AUDIO_REMOTE_PROC_PATH/state" 2>/dev/null)" = crashed ]; then
+      AUDIO_REMOTE_PROC_REASON="audio remoteproc crashed during ALSA $acwfc_direction registration: $AUDIO_REMOTE_PROC_PATH"
+      export AUDIO_REMOTE_PROC_REASON
+      log_fail "$AUDIO_REMOTE_PROC_REASON"
+      return 1
+    fi
+    acwfc_now="$(get_monotonic_seconds)"
+    acwfc_elapsed=$((acwfc_now - acwfc_started))
+    # A stalled or backwards fallback clock must not make the wait unbounded.
+    if [ "$acwfc_elapsed" -lt "$acwfc_polls" ]; then
+      acwfc_elapsed="$acwfc_polls"
+    fi
+    if [ "$acwfc_state" != "$acwfc_previous" ] ||
+       { [ "$acwfc_polls" -gt 0 ] && [ $((acwfc_polls % 5)) -eq 0 ]; }; then
+      log_info "ALSA registration state=$acwfc_state direction=${acwfc_direction:-card-only} elapsed=${acwfc_elapsed}s"
+      acwfc_previous="$acwfc_state"
+    fi
+    if [ "$acwfc_state" = ready ] &&
+       { [ "$acwfc_elapsed" -le "$acwfc_wait" ] ||
+         { [ "$acwfc_wait" -eq 0 ] && [ "$acwfc_polls" -eq 0 ]; }; }; then
+      return 0
+    fi
+    if [ "$acwfc_elapsed" -ge "$acwfc_wait" ]; then
       break
     fi
-
     sleep 1
-    elapsed=$((elapsed + 1))
-
-    case "$elapsed" in
-      5|10|15|20|25|30|45|60)
-        log_info "Still waiting for ALSA card registration, elapsed=${elapsed}s"
-        ;;
-    esac
+    acwfc_polls=$((acwfc_polls + 1))
   done
-
+  log_warn "ALSA registration deadline reached, state=$acwfc_state direction=${acwfc_direction:-card-only} elapsed=${acwfc_elapsed}s budget=${acwfc_wait}s"
   return 1
 }
 
@@ -7231,14 +7274,15 @@ audio_collect_remoteproc_diagnostics() {
   return 0
 }
 
-# audio_wait_for_alsa_registration <playback|capture>
-# Wait up to 30 seconds for a card and another 10 seconds for a directional PCM.
+# audio_wait_for_alsa_registration <playback|capture> [timeout-seconds]
+# Wait for a card and directional PCM within one deadline, default 90 seconds.
 # Called only for ALSA after applicable audio remoteproc preparation. Return 1
 # with ALSA and remoteproc diagnostics on stdout when registration is incomplete.
 # On timeout, retain FAIL and observe for another 15s before capturing late
 # watchdog evidence. Successful registration is also checked for prior recovery.
 audio_wait_for_alsa_registration() {
   awfar_direction="$1"
+  awfar_timeout="${2:-90}"
   case "$awfar_direction" in
     playback|capture)
       ;;
@@ -7246,26 +7290,29 @@ audio_wait_for_alsa_registration() {
       return 1
       ;;
   esac
-  if audio_card_wait_for_cards 30 ""; then
-    awfar_elapsed=0
-    while [ "$awfar_elapsed" -le 10 ]; do
-      if grep -E \
-          "^[0-9]+-[0-9]+:.*${awfar_direction}[[:space:]]+[1-9][0-9]*" \
-          /proc/asound/pcm >/dev/null 2>&1; then
-        log_info "ALSA $awfar_direction PCM registration is ready"
-        if [ -n "${LOGDIR:-}" ]; then
-          audio_collect_remoteproc_diagnostics "$LOGDIR/remoteproc-preflight" || return 1
-        fi
-        return 0
-      fi
-      if [ "$awfar_elapsed" -eq 10 ]; then
-        break
-      fi
-      sleep 1
-      awfar_elapsed=$((awfar_elapsed + 1))
-    done
+  case "$awfar_timeout" in
+    ''|*[!0-9]*)
+      AUDIO_REMOTE_PROC_REASON="ALSA registration timeout must be an integer from 0 to 3600 seconds"
+      log_fail "$AUDIO_REMOTE_PROC_REASON"
+      return 1
+      ;;
+  esac
+  if ! [ "$awfar_timeout" -le 3600 ] 2>/dev/null; then
+    AUDIO_REMOTE_PROC_REASON="ALSA registration timeout must be an integer from 0 to 3600 seconds"
+    log_fail "$AUDIO_REMOTE_PROC_REASON"
+    return 1
   fi
-  AUDIO_REMOTE_PROC_REASON="ALSA $awfar_direction registration timed out after audio remoteproc preparation, check sound-card probe, DT and image topology"
+  AUDIO_REMOTE_PROC_REASON=""
+  if audio_card_wait_for_cards "$awfar_timeout" "" "$awfar_direction"; then
+    log_info "ALSA $awfar_direction PCM registration is ready"
+    if [ -n "${LOGDIR:-}" ]; then
+      audio_collect_remoteproc_diagnostics "$LOGDIR/remoteproc-preflight" || return 1
+    fi
+    return 0
+  fi
+  if [ -z "$AUDIO_REMOTE_PROC_REASON" ]; then
+    AUDIO_REMOTE_PROC_REASON="ALSA $awfar_direction registration timed out within ${awfar_timeout}s after audio remoteproc preparation, check sound-card probe, DT and image topology"
+  fi
   export AUDIO_REMOTE_PROC_REASON
   log_fail "$AUDIO_REMOTE_PROC_REASON"
   if [ -n "${LOGDIR:-}" ] && [ -n "${AUDIO_REMOTE_PROC_PATH:-}" ]; then
