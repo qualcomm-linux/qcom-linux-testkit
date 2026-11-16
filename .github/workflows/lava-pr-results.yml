@@ -14,6 +14,15 @@ on:
       validation_result:
         required: true
         type: string
+      validation_pr:
+        required: true
+        type: string
+      validation_sha:
+        required: true
+        type: string
+      submit_requested:
+        required: true
+        type: boolean
   workflow_dispatch:
     inputs:
       validation_run:
@@ -23,50 +32,51 @@ on:
       validation_attempt:
         description: Attempt to recover, empty selects the latest completed attempt
         type: string
+      recover:
+        description: Reconcile remote jobs on an OSS runner. Disable to retry publication only.
+        default: true
+        type: boolean
 
 permissions:
   contents: read
   actions: read
-  issues: write
 
 concurrency:
   group: lava-results-${{ inputs.validation_run }}
   cancel-in-progress: false
 
 jobs:
-  results:
+  recover:
+    # Automatic publishing never queues another OSS runner. Manual recovery
+    # can be cancelled independently if an OSS runner is unavailable.
     if: >-
-      always() &&
+      !cancelled() && inputs.recover &&
       github.repository == 'qualcomm-linux/qcom-linux-testkit' &&
-      github.ref == 'refs/heads/main' &&
-      github.event_name == 'workflow_dispatch'
+      github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch'
     environment: lava-oss
     runs-on:
       group: GHA-Kernel-SelfHosted-RG
       labels: kernel-prd-u2404-x64-large-od-ephem
     timeout-minutes: 30
+    outputs:
+      evidence_id: ${{ steps.evidence.outputs.artifact-id }}
     steps:
       - name: Checkout trusted controller
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         with:
           python-version: '3.11'
-
       - run: python -m pip install -r .github/ci/lava-pr-requirements.txt
-
       - name: Resolve trusted validation request
         id: request
         env:
           GH_TOKEN: ${{ github.token }}
           VALIDATION_RUN_ID: ${{ inputs.validation_run }}
           VALIDATION_RUN_ATTEMPT: ${{ inputs.validation_attempt }}
-          VALIDATION_RESULT: ${{ inputs.validation_result }}
         run: python .github/workflows/lava_pr_validation.py resolve
-
       - name: Download prepared request
         if: steps.request.outputs.prepared == 'true'
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
@@ -75,23 +85,105 @@ jobs:
           run-id: ${{ steps.request.outputs.run_id }}
           name: ${{ steps.request.outputs.artifact_name }}
           path: lava-output
-
-      - name: Reconcile jobs and publish results
+      - name: Recover owned jobs and collect results
         if: steps.request.outputs.prepared == 'true'
         env:
-          GH_TOKEN: ${{ github.token }}
           LAVA_OSS_USER: ${{ secrets.LAVA_OSS_USER }}
           LAVA_OSS_TOKEN: ${{ secrets.LAVA_OSS_TOKEN }}
           VALIDATION_RUN_ID: ${{ steps.request.outputs.run_id }}
-        run: python .github/workflows/lava_pr_validation.py finish
+        run: python .github/workflows/lava_pr_validation.py collect
+      - name: Save recovered evidence
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: lava-recovery-${{ inputs.validation_run }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: lava-output/results.json
+          if-no-files-found: warn
+          retention-days: 30
+        id: evidence
 
+  publish:
+    needs: recover
+    if: >-
+      always() && github.repository == 'qualcomm-linux/qcom-linux-testkit' &&
+      github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+      checks: write
+    steps:
+      - name: Checkout trusted controller
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+        with:
+          python-version: '3.11'
+      - run: python -m pip install -r .github/ci/lava-pr-requirements.txt
+      - name: Resolve trusted validation request
+        id: request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VALIDATION_RUN_ID: ${{ inputs.validation_run }}
+          VALIDATION_RUN_ATTEMPT: ${{ inputs.validation_attempt }}
+          VALIDATION_RESULT: ${{ inputs.validation_result }}
+        run: python .github/workflows/lava_pr_validation.py resolve
+      - name: Download prepared request
+        if: steps.request.outputs.prepared == 'true'
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ steps.request.outputs.run_id }}
+          name: ${{ steps.request.outputs.artifact_name }}
+          path: lava-output
+      - name: Download request context
+        if: steps.request.outputs.context_artifact != ''
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ steps.request.outputs.run_id }}
+          name: ${{ steps.request.outputs.context_artifact }}
+          path: lava-output
+      - name: Download collected evidence
+        if: needs.recover.outputs.evidence_id == '' && steps.request.outputs.evidence_available == 'true'
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ steps.request.outputs.run_id }}
+          name: ${{ steps.request.outputs.evidence_artifact }}
+          path: lava-output
+      - name: Download recovered evidence
+        if: needs.recover.outputs.evidence_id != ''
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          artifact-ids: ${{ needs.recover.outputs.evidence_id }}
+          path: lava-output
+      - name: Publish workflow matrix, PR comment and commit check
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VALIDATION_RUN_ID: ${{ steps.request.outputs.run_id || inputs.validation_run }}
+          VALIDATION_RUN_ATTEMPT: ${{ steps.request.outputs.run_attempt || inputs.validation_attempt }}
+          VALIDATION_RESULT: ${{ steps.request.outputs.validation_result || inputs.validation_result || 'failure' }}
+          VALIDATION_PR: ${{ inputs.validation_pr }}
+          VALIDATION_SHA: ${{ inputs.validation_sha }}
+          SUBMIT_REQUEST: ${{ inputs.submit_requested }}
+        run: python .github/workflows/lava_pr_validation.py publish
       - name: Save results and evidence
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: lava-results-${{ inputs.validation_run }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            lava-output/results.json
+          path: 'lava-output/results.json
+
             lava-output/summary.md
+
+            lava-output/test-results.md
+
+            '
           if-no-files-found: ignore
           retention-days: 30
