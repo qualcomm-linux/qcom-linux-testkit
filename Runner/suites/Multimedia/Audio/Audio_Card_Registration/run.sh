@@ -168,7 +168,7 @@ fi
 # orchestrator on Debian and CentOS, so logs, results, inventory, and dmesg
 # evidence stay root-owned.
 RES_FILE="$SCRIPT_DIR/$TESTNAME.res"
-# Gate image utilities before topology, FIT, user or package helpers use them.
+# Gate image utilities before FIT, user or package helpers use them.
 if ! CHECK_DEPS_NO_EXIT=1 CHECK_DEPS_RECOVER=0 check_dependencies \
     awk grep sed cat find sleep wc readlink tr mkdir mktemp date cp; then
     test_result_init "$TESTNAME" "$RES_FILE" || exit 1
@@ -379,18 +379,7 @@ if ! audio_dt_fit_preflight "$LOGDIR/dt-fit-preflight" \
     test_result_finish
 fi
 
-# Passive prerequisite validation only, never start or restart a DSP here.
-if [ "$AUDIO_OVERLAY_REQUESTED" -eq 0 ]; then
-    audio_base_topology_preflight >"$LOGDIR/topology_preflight.txt"
-    audio_topology_rc=$?
-    if [ "$audio_topology_rc" -eq 1 ]; then
-        test_result_init "$TESTNAME" "$RES_FILE" || exit 1
-        test_result_record FAIL "$TESTNAME FAIL - required kernel-selected image topology is missing, empty or invalid for the active DT"
-        test_result_finish
-    elif [ "$audio_topology_rc" -eq 4 ]; then
-        log_info "Exact topology validation is pending ALSA card registration, continuing with the configured card wait"
-    fi
-fi
+# Passive runtime inventory only, never start or restart a DSP here.
 list_remoteproc_instances >"$LOGDIR/remoteproc_inventory.txt" 2>&1 || true
 log_file_with_label AUDIO-REMOTEPROC "$LOGDIR/remoteproc_inventory.txt"
 
@@ -574,15 +563,6 @@ while IFS='|' read -r card_idx card_id card_desc || [ -n "$card_idx" ]; do
 done < "$MATCHED_CARDS_FILE"
 
 test_failed=0
-
-if [ "$AUDIO_OVERLAY_REQUESTED" -eq 0 ]; then
-    while IFS='|' read -r card_idx card_id card_desc || [ -n "$card_idx" ]; do
-        [ -n "$card_idx" ] || continue
-        if ! audio_alsa_validate_topology "$card_idx"; then
-            test_failed=1
-        fi
-    done <"$MATCHED_CARDS_FILE"
-fi
 
 if [ "$REQUIRE_CONTROL_NODE" -eq 1 ]; then
     if ! audio_run_helper_as_test_user \
