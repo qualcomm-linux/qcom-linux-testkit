@@ -47,6 +47,7 @@ TESTNAME="AudioLoopback"
 RES_FILE="$AUDIO_WORK_DIR/${TESTNAME}.res"
 
 DURATION=5
+REGISTRATION_TIMEOUT=90
 EXPECTED_DT_COMPATIBLE=""
 DT_FIT_IMAGE=""
 PLAYBACK_ROUTE="auto"
@@ -77,6 +78,7 @@ Options:
   --expected-dt-compatible TEXT  Require this exact active DT compatible
   --fit-image PATH               Verify EFI selection using the supplied boot FIT
   --duration SECONDS        Reference playback duration, default: 5
+  --registration-timeout SECS  ALSA card/PCM deadline per direction, default: 90 (0=check once)
   --sink {auto|speaker|speakers|headphone|headphones|headset}
                             Semantic playback route, default: auto
   --source {auto|mic|microphone|headset-mic|headset_mic|"headset mic"}
@@ -112,6 +114,15 @@ parse_args() {
                         DT_FIT_IMAGE="$2"
                         ;;
                 esac
+                shift 2
+                ;;
+            --registration-timeout)
+                if [ "$#" -lt 2 ] || ! is_unsigned_number "$2" ||
+                   ! [ "$2" -le 3600 ] 2>/dev/null; then
+                    ARG_ERROR="--registration-timeout requires an integer from 0 to 3600 seconds"
+                    return 1
+                fi
+                REGISTRATION_TIMEOUT="$2"
                 shift 2
                 ;;
             --duration)
@@ -518,7 +529,7 @@ if [ "$audio_loopback_overlay_rc" -eq 0 ] && [ "$AUDIO_BACKEND" != pipewire ]; t
 fi
 
 if [ -z "$AUDIO_BACKEND" ] || [ "$AUDIO_BACKEND" = alsa ]; then
-    if ! audio_loopback_prepare_alsa; then
+    if ! audio_loopback_prepare_alsa "$REGISTRATION_TIMEOUT"; then
         test_result_record FAIL "$TESTNAME FAIL - ${AUDIO_REMOTE_PROC_REASON:-ALSA preparation failed}, inspect $LOGDIR/remoteproc-preflight"
         test_result_finish
     fi

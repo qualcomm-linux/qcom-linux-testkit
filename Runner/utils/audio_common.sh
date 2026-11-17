@@ -404,6 +404,8 @@ audio_kernel_diagnostic_summary() {
   : >"$akds_out/audio_kernel_warnings.log"
   if [ "${DMESG_ACCESS_STATUS:-unavailable}" != available ] ||
      [ ! -s "$akds_out/dmesg_snapshot.log" ]; then
+    printf '%s\n' 'AUDIO_KERNEL_HEALTH status=unverified reason=snapshot-unavailable attribution=unverified' >"$akds_out/audio_kernel_health.log"
+    log_file_with_label AUDIO-KERNEL "$akds_out/audio_kernel_health.log" 1
     log_warn "[AUDIO-KERNEL] Evidence unavailable, kernel health is unverified. See $akds_out/dmesg_access.log and kernel_capture.log"
     return 0
   fi
@@ -413,6 +415,7 @@ audio_kernel_diagnostic_summary() {
     {
       if (since ~ /^[0-9]+$/) {
         if ($0 !~ /^\[[[:space:]]*[0-9]+([.][0-9]+)?\]/) next
+        timestamped++
         stamp = $0
         sub(/^\[[[:space:]]*/, "", stamp)
         sub(/\].*$/, "", stamp)
@@ -427,12 +430,24 @@ audio_kernel_diagnostic_summary() {
       else if (line ~ /unknown pin|no backend dais|underrun|overrun|xrun/)
         print $0 > warnings
     }
+    END {
+      if (since ~ /^[0-9]+$/ && !timestamped) exit 1
+    }
   ' "$akds_out/dmesg_snapshot.log"; then
+    printf '%s\n' 'AUDIO_KERNEL_HEALTH status=unverified reason=classification-failed attribution=unverified' >"$akds_out/audio_kernel_health.log"
+    log_file_with_label AUDIO-KERNEL "$akds_out/audio_kernel_health.log" 1
     log_warn "[AUDIO-KERNEL] Snapshot classification failed, kernel health is unverified. Retain $akds_out/dmesg_snapshot.log for triage"
     return 0
   fi
   akds_errors="$(wc -l <"$akds_out/audio_kernel_errors.log")"
   akds_warnings="$(wc -l <"$akds_out/audio_kernel_warnings.log")"
+  akds_status=no-matched-diagnostics
+  if [ "$akds_errors" -gt 0 ] || [ "$akds_warnings" -gt 0 ]; then
+    akds_status=needs-triage
+  fi
+  printf 'AUDIO_KERNEL_HEALTH status=%s errors=%s warnings=%s since_uptime=%s attribution=unverified\n' \
+    "$akds_status" "$akds_errors" "$akds_warnings" "${AUDIO_REMOTE_PROC_SINCE:-boot}" >"$akds_out/audio_kernel_health.log"
+  log_file_with_label AUDIO-KERNEL "$akds_out/audio_kernel_health.log" 1
   log_info "[AUDIO-KERNEL] Captured audio diagnostics: errors=$akds_errors warnings=$akds_warnings since_uptime=${AUDIO_REMOTE_PROC_SINCE:-boot}, independent of stream execution result"
   if [ "$akds_errors" -gt 0 ] || [ "$akds_warnings" -gt 0 ]; then
     log_warn "[AUDIO-KERNEL] Audio messages require triage even when playback/recording passes, artifacts: $akds_out/audio_kernel_errors.log and audio_kernel_warnings.log"
@@ -2394,6 +2409,7 @@ audio_record_pipewire_capture() {
   if [ "$arpc_route" = null ]; then
     arpc_identity_mode=""
   fi
+  printf 'AUDIO_ROUTE_ATTEMPT requested=%s\n' "$arpc_route" >>"$arpc_log.route"
   if ! arpc_identity="$(audio_run_helper_as_test_user --require-session \
       audio_pipewire_capture_target "$arpc_route" "$arpc_identity_mode" 2>>"$arpc_log.route")"; then
     # shellcheck disable=SC2034
@@ -4368,109 +4384,6 @@ audio_should_use_service_recovery() {
   return 1
 }
 
-# Require an image-provided ALSA topology in the configured DSP firmware
-# directory or its platform parent. Some images keep a shared platform topology
-# above variant-specific firmware directories such as cqs, iqs, or cqm.
-audio_remoteproc_topology_path() {
-  artp_firmware_path="$1"
-  artp_firmware_dir="$(dirname "$artp_firmware_path")"
-  artp_platform_dir="$(dirname "$artp_firmware_dir")"
-
-  for artp_search_dir in "$artp_firmware_dir" "$artp_platform_dir"; do
-    for artp_path in \
-      "$artp_search_dir"/*tplg* \
-      "$artp_search_dir"/*topology*
-    do
-      if [ -f "$artp_path" ]; then
-        printf '%s\n' "$artp_path"
-        return 0
-      fi
-    done
-  done
-
-  return 1
-}
-
-# audio_dt_requires_topology <sound-card-DT-node>
-# Return 0 when an enabled card link references the q6apm topology provider,
-# otherwise 1. Shared by pre-registration and registered-card validation.
-audio_dt_requires_topology() {
-  adrt_node="$1"
-  adrt_providers="$(dt_list_compatible_nodes 'qcom,q6apm' 2>/dev/null)"
-  for adrt_provider in $adrt_providers; do
-    if ! dt_property_text "$adrt_provider" compatible |
-        tr ' ' '\n' | grep -F -x qcom,q6apm >/dev/null; then
-      continue
-    fi
-    adrt_phandle="$(dt_property_hex "$adrt_provider" phandle)"
-    [ -n "$adrt_phandle" ] || continue
-    for adrt_link in "$adrt_node"/*; do
-      [ -d "$adrt_link/platform" ] || continue
-      dt_node_enabled "$adrt_link" || continue
-      dt_node_enabled "$adrt_link/platform" || continue
-      if [ "$(dt_property_hex "$adrt_link/platform" sound-dai)" = "$adrt_phandle" ]; then
-        return 0
-      fi
-    done
-  done
-  return 1
-}
-
-# audio_alsa_card_driver <card-number>
-# Print the registered ALSA driver name, return 1 when it is unavailable.
-audio_alsa_card_driver() {
-  aacd_driver=$(awk -v card="$1" '
-    $1 == card {
-      sub(/^.*\]:[[:space:]]*/, "")
-      sub(/[[:space:]]+- .*/, "")
-      print
-      exit
-    }
-  ' /proc/asound/cards 2>/dev/null)
-  [ -n "$aacd_driver" ] || return 1
-  printf '%s\n' "$aacd_driver"
-}
-
-# audio_topology_for_dt_model <model> [sound-card-DT-node]
-# Print the exact kernel driver/model topology for the matching registered card.
-# Return 4 when registration has not exposed the driver, 1 for invalid identity
-# or a missing/empty selected asset. A DT compatible does not name the ALSA
-# driver. Use find_image_firmware, never infer the path from installed copies.
-audio_topology_for_dt_model() {
-  atfdm_model="$1"
-  atfdm_node="${2:-}"
-  case "$atfdm_model" in
-    ''|*/*|*..*)
-      printf '%s\n' "Invalid or missing sound-card DT model for topology discovery: '$atfdm_model'" >&2
-      return 1
-      ;;
-  esac
-  if [ -n "$atfdm_node" ]; then
-    atfdm_card_node=$(readlink -f "$atfdm_node") || return 1
-    for atfdm_card_dir in /proc/asound/card[0-9]*; do
-      [ -d "$atfdm_card_dir" ] || continue
-      atfdm_card=${atfdm_card_dir##*/card}
-      atfdm_registered_node=$(audio_alsa_card_dt_node "$atfdm_card") || continue
-      [ "$atfdm_registered_node" = "$atfdm_card_node" ] || continue
-      atfdm_driver=$(audio_alsa_card_driver "$atfdm_card") || return 1
-      case "$atfdm_driver" in
-        ''|*/*|*..*)
-          return 1
-          ;;
-      esac
-      atfdm_path=$(find_image_firmware "qcom/$atfdm_driver/$atfdm_model-tplg.bin") || atfdm_path=""
-      if [ ! -s "$atfdm_path" ]; then
-        printf '%s\n' "Required registered-driver topology 'qcom/$atfdm_driver/$atfdm_model-tplg.bin' is missing or empty, provision the selected driver/model asset in the build" >&2
-        return 1
-      fi
-      printf '%s\n' "$atfdm_path"
-      return 0
-    done
-  fi
-  printf '%s\n' "Audio topology pending: DT=$atfdm_node model=$atfdm_model, waiting for the matching ALSA card to expose its kernel-selected driver" >&2
-  return 4
-}
-
 # audio_dt_fit_candidates
 # List canonical FIT candidate files from already accessible boot directories
 # and mounted FAT filesystems. No mounting, raw partition reads or boot-slot
@@ -4713,61 +4626,6 @@ audio_dt_fit_preflight() {
   return 0
 }
 
-# audio_base_topology_preflight
-# Discover enabled sound cards through runtime DT platform sound-dai links,
-# before any ALSA card exists. Print only validated paths, diagnostics to stderr.
-# Return 0 when all q6apm assets are validated, 4 while matching cards are pending,
-# 2 when none are declared, 3 when DT is unavailable, 1 for an unmet requirement.
-audio_base_topology_preflight() {
-  abtp_root="$(dt_runtime_root)" || return 3
-  abtp_discovery_rc=0
-  abtp_platforms="$(dt_list_enabled_property_nodes "$abtp_root" sound-dai)" || abtp_discovery_rc=$?
-  if [ "$abtp_discovery_rc" -gt 1 ]; then
-    printf '%s\n' "Audio topology discovery failed, rc=$abtp_discovery_rc. Check DT access and discovery tools" >&2
-    return 1
-  fi
-  abtp_cards="$(
-    printf '%s\n' "$abtp_platforms" |
-      while IFS= read -r abtp_platform; do
-        [ "${abtp_platform##*/}" = platform ] || continue
-        abtp_link="${abtp_platform%/*}"
-        abtp_card="${abtp_link%/*}"
-        dt_node_enabled "$abtp_link" || continue
-        dt_node_enabled "$abtp_card" || continue
-        printf '%s\n' "$abtp_card"
-      done | sort -u
-  )"
-  abtp_paths=""
-  abtp_pending=0
-  while IFS= read -r abtp_card; do
-    [ -n "$abtp_card" ] || continue
-    audio_dt_requires_topology "$abtp_card" || continue
-    abtp_model="$(dt_property_text "$abtp_card" model)"
-    abtp_path_rc=0
-    abtp_path="$(audio_topology_for_dt_model "$abtp_model" "$abtp_card")" || abtp_path_rc=$?
-    case "$abtp_path_rc" in
-      0)
-        ;;
-      4)
-        abtp_pending=1
-        continue
-        ;;
-      *)
-        return 1
-        ;;
-    esac
-    printf '%s\n' "Audio topology preflight: DT=$abtp_card model=$abtp_model file=$abtp_path, kernel-selected ALSA driver path validated" >&2
-    abtp_paths="${abtp_paths}${abtp_path}
-"
-  done <<EOF
-$abtp_cards
-EOF
-  printf '%s' "$abtp_paths"
-  [ "$abtp_pending" -eq 0 ] || return 4
-  [ -n "$abtp_paths" ] || return 2
-  return 0
-}
-
 # audio_wait_for_capture_payload <WAV> <owner-pid> <seconds>
 # Wait for a valid WAV header and at least one complete PCM frame while the
 # owned capture process is alive. No stdout data, return 1 on exit or timeout.
@@ -4879,11 +4737,12 @@ audio_loopback_prepare_overlay() {
 }
 
 # audio_loopback_prepare_alsa
-# Prepare provisioned audio firmware/topology before functional ALSA loopback
+# Prepare the audio remoteproc before functional ALSA loopback
 # probes, then require playback and capture registration. Keep non-applicable
 # platforms' existing lazy recovery unchanged, only the existing runtime
 # Shikra modem-audio gate opts into eager startup. Return 1 on failure, 0 otherwise.
 audio_loopback_prepare_alsa() {
+  alpa_registration_timeout="${1:-90}"
   AUDIO_REMOTE_PROC_PATH=""
   AUDIO_REMOTE_PROC_REASON=""
   if ! audio_platform_is_shikra; then
@@ -4893,8 +4752,8 @@ audio_loopback_prepare_alsa() {
   alpa_rc=$?
   case "$alpa_rc" in
     0)
-      audio_wait_for_alsa_registration playback || return 1
-      audio_wait_for_alsa_registration capture || return 1
+      audio_wait_for_alsa_registration playback "$alpa_registration_timeout" || return 1
+      audio_wait_for_alsa_registration capture "$alpa_registration_timeout" || return 1
       ;;
     2)
       log_info "Loopback remoteproc preparation not applicable: $AUDIO_REMOTE_PROC_REASON"
@@ -4954,8 +4813,8 @@ audio_platform_is_shikra() {
 }
 
 # Reorder an inventory so a modem-hosted audio path is considered before DSP
-# fallbacks. The caller still validates its firmware and topology, and no
-# remoteproc index is inferred or hardcoded.
+# fallbacks. The caller validates its runtime state and startup requirements.
+# No remoteproc index is inferred or hardcoded.
 audio_remoteproc_prioritize_modem() {
   arpm_instances="$1"
 
@@ -4982,10 +4841,12 @@ EOF
   done
 }
 
-# Check the audio-bearing remoteproc before audio tests begin. A matching
-# remoteproc needs image-provided firmware before startup. Exact q6apm topology
-# validation waits for its ALSA driver identity. Legacy layouts retain their
-# adjacent-topology check. Return 2 when no applicable remoteproc exists.
+# Check the audio-bearing remoteproc before audio tests begin. Reuse a running
+# instance without requiring its firmware to remain accessible on disk. Offline
+# startup requires image-provided firmware. The kernel selects and loads audio
+# topology, card/PCM readiness and stream tests validate the resulting runtime.
+# Return 0 when ready, 1 on preparation failure, 2 when no instance is applicable.
+# Track test-owned startup and the selected instance for later diagnostics.
 audio_prepare_audio_remoteproc() {
   AUDIO_REMOTE_PROC_REASON=""
   AUDIO_REMOTE_PROC_STARTED=0
@@ -5018,8 +4879,6 @@ audio_prepare_audio_remoteproc() {
   while IFS='|' read -r arpr_path arpr_name arpr_firmware arpr_state ||
         [ -n "$arpr_path" ]
   do
-    arpr_is_shikra_modem=0
-
     if ! audio_remoteproc_is_audio_candidate "$arpr_name" "$arpr_firmware"; then
       continue
     fi
@@ -5031,10 +4890,6 @@ audio_prepare_audio_remoteproc() {
        ! audio_platform_is_shikra; then
       continue
     fi
-    if audio_remoteproc_is_modem "$arpr_name"; then
-      arpr_is_shikra_modem=1
-    fi
-
     arpr_matched=1
     AUDIO_REMOTE_PROC_PATH="$arpr_path"
     AUDIO_REMOTE_PROC_INITIAL_STATE="$arpr_state"
@@ -5055,58 +4910,23 @@ audio_prepare_audio_remoteproc() {
     fi
     export AUDIO_REMOTE_PROC_PATH AUDIO_REMOTE_PROC_SINCE
     export AUDIO_REMOTE_PROC_CONTROLLER AUDIO_REMOTE_PROC_INITIAL_STATE
-    arpr_firmware_path="$(
-      find_image_firmware "$arpr_firmware" 2>/dev/null || true
-    )"
-    if [ -z "$arpr_firmware_path" ]; then
-      AUDIO_REMOTE_PROC_REASON="audio remoteproc firmware is not provisioned: name='$arpr_name' firmware='$arpr_firmware'"
-      continue
-    fi
-
-    arpr_topology_rc=2
-    if [ "${AUDIO_OVERLAY_ACTIVE:-${AUDIO_OVERLAY_REQUESTED:-0}}" -eq 0 ]; then
-      arpr_topology_path="$(audio_base_topology_preflight)"
-      arpr_topology_rc=$?
-      if [ "$arpr_topology_rc" -eq 1 ]; then
-        AUDIO_REMOTE_PROC_REASON="required kernel-selected base audio topology is missing, empty or invalid, see the runtime DT-model diagnostic above"
-        export AUDIO_REMOTE_PROC_REASON
-        return 1
-      fi
-    fi
-    if [ "$arpr_topology_rc" -eq 0 ]; then
-      :
-    elif [ "$arpr_topology_rc" -eq 4 ]; then
-      arpr_topology_path="pending ALSA registration, exact driver/model topology validation follows"
-    elif [ "$arpr_is_shikra_modem" -eq 1 ]; then
-      if [ "${AUDIO_OVERLAY_ACTIVE:-${AUDIO_OVERLAY_REQUESTED:-0}}" -eq 1 ]; then
-        arpr_topology_path="managed-overlay, base ALSA topology check not applicable"
-      elif [ "$arpr_topology_rc" -eq 3 ]; then
-        AUDIO_REMOTE_PROC_REASON="runtime DT is unavailable, cannot verify the base audio topology prerequisite before modem startup"
-        export AUDIO_REMOTE_PROC_REASON
-        return 1
-      else
-        arpr_topology_path="runtime DT declares no q6apm topology consumer"
-      fi
-    else
-      # Preserve older non-q6apm image layouts and their established check.
-      arpr_topology_path="$(
-        audio_remoteproc_topology_path "$arpr_firmware_path" 2>/dev/null || true
-      )"
-      if [ -z "$arpr_topology_path" ]; then
-        AUDIO_REMOTE_PROC_REASON="audio topology is not provisioned for firmware '$arpr_firmware_path'"
-        continue
-      fi
-    fi
-
     case "$arpr_state" in
       running)
-        log_info "Audio remoteproc ready: name='$arpr_name' state=running firmware='$arpr_firmware_path' topology='$arpr_topology_path'"
+        log_info "Audio remoteproc ready: name='$arpr_name' state=running firmware='$arpr_firmware'"
         AUDIO_REMOTE_PROC_REASON=""
         export AUDIO_REMOTE_PROC_REASON
         return 0
         ;;
       offline)
-        log_info "Starting offline audio remoteproc: name='$arpr_name' path='$arpr_path' firmware='$arpr_firmware_path' topology='$arpr_topology_path'"
+        arpr_firmware_path="$(
+          find_image_firmware "$arpr_firmware" 2>/dev/null || true
+        )"
+        if [ -z "$arpr_firmware_path" ]; then
+          AUDIO_REMOTE_PROC_REASON="audio remoteproc firmware is not provisioned: name='$arpr_name' firmware='$arpr_firmware'"
+          continue
+        fi
+
+        log_info "Starting offline audio remoteproc: name='$arpr_name' path='$arpr_path' firmware='$arpr_firmware_path'"
         if start_remoteproc "$arpr_path"; then
           log_info "Audio remoteproc started: name='$arpr_name' path='$arpr_path'"
           AUDIO_REMOTE_PROC_REASON=""
@@ -5352,49 +5172,6 @@ audio_alsa_route_control() {
 audio_alsa_route_pcm() {
   aarp_selected="$(audio_alsa_select_route "$1" "$2")" || return 1
   printf '%s\n' "$aarp_selected" | cut -d'|' -f1
-}
-
-# audio_alsa_card_dt_node <card>
-# Print the resolved DT node belonging to an ALSA card, including named cards.
-audio_alsa_card_dt_node() {
-  aacdn_card="$1"
-  if [ -L "/proc/asound/$aacdn_card" ]; then
-    aacdn_card="$(basename "$(readlink -f "/proc/asound/$aacdn_card")")"
-    aacdn_card="${aacdn_card#card}"
-  fi
-  aacdn_node="$(readlink -f "/sys/class/sound/card$aacdn_card/device/of_node" 2>/dev/null)"
-  [ -d "$aacdn_node" ] || return 1
-  printf '%s\n' "$aacdn_node"
-}
-
-# audio_alsa_validate_topology <card>
-# For a card linked to q6apm in runtime DT, verify the exact image-provided
-# topology using the kernel naming contract qcom/<driver>/<model>-tplg.bin.
-# Direct-codec cards have no such dependency. Never download or copy firmware.
-audio_alsa_validate_topology() {
-  aavt_card="$1"
-  if [ -L "/proc/asound/$aavt_card" ]; then
-    aavt_card="$(basename "$(readlink -f "/proc/asound/$aavt_card")")"
-    aavt_card="${aavt_card#card}"
-  fi
-  aavt_node="$(audio_alsa_card_dt_node "$aavt_card")" || return 0
-  audio_dt_requires_topology "$aavt_node" || return 0
-
-  aavt_model="$(dt_property_text "$aavt_node" model)"
-  aavt_driver=$(audio_alsa_card_driver "$aavt_card") || aavt_driver=""
-  case "$aavt_driver:$aavt_model" in
-    :*|*:|*/*|*..*)
-      printf '%s\n' "Cannot derive the q6apm topology filename for ALSA card $aavt_card, DT=$aavt_node" >&2
-      return 1
-      ;;
-  esac
-  aavt_name="qcom/$aavt_driver/$aavt_model-tplg.bin"
-  aavt_path="$(find_image_firmware "$aavt_name")"
-  if [ -z "$aavt_path" ] || [ ! -s "$aavt_path" ]; then
-    printf '%s\n' "Required audio topology is missing or empty: $aavt_name, DT=$aavt_node. Include it in the build and boot with the matching audio DT." >&2
-    return 1
-  fi
-  printf '%s\n' "ALSA topology: card=$aavt_card DT=$aavt_node firmware=$aavt_path" >&2
 }
 
 # audio_log_phase <label> <monotonic-start> <status>
@@ -6062,10 +5839,6 @@ audio_playback_alsa_prepare() {
     return 0
   fi
 
-  if [ -n "$ap_card" ]; then
-    audio_alsa_validate_topology "$ap_card" || return 1
-  fi
-
   if command -v alsaucm >/dev/null 2>&1; then
     if [ -z "$ap_ucm_card" ] || [ -z "$ap_ucm_device" ]; then
       ap_route_record="$(
@@ -6290,7 +6063,7 @@ audio_probe_log_begin() {
     aplb_lines="$(wc -l <"$aplb_file")"
     aplb_first=$((aplb_lines + 1))
   fi
-  printf '%s\n' "[$aplb_label] Preparing route: discover PCM, validate topology, apply mixers, then run a bounded stream probe. Details: $aplb_file" >&2
+  printf '%s\n' "[$aplb_label] Preparing route: discover PCM, prepare the route and mixers, then run a bounded stream probe. Details: $aplb_file" >&2
   printf '%s\n' "$aplb_first"
 }
 
@@ -6380,12 +6153,12 @@ audio_playback_alsa_probe() {
   ap_prepare_start="$(get_monotonic_seconds)"
   if ! audio_playback_alsa_prepare \
       "$ap_probe_card" "$ap_probe_ucm_card" "$ap_probe_ucm_device" "$ap_probe_dev"; then
-    audio_log_phase playback-topology-mixers "$ap_prepare_start" 1
+    audio_log_phase playback-route-mixers "$ap_prepare_start" 1
     printf '%s\n' \
       "[ALSA-PROBE] route preparation failed: choice=${SINK_CHOICE:-speakers} device=$ap_probe_dev" >&2
     return 3
   fi
-  audio_log_phase playback-topology-mixers "$ap_prepare_start" 0
+  audio_log_phase playback-route-mixers "$ap_prepare_start" 0
 
   printf '%s\n' \
     "[ALSA-PROBE] exec: aplay -D $ap_probe_dev -t raw -f S16_LE -r 48000 -c 2 -d 1 /dev/zero" >&2
@@ -6699,10 +6472,6 @@ audio_record_alsa_prepare_capture() {
   ar_ucm_device="${3:-}"
   ar_selected_pcm="${4:-}"
   ar_route_record=""
-
-  if [ -n "$ar_card" ]; then
-    audio_alsa_validate_topology "$ar_card" || return 1
-  fi
 
   if command -v alsaucm >/dev/null 2>&1; then
     if [ -z "$ar_ucm_card" ] || [ -z "$ar_ucm_device" ]; then
@@ -7052,12 +6821,12 @@ audio_probe_alsa_capture_profile() {
     capture_prepare_start="$(get_monotonic_seconds)"
     if ! audio_record_alsa_prepare_capture \
         "$probe_card" "$probe_ucm_card" "$probe_ucm_device" "$dev"; then
-      audio_log_phase "capture-topology-mixers device=$dev" "$capture_prepare_start" 1
+      audio_log_phase "capture-route-mixers device=$dev" "$capture_prepare_start" 1
       AUDIO_ALSA_CAPTURE_REASON="could not prepare the ${SRC_CHOICE:-mic} capture route for $dev"
       probe_cleanup
       return 3
     fi
-    audio_log_phase "capture-topology-mixers device=$dev" "$capture_prepare_start" 0
+    audio_log_phase "capture-route-mixers device=$dev" "$capture_prepare_start" 0
 
     for combo in \
       "S16_LE 48000 1" \
@@ -7320,46 +7089,88 @@ audio_card_dt_audio_expected() (
     return 1
 )
 
-# Wait for at least one valid ALSA card, optionally matching AUDIO_CARD_MATCH.
+# audio_card_wait_for_cards <seconds> <card-match> [playback|capture]
+# Wait for a valid card and, when requested, a directional PCM within one budget.
+# Keep the two-argument card-only interface for Audio_Card_Registration.
 audio_card_wait_for_cards() {
-  wait_secs="$1"
-  card_match="$2"
-  elapsed=0
+  acwfc_wait="$1"
+  acwfc_match="$2"
+  acwfc_direction="${3:-}"
+  acwfc_elapsed=0
+  acwfc_polls=0
+  acwfc_previous=""
 
-  case "$wait_secs" in
+  case "$acwfc_wait" in
     ''|*[!0-9]*)
-      wait_secs=30
+      acwfc_wait=30
       ;;
   esac
+  acwfc_wait="$(printf '%s' "$acwfc_wait" | sed 's/^0*//')"
+  acwfc_wait="${acwfc_wait:-0}"
+  case "$acwfc_direction" in
+    ''|playback|capture)
+      ;;
+    *)
+      log_fail "Invalid ALSA PCM direction '$acwfc_direction'"
+      return 1
+      ;;
+  esac
+  acwfc_started="$(get_monotonic_seconds)"
+  log_info "Waiting up to ${acwfc_wait}s for ALSA registration, direction=${acwfc_direction:-card-only}"
 
-  log_info "Waiting up to ${wait_secs}s for ALSA sound card registration"
-
-  while [ "$elapsed" -le "$wait_secs" ]; do
-    if [ -n "$card_match" ]; then
-      if audio_card_find_matching_cards "$card_match" | grep -q .; then
-        return 0
+  while :; do
+    acwfc_state=waiting-card
+    acwfc_card_ready=0
+    if [ -n "$acwfc_match" ]; then
+      if audio_card_find_matching_cards "$acwfc_match" | grep -q .; then
+        acwfc_card_ready=1
       fi
     else
-      card_count="$(audio_card_count_valid_cards)"
-      if [ "$card_count" -gt 0 ] 2>/dev/null; then
-        return 0
+      acwfc_count="$(audio_card_count_valid_cards)"
+      if [ "$acwfc_count" -gt 0 ] 2>/dev/null; then
+        acwfc_card_ready=1
       fi
     fi
-
-    if [ "$elapsed" -eq "$wait_secs" ]; then
+    if [ "$acwfc_card_ready" -eq 1 ]; then
+      acwfc_state=ready
+      if [ -n "$acwfc_direction" ] &&
+         ! grep -E "^[0-9]+-[0-9]+:.*${acwfc_direction}[[:space:]]+[1-9][0-9]*" \
+             /proc/asound/pcm >/dev/null 2>&1; then
+        acwfc_state=waiting-pcm
+      fi
+    fi
+    # A prepared DSP that crashes must not pass after automatic recovery.
+    # Keep ordinary card-only discovery independent of remoteproc state.
+    if [ -n "$acwfc_direction" ] && [ -n "${AUDIO_REMOTE_PROC_PATH:-}" ] &&
+       [ "$(cat "$AUDIO_REMOTE_PROC_PATH/state" 2>/dev/null)" = crashed ]; then
+      AUDIO_REMOTE_PROC_REASON="audio remoteproc crashed during ALSA $acwfc_direction registration: $AUDIO_REMOTE_PROC_PATH"
+      export AUDIO_REMOTE_PROC_REASON
+      log_fail "$AUDIO_REMOTE_PROC_REASON"
+      return 1
+    fi
+    acwfc_now="$(get_monotonic_seconds)"
+    acwfc_elapsed=$((acwfc_now - acwfc_started))
+    # A stalled or backwards fallback clock must not make the wait unbounded.
+    if [ "$acwfc_elapsed" -lt "$acwfc_polls" ]; then
+      acwfc_elapsed="$acwfc_polls"
+    fi
+    if [ "$acwfc_state" != "$acwfc_previous" ] ||
+       { [ "$acwfc_polls" -gt 0 ] && [ $((acwfc_polls % 5)) -eq 0 ]; }; then
+      log_info "ALSA registration state=$acwfc_state direction=${acwfc_direction:-card-only} elapsed=${acwfc_elapsed}s"
+      acwfc_previous="$acwfc_state"
+    fi
+    if [ "$acwfc_state" = ready ] &&
+       { [ "$acwfc_elapsed" -le "$acwfc_wait" ] ||
+         { [ "$acwfc_wait" -eq 0 ] && [ "$acwfc_polls" -eq 0 ]; }; }; then
+      return 0
+    fi
+    if [ "$acwfc_elapsed" -ge "$acwfc_wait" ]; then
       break
     fi
-
     sleep 1
-    elapsed=$((elapsed + 1))
-
-    case "$elapsed" in
-      5|10|15|20|25|30|45|60)
-        log_info "Still waiting for ALSA card registration, elapsed=${elapsed}s"
-        ;;
-    esac
+    acwfc_polls=$((acwfc_polls + 1))
   done
-
+  log_warn "ALSA registration deadline reached, state=$acwfc_state direction=${acwfc_direction:-card-only} elapsed=${acwfc_elapsed}s budget=${acwfc_wait}s"
   return 1
 }
 
@@ -7463,14 +7274,15 @@ audio_collect_remoteproc_diagnostics() {
   return 0
 }
 
-# audio_wait_for_alsa_registration <playback|capture>
-# Wait up to 30 seconds for a card and another 10 seconds for a directional PCM.
+# audio_wait_for_alsa_registration <playback|capture> [timeout-seconds]
+# Wait for a card and directional PCM within one deadline, default 90 seconds.
 # Called only for ALSA after applicable audio remoteproc preparation. Return 1
 # with ALSA and remoteproc diagnostics on stdout when registration is incomplete.
 # On timeout, retain FAIL and observe for another 15s before capturing late
 # watchdog evidence. Successful registration is also checked for prior recovery.
 audio_wait_for_alsa_registration() {
   awfar_direction="$1"
+  awfar_timeout="${2:-90}"
   case "$awfar_direction" in
     playback|capture)
       ;;
@@ -7478,41 +7290,29 @@ audio_wait_for_alsa_registration() {
       return 1
       ;;
   esac
-  if audio_card_wait_for_cards 30 ""; then
-    awfar_elapsed=0
-    while [ "$awfar_elapsed" -le 10 ]; do
-      if grep -E \
-          "^[0-9]+-[0-9]+:.*${awfar_direction}[[:space:]]+[1-9][0-9]*" \
-          /proc/asound/pcm >/dev/null 2>&1; then
-        log_info "ALSA $awfar_direction PCM registration is ready"
-        if [ -n "${LOGDIR:-}" ]; then
-          audio_collect_remoteproc_diagnostics "$LOGDIR/remoteproc-preflight" || return 1
-        fi
-        if [ "${AUDIO_OVERLAY_ACTIVE:-${AUDIO_OVERLAY_REQUESTED:-0}}" -eq 0 ]; then
-          awfar_topology_rc=0
-          audio_base_topology_preflight >/dev/null || awfar_topology_rc=$?
-          case "$awfar_topology_rc" in
-            1)
-              AUDIO_REMOTE_PROC_REASON="ALSA $awfar_direction PCM is present but required q6apm topology validation failed, check matching sound-card registration and the kernel-selected driver/model asset"
-              export AUDIO_REMOTE_PROC_REASON
-              log_fail "$AUDIO_REMOTE_PROC_REASON"
-              return 1
-              ;;
-            4)
-              log_info "Topology validation for unregistered cards remains pending, the selected ALSA card will be checked before stream preparation"
-              ;;
-          esac
-        fi
-        return 0
-      fi
-      if [ "$awfar_elapsed" -eq 10 ]; then
-        break
-      fi
-      sleep 1
-      awfar_elapsed=$((awfar_elapsed + 1))
-    done
+  case "$awfar_timeout" in
+    ''|*[!0-9]*)
+      AUDIO_REMOTE_PROC_REASON="ALSA registration timeout must be an integer from 0 to 3600 seconds"
+      log_fail "$AUDIO_REMOTE_PROC_REASON"
+      return 1
+      ;;
+  esac
+  if ! [ "$awfar_timeout" -le 3600 ] 2>/dev/null; then
+    AUDIO_REMOTE_PROC_REASON="ALSA registration timeout must be an integer from 0 to 3600 seconds"
+    log_fail "$AUDIO_REMOTE_PROC_REASON"
+    return 1
   fi
-  AUDIO_REMOTE_PROC_REASON="ALSA $awfar_direction registration timed out after audio remoteproc preparation, check sound-card probe, DT and image topology"
+  AUDIO_REMOTE_PROC_REASON=""
+  if audio_card_wait_for_cards "$awfar_timeout" "" "$awfar_direction"; then
+    log_info "ALSA $awfar_direction PCM registration is ready"
+    if [ -n "${LOGDIR:-}" ]; then
+      audio_collect_remoteproc_diagnostics "$LOGDIR/remoteproc-preflight" || return 1
+    fi
+    return 0
+  fi
+  if [ -z "$AUDIO_REMOTE_PROC_REASON" ]; then
+    AUDIO_REMOTE_PROC_REASON="ALSA $awfar_direction registration timed out within ${awfar_timeout}s after audio remoteproc preparation, check sound-card probe, DT and image topology"
+  fi
   export AUDIO_REMOTE_PROC_REASON
   log_fail "$AUDIO_REMOTE_PROC_REASON"
   if [ -n "${LOGDIR:-}" ] && [ -n "${AUDIO_REMOTE_PROC_PATH:-}" ]; then
@@ -10738,7 +10538,7 @@ audio_check_stream_server_errors() {
   fi
 }
 
-# audio_record_attempt_summary <recorder-log> <backend> <WAV-validation-summary>
+# audio_record_attempt_summary <recorder-log> <backend> <WAV-validation-summary> [WAV]
 # Print compact current-attempt evidence on PASS and FAIL without new DUT probes.
 # Preserve capture timing, server snapshots and operation-window calibration
 # messages for full nightly comparisons. Diagnostics do not change verdicts.
@@ -10746,6 +10546,7 @@ audio_record_attempt_summary() (
   aras_log="$1"
   aras_backend="$2"
   aras_validation="$3"
+  aras_wav="${4:-}"
   aras_out="$aras_log.capture-summary"
   if ! {
     printf 'backend=%s\n%s\n' "$aras_backend" "$aras_validation"
@@ -10757,6 +10558,46 @@ audio_record_attempt_summary() (
       ' "$aras_log"
     fi
     if [ "$aras_backend" = pipewire ]; then
+      printf '\n%s\n' '---- selected source properties ----'
+      if [ -r "$aras_log.route" ]; then
+        # The route resolver already inspected the selected node. Retain only
+        # the last attempt when a legacy caller appends to the same log.
+        awk '
+          /^AUDIO_ROUTE_ATTEMPT / || /^[[:space:]]*id [0-9]+,/ {
+            properties=""
+            selected=""
+            count=0
+          }
+          /^[[:space:]*]*(node[.]|object[.]serial|device[.]|api[.]alsa[.]|audio[.])/ {
+            if (count++ < 30) properties=properties $0 "\n"
+          }
+          /^PipeWire capture route=/ { selected=$0 }
+          END {
+            if (properties != "") printf "%s", properties
+            else print "Source properties unavailable"
+            if (selected != "") print selected
+          }
+        ' "$aras_log.route"
+      else
+        printf '%s\n' 'Source properties unavailable'
+      fi
+      for aras_sidecar in source-format links; do
+        printf '\n---- live %s ----\n' "$aras_sidecar"
+        if [ -n "$aras_wav" ] && [ -r "$aras_wav.$aras_sidecar" ]; then
+          awk '
+            NR <= 40 { print }
+            { last=$0 }
+            END {
+              if (NR > 40) {
+                print "Snapshot excerpt truncated, full artifact retained"
+                print last
+              }
+            }
+          ' "$aras_wav.$aras_sidecar"
+        else
+          printf '%s\n' 'Live snapshot unavailable'
+        fi
+      done
       for aras_phase in before after; do
         printf '\n---- server-%s ----\n' "$aras_phase"
         if [ ! -r "$aras_log.server-$aras_phase" ]; then
@@ -10799,7 +10640,7 @@ audio_record_attempt_summary() (
     log_warn "Could not write capture summary: $aras_out"
     return 0
   fi
-  log_file_with_label AUDIO-RECORD-SUMMARY "$aras_out" 100
+  log_file_with_label AUDIO-RECORD-SUMMARY "$aras_out" 220
   case "$aras_validation" in
     *" warnings="*)
       aras_warnings="${aras_validation#* warnings=}"
@@ -11864,6 +11705,10 @@ audio_validate_recorded_wav_od() {
   avrwo_threshold_lsb="${AUDIO_RECORD_SAMPLE_THRESHOLD_LSB:-${AUDIO_RECORD_SAMPLE_THRESHOLD:-8}}"
   avrwo_strict_signal="${AUDIO_RECORD_STRICT_SIGNAL:-0}"
   avrwo_min_rms_dbfs="${AUDIO_RECORD_MIN_RMS_DBFS:--60}"
+  avrwo_signal_policy=diagnostic
+  if [ "$avrwo_strict_signal" = 1 ]; then
+    avrwo_signal_policy=global-rms
+  fi
 
   avrwo_meta="$(audio_wav_header_metadata "$avrwo_file")" || return 1
 
@@ -11939,7 +11784,7 @@ EOF
   fi
 
   if [ "$avrwo_source_kind" = "null" ]; then
-    avrwo_fields="status=PASS reason=valid-null-source-recording validator=od payload_bytes=$avrwo_usable"
+    avrwo_fields="status=PASS reason=valid-null-source-recording validator=od payload_bytes=$avrwo_usable strict_signal=$avrwo_strict_signal signal_policy=not-applicable signal_evaluated=0 min_rms_dbfs=$avrwo_min_rms_dbfs analysis_method=none analyzed_bytes=0"
     AUDIO_WAV_VALIDATION_SUMMARY="AUDIO_WAV_VALIDATION $avrwo_fields"
     AUDIO_VALIDATION_SUMMARY="AUDIO_VALIDATION scope=$avrwo_scope policy=basic-integrity $avrwo_fields"
     export AUDIO_WAV_VALIDATION_SUMMARY AUDIO_VALIDATION_SUMMARY
@@ -11953,6 +11798,10 @@ EOF
   fi
   avrwo_count=$((avrwo_count - (avrwo_count % avrwo_block_align)))
   [ "$avrwo_count" -gt 0 ] 2>/dev/null || return 1
+  avrwo_analysis_method=prefix
+  if [ "$avrwo_count" -eq "$avrwo_usable" ]; then
+    avrwo_analysis_method=full
+  fi
 
   avrwo_stats="$({
     dd if="$avrwo_file" \
@@ -12051,10 +11900,16 @@ EOF
       if (silence_samples > longest_silence_samples) longest_silence_samples = silence_samples
       silent_channels = 0
       for (channel = 1; channel <= channels; channel++) {
-        if (channel_active[channel] == 0) silent_channels++
+        separator = channel == 1 ? "" : ","
+        active_counts = active_counts separator sprintf("%d", channel_active[channel])
+        active_ratios = active_ratios separator sprintf("%.8f", samples > 0 ? channel_active[channel] / (samples / channels) : 0)
+        if (channel_active[channel] == 0) {
+          silent_indices = silent_indices (silent_channels ? "," : "") channel
+          silent_channels++
+        }
       }
       longest_silence_ms = rate > 0 && channels > 0 ? (1000 * longest_silence_samples / (rate * channels)) : 0
-      printf "%d|%d|%d|%d|%d|%.2f|%.8f|%d|%d|%.2f|%d|%d\n", samples, payload_nonzero_bytes, nonzero_samples, active_samples, distinct_samples, rms_dbfs, dc_offset, clipped_samples, silence_runs, longest_silence_ms, glitch_candidates, silent_channels
+      printf "%d|%d|%d|%d|%d|%.2f|%.8f|%d|%d|%.2f|%d|%d|%s|%s|%s\n", samples, payload_nonzero_bytes, nonzero_samples, active_samples, distinct_samples, rms_dbfs, dc_offset, clipped_samples, silence_runs, longest_silence_ms, glitch_candidates, silent_channels, active_counts, active_ratios, silent_channels ? silent_indices : "none"
       if (samples <= 0 || payload_nonzero_bytes <= 0 || nonzero_samples <= 0) {
         exit 1
       }
@@ -12075,12 +11930,21 @@ EOF
     avrwo_silence_runs \
     avrwo_longest_silence_ms \
     avrwo_glitch_candidates \
-    avrwo_silent_channels <<EOF
+    avrwo_silent_channels \
+    avrwo_active_counts \
+    avrwo_active_ratios \
+    avrwo_silent_indices <<EOF
 $avrwo_stats
 EOF
 
+  avrwo_evaluated=0
+  if [ "${avrwo_samples:-0}" -gt 0 ] 2>/dev/null; then
+    avrwo_evaluated=1
+  fi
+  avrwo_diagnostics="signal_policy=$avrwo_signal_policy signal_evaluated=$avrwo_evaluated analysis_method=$avrwo_analysis_method analyzed_bytes=$(( ${avrwo_samples:-0} * avrwo_bytes_per_sample )) analyzed_frames=$(( ${avrwo_samples:-0} / avrwo_actual_channels )) usable_data_bytes=$avrwo_usable channel_index_base=1 channel_active_samples=${avrwo_active_counts:-unavailable} channel_active_ratio=${avrwo_active_ratios:-unavailable} silent_channel_indices=${avrwo_silent_indices:-unavailable}"
   if [ "$avrwo_stats_rc" -ne 0 ]; then
     avrwo_fields="status=FAIL reason=pcm-signal-validation-failed validator=od analyzed_samples=${avrwo_samples:-0} nonzero_storage_bytes=${avrwo_nonzero_storage_bytes:-0} nonzero_samples=${avrwo_nonzero_samples:-0} active_samples=${avrwo_active_samples:-0} distinct_samples=${avrwo_distinct_samples:-0} rms_dbfs=${avrwo_rms_dbfs:--999} dc_offset=${avrwo_dc_offset:-0} clipped_samples=${avrwo_clipped_samples:-0} silence_runs=${avrwo_silence_runs:-0} longest_silence_ms=${avrwo_longest_silence_ms:-0} glitch_candidates=${avrwo_glitch_candidates:-0} silent_channels=${avrwo_silent_channels:-0} strict_signal=$avrwo_strict_signal min_rms_dbfs=$avrwo_min_rms_dbfs"
+    avrwo_fields="$avrwo_fields $avrwo_diagnostics"
     AUDIO_WAV_VALIDATION_SUMMARY="AUDIO_WAV_VALIDATION $avrwo_fields"
     AUDIO_VALIDATION_SUMMARY="AUDIO_VALIDATION scope=$avrwo_scope policy=basic-integrity $avrwo_fields"
     export AUDIO_WAV_VALIDATION_SUMMARY AUDIO_VALIDATION_SUMMARY
@@ -12088,6 +11952,7 @@ EOF
   fi
 
   avrwo_fields="status=PASS reason=pcm-signal-activity-present validator=od analyzed_samples=$avrwo_samples nonzero_storage_bytes=$avrwo_nonzero_storage_bytes nonzero_samples=$avrwo_nonzero_samples active_samples=$avrwo_active_samples distinct_samples=$avrwo_distinct_samples rms_dbfs=$avrwo_rms_dbfs dc_offset=$avrwo_dc_offset clipped_samples=$avrwo_clipped_samples silence_runs=$avrwo_silence_runs longest_silence_ms=$avrwo_longest_silence_ms glitch_candidates=$avrwo_glitch_candidates silent_channels=$avrwo_silent_channels strict_signal=$avrwo_strict_signal min_rms_dbfs=$avrwo_min_rms_dbfs"
+  avrwo_fields="$avrwo_fields $avrwo_diagnostics"
   AUDIO_WAV_VALIDATION_SUMMARY="AUDIO_WAV_VALIDATION $avrwo_fields"
   AUDIO_VALIDATION_SUMMARY="AUDIO_VALIDATION scope=$avrwo_scope policy=basic-integrity $avrwo_fields"
   export AUDIO_WAV_VALIDATION_SUMMARY AUDIO_VALIDATION_SUMMARY
@@ -12097,7 +11962,7 @@ EOF
 # audio_validate_wav_file <file> <source-kind> <rate> <channels> <bits>
 #                         <seconds> <log-file> <scope> [min-distinct-samples]
 # Validate WAV structure and basic signal integrity. Advanced signal metrics
-# remain diagnostic unless strict-signal mode is explicitly enabled.
+# remain diagnostic. Explicit strict-signal mode additionally gates global RMS.
 audio_validate_wav_file() {
   avrw_file="$1"
   avrw_source_kind="${2:-mic}"

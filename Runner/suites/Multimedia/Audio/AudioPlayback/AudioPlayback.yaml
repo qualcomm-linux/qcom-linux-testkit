@@ -8,6 +8,7 @@ metadata:
     - functional
 
 params:
+  REGISTRATION_TIMEOUT: null  # Optional ALSA card/PCM deadline in seconds, runner default: 90
   AUDIO_BACKEND: ""  # Selects backend: pipewire, pulseaudio, or alsa, default: auto-detect
   SINK_CHOICE: "speakers"  # Playback sink: speakers or null, default: speakers
   CLIP_NAMES: "playback_config1"  # Test specific clips (e.g., "playback_config1 playback_config2" or "play_48KHz_8b_2ch"), default: playback_config1
@@ -33,5 +34,5 @@ run:
   steps:
     - REPO_PATH=$PWD
     - cd Runner/suites/Multimedia/Audio/AudioPlayback/
-    - ./run.sh --backend "${AUDIO_BACKEND}" --sink "${SINK_CHOICE}" --clip-name "${CLIP_NAMES}" --clip-filter "${CLIP_FILTER}" --loops "${LOOPS}" --timeout "${TIMEOUT}" --strict "${STRICT}" --audio-clips-path "${AUDIO_CLIPS_BASE_DIR}" --res-suffix "${RES_SUFFIX}" --lava-testcase-id "${LAVA_TESTCASE_ID}" --ssid "${SSID}" --password "${PASSWORD}" || true
+    - ./run.sh ${REGISTRATION_TIMEOUT:+--registration-timeout "${REGISTRATION_TIMEOUT}"} --backend "${AUDIO_BACKEND}" --sink "${SINK_CHOICE}" --clip-name "${CLIP_NAMES}" --clip-filter "${CLIP_FILTER}" --loops "${LOOPS}" --timeout "${TIMEOUT}" --strict "${STRICT}" --audio-clips-path "${AUDIO_CLIPS_BASE_DIR}" --res-suffix "${RES_SUFFIX}" --lava-testcase-id "${LAVA_TESTCASE_ID}" --ssid "${SSID}" --password "${PASSWORD}" || true
     - $REPO_PATH/Runner/utils/send-to-lava.sh AudioPlayback${RES_SUFFIX:+_${RES_SUFFIX}}.res

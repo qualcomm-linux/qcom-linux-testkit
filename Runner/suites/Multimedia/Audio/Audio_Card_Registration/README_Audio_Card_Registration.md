@@ -8,7 +8,7 @@ This test is intended as an audio preflight check before running playback or rec
 
 ## Active DT and FIT preflight
 
-Before topology and passive registration checks, the runner reports the live DT model, complete
+Before passive registration checks, the runner reports the live DT model, complete
 compatible list and sound-card identities. CQS, CQM, IQS and future boards are
 discovered from runtime data, not a fixed variant/PCM table. EFI
 `VendorDtbOverlays` is read separately without mounting, writing or rebooting.
@@ -70,7 +70,7 @@ It does not start the modem/DSP, change mixer controls or exercise a stream.
 
 Expected outcomes: a matching DT permits the normal test to run, it does not
 itself produce PASS. An explicit DT mismatch or unverifiable explicit FIT
-produces FAIL before topology validation. Missing optional automatic FIT/EFI
+produces FAIL before audio validation. Missing optional automatic FIT/EFI
 evidence reports unverified detection and preserves the suite's normal
 PASS/FAIL/SKIP policy. Inspect `dt-fit-preflight/report.txt` and the accompanying
 inventory/tool logs under the suite's retained log directory.
@@ -104,12 +104,8 @@ used by the functional playback and recording suites.
 
 ## What This Test Validates
 
-Base-mode preflight identifies enabled runtime q6apm sound-card links and checks
-the exact topology of cards already registered. Unregistered cards keep topology
-validation pending during the configured wait. After registration, each matched
-card's kernel-selected driver/model topology path is checked. CQM/direct-codec and other cards that
-do not consume q6apm topology retain that exemption. Remoteproc inventory is
-retained for diagnosis, but this suite never starts or restarts a DSP, changes
+The test validates the registered cards and device nodes without repeating the
+kernel's topology-file lookup. Remoteproc inventory is retained for diagnosis, but this suite never starts or restarts a DSP, changes
 mixers or opens an audio stream. An offline modem must be prepared by the image
 or a functional audio test before passive card registration can pass.
 
@@ -394,36 +390,16 @@ On Qualcomm boards, this test is useful for identifying early audio bring-up iss
 
 This test should remain lightweight and non-destructive. It should not attempt to recover the audio subsystem by restarting services or remote processors.
 
-## Runtime topology selection
-
-Base audio validates image-provided topology only when the active DT declares
-a q6apm dependency. The matching registered ALSA card supplies the driver name,
-and its sound-card DT supplies the model. The required firmware is exactly
-`qcom/<ALSA-driver>/<DT-model>-tplg.bin`, using the existing firmware-root and
-compression precedence. Other directories containing the same basename are
-irrelevant. A DT compatible is not used to guess the ALSA driver name.
-
-Before that card registers, exact topology validation is reported as pending.
-Functional suites can start the image-provisioned DSP and use the existing
-bounded ALSA card/PCM wait. The registered card's exact topology is checked
-before ALSA stream preparation. Passive card registration keeps its configured
-wait and never starts a DSP. Pending discovery is not proof that a topology is
-provisioned. A required card that fails to register follows the existing failure
-policy, and a missing or empty kernel-selected asset fails validation.
-
-No SoC mapping, topology copy, download or package-policy change is introduced.
-Direct-codec and overlay paths retain their existing applicability checks.
-
 ## Result publication
 
 Audio_Card_Registration.res is always written beside run.sh, including early
-DT/topology failures and applicability skips. Logs and temporary evidence
+DT/FIT failures and applicability skips. Logs and temporary evidence
 remain below invocation CWD. Both suite-directory and Runner launches publish
 the same result path to existing plans.
 
 ## Kernel and ramdisk execution
 
 The kbdev plan sets `TESTKIT_IMAGE_ONLY=1` to bypass package preparation.
-Registration uses image-provided ALSA cards, control/PCM nodes and topology
-evidence. Playback and recording clients are not prerequisites for registration.
+Registration uses image-provided ALSA cards and control/PCM nodes. Playback and
+recording clients are not prerequisites for registration.
 This does not add playback or capture coverage, and it does not start PipeWire.

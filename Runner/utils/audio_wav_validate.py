@@ -20,6 +20,11 @@ from dataclasses import dataclass
 from typing import BinaryIO, Iterable
 
 VALIDATION_SCOPE = "record"
+SIGNAL_SETTINGS: dict[str, object] = {
+    "strict_signal": "0",
+    "signal_policy": "diagnostic",
+    "min_rms_dbfs": -60.0,
+}
 
 
 class WavValidationError(Exception):
@@ -60,6 +65,8 @@ class WaveInfo:
 @dataclass
 class SignalStats:
     samples: int = 0
+    analyzed_bytes: int = 0
+    analysis_method: str = "none"
     nonzero_storage_samples: int = 0
     active_samples: int = 0
     clipped_samples: int = 0
@@ -364,6 +371,9 @@ def analyze_signal(
     stats.channel_active_samples = [0] * info.channels
     container_bytes = info.block_align // info.channels
     ranges = _window_ranges(info.usable_data_bytes, analyze_bytes, info.block_align)
+    stats.analysis_method = (
+        "full" if ranges == [(0, info.usable_data_bytes)] else "distributed-windows"
+    )
     minimum_silence_frames = max(
         1,
         int(info.sample_rate * max(0.0, dropout_min_ms) / 1000.0),
@@ -376,6 +386,7 @@ def analyze_signal(
             handle.seek(info.data_offset + relative_offset)
             payload = handle.read(length)
             payload = payload[: len(payload) - (len(payload) % info.block_align)]
+            stats.analyzed_bytes += len(payload)
 
             for frame_offset in range(0, len(payload), info.block_align):
                 frame = payload[frame_offset : frame_offset + info.block_align]
@@ -488,8 +499,12 @@ def emit(status: str, reason: str, info: WaveInfo | None, stats: SignalStats | N
         )
 
     if stats is not None:
+        analyzed_frames = stats.analyzed_bytes // info.block_align
         fields.extend(
             [
+                ("analysis_method", stats.analysis_method),
+                ("analyzed_bytes", stats.analyzed_bytes),
+                ("analyzed_frames", analyzed_frames),
                 ("analyzed_samples", stats.samples),
                 ("nonzero_storage_samples", stats.nonzero_storage_samples),
                 ("active_samples", stats.active_samples),
@@ -511,9 +526,35 @@ def emit(status: str, reason: str, info: WaveInfo | None, stats: SignalStats | N
                     sum(1 for count in stats.channel_active_samples or [] if count == 0),
                 ),
                 ("invalid_float_samples", stats.invalid_float_samples),
+                ("channel_index_base", 1),
+                (
+                    "channel_active_samples",
+                    ",".join(str(count) for count in stats.channel_active_samples or []),
+                ),
+                (
+                    "channel_active_ratio",
+                    ",".join(
+                        f"{count / analyzed_frames:.8f}" if analyzed_frames else "0.00000000"
+                        for count in stats.channel_active_samples or []
+                    ),
+                ),
+                (
+                    "silent_channel_indices",
+                    ",".join(
+                        str(index + 1)
+                        for index, count in enumerate(stats.channel_active_samples or [])
+                        if count == 0
+                    ) or "none",
+                ),
             ]
         )
 
+    fields.extend(SIGNAL_SETTINGS.items())
+    fields.append(
+        ("signal_evaluated", int(
+            stats is not None and SIGNAL_SETTINGS["signal_policy"] != "not-applicable"
+        ))
+    )
     warning_list = list(warnings)
     fields.append(("warnings", ",".join(warning_list) if warning_list else "none"))
 
@@ -566,6 +607,14 @@ def main() -> int:
 
     args = parse_args()
     VALIDATION_SCOPE = args.validation_scope
+    SIGNAL_SETTINGS.update(
+        strict_signal=args.strict_signal,
+        signal_policy=(
+            "not-applicable" if args.source_kind == "null"
+            else "global-rms" if args.strict_signal == "1" else "diagnostic"
+        ),
+        min_rms_dbfs=args.min_rms_dbfs,
+    )
     warnings: list[str] = []
 
     try:

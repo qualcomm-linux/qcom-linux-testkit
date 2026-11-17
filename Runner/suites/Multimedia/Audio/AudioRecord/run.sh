@@ -143,6 +143,7 @@ export AUDIO_BOOTSTRAP_MODE AUDIO_RUNTIME_DIR MINIMAL_RAMDISK_MODE AUDIO_STARTED
 
 # New config-based testing options
 CONFIG_NAMES="" # Explicit config names to test (e.g., "record_config1 record_config2")
+REGISTRATION_TIMEOUT=90
 CONFIG_FILTER="" # Filter pattern for configs (e.g., "48KHz" or "2ch")
 USE_CONFIG_DISCOVERY="${USE_CONFIG_DISCOVERY:-auto}" # auto|true|false
 
@@ -175,6 +176,7 @@ Usage: $0 [options]
   --loops N
   --timeout SECS         Override the automatic duration-based watchdog
   --start-grace SECS     Startup/progress headroom, default: 5
+  --registration-timeout SECS  ALSA card/PCM readiness deadline, default: 90 (0=check once)
   --strict [0|1]
   --no-dmesg
   --junit FILE.xml
@@ -355,6 +357,15 @@ parse_args() {
       ;;
     --timeout)
       TIMEOUT="$2"
+      shift 2
+      ;;
+    --registration-timeout)
+      if [ "$#" -lt 2 ] || ! is_unsigned_number "$2" ||
+         ! [ "$2" -le 3600 ] 2>/dev/null; then
+        log_fail "--registration-timeout requires an integer from 0 to 3600 seconds"
+        return 1
+      fi
+      REGISTRATION_TIMEOUT="$2"
       shift 2
       ;;
     --start-grace)
@@ -566,7 +577,7 @@ case "$audio_remoteproc_rc" in
     if [ "$AUDIO_OVERLAY_ACTIVE" -eq 0 ] &&
        [ "$SRC_CHOICE" != "null" ] &&
        { [ -z "$AUDIO_BACKEND" ] || [ "$AUDIO_BACKEND" = "alsa" ]; } &&
-       ! audio_wait_for_alsa_registration capture; then
+       ! audio_wait_for_alsa_registration capture "$REGISTRATION_TIMEOUT"; then
       log_fail "$TESTNAME FAIL - ${AUDIO_REMOTE_PROC_REASON:-audio remoteproc prepared but ALSA capture registration is incomplete}, inspect the diagnostic artifacts and inventory above"
       echo "$RESULT_TESTNAME FAIL" >"$RES_FILE"
       exit 1
@@ -1515,7 +1526,7 @@ if [ "$USE_CONFIG_DISCOVERY" = "true" ]; then
       fi
 
       audio_record_validate_final_output
-      audio_record_attempt_summary "$logf" "$AUDIO_BACKEND" "$AUDIO_WAV_VALIDATION_SUMMARY"
+      audio_record_attempt_summary "$logf" "$AUDIO_BACKEND" "$AUDIO_WAV_VALIDATION_SUMMARY" "$record_out"
 
       # Evidence
       pw_ev="$(audio_run_helper_as_test_user --require-session audio_evidence_pw_streaming || echo 0)"
@@ -1755,7 +1766,7 @@ else
       fi
 
       audio_record_validate_final_output
-      audio_record_attempt_summary "$logf" "$AUDIO_BACKEND" "$AUDIO_WAV_VALIDATION_SUMMARY"
+      audio_record_attempt_summary "$logf" "$AUDIO_BACKEND" "$AUDIO_WAV_VALIDATION_SUMMARY" "$record_out"
 
       # Evidence
       pw_ev="$(audio_run_helper_as_test_user --require-session audio_evidence_pw_streaming || echo 0)"
