@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
+import shlex
 import subprocess
 import sys
 import tarfile
@@ -237,6 +238,10 @@ def affected_suites(source, changes, owners, config):
         changed = change["path"]
         if changed.lower().endswith((".md", ".rst")):
             continue
+        # Transport helpers are exercised by the mandatory plan, not by adding
+        # every suite whose YAML publishes results. Verify that coverage below.
+        if changed in config.get("baseline_helpers", []):
+            continue
         owner = owning_suite(changed, owners)
         if owner:
             reasons[owner].add(changed)
@@ -314,6 +319,26 @@ def effective_params(definition, documents):
             for key, value in (defaults | definition.get("params", {})).items()}
 
 
+def invokes_helper(document, helper):
+    """Recognize direct run.steps calls, excluding comments and printed filenames."""
+    for step in document["run"]["steps"]:
+        tokens = shlex.shlex(step, posix=True, punctuation_chars=";&|")
+        tokens.whitespace_split = True
+        command = True
+        for token in tokens:
+            if token and all(character in ";&|" for character in token):
+                command = True
+            elif command:
+                if token in {"if", "then", "else", "do", "!", "command", "exec", "sh", "bash"}:
+                    continue
+                if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", token):
+                    continue
+                if PurePosixPath(token).name == PurePosixPath(helper).name:
+                    return True
+                command = False
+    return False
+
+
 def group_for(suite):
     groups = {"Connectivity/BT/": "pre-merge-bt", "Connectivity/Bluetooth/": "pre-merge-bt",
               "Multimedia/Audio/": "pre-merge-audio", "Multimedia/Graphics/": "pre-merge-display-gfx",
@@ -323,7 +348,7 @@ def group_for(suite):
     return next((group for prefix, group in groups.items() if prefix in suite), "pre-merge-basic")
 
 
-def append_tests(jobs, affected, documents, by_suite, selections, config, source_url):
+def append_tests(jobs, affected, documents, by_suite, selections, config, source_url, source=None):
     manifest = []
     baseline = [(group, definition) for group, job in jobs.items() for definition in entries(job)]
     for suite, reasons in sorted(affected.items()):
@@ -383,8 +408,21 @@ def append_tests(jobs, affected, documents, by_suite, selections, config, source
                     raise ValueError("Addition timeout must be 1..120 minutes")
                 fresh = choice.get("fresh_boot", False)
                 steps = " ".join(documents[path]["run"]["steps"]).lower()
-                risky = any(word in (path + " " + steps + json.dumps(params)).lower()
+                risky = any(word in (path + " " + steps + json.dumps(effective_params(definition, documents))).lower()
                             for word in ("crash", "inject", "unbind", "reboot"))
+                if risky and source is not None and path in config.get("passive_definitions", []):
+                    # Only the reviewed definition and runner from the trusted
+                    # controller may bypass a name-based false alarm. A PR edit
+                    # or parameter override still needs explicit isolation.
+                    trusted_path = ROOT / path
+                    runner = Path(suite) / "run.sh"
+                    if trusted_path.is_file() and (ROOT / runner).is_file() and (source / runner).is_file():
+                        trusted = yaml.safe_load(trusted_path.read_text(encoding="utf-8"))
+                        if (documents[path] == trusted and
+                                (source / runner).read_bytes() == (ROOT / runner).read_bytes() and
+                                effective_params(definition, documents) ==
+                                effective_params({"path": path}, {path: trusted})):
+                            risky = False
                 if risky and (not explicit or not fresh):
                     raise ValueError(f"{path} needs an explicit fresh_boot selection")
                 destination = jobs[group]
@@ -468,6 +506,7 @@ def prepare(folder):
                     run_attempt=attempt, changes=changes,
                     target_matrix=target_matrix,
                     plans_revision=config["plans_revision"], jobs=[], selections=[], exclusions=[],
+                    baseline_helpers=[],
                     artifact_token_name=token_name,
                     artifact_verification=("controller" if (os.environ.get("QLI_S3_TOKEN") or
                                                              os.environ.get("QLI_ARTIFACT_TOKEN"))
@@ -497,7 +536,13 @@ def prepare(folder):
             for definition in entries(job):
                 if definition["path"] not in documents:
                     raise ValueError(f"Missing baseline YAML in PR: {definition['path']}")
-        selection = append_tests(jobs, affected, documents, by_suite, selections, config, source_url)
+        for changed in sorted({change["path"] for change in changes} & set(config.get("baseline_helpers", []))):
+            coverage = sorted({definition["path"] for job in jobs.values() for definition in entries(job)
+                               if invokes_helper(documents[definition["path"]], changed)})
+            if not (source / changed).is_file() or not coverage:
+                raise ValueError(f"{changed} has no mandatory baseline coverage on {target}")
+            manifest["baseline_helpers"].append(dict(target=target, path=changed, definitions=coverage))
+        selection = append_tests(jobs, affected, documents, by_suite, selections, config, source_url, source)
         manifest["selections"].extend(dict(target=target, **row) for row in selection)
         for group, job in jobs.items():
             job["device_type"] = config["targets"][target]
