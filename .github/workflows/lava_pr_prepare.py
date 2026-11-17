@@ -15,6 +15,7 @@ import shlex
 import subprocess
 import sys
 import tarfile
+import time
 from urllib.parse import urljoin, urlsplit
 import zipfile
 
@@ -99,21 +100,64 @@ def check_download(url, access=None):
                 # Use it in memory for preflight, never in a manifest or job YAML.
                 record = lava().get(f"/api/v0.2/remote-artifact-tokens/{artifact_token_name()}/")
                 token = record.get("token")
-            if not isinstance(token, str) or not token or any(char in token for char in "\r\n"):
-                raise ValueError("QLI artifact authentication is unavailable")
             access["qli_token"] = token
+        if not isinstance(access["qli_token"], str) or not access["qli_token"] or any(
+                char in access["qli_token"] for char in "\r\n"):
+            raise ValueError("QLI artifact authentication is unavailable")
         headers["QLIAuthorization"] = access["qli_token"]
-    for redirect in range(4):
+    origin = parsed.hostname
+    object_path = parsed.path
+    bucket, separator, object_key = object_path.lstrip("/").partition("/")
+    visited = set()
+    deadline = time.monotonic() + 120
+    for redirect in range(5):
+        if url in visited:
+            raise ValueError(f"Artifact redirect loop: {parsed.path}")
+        visited.add(url)
         try:
-            with requests.get(url, headers=headers, stream=True, allow_redirects=False,
-                              timeout=(15, 60)) as response:
-                if public and response.status_code in {301, 302, 303, 307, 308}:
-                    url = urljoin(url, response.headers.get("Location", ""))
-                    destination = urlsplit(url)
+            for attempt in range(3):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise RuntimeError(f"Artifact access deadline expired: {parsed.path}")
+                try:
+                    response = requests.get(url, headers=headers, stream=True, allow_redirects=False,
+                                            timeout=(min(15, remaining), min(45, remaining)))
+                except requests.RequestException:
+                    if attempt == 2:
+                        raise
+                else:
+                    if response.status_code not in {429, 500, 502, 503, 504} or attempt == 2:
+                        break
+                    response.close()
+                time.sleep(min(2 ** attempt, max(0, deadline - time.monotonic())))
+            with response:
+                if response.status_code in {301, 302, 303, 307, 308}:
+                    location = response.headers.get("Location", "")
+                    if not location or any(ord(char) < 33 for char in location):
+                        raise ValueError(f"Artifact redirect has no valid Location: {parsed.path}")
+                    destination_url = urljoin(url, location)
+                    destination = urlsplit(destination_url)
                     if (destination.scheme != "https" or destination.username or destination.password or
-                            destination.port not in {None, 443} or destination.hostname not in
-                            {"github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com"}):
-                        raise ValueError("Audio release redirect left the public GitHub artifact hosts")
+                            destination.port not in {None, 443} or destination.fragment):
+                        raise ValueError(f"Artifact redirect requires a plain HTTPS destination: {parsed.path}")
+                    if public:
+                        if destination.hostname not in {
+                                "github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com"}:
+                            raise ValueError("Audio release redirect left the public GitHub artifact hosts")
+                    elif destination.hostname != origin:
+                        # The gateway can hand off to the same S3 object. Never
+                        # forward its custom authentication header to that host.
+                        endpoint = r"s3(?:[.-](?:dualstack\.)?[a-z0-9-]+)?\.amazonaws\.com"
+                        virtual = re.fullmatch(re.escape(bucket) + r"\." + endpoint, destination.hostname or "")
+                        path_style = re.fullmatch(endpoint, destination.hostname or "")
+                        if not separator or not ((virtual and destination.path == "/" + object_key) or
+                                                 (path_style and destination.path == object_path)):
+                            raise ValueError(f"Artifact redirect left the configured object: {parsed.path}, "
+                                             f"destination host {destination.hostname or 'missing'}")
+                        headers = {}
+                    # Once credentials are removed, a later redirect cannot add them back.
+                    print(f"Artifact redirect HTTP {response.status_code}: {parsed.hostname} -> {destination.hostname}")
+                    url = destination_url
                     continue
                 if response.status_code not in (200, 206):
                     if response.status_code in (401, 403):
@@ -539,6 +583,15 @@ def prepare(folder):
             check_download(url, access)
     else:
         build = select_build(producer, config, targets, distro, os.environ.get("NIGHTLY_RUN_ID", ""), image_name, access)
+    if os.environ.get("QLI_S3_TOKEN") or os.environ.get("QLI_ARTIFACT_TOKEN"):
+        # GitHub and the dispatcher can use different registered credentials.
+        # A successful controller probe alone cannot prove LAVA can fetch images.
+        record = lava().get(f"/api/v0.2/remote-artifact-tokens/{token_name}/")
+        dispatcher_access = {"qli_token": record.get("token")}
+        if dispatcher_access["qli_token"] != access.get("qli_token"):
+            for url in [audio_url, *build["images"].values()]:
+                if urlsplit(url).hostname == "qli-prod-artifacts.qualcomm.com":
+                    check_download(url, dispatcher_access)
     source_url = f"https://github.com/{repository}/archive/{sha}.tar.gz"
     manifest = dict(pr=number, sha=sha, merge_base=base, repository=repository,
                     distro=distro, image_type=image_type, build=build, run_id=run_id,

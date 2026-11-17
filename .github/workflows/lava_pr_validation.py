@@ -14,6 +14,7 @@ from pathlib import Path
 import re
 import shutil
 import signal
+import subprocess
 import sys
 import time
 from urllib.parse import urljoin, urlsplit
@@ -39,6 +40,39 @@ def save_json(path, data):
 
 def digest(data):
     return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
+
+
+def record_failure(folder, stage, failure):
+    """Retain a sanitized controller error even before a manifest exists."""
+    message = str(failure)
+    if isinstance(failure, subprocess.SubprocessError):
+        message = "Controller subprocess failed or timed out, check the preceding step output"
+    elif isinstance(failure, yaml.YAMLError):
+        message = "Invalid YAML in the selected definitions or templates"
+    for name in ("GH_TOKEN", "META_QCOM_READ_TOKEN", "LAVA_OSS_TOKEN", "QLI_S3_TOKEN", "QLI_ARTIFACT_TOKEN"):
+        value = os.environ.get(name)
+        if value:
+            message = message.replace(value, "[redacted]")
+    # Signed URLs and URL userinfo must not reach artifacts or PR comments.
+    message = re.sub(r"https?://[^\s<>\"']+", "[URL omitted]", message)
+    message = " ".join(message.split())[:2000]
+    if stage not in {"begin", "start", "preflight", "prepare", "validate", "cleanup"}:
+        return message
+    context_path = folder / "context.json"
+    context = json.loads(context_path.read_text(encoding="utf-8")) if context_path.is_file() else {}
+    if not isinstance(context, dict):
+        raise ValueError("Invalid controller context")
+    saved = dict(run_id=os.environ.get("VALIDATION_RUN_ID", ""),
+                 run_attempt=os.environ.get("GITHUB_RUN_ATTEMPT", "1"),
+                 sha=context.get("sha", os.environ.get("PR_REVISION", "")),
+                 stage=stage, error=message)
+    path = folder / "controller-errors.json"
+    errors = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else []
+    if not isinstance(errors, list):
+        raise ValueError("Invalid controller error evidence")
+    errors.append(saved)
+    save_json(path, errors)
+    return message
 
 
 class API:
@@ -673,6 +707,8 @@ def result_matrix(rows, targets, by_group=True):
         if row["job"]:
             value["jobs"].add(row["job"])
     title = "Test group" if by_group else "Test/configuration"
+    if not grouped:
+        return ["No functional test results are available."]
     lines = ["| " + " | ".join([title] + [cell(target) for target in targets]) + " |",
              "|" + "---|" * (len(targets) + 1)]
     for label in sorted({label for label, target in grouped}):
@@ -763,6 +799,17 @@ def finish_jobs(folder, manifest, lifecycle=True):
     rows, evidence = [], []
     cleanup_complete = not manifest.get("jobs")
     state = execution_state(folder, manifest)
+    failure_path = folder / "controller-errors.json"
+    controller_errors = []
+    if failure_path.is_file():
+        controller_errors = json.loads(failure_path.read_text(encoding="utf-8"))
+        if not isinstance(controller_errors, list) or any(
+                not isinstance(error, dict) or error.get("run_id") != manifest["run_id"] or
+                str(error.get("run_attempt")) != str(manifest.get("run_attempt", "1")) or
+                error.get("sha") != manifest["sha"] or not isinstance(error.get("error"), str) or
+                error.get("stage") not in {"begin", "start", "preflight", "prepare", "validate", "cleanup"}
+                for error in controller_errors):
+            raise ValueError("Controller errors do not match this workflow request")
     if result_path.is_file():
         saved = json.loads(result_path.read_text(encoding="utf-8"))
         if (saved.get("run_id") != manifest["run_id"] or saved.get("sha") != manifest["sha"] or
@@ -791,6 +838,9 @@ def finish_jobs(folder, manifest, lifecycle=True):
                                       state["error"] in row["errors"] for row in rows):
         rows.append(dict(target="All", group="Controller", coverage="Workflow", name="Validation controller",
                          counts={}, job=None, errors=[state["error"]]))
+    for error in controller_errors:
+        rows.append(dict(target="All", group="Controller", coverage="Workflow", name=error["stage"],
+                         counts={}, job=None, errors=[f"{error['stage']}: {error['error']}"]))
     outcome = os.environ.get("VALIDATION_RESULT", "")
     if outcome and outcome != "success":
         rows.append(dict(target="All", group="Controller", coverage="Workflow",
@@ -816,6 +866,8 @@ def finish_jobs(folder, manifest, lifecycle=True):
                      f"producer `{manifest['build']['prefix'].rstrip('/').rsplit('/', 1)[-1]}`.")
     if not manifest["submit_requested"]:
         lines[3] = "Result: **Preparation only, no hardware validation requested**"
+    elif not manifest.get("jobs"):
+        lines.append("No hardware jobs were submitted. Validation stopped before a submission request was saved.")
     elif not cleanup_complete:
         lines.append("Cleanup is unconfirmed. Use the LAVA PR results workflow with this run and attempt "
                      "to recover remote jobs and results. No hardware PASS is claimed without evidence.")
@@ -847,7 +899,8 @@ def finish_jobs(folder, manifest, lifecycle=True):
     lines += result_matrix(rows, targets)
     controller_errors = [error for row in rows if row["coverage"] == "Workflow" for error in row["errors"]]
     if controller_errors:
-        lines += ["", "Workflow: " + ", ".join(controller_errors)]
+        detail = ", ".join(controller_errors).replace("<", "&lt;").replace("\n", " ").replace("\r", " ")
+        lines += ["", "Workflow: " + detail]
     # Keep infrastructure and collection failures visible, not just ERROR counts.
     diagnostics = []
     for row in rows:
@@ -861,8 +914,9 @@ def finish_jobs(folder, manifest, lifecycle=True):
         lines += ["", "Failure details:"] + diagnostics[:12]
         if len(diagnostics) > 12:
             lines.append("Remaining failure details are in diagnostics.md in the results artifact.")
-    lines += ["", f"[Complete testcase matrix and evidence]({workflow_url}) are in the results artifact. "
-              "The matrix includes baseline tests and PR additions. LAVA setup bookkeeping is excluded."]
+    if manifest.get("jobs"):
+        lines += ["", f"[Complete testcase matrix and evidence]({workflow_url}) are in the results artifact. "
+                  "The matrix includes baseline tests and PR additions. LAVA setup bookkeeping is excluded."]
     case_rows = []
     for row in rows:
         if not row.get("tests") or row["errors"]:
@@ -934,10 +988,25 @@ def finish_jobs(folder, manifest, lifecycle=True):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["begin", "start", "preflight", "prepare", "run", "resolve",
+    parser.add_argument("command", choices=["begin", "start", "preflight", "prepare", "validate", "run", "resolve",
                                             "collect", "publish", "finish", "cleanup"])
     parser.add_argument("--output", type=Path, default=Path("lava-output"))
     args = parser.parse_args()
+    try:
+        return execute(args)
+    except Exception as failure:
+        # Unexpected parsing/template errors need the same early-failure evidence.
+        # Do not include tracebacks or raw HTTP responses in the published artifact.
+        try:
+            message = record_failure(args.output, args.command, failure)
+        except (OSError, ValueError, TypeError):
+            message = f"{args.command} failed ({type(failure).__name__}), controller evidence could not be saved"
+        print(f"Validation stopped: {message}", file=sys.stderr)
+        return 1
+
+
+def execute(args):
+    """Run one controller stage, preserving failures at the CLI boundary."""
     if args.command == "begin":
         begin_request(args.output)
         return 0
@@ -987,6 +1056,9 @@ def main():
     if args.command == "run":
         run_jobs(args.output, manifest)
         return 0
+    if args.command == "validate":
+        validate_jobs(lava(), args.output, manifest)
+        return 0
     if args.command == "start":
         update_check(github(), manifest, "in_progress", "The validation runner is preparing the LAVA request.")
         return 0
@@ -1001,8 +1073,4 @@ def main():
 
 
 if __name__ == "__main__":
-    try:
-        sys.exit(main())
-    except (ValueError, RuntimeError, requests.RequestException, OSError) as failure:
-        print(f"Validation stopped: {failure}", file=sys.stderr)
-        sys.exit(1)
+    sys.exit(main())
