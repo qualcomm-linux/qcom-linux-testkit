@@ -33,7 +33,7 @@ on:
         description: Attempt to recover, empty selects the latest completed attempt
         type: string
       recover:
-        description: Reconcile remote jobs on an OSS runner. Disable to retry publication only.
+        description: Reconcile remote jobs on a validation runner. Disable to retry publication only.
         default: true
         type: boolean
 
@@ -47,16 +47,14 @@ concurrency:
 
 jobs:
   recover:
-    # Automatic publishing never queues another OSS runner. Manual recovery
-    # can be cancelled independently if an OSS runner is unavailable.
+    # Remote cleanup is reserved for explicit recovery. Automatic publishing
+    # uses the evidence retained by the validation job.
     if: >-
       !cancelled() && inputs.recover &&
       github.repository == 'qualcomm-linux/qcom-linux-testkit' &&
       github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch'
-    environment: lava-oss
-    runs-on:
-      group: GHA-Kernel-SelfHosted-RG
-      labels: kernel-prd-u2404-x64-large-od-ephem
+    environment: lava-foundries
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     outputs:
       evidence_id: ${{ steps.evidence.outputs.artifact-id }}
@@ -96,8 +94,7 @@ jobs:
       - name: Recover owned jobs and collect results
         if: steps.request.outputs.prepared == 'true'
         env:
-          LAVA_OSS_USER: ${{ secrets.LAVA_OSS_USER }}
-          LAVA_OSS_TOKEN: ${{ secrets.LAVA_OSS_TOKEN }}
+          LAVATOKEN: ${{ secrets.LAVATOKEN }}
           VALIDATION_RUN_ID: ${{ steps.request.outputs.run_id }}
         run: python .github/workflows/lava_pr_validation.py collect
       - name: Save recovered evidence
@@ -115,7 +112,7 @@ jobs:
     if: >-
       always() && github.repository == 'qualcomm-linux/qcom-linux-testkit' &&
       github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
       contents: read
@@ -200,5 +197,6 @@ jobs:
             lava-output/test-results.md
             lava-output/diagnostics.md
             lava-output/controller-errors.json
+            lava-output/scheduling.json
           if-no-files-found: ignore
           retention-days: 30

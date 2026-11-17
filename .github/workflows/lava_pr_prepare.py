@@ -29,7 +29,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(1, str(ROOT / "scripts"))
 
 import generate_test_inventory_html as inventory
-from lava_pr_validation import API, GITHUB, REPOSITORY, artifact_token_name, digest, github, lava, previous_request, save_json
+from lava_pr_validation import API, GITHUB, LAVA, REPOSITORY, artifact_token_name, digest, github, lava, previous_request, save_json
 
 
 def git(directory, *arguments):
@@ -212,10 +212,9 @@ def validate_target_templates(plans, targets, config):
     gaps = []
     for target in targets:
         if not config["targets"].get(target):
-            gaps.append(f"{target}: OSS device mapping is not confirmed")
+            gaps.append(f"{target}: Foundries device mapping is not confirmed")
         relative = Path("projects/meta-qcom/devices") / target
-        if not ((ROOT / ".github/ci/lava-oss" / relative).is_file() or
-                (plans / "lava_test_plans" / relative).is_file()):
+        if not (plans / "lava_test_plans" / relative).is_file():
             gaps.append(f"{target}: device template is absent from the pinned lava-test-plans")
     if gaps:
         raise ValueError("Pre-merge targets cannot be silently omitted. " + ", ".join(gaps))
@@ -356,7 +355,7 @@ def render_baseline(plans, target, context, config):
     # Pinned LAVA templates produce YAML and shell, HTML escaping corrupts their values.
     environment = Environment(  # nosemgrep: python.flask.security.xss.audit.direct-use-of-jinja2.direct-use-of-jinja2
         loader=FileSystemLoader([
-            str(ROOT / ".github/ci/lava-oss"), str(templates), str(templates / "testplans"),
+            str(templates), str(templates / "testplans"),
             str(templates / "testcases"), str(templates / "devices")]),
         undefined=StrictUndefined,
         autoescape=False,
@@ -534,6 +533,8 @@ def prepare(folder):
     config = json.loads((ROOT / ".github/ci/lava-pr-validation.json").read_text(encoding="utf-8"))
     gh = github()
     previous = previous_request(gh, run_id, attempt)
+    if previous and previous.get("lava_url") != LAVA:
+        raise ValueError("The previous attempt used another LAVA instance, start a new workflow run")
     number = int(os.environ["PR_NUMBER"])
     pr = gh.get(f"/repos/{REPOSITORY}/pulls/{number}")
     if pr["state"] != "open" or pr["base"]["ref"] != "main":
@@ -595,7 +596,7 @@ def prepare(folder):
     source_url = f"https://github.com/{repository}/archive/{sha}.tar.gz"
     manifest = dict(pr=number, sha=sha, merge_base=base, repository=repository,
                     distro=distro, image_type=image_type, build=build, run_id=run_id,
-                    run_attempt=attempt, changes=changes,
+                    run_attempt=attempt, changes=changes, lava_url=LAVA,
                     target_matrix=target_matrix,
                     plans_revision=config["plans_revision"], jobs=[], selections=[], exclusions=[],
                     baseline_helpers=[],
@@ -636,25 +637,12 @@ def prepare(folder):
         selection = append_tests(jobs, affected, documents, by_suite, selections, config, source_url, source)
         manifest["selections"].extend(dict(target=target, **row) for row in selection)
         for group, job in jobs.items():
-            job["device_type"] = config["targets"][target]
+            if job["device_type"] != config["targets"][target]:
+                raise ValueError(f"{target}: Foundries device type differs from the pinned template")
             job["timeouts"]["queue"] = {"minutes": config["queue_minutes"]}
-            # The OSS flasher invokes QDL. Preserve the project's camera/media
-            # postprocessing and supply the existing OSS flash.settings contract.
+            # Retain native meta-qcom deployment, flashing stages and device setup.
             for action in job["actions"]:
                 deploy = action.get("deploy", {})
-                if deploy.get("to") == "qdl":
-                    raise ValueError("OSS requires QDL through the flasher action")
-                docker = deploy.get("postprocess", {}).get("docker")
-                if docker:
-                    docker.pop("local", None)
-                    docker["steps"] = [
-                        f'echo "DEVICE_TYPE={config["targets"][target]}" >> $IMAGE_PATH/flash.settings'
-                        if 'echo "DEVICE_TYPE=' in step else
-                        step.replace(f"qcom-multimedia-image-{target}", f"{image_name}-{target}")
-                        for step in docker["steps"]]
-                    docker["steps"].extend([
-                        'echo "ROOTFS_IMAGE=rootfs.img" >> $IMAGE_PATH/flash.settings',
-                        f'echo "PORT={config["flasher_port"]}" >> $IMAGE_PATH/flash.settings'])
                 if "audio" in deploy.get("images", {}):
                     audio = deploy["images"]["audio"]
                     audio["sha256sum"] = audio_sha256
@@ -665,13 +653,13 @@ def prepare(folder):
             definitions = entries(job)
             if any(item.get("repository") != source_url for item in definitions):
                 raise ValueError("All test definitions must use the exact PR archive")
-            # OSS currently fetches definitions with git on the dispatcher.
+            # Fetch definitions with git on the dispatcher.
             # This does not require git in the image or execute PR code here.
             for definition in definitions:
                 definition.update({"from": "git", "repository": f"https://github.com/{repository}.git",
                                    "revision": sha})
                 definition.pop("strip-components", None)
-            key = "testkit-" + digest(dict(run_id=run_id, sha=sha, repository=repository, build=build["prefix"],
+            key = "testkit-" + digest(dict(lava_url=LAVA, run_id=run_id, sha=sha, repository=repository, build=build["prefix"],
                                           distro=distro, target=target, group=group, job=job))[:32]
             job["job_name"] = key
             job.setdefault("metadata", {}).update({"testkit-request-key": key,
