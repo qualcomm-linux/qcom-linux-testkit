@@ -151,6 +151,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           META_QCOM_READ_TOKEN: ${{ secrets.META_QCOM_READ_TOKEN }}
           QLI_S3_TOKEN: ${{ secrets.QLI_S3_TOKEN }}
+          LAVA_OSS_USER: ${{ secrets.LAVA_OSS_USER }}
+          LAVA_OSS_TOKEN: ${{ secrets.LAVA_OSS_TOKEN }}
           LAVA_ARTIFACT_TOKEN_NAME: ${{ vars.LAVA_ARTIFACT_TOKEN_NAME }}
           LAVA_PLANS_PATH: lava-test-plans
           PR_NUMBER: ${{ inputs.pr }}
