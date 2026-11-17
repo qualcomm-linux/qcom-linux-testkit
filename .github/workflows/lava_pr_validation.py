@@ -52,7 +52,7 @@ class API:
 
     def request(self, method, path, **kwargs):
         url = urljoin(self.base + "/", path)
-        if urlsplit(url).netloc != urlsplit(self.base).netloc:
+        if (urlsplit(url).scheme, urlsplit(url).netloc) != (urlsplit(self.base).scheme, urlsplit(self.base).netloc):
             raise ValueError("API pagination or request escaped its origin")
         attempts = 3 if method in {"GET", "HEAD"} else 1
         for attempt in range(attempts):
@@ -82,7 +82,12 @@ class API:
 
     def pages(self, path, key=None, **params):
         """Support GitHub Link pagination and LAVA next/results pagination."""
+        visited = set()
         while path:
+            page = urljoin(self.base + "/", path)
+            if page in visited:
+                raise RuntimeError("API pagination repeated a page")
+            visited.add(page)
             response = self.request("GET", path, params=params)
             data = response.json()
             if isinstance(data, list):
@@ -221,10 +226,6 @@ def resolve_request():
     artifacts = [artifact for artifact in available if artifact["name"] == artifact_name]
     if len(artifacts) > 1 or any(artifact["expired"] for artifact in artifacts):
         raise ValueError("The prepared request artifact is ambiguous or expired")
-    if not artifacts:
-        if not same_run or os.environ.get("VALIDATION_RESULT") not in {"failure", "cancelled", "skipped"}:
-            raise ValueError("No prepared request artifact exists for this validation attempt")
-        print("Validation did not complete successfully and no request artifact is available for collection.")
     outcome = os.environ.get("VALIDATION_RESULT")
     if not same_run:
         # A failed publication also fails the workflow. Recover the validator's
@@ -239,6 +240,10 @@ def resolve_request():
     if outcome not in {"success", "failure", "cancelled", "skipped", "timed_out",
                        "neutral", "action_required", "stale", "startup_failure"}:
         raise ValueError("The validation controller outcome is not available")
+    if not artifacts:
+        if outcome == "success":
+            raise ValueError("No prepared request artifact exists for this validation attempt")
+        print("No prepared request artifact is available for collection. Check the preparation logs.")
     contexts = []
     for artifact in available:
         match = re.fullmatch(rf"lava-context-{run_id}-([1-9][0-9]*)", artifact["name"])
@@ -251,10 +256,15 @@ def resolve_request():
     evidence = [artifact for artifact in available if artifact["name"] == evidence_name]
     if len(evidence) > 1 or any(artifact["expired"] for artifact in evidence):
         raise ValueError("The collected evidence is ambiguous or expired")
+    progress_name = f"lava-progress-{run_id}-{attempt}"
+    progress = [artifact for artifact in available if artifact["name"] == progress_name]
+    if len(progress) > 1 or any(artifact["expired"] for artifact in progress):
+        raise ValueError("The controller progress is ambiguous or expired")
     return dict(run_id=run_id, run_attempt=attempt, artifact_name=artifact_name,
                 validation_result=outcome,
                 context_artifact=context["name"] if context else "",
                 evidence_artifact=evidence_name, evidence_available="true" if evidence else "false",
+                progress_artifact=progress_name, progress_available="true" if progress else "false",
                 prepared="true" if artifacts else "false")
 
 
@@ -293,16 +303,67 @@ def preflight():
     print("LAVA artifact token is registered. Download permission is verified when fetching artifacts.")
 
 
-def matching_jobs(api, entry, include_active=False):
+def job_details(api, job):
+    """Normalize ownership from OSS's saved definition without executing it."""
+    fetched = not isinstance(job, dict)
+    if not isinstance(job, dict):
+        identifier = int(job)
+        job = api.get(f"/api/v0.2/jobs/{identifier}/")
+        if not isinstance(job, dict) or job.get("id") != identifier:
+            raise ValueError("LAVA job detail does not match the requested ID")
+    if not isinstance(job.get("metadata"), dict):
+        if not fetched and not job.get("original_definition") and not job.get("definition"):
+            return job_details(api, job['id'])
+        definition = job.get("original_definition") or job.get("definition")
+        if isinstance(definition, str) and len(definition.encode("utf-8")) <= 4194304:
+            try:
+                definition = yaml.safe_load(definition)
+            except yaml.YAMLError:
+                raise ValueError(f"Invalid saved definition for LAVA job {job['id']}") from None
+        if not isinstance(definition, dict) or not isinstance(definition.get("metadata"), dict):
+            raise ValueError(f"Ownership metadata unavailable for LAVA job {job['id']}")
+        job = job | {"metadata": definition["metadata"]}
+    metadata = job["metadata"]
+    if any(type(metadata.get(key)) not in (str, int) for key in
+           ("testkit-request-key", "testkit-workflow-run")) or (
+            "testkit-workflow-attempt" in metadata and
+            type(metadata["testkit-workflow-attempt"]) not in (str, int)):
+        raise ValueError(f"Invalid ownership metadata for LAVA job {job['id']}")
+    return job
+
+
+def execution_state(folder, manifest):
+    """Accept saved job IDs only from this immutable workflow request."""
+    identity = dict(run_id=manifest["run_id"], run_attempt=str(manifest.get("run_attempt", "1")),
+                    sha=manifest.get("sha", ""), request_digest=digest(manifest))
+    path = folder / "execution.json"
+    if path.is_file():
+        state = json.loads(path.read_text(encoding="utf-8"))
+        if all(state.get(key) == value for key, value in identity.items()):
+            if (not isinstance(state.get("jobs"), dict) or
+                    any(not isinstance(value, dict) for value in state["jobs"].values())):
+                raise ValueError("Saved execution jobs must be an object")
+            return state
+        # Older controllers did not bind execution.json to a request. Recover
+        # those jobs through their saved LAVA definitions instead of trusting IDs.
+        if "request_digest" in state:
+            raise ValueError("Execution evidence does not match the immutable request")
+    return identity | dict(jobs={}, error="", started=False)
+
+
+def matching_jobs(api, entry, include_active=False, known_id=None):
     """Verify every returned row, older servers can ignore query filters."""
     matches = []
     earlier = []
-    for job in api.pages("/api/v0.2/jobs/", description=entry["key"], limit=100):
+    candidates = ([job_details(api, known_id)] if known_id is not None else
+                  api.pages("/api/v0.2/jobs/", description=entry["key"], limit=100))
+    for job in candidates:
         if job.get("description") != entry["key"]:
             continue
         if job.get("submitter") != os.environ["LAVA_OSS_USER"]:
             continue
-        metadata = job.get("metadata") or {}
+        job = job_details(api, job)
+        metadata = job["metadata"]
         if metadata.get("testkit-request-key") != entry["key"]:
             raise RuntimeError("Job name collision without matching request metadata")
         if entry.get("run_attempt"):
@@ -330,20 +391,27 @@ def matching_jobs(api, entry, include_active=False):
                 return [job]
             raise RuntimeError(f"Earlier attempt job {job['id']} is still active, recover its cleanup first")
         if job["state"] != "Finished" or job.get("health") != "Complete":
+            if known_id is not None:
+                raise RuntimeError("Saved job ID belongs to an unsuccessful earlier attempt")
             return []
         rows, evidence = collect_results(api, job, entry)
         if rows and all(not row["errors"] and not row["counts"].get("fail") for row in rows):
             matches.append(job)
+    if known_id is not None and not matches:
+        raise RuntimeError("Saved LAVA job ID does not match this request or reusable results")
     return matches
 
 
 def cancel_owned_job(api, job, run_id, wait_seconds=60, run_attempt=None):
     """Cancel only this run's job and optionally confirm its terminal state."""
-    if (job["state"] in TERMINAL or job.get("submitter") != os.environ["LAVA_OSS_USER"] or
-            str((job.get("metadata") or {}).get("testkit-workflow-run")) != run_id or
-            (run_attempt is not None and
-             str((job.get("metadata") or {}).get("testkit-workflow-attempt", "1")) != run_attempt)):
+    if job["state"] in TERMINAL:
         return job
+    job = job_details(api, job)
+    if (job.get("submitter") != os.environ["LAVA_OSS_USER"] or
+            str(job["metadata"].get("testkit-workflow-run")) != run_id or
+            (run_attempt is not None and
+             str(job["metadata"].get("testkit-workflow-attempt", "1")) != run_attempt)):
+        raise RuntimeError(f"Refusing to cancel LAVA job {job['id']} owned by another run or attempt")
     error = ""
     try:
         api.request("POST", f"/api/v0.2/jobs/{job['id']}/cancel/")
@@ -412,13 +480,14 @@ def validate_jobs(api, folder, manifest):
 
 def run_jobs(folder, manifest):
     """Hold slots until LAVA terminates, including time spent queued."""
-    api = lava()
-    validate_jobs(api, folder, manifest)
-    state = {"jobs": {}, "error": ""}
+    state = execution_state(folder, manifest)
+    state.update(started=True, error="")
     state_path = folder / "execution.json"
+    save_json(state_path, state)
     deadline = time.monotonic() + manifest["request_minutes"] * 60
     pending = list(manifest["jobs"])
     active = {}
+    api = None
 
     def interrupted(signum, frame):
         raise InterruptedError(f"Controller received signal {signum}")
@@ -426,6 +495,8 @@ def run_jobs(folder, manifest):
     signal.signal(signal.SIGTERM, interrupted)
     signal.signal(signal.SIGINT, interrupted)
     try:
+        api = lava()
+        validate_jobs(api, folder, manifest)
         while pending or active:
             if time.monotonic() >= deadline:
                 raise TimeoutError("Validation request deadline expired")
@@ -436,8 +507,13 @@ def run_jobs(folder, manifest):
                 if current["state"] in TERMINAL:
                     del active[key]
             while pending and len(active) < manifest["max_active_jobs"]:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("Validation request deadline expired")
                 entry = pending[0]
-                matches = matching_jobs(api, entry, include_active=True)
+                known = state["jobs"].get(entry["key"], {})
+                matches = matching_jobs(api, entry, include_active=True, known_id=known.get("id"))
+                if not matches and known.get("state") in {"Submitting", "Submitted"}:
+                    raise RuntimeError("Submission outcome is unknown, recover this request before submitting again")
                 if (matches and entry.get("run_attempt") and matches[0]["state"] not in TERMINAL and
                         str(matches[0]["metadata"].get("testkit-workflow-attempt", "1")) != entry["run_attempt"]):
                     # A rerun owns recovery of its earlier attempt for the same
@@ -449,12 +525,12 @@ def run_jobs(folder, manifest):
                     job = matches[0]
                 else:
                     # A previous workflow's cleanup may still be running.
-                    outstanding = [item for item in api.pages(
+                    outstanding = [job_details(api, item) for item in api.pages(
                         "/api/v0.2/jobs/", end_time__isnull="true", description__startswith="testkit-",
                         submitter__username=os.environ["LAVA_OSS_USER"], limit=100)
                         if item.get("state") not in TERMINAL and
                         item.get("submitter") == os.environ["LAVA_OSS_USER"] and
-                        (item.get("metadata") or {}).get("testkit-request-key")]
+                        str(item.get("description", "")).startswith("testkit-")]
                     if len(outstanding) >= manifest["max_active_jobs"]:
                         break
                     # Mark intent before POST. A timeout is never blindly retried.
@@ -465,16 +541,30 @@ def run_jobs(folder, manifest):
                         result = api.request("POST", "/api/v0.2/jobs/", json={
                             "definition": definition,
                         }).json()
-                        ids = result.get("job_ids", [])
-                        if len(ids) != 1:
+                        ids = result.get("job_ids", []) if isinstance(result, dict) else []
+                        if (not isinstance(ids, list) or len(ids) != 1 or
+                                not re.fullmatch(r"[1-9][0-9]*", str(ids[0]))):
                             raise RuntimeError("Expected one non-multinode LAVA job")
-                        job = api.get(f"/api/v0.2/jobs/{ids[0]}/")
-                    except (requests.RequestException, RuntimeError):
-                        matches = matching_jobs(api, entry)
+                        # Persist the accepted ID before any follow-up network
+                        # request, so recovery never depends on a list response.
+                        state["jobs"][entry["key"]] = {"id": int(ids[0]), "state": "Submitted"}
+                        save_json(state_path, state)
+                        matches = matching_jobs(api, entry, known_id=ids[0])
+                        if not matches:
+                            raise RuntimeError("Submitted LAVA job does not match this request")
+                        job = matches[0]
+                    except (requests.RequestException, RuntimeError, ValueError) as failure:
+                        state["error"] = str(failure)
+                        save_json(state_path, state)
+                        try:
+                            matches = matching_jobs(api, entry, known_id=state["jobs"][entry["key"]].get("id"))
+                        except (requests.RequestException, RuntimeError, ValueError) as recovery_error:
+                            raise RuntimeError(f"Submission recovery failed: {failure}. {recovery_error}") from None
                         if not matches:
                             raise RuntimeError(
-                                "Submission outcome is unknown, no automatic resubmission") from None
+                                f"Submission outcome is unknown, no automatic resubmission. {failure}") from None
                         job = matches[0]
+                        state["error"] = ""
                 pending.pop(0)
                 print(f"{entry['target']} {entry['group']}: {LAVA}/scheduler/job/{job['id']}",
                       flush=True)
@@ -488,7 +578,7 @@ def run_jobs(folder, manifest):
         # Fail the validation job as well as the reporter, so GitHub's failed-job
         # rerun includes hardware execution instead of repeating only reporting.
         for entry in manifest["jobs"]:
-            matches = matching_jobs(api, entry)
+            matches = matching_jobs(api, entry, known_id=state["jobs"].get(entry["key"], {}).get("id"))
             if not matches:
                 raise RuntimeError(f"LAVA results missing for {entry['target']} {entry['group']}")
             rows, evidence = collect_results(api, matches[0], entry)
@@ -507,7 +597,9 @@ def run_jobs(folder, manifest):
             if not known or known.get("state") in TERMINAL:
                 continue
             try:
-                matches = matching_jobs(api, entry)
+                if api is None:
+                    raise RuntimeError("LAVA authentication unavailable, cleanup must be recovered")
+                matches = matching_jobs(api, entry, known_id=known.get("id"))
                 if not matches:
                     raise RuntimeError("No job found for the attempted submission, finalizer must reconcile")
                 job = cancel_owned_job(api, matches[0], manifest["run_id"], wait_seconds=0,
@@ -613,31 +705,53 @@ def collect_jobs(folder, manifest):
     cleanup_complete = True
     identity = dict(run_id=manifest["run_id"], run_attempt=str(manifest.get("run_attempt", "1")),
                     sha=manifest["sha"], request_digest=digest(manifest))
+    state = execution_state(folder, manifest)
     save_json(folder / "results.json", identity | dict(rows=rows, evidence=evidence, cleanup_complete=False))
-    api = lava()
+    api_error = ""
+    try:
+        api = lava()
+    except (requests.RequestException, RuntimeError, ValueError) as error:
+        api = None
+        api_error = str(error)
     for entry in manifest["jobs"]:
+        known = state["jobs"].get(entry["key"], {})
+        terminal = known.get("state") in TERMINAL
         try:
-            matches = matching_jobs(api, entry)
+            if state.get("started") and not known:
+                rows.append(dict(target=entry["target"], group=entry["group"], coverage="Job",
+                                 name="Submission", counts={}, job=None,
+                                 errors=["Not submitted, controller stopped before this job"]))
+                continue
+            if api is None:
+                raise RuntimeError(api_error)
+            matches = matching_jobs(api, entry, include_active=True, known_id=known.get("id"))
             if not matches:
-                raise RuntimeError("Not submitted or submission could not be reconciled")
+                raise RuntimeError("Submission could not be reconciled, remote cleanup is unconfirmed")
             job = matches[0]
+            known = {"id": job["id"], "state": job["state"]}
+            terminal = job["state"] in TERMINAL
             try:
                 job = cancel_owned_job(api, job, manifest["run_id"],
                                        run_attempt=manifest.get("run_attempt", "1"))
-            except (requests.RequestException, RuntimeError) as error:
+            except (requests.RequestException, RuntimeError, ValueError) as error:
                 cleanup_complete = False
                 rows.append(dict(target=entry["target"], group=entry["group"], coverage="Job",
                                  name="Cleanup", counts={}, job=job["id"], errors=[str(error)]))
+            terminal = job["state"] in TERMINAL
             result, raw = collect_results(api, job, entry)
             if job["state"] not in TERMINAL:
                 cleanup_complete = False
             rows.extend(result)
             evidence.append({"job": job["id"], "results": raw})
         except (requests.RequestException, RuntimeError, ValueError) as error:
-            cleanup_complete = False
+            if not terminal:
+                cleanup_complete = False
             rows.append(dict(target=entry["target"], group=entry["group"], coverage="Job",
-                             name="Collection", counts={}, job=None, errors=[str(error)]))
+                             name="Collection", counts={}, job=known.get("id"), errors=[str(error)]))
         save_json(folder / "results.json", identity | dict(rows=rows, evidence=evidence, cleanup_complete=False))
+    if state.get("error"):
+        rows.append(dict(target="All", group="Controller", coverage="Workflow",
+                         name="Validation controller", counts={}, job=None, errors=[state["error"]]))
     save_json(folder / "results.json", identity | dict(rows=rows, evidence=evidence, cleanup_complete=cleanup_complete))
     return 0
 
@@ -647,7 +761,8 @@ def finish_jobs(folder, manifest, lifecycle=True):
     folder.mkdir(parents=True, exist_ok=True)
     result_path = folder / "results.json"
     rows, evidence = [], []
-    cleanup_complete = False
+    cleanup_complete = not manifest.get("jobs")
+    state = execution_state(folder, manifest)
     if result_path.is_file():
         saved = json.loads(result_path.read_text(encoding="utf-8"))
         if (saved.get("run_id") != manifest["run_id"] or saved.get("sha") != manifest["sha"] or
@@ -656,11 +771,26 @@ def finish_jobs(folder, manifest, lifecycle=True):
             raise ValueError("Result evidence does not match the immutable request")
         rows, evidence = saved["rows"], saved["evidence"]
         cleanup_complete = saved.get("cleanup_complete") is True
+    elif state.get("started"):
+        cleanup_complete = all(job.get("state") in TERMINAL for job in state["jobs"].values())
     observed = {(row["target"], row["group"]) for row in rows}
     if manifest["submit_requested"]:
-        rows.extend(dict(target=entry["target"], group=entry["group"], coverage="Job", name="Collection",
-                         counts={}, job=None, errors=["Result collection unavailable, cleanup is unconfirmed"])
-                    for entry in manifest.get("jobs", []) if (entry["target"], entry["group"]) not in observed)
+        for entry in manifest.get("jobs", []):
+            if (entry["target"], entry["group"]) in observed:
+                continue
+            known = state["jobs"].get(entry["key"], {})
+            if state.get("started") and not known:
+                error = "Not submitted, controller stopped before this job"
+            elif known.get("state") in TERMINAL:
+                error = "Job completed, result collection unavailable"
+            else:
+                error = "Result collection unavailable, cleanup is unconfirmed"
+            rows.append(dict(target=entry["target"], group=entry["group"], coverage="Job", name="Collection",
+                             counts={}, job=known.get("id"), errors=[error]))
+    if state.get("error") and not any(row["coverage"] == "Workflow" and
+                                      state["error"] in row["errors"] for row in rows):
+        rows.append(dict(target="All", group="Controller", coverage="Workflow", name="Validation controller",
+                         counts={}, job=None, errors=[state["error"]]))
     outcome = os.environ.get("VALIDATION_RESULT", "")
     if outcome and outcome != "success":
         rows.append(dict(target="All", group="Controller", coverage="Workflow",
@@ -718,6 +848,19 @@ def finish_jobs(folder, manifest, lifecycle=True):
     controller_errors = [error for row in rows if row["coverage"] == "Workflow" for error in row["errors"]]
     if controller_errors:
         lines += ["", "Workflow: " + ", ".join(controller_errors)]
+    # Keep infrastructure and collection failures visible, not just ERROR counts.
+    diagnostics = []
+    for row in rows:
+        if row["coverage"] == "Workflow" or not row["errors"]:
+            continue
+        label = f"{row['target']} / {row['group']} / {row['name']}"
+        detail = ", ".join(row["errors"]).replace("\n", " ").replace("\r", " ").replace("<", "&lt;")
+        diagnostics.append(f"- {label}: {detail[:1000]}")
+    if diagnostics:
+        (folder / "diagnostics.md").write_text("\n".join(diagnostics) + "\n", encoding="utf-8")
+        lines += ["", "Failure details:"] + diagnostics[:12]
+        if len(diagnostics) > 12:
+            lines.append("Remaining failure details are in diagnostics.md in the results artifact.")
     lines += ["", f"[Complete testcase matrix and evidence]({workflow_url}) are in the results artifact. "
               "The matrix includes baseline tests and PR additions. LAVA setup bookkeeping is excluded."]
     case_rows = []
@@ -754,8 +897,17 @@ def finish_jobs(folder, manifest, lifecycle=True):
     if not manifest["submit_requested"]:
         return int(outcome not in {"", "success"})
     if publication_error is not None:
+        if lifecycle:
+            update_check(gh, manifest, "completed", "PR access failed. Results remain in the workflow artifacts.",
+                         "failure")
         raise publication_error
-    comments = list(gh.pages(f"/repos/{REPOSITORY}/issues/{manifest['pr']}/comments", per_page=100))
+    try:
+        comments = list(gh.pages(f"/repos/{REPOSITORY}/issues/{manifest['pr']}/comments", per_page=100))
+    except (requests.RequestException, RuntimeError, ValueError):
+        if lifecycle:
+            update_check(gh, manifest, "completed", "PR comments could not be read. Results remain in the workflow artifacts.",
+                         "failure")
+        raise
     previous = next((comment for comment in comments if marker in comment.get("body", "")
                      and comment["user"]["type"] == "Bot"), None)
     if previous:
