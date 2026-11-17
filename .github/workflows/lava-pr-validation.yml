@@ -15,7 +15,7 @@ on:
         default: meta-qcom
         type: string
       revision:
-        description: Full PR commit SHA, empty resolves current PR head
+        description: Full PR commit SHA, empty resolves current PR head. Reruns retain the original SHA.
         type: string
       distro:
         description: qcom-distro or qcom-distro_linux-qcom-6.18
@@ -29,7 +29,7 @@ on:
           - multimedia
           - proprietary
       nightly_run:
-        description: Optional successful meta-qcom nightly or extended build run ID
+        description: Optional successful meta-qcom nightly or extended build run ID. Reruns reuse the original images.
         type: string
       selections:
         description: Optional JSON mapping suite paths to YAML/group/params selections
@@ -50,13 +50,59 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  request:
+    if: github.repository == 'qualcomm-linux/qcom-linux-testkit' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      checks: write
+    outputs:
+      sha: ${{ steps.context.outputs.sha }}
+      context_attempt: ${{ steps.context.outputs.context_attempt }}
+    steps:
+      - name: Checkout trusted controller
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+        with:
+          python-version: '3.11'
+      - run: python -m pip install -r .github/ci/lava-pr-requirements.txt
+      - name: Resolve PR revision and queue its validation check
+        id: context
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VALIDATION_RUN_ID: ${{ github.run_id }}
+          PR_NUMBER: ${{ inputs.pr }}
+          PR_REVISION: ${{ inputs.revision }}
+          SUBMIT_REQUEST: ${{ inputs.submit }}
+        run: python .github/workflows/lava_pr_validation.py begin
+      - name: Save request context before waiting for an OSS runner
+        if: always() && steps.context.outputs.sha != ''
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: lava-context-${{ github.run_id }}-${{ github.run_attempt }}
+          path: lava-output/context.json
+          if-no-files-found: error
+          retention-days: 30
+
   validate:
+    needs: request
     if: github.repository == 'qualcomm-linux/qcom-linux-testkit' && github.ref == 'refs/heads/main'
     environment: lava-oss
     runs-on:
       group: GHA-Kernel-SelfHosted-RG
       labels: kernel-prd-u2404-x64-large-od-ephem
     timeout-minutes: 1320
+    permissions:
+      contents: read
+      actions: read
+      checks: write
+    outputs:
+      request_attempt: ${{ steps.prepare.outputs.request_attempt }}
     env:
       PYTHONDONTWRITEBYTECODE: '1'
       VALIDATION_RUN_ID: ${{ github.run_id }}
@@ -82,16 +128,34 @@ jobs:
       - name: Install controller dependencies
         run: python -m pip install -r .github/ci/lava-pr-requirements.txt ./lava-test-plans
 
+      - name: Download resolved PR context
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: lava-context-${{ github.run_id }}-${{ needs.request.outputs.context_attempt }}
+          path: lava-output
+      - name: Mark the PR validation in progress
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python .github/workflows/lava_pr_validation.py start
+
+      - name: Check LAVA identity and artifact access configuration
+        env:
+          LAVA_OSS_USER: ${{ secrets.LAVA_OSS_USER }}
+          LAVA_OSS_TOKEN: ${{ secrets.LAVA_OSS_TOKEN }}
+          LAVA_ARTIFACT_TOKEN_NAME: ${{ vars.LAVA_ARTIFACT_TOKEN_NAME }}
+        run: python .github/workflows/lava_pr_validation.py preflight
+
       - name: Prepare mandatory baseline and PR additions
+        id: prepare
         env:
           GH_TOKEN: ${{ github.token }}
           META_QCOM_READ_TOKEN: ${{ secrets.META_QCOM_READ_TOKEN }}
-          QLI_ARTIFACT_TOKEN: ${{ secrets.QLI_ARTIFACT_TOKEN }}
+          QLI_S3_TOKEN: ${{ secrets.QLI_S3_TOKEN }}
           LAVA_ARTIFACT_TOKEN_NAME: ${{ vars.LAVA_ARTIFACT_TOKEN_NAME }}
           LAVA_PLANS_PATH: lava-test-plans
           PR_NUMBER: ${{ inputs.pr }}
           TARGETS: ${{ inputs.targets }}
-          PR_REVISION: ${{ inputs.revision }}
+          PR_REVISION: ${{ needs.request.outputs.sha }}
           IMAGE_DISTRO: ${{ inputs.distro }}
           IMAGE_TYPE: ${{ inputs.image_type }}
           NIGHTLY_RUN_ID: ${{ inputs.nightly_run }}
@@ -102,6 +166,7 @@ jobs:
       # Publish before submitting. The independent finalizer can recover IDs
       # from LAVA metadata even if this runner disappears during a POST.
       - name: Save immutable request
+        id: request
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: lava-request-${{ github.run_id }}-${{ github.run_attempt }}
@@ -119,6 +184,23 @@ jobs:
           LAVA_OSS_TOKEN: ${{ secrets.LAVA_OSS_TOKEN }}
         run: python .github/workflows/lava_pr_validation.py run
 
+      - name: Reconcile owned LAVA jobs and collect results
+        if: always() && steps.request.outcome == 'success' && inputs.submit
+        timeout-minutes: 10
+        env:
+          LAVA_OSS_USER: ${{ secrets.LAVA_OSS_USER }}
+          LAVA_OSS_TOKEN: ${{ secrets.LAVA_OSS_TOKEN }}
+        run: python .github/workflows/lava_pr_validation.py collect
+
+      - name: Save collected LAVA evidence
+        if: always() && steps.request.outcome == 'success' && inputs.submit
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: lava-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: lava-output/results.json
+          if-no-files-found: warn
+          retention-days: 30
+
       - name: Save controller progress
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
@@ -130,8 +212,30 @@ jobs:
           if-no-files-found: ignore
           retention-days: 30
 
+      - name: Remove temporary source snapshots
+        if: always()
+        run: python .github/workflows/lava_pr_validation.py cleanup
+
+      - name: Report controller status
+        if: always()
+        env:
+          CONTROLLER_STATUS: ${{ job.status }}
+          REQUEST_READY: ${{ steps.request.outcome == 'success' && inputs.submit }}
+          SUBMIT_REQUEST: ${{ inputs.submit }}
+        run: |
+          {
+            printf 'LAVA validation controller: **%s**.\n\n' "$CONTROLLER_STATUS"
+            if [ "$REQUEST_READY" = 'true' ]; then
+              printf 'Collected evidence is retained for the hosted results publisher.\n'
+            elif [ "$SUBMIT_REQUEST" = 'true' ]; then
+              printf 'No hardware jobs were submitted. The immutable submission request was not saved.\n'
+            else
+              printf 'Preparation-only request. No hardware jobs were submitted.\n'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
   results:
-    needs: validate
+    needs: [request, validate]
     if: >-
       always() &&
       github.repository == 'qualcomm-linux/qcom-linux-testkit' &&
@@ -140,8 +244,12 @@ jobs:
       contents: read
       actions: read
       issues: write
+      checks: write
     uses: $/.github/workflows/lava-pr-results.yml
     with:
       validation_run: ${{ github.run_id }}
-      validation_attempt: ${{ github.run_attempt }}
-      validation_result: ${{ needs.validate.result }}
+      validation_attempt: ${{ needs.validate.outputs.request_attempt || github.run_attempt }}
+      validation_result: ${{ needs.request.result != 'success' && needs.request.result || needs.validate.result }}
+      validation_pr: ${{ inputs.pr }}
+      validation_sha: ${{ needs.request.outputs.sha }}
+      submit_requested: ${{ inputs.submit }}
