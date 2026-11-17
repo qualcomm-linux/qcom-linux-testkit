@@ -112,7 +112,7 @@ jobs:
     permissions:
       contents: read
       actions: read
-      issues: write
+      pull-requests: write
       checks: write
     steps:
       - name: Checkout trusted controller
