@@ -29,6 +29,8 @@
   "queue_minutes": 120,
   "request_minutes": 1200,
   "addition_minutes": 20,
+  "baseline_helpers": ["Runner/utils/send-to-lava.sh"],
+  "passive_definitions": ["Runner/suites/Kernel/Baseport/Reboot_health_check/Reboot_health_check.yaml"],
   "associations": {},
   "selections": {}
 }

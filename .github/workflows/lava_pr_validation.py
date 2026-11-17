@@ -68,7 +68,13 @@ class API:
             time.sleep(2 ** attempt)
         if not response.ok:
             # Do not print response bodies, headers or signed download URLs.
-            raise RuntimeError(f"{method} {urlsplit(url).path}: HTTP {response.status_code}")
+            message = f"{method} {urlsplit(url).path}: HTTP {response.status_code}"
+            if (self.base == GITHUB and response.status_code == 403 and method in {"POST", "PATCH"} and
+                    re.fullmatch(r"/repos/[^/]+/[^/]+/issues/(?:[0-9]+/comments|comments/[0-9]+)",
+                                 urlsplit(url).path)):
+                message += (". PR comment access denied. Check pull-requests: write in the calling and "
+                            "reusable workflows, and repository policy.")
+            raise RuntimeError(message)
         return response
 
     def get(self, path, **params):
@@ -696,6 +702,9 @@ def finish_jobs(folder, manifest, lifecycle=True):
             lines.append("Configured target exclusions: " + ", ".join(matrix["excluded"]) + ".")
     if manifest.get("exclusions"):
         lines.append("Template exclusions: " + ", ".join(manifest["exclusions"]) + ".")
+    if manifest.get("baseline_helpers"):
+        helpers = sorted({entry["path"] for entry in manifest["baseline_helpers"]})
+        lines.append("Shared-helper coverage assigned to the mandatory baseline: " + ", ".join(helpers) + ".")
     workflow_url = f"https://github.com/{REPOSITORY}/actions/runs/{os.environ.get('GITHUB_RUN_ID', manifest['run_id'])}"
     request_url = f"https://github.com/{REPOSITORY}/actions/runs/{manifest['run_id']}"
     totals = Counter()
