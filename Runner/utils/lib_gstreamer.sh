@@ -1429,6 +1429,109 @@ gstreamer_file_size_bytes() {
   printf '%s\n' "$file_size"
 }
 
+# gstreamer_v4l2_encode_source <width> <height> <frames> <framerate>
+# The raw source of the encode cases; output checks regenerate it from here.
+gstreamer_v4l2_encode_source() {
+  printf '%s\n' "videotestsrc num-buffers=$3 pattern=smpte ! video/x-raw,width=$1,height=$2,format=NV12,framerate=$4/1"
+}
+
+# gstreamer_verify_size_ok <width> <height>: 0 when frames of this size can be
+# compared with FFmpeg's: GStreamer pads I420 and NV12 rows to 4 bytes, so the
+# width must be a multiple of 8 (chroma included), the height even.
+gstreamer_verify_size_ok() {
+  case "$1$2" in
+    ''|*[!0-9]*)
+      return 1
+      ;;
+  esac
+  [ $(($1 % 8)) -eq 0 ] && [ $(($2 % 2)) -eq 0 ]
+}
+
+# gstreamer_ffmpeg_codec <h264|h265|hevc|vp9>: FFmpeg's decoder name.
+gstreamer_ffmpeg_codec() {
+  case "$1" in
+    h265|hevc)
+      echo hevc
+      ;;
+    *)
+      echo "$1"
+      ;;
+  esac
+}
+
+# gstreamer_verify_encode <name> <file> <width> <height> <frames> <framerate> <outdir>
+# The encoded file must decode in FFmpeg to <frames> frames at VIDEO_MIN_PSNR
+# luma PSNR against the regenerated gstreamer_v4l2_encode_source.
+gstreamer_verify_encode() {
+  gve_name="$1"
+  gve_file="$2"
+  gve_w="$3"
+  gve_h="$4"
+  gve_frames="$5"
+  gve_fr="$6"
+  gve_dir="$7"
+
+  if ! video_framemd5 "$gve_dir/${gve_name}.out.framemd5" yuv420p -1 -i "$gve_file"; then
+    log_fail "$gve_name: verify: software decode of $gve_file failed"
+    return 1
+  fi
+  gve_got=$(video_frame_count "$gve_dir/${gve_name}.out.framemd5")
+  if [ "$gve_got" -ne "$gve_frames" ]; then
+    log_fail "$gve_name: verify: $gve_got frames decoded, source has $gve_frames"
+    return 1
+  fi
+  # The source streams into FFmpeg; its status comes back through a file.
+  # Checked first: gstreamer_run_bounded would log into the stream.
+  if ! gstreamer_timeout_supported; then
+    log_fail "$gve_name: verify: no timeout(1) to bound the reference source"
+    return 1
+  fi
+  gve_rcf="$gve_dir/${gve_name}.src.rc"
+  rm -f "$gve_rcf"
+  # shellcheck disable=SC2046
+  gve_psnr=$({
+      gstreamer_run_bounded "$VIDEO_VERIFY_TIMEOUT" TERM gst-launch-1.0 -q \
+        $(gstreamer_v4l2_encode_source "$gve_w" "$gve_h" "$gve_frames" "$gve_fr") \
+        ! fdsink fd=1 2>"$gve_dir/${gve_name}.src.log"
+      echo "$?" >"$gve_rcf"
+    } |
+    video_psnr_y "$gve_dir/${gve_name}.psnr.log" -i "$gve_file" -- \
+      -f rawvideo -pix_fmt nv12 -s "${gve_w}x${gve_h}" -i pipe:0)
+  gve_rc=$(cat "$gve_rcf" 2>/dev/null)
+  if gstreamer_bounded_timed_out "$gve_rc"; then
+    log_fail "$gve_name: verify: reference source timed out after ${VIDEO_VERIFY_TIMEOUT}s"
+    return 1
+  fi
+  if [ "$gve_rc" != 0 ]; then
+    log_fail "$gve_name: verify: reference source failed (rc=${gve_rc:-unknown}, ${gve_name}.src.log)"
+    return 1
+  fi
+  gve_cmp=$(video_psnr_frames "$gve_dir/${gve_name}.psnr.log")
+  if [ "${gve_cmp:-0}" -ne "$gve_frames" ]; then
+    log_fail "$gve_name: verify: PSNR compared ${gve_cmp:-0} of $gve_frames frames"
+    return 1
+  fi
+  if ! video_psnr_ok "$gve_psnr" "$VIDEO_MIN_PSNR"; then
+    log_fail "$gve_name: verify: luma PSNR ${gve_psnr:-unknown} dB below $VIDEO_MIN_PSNR dB"
+    return 1
+  fi
+  log_info "$gve_name: verify: $gve_got frames, luma PSNR $gve_psnr dB (min $VIDEO_MIN_PSNR)"
+  return 0
+}
+
+# gstreamer_verify_decode <name> <input> <gst log> <outdir>
+# The md5s checksumsink logged ("<pts> <md5>" per frame) must equal an FFmpeg
+# decode of <input>, frame for frame.
+gstreamer_verify_decode() {
+  awk '$NF ~ /^[0-9a-f]{32}$/ && NF == 2 { print $2 }' "$3" >"$4/$1.out.md5"
+  if ! video_framemd5 "$4/$1.ref.framemd5" yuv420p -1 -i "$2"; then
+    log_fail "$1: verify: software decode of $2 failed"
+    return 1
+  fi
+  video_framemd5_hashes "$4/$1.ref.framemd5" >"$4/$1.ref.md5"
+  video_md5_compare "$4/$1.ref.md5" "$4/$1.out.md5" "$1"
+}
+
 # -------------------- V4L2 encode pipeline builder --------------------
 # gstreamer_build_v4l2_encode_pipeline <codec> <width> <height> <duration> <framerate> <bitrate> <output_file> <video_stack>
 # Builds a complete V4L2 encode pipeline string
@@ -1485,24 +1588,28 @@ gstreamer_build_v4l2_encode_pipeline() {
     total_frames=900 # Default 30s * 30fps = 900 frames
   fi
 
+  enc_source=$(gstreamer_v4l2_encode_source "$width" "$height" "$total_frames" "$framerate")
+
   # Build pipeline with mp4mux for MP4 container
   if [ -n "$parser" ]; then
-    printf '%s\n' "videotestsrc num-buffers=${total_frames} pattern=smpte ! video/x-raw,width=${width},height=${height},format=NV12,framerate=${framerate}/1 ! ${encoder} ${encoder_params} ! ${parser} ! mp4mux ! filesink location=${output_file}"
+    printf '%s\n' "${enc_source} ! ${encoder} ${encoder_params} ! ${parser} ! mp4mux ! filesink location=${output_file}"
   else
-    printf '%s\n' "videotestsrc num-buffers=${total_frames} pattern=smpte ! video/x-raw,width=${width},height=${height},format=NV12,framerate=${framerate}/1 ! ${encoder} ${encoder_params} ! mp4mux ! filesink location=${output_file}"
+    printf '%s\n' "${enc_source} ! ${encoder} ${encoder_params} ! mp4mux ! filesink location=${output_file}"
   fi
 
   return 0
 }
 
 # -------------------- V4L2 decode pipeline builder --------------------
-# gstreamer_build_v4l2_decode_pipeline <codec> <input_file> <video_stack>
-# Builds a complete V4L2 decode pipeline string
+# gstreamer_build_v4l2_decode_pipeline <codec> <input_file> <video_stack> [<sink>]
+# Builds a complete V4L2 decode pipeline string ending in <sink>
+# (default: videoconvert ! fakesink)
 # Prints: pipeline string or empty if decoder not available
 gstreamer_build_v4l2_decode_pipeline() {
   codec="$1"
   input_file="$2"
   video_stack="${3:-upstream}"
+  dec_sink="${4:-videoconvert ! fakesink}"
 
   decoder=$(gstreamer_v4l2_decoder_for_codec "$codec")
   if [ -z "$decoder" ]; then
@@ -1539,16 +1646,16 @@ gstreamer_build_v4l2_decode_pipeline() {
   if [ -n "$parser" ]; then
     # Use parser if available
     if [ -n "$decoder_args" ]; then
-      printf '%s\n' "filesrc location=${input_file} ! ${container} ! ${parser} ! ${decoder} ${decoder_args} ! videoconvert ! fakesink"
+      printf '%s\n' "filesrc location=${input_file} ! ${container} ! ${parser} ! ${decoder} ${decoder_args} ! ${dec_sink}"
     else
-      printf '%s\n' "filesrc location=${input_file} ! ${container} ! ${parser} ! ${decoder} ! videoconvert ! fakesink"
+      printf '%s\n' "filesrc location=${input_file} ! ${container} ! ${parser} ! ${decoder} ! ${dec_sink}"
     fi
   else
     # Skip parser if not available (e.g. VP9 without vp9parse)
     if [ -n "$decoder_args" ]; then
-      printf '%s\n' "filesrc location=${input_file} ! ${container} ! ${decoder} ${decoder_args} ! videoconvert ! fakesink"
+      printf '%s\n' "filesrc location=${input_file} ! ${container} ! ${decoder} ${decoder_args} ! ${dec_sink}"
     else
-      printf '%s\n' "filesrc location=${input_file} ! ${container} ! ${decoder} ! videoconvert ! fakesink"
+      printf '%s\n' "filesrc location=${input_file} ! ${container} ! ${decoder} ! ${dec_sink}"
     fi
   fi
 

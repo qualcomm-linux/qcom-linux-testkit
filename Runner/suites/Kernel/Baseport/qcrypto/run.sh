@@ -39,9 +39,9 @@ log_info "-------------------Starting $TESTNAME Testcase------------------------
 log_info "=== Test Initialization ==="
 
 log_info "Checking if dependency binary is available"
-check_dependencies kcapi-convience
+check_dependencies kcapi-convenience
 
-kcapi-convience
+kcapi-convenience
 KCAPI_RET=$?
 
 echo "${KCAPI_RET}"
@@ -49,9 +49,9 @@ echo "${KCAPI_RET}"
 if [ ${KCAPI_RET} -eq 0 ]; then
     log_pass "$TESTNAME : Test Passed"
     echo "$TESTNAME PASS" > "$res_file"
-    exit 1
+    exit 0
 else
     log_fail "$TESTNAME : Test Failed"
     echo "$TESTNAME FAIL" > "$res_file"
-    exit 0
+    exit 1
 fi

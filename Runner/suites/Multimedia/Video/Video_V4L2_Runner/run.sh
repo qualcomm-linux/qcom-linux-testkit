@@ -135,6 +135,11 @@ Platform notes:
           overlay_h264Encoder.json, overlay_h265Encoder.json).
 
 Environment variables:
+  VIDEO_VERIFY         off (default) | on
+          'on' checks what the app wrote: a decode must match an FFmpeg
+          decode of the input frame for frame, an encode must decode in
+          FFmpeg to one frame per input frame at VIDEO_MIN_PSNR (default
+          25 dB) luma PSNR. It SKIPs without ffmpeg (VIDEO_FFMPEG).
   VIDEO_POLICY_SCOPE   bundled (default) | all
           Controls which configs receive automatic platform policy rewrites.
           'bundled' restricts rewrites to the bundled fixture configs above.
@@ -394,6 +399,21 @@ if ! check_dependencies grep sed awk find sort; then
     log_skip "$TESTNAME SKIP - required tools missing"
     printf '%s\n' "$TESTNAME SKIP" >"$RES_FILE"
     exit 0
+fi
+
+if ! video_verify_settings_valid; then
+    log_fail "$TESTNAME FAIL - invalid VIDEO_VERIFY='$VIDEO_VERIFY' (on, off), VIDEO_MIN_PSNR='$VIDEO_MIN_PSNR' or VIDEO_VERIFY_TIMEOUT='$VIDEO_VERIFY_TIMEOUT'"
+    printf '%s\n' "$TESTNAME FAIL" >"$RES_FILE"
+    exit 0
+fi
+if [ "$VIDEO_VERIFY" = "on" ] && ! video_exist_cmd "$VIDEO_FFMPEG"; then
+    log_skip "$TESTNAME SKIP - $VIDEO_FFMPEG not found: install FFmpeg to verify outputs, or set VIDEO_VERIFY=off"
+    printf '%s\n' "$TESTNAME SKIP" >"$RES_FILE"
+    exit 0
+fi
+# Fill the decoder cache here: the per-case check runs in a subshell.
+if video_verify_active; then
+    video_ffmpeg_has_decoder h264 || true
 fi
 
 test_path="$(find_test_case_by_name "$TESTNAME" 2>/dev/null || echo "$SCRIPT_DIR")"
@@ -1184,6 +1204,14 @@ while IFS= read -r cfg; do
         continue
     fi
 
+    if video_verify_active && ! vsup=$(video_verify_cfg_supported "$cfg"); then
+        log_skip "[$id] SKIP - output cannot be verified: $vsup (VIDEO_VERIFY=off runs it unverified)"
+        printf '%s\n' "$id SKIP $pretty" >> "$LOG_DIR/summary.txt"
+        printf '%s\n' "$mode,$id,SKIP,$pretty,0,0,0" >> "$LOG_DIR/results.csv"
+        skip=$((skip + 1))
+        continue
+    fi
+
     # Fetch only when not explicitly provided a config/dir and feature enabled
     if [ "$EXTRACT_INPUT_CLIPS" = "true" ] && [ -z "$CFG" ] && [ -z "$DIR" ]; then
         if [ -n "$CLIPS_TAR" ]; then
@@ -1384,6 +1412,7 @@ while IFS= read -r cfg; do
     fi
 
     pass_runs="0"
+    VIDEO_OUTPUT_MISMATCH=0
     fail_runs="0"
     rep="1"
     start_case="$(date +%s 2>/dev/null || printf '%s' 0)"
@@ -1425,6 +1454,11 @@ while IFS= read -r cfg; do
             fail_runs=$((fail_runs + 1))
         fi
 
+        # A wrong output is not a flake: stop here so its evidence stays.
+        if [ "$VIDEO_OUTPUT_MISMATCH" -eq 1 ]; then
+            break
+        fi
+
         if [ "$rep" -lt "$REPEAT" ] && [ "$REPEAT_DELAY" -gt 0 ]; then
             sleep "$REPEAT_DELAY"
         fi
@@ -1451,6 +1485,9 @@ while IFS= read -r cfg; do
             fi
             ;;
     esac
+    if [ "$VIDEO_OUTPUT_MISMATCH" -eq 1 ]; then
+        final="FAIL"
+    fi
 
     video_step "$id" "DMESG triage"
     video_scan_dmesg_if_enabled "$DMESG_SCAN" "$LOG_DIR"
@@ -1464,7 +1501,9 @@ while IFS= read -r cfg; do
     fi
 
     # (2) Retry on final failure (extra attempts outside REPEAT loop, before recording results)
-        if [ "$final" = "FAIL" ] && [ "$RETRY_ON_FAIL" -gt 0 ] 2>/dev/null; then
+        # No retry after a wrong output.
+        if [ "$final" = "FAIL" ] && [ "$RETRY_ON_FAIL" -gt 0 ] 2>/dev/null \
+           && [ "$VIDEO_OUTPUT_MISMATCH" -eq 0 ]; then
         r=1
         log_info "[$id] RETRY_ON_FAIL: up to $RETRY_ON_FAIL additional attempt(s)"
         while [ "$r" -le "$RETRY_ON_FAIL" ]; do
@@ -1487,6 +1526,9 @@ while IFS= read -r cfg; do
                         137) log_warn "[$id] Retry exited rc=137 (SIGKILL/OOM?)." ;;
                         *) : ;;
                     esac
+                fi
+                if [ "$VIDEO_OUTPUT_MISMATCH" -eq 1 ]; then
+                    break
                 fi
             fi
             r=$((r + 1))

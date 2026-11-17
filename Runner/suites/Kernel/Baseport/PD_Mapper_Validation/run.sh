@@ -221,6 +221,8 @@ if pd_mapper_validate_registry_files \
         test_result_record "SKIP" "No service-registry .jsn files were discovered from running remoteproc firmware paths"
     elif [ "$PD_MAPPER_REGISTRY_VALIDATOR" = "unavailable" ]; then
         test_result_record "SKIP" "$PD_MAPPER_REGISTRY_COUNT service-registry file(s) were discovered but no image-provided JSON validator is available"
+    elif [ "$PD_MAPPER_REGISTRY_VALIDATED_COUNT" -eq 0 ]; then
+        test_result_record "SKIP" "$PD_MAPPER_REGISTRY_COUNT service-registry file(s) were discovered but none could be validated (xz without Python lzma)"
     else
         test_result_record "PASS" "Validated $PD_MAPPER_REGISTRY_VALIDATED_COUNT service-registry file(s)"
         pd_mapper_registry_valid=1

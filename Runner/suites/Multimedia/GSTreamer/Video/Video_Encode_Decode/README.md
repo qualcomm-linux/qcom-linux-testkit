@@ -339,17 +339,39 @@ The script will automatically detect the input type and extract/copy clips as ne
 ## PASS / FAIL / SKIP criteria
 
 ### PASS
-- **Encoding**: Output file is created and has size > 1000 bytes
-- **Decoding**: Pipeline completes successfully (exit code 0 or "Setting pipeline to NULL" in log)
+- **Encoding**: Output file is created and has size > 1000 bytes; with output
+  verification, it decodes in FFmpeg to one frame per source frame with an
+  average luma PSNR of at least `VIDEO_MIN_PSNR` (default 25 dB) against the
+  regenerated `videotestsrc` source
+- **Decoding**: Pipeline completes successfully (exit code 0 or "Setting pipeline to NULL" in log);
+  with output verification, every decoded frame has the md5 of the FFmpeg
+  software decode of the same file, and the frame counts match
 - **Overall**: At least one test passes and no tests fail
 
 ### FAIL
-- **Encoding**: No output file created or file size too small
-- **Decoding**: Pipeline fails or crashes
+- **Encoding**: No output file created, file size too small, or verification failed
+- **Decoding**: Pipeline fails or crashes, or verification failed
 - **Overall**: One or more tests fail
+
+### Output verification
+`VIDEO_VERIFY=on` checks the encode and decode outputs of `--test-type basic`
+against `ffmpeg` (or `VIDEO_FFMPEG`); without it the suite SKIPs. The other
+test types run unchecked. The default, `off`, keeps the exit status and
+size checks of existing jobs. Decoded frames are converted to I420 and hashed
+by `checksumsink` (gst-plugins-bad). A case SKIPs when its output cannot be
+checked: no FFmpeg decoder for the codec, no `checksumsink` (decode), or a
+width that is not a multiple of 8 or an odd height (GStreamer pads rows to 4
+bytes). The decode bound doubles to `2 * duration + 10`
+seconds for the hashing. Evidence per case in the logs directory:
+`<case>.out.md5`, `<case>.ref.md5`, `<case>.out.framemd5`, `<case>.psnr.log`,
+`<case>.src.log`. Each FFmpeg run and the regenerated source are bounded by
+`VIDEO_VERIFY_TIMEOUT` (default 600 s); an encode PSNR counts only when the
+source exited cleanly and every source frame was compared.
 
 ### SKIP
 - Missing required tools (`gst-launch-1.0`, `gst-inspect-1.0`)
+- `VIDEO_VERIFY=on` without `ffmpeg`, or a case whose output the check
+  cannot compare
 - Required V4L2 encoder/decoder elements not available
 - For H.264/H.265 decode tests: corresponding encoded file not found (encode must run first)
 - For VP9 decode tests: network connectivity unavailable, clip download failed, or IVF to WebM conversion failed

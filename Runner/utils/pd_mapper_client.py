@@ -7,12 +7,16 @@
 import argparse
 import hashlib
 import json
-import lzma
 import socket
 import struct
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
+
+try:
+    import lzma
+except ImportError:
+    lzma = None
 
 
 QMI_REQUEST = 0
@@ -27,14 +31,21 @@ def emit(status: str, reason: str, **fields: object) -> None:
     print(f"PD_MAPPER_FUNCTIONAL status={status} reason={reason} {details}".rstrip())
 
 
-def load_registry(list_file: Path) -> Dict[str, Set[Tuple[str, int]]]:
-    """Return registry service names mapped to their expected domain tuples."""
+def load_registry(list_file: Path) -> Tuple[Dict[str, Set[Tuple[str, int]]], int]:
+    """Return registry services mapped to their domain tuples, and the number
+    of .xz registries left unread because Python has no lzma."""
     services: Dict[str, Set[Tuple[str, int]]] = {}
+    unread = 0
     for raw_path in list_file.read_text(encoding="utf-8").splitlines():
         if not raw_path:
             continue
         path = Path(raw_path)
-        opener = lzma.open if path.name.endswith(".xz") else open
+        opener = open
+        if path.name.endswith(".xz"):
+            if lzma is None:
+                unread += 1
+                continue
+            opener = lzma.open
         with opener(path, "rt", encoding="utf-8") as stream:
             root = json.load(stream)
         domain_data = root["sr_domain"]
@@ -45,7 +56,7 @@ def load_registry(list_file: Path) -> Dict[str, Set[Tuple[str, int]]]:
         for entry in root["sr_service"]:
             service = f'{entry["provider"]}/{entry["service"]}'
             services.setdefault(service, set()).add((domain, instance))
-    return services
+    return services, unread
 
 
 def parse_tlvs(payload: bytes) -> Dict[int, bytes]:
@@ -206,7 +217,7 @@ def main() -> int:
     family = getattr(socket, "AF_QIPCRTR", 42)
 
     try:
-        services = load_registry(args.registry_list)
+        services, unread = load_registry(args.registry_list)
     except (OSError, EOFError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
         emit("FAIL", "registry-read-or-parse", message=repr(str(error)))
         return 1
@@ -230,6 +241,7 @@ def main() -> int:
         "PD_MAPPER_SELECTION"
         f" source={service_source} available_services={len(services)}"
         f" candidates={len(candidates)} omitted={omitted_candidates}"
+        f" unread_registries={unread}"
         f" registry_list={args.registry_list}"
     )
     endpoint = (args.node, args.port)
@@ -326,6 +338,8 @@ def main() -> int:
                 state = "matched"
             elif (domain, instance) in expected:
                 state = "missing"
+            elif unread:
+                state = "unverified"
             else:
                 state = "unexpected"
             report.write(f"{state}\t{domain}\t{instance}\n")
@@ -344,7 +358,21 @@ def main() -> int:
         f" sha256={hashlib.sha256(response_data).hexdigest()}"
         f" preview_hex={preview(response_data)}"
     )
-    if expected is not None and observed != expected:
+    # An unread registry may add domains to the service: then only the
+    # readable registries' domains can be required.
+    if expected is not None and unread and not expected <= observed:
+        emit(
+            "FAIL",
+            "readable-registry-domain-missing",
+            service=service,
+            service_source=service_source,
+            expected_domains=len(expected),
+            observed_domains=len(observed),
+            unread_registries=unread,
+            report=args.report_file,
+        )
+        return 1
+    if expected is not None and not unread and observed != expected:
         emit(
             "FAIL",
             "domain-set-mismatch",
@@ -356,6 +384,12 @@ def main() -> int:
         )
         return 1
 
+    if expected is None:
+        comparison = "nonempty-structural"
+    elif unread:
+        comparison = "readable-registry-subset"
+    else:
+        comparison = "exact-registry"
     emit(
         "PASS",
         "domain-list-verified",
@@ -364,7 +398,7 @@ def main() -> int:
         node=args.node,
         port=args.port,
         domains=len(observed),
-        comparison="exact-registry" if expected is not None else "nonempty-structural",
+        comparison=comparison,
         report=args.report_file,
     )
     return 0

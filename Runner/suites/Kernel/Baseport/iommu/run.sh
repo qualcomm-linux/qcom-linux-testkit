@@ -38,16 +38,22 @@ log_info "----------------------------------------------------------------------
 log_info "-------------------Starting $TESTNAME Testcase----------------------------"
 log_info "=== Test Initialization ==="
 
-check_runtime_behavior() {
-    if dmesg | grep -i -q "msm_iommu.*enabled"; then
-        log_info "Runtime logs show Qualcomm MSM IOMMU is active"
-    elif dmesg | grep -i -q "iommu.*enabled"; then
-        log_info "Runtime logs show IOMMU is active"
-    else
-        log_fail "No runtime indication of IOMMU being active"
+check_iommu_bound() {
+    bound=""
+    for unit in /sys/class/iommu/*; do
+        [ -e "$unit/device/driver" ] || continue
+        log_info "IOMMU ${unit##*/} bound to $(basename "$(readlink -f "$unit/device/driver")")"
+        bound=1
+    done
+    if [ -z "$bound" ]; then
+        log_fail "No bound IOMMU in /sys/class/iommu"
         return 1
     fi
-    return 0
+    for group in /sys/kernel/iommu_groups/*; do
+        [ -e "$group" ] && return 0
+    done
+    log_fail "No IOMMU groups in /sys/kernel/iommu_groups"
+    return 1
 }
 
 pass=true
@@ -59,14 +65,6 @@ check_kernel_config "$CONFIGS" || {
     echo "$TESTNAME FAIL" > "$res_file"
     exit 1
 }
-LOADED_MODULES="msm_iommu arm_smmu"
-check_driver_loaded "$LOADED_MODULES" || {
-    log_fail "Failed to load required driver modules"
-    log_info "Writing to file $res_file"
-    echo "$TESTNAME FAIL" > "$res_file"
-    exit 1
-}
-
 DT_NODES="/proc/device-tree/soc@0/iommu@15000000 /proc/device-tree/soc/iommu@15000000"
 check_dt_nodes "$DT_NODES" || {
     log_fail "Device tree validation failed."
@@ -75,7 +73,7 @@ check_dt_nodes "$DT_NODES" || {
     exit 1
 }
 
-check_runtime_behavior || pass=false
+check_iommu_bound || pass=false
 
 if $pass; then
     log_pass "$TESTNAME : Test Passed"

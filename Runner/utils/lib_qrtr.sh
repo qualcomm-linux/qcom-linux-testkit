@@ -580,7 +580,8 @@ pd_mapper_capture_registry_files() {
 
 # pd_mapper_validate_registry_files <list-file> <report-file> [timeout]
 # Uses image-provided Python when available to parse plain or xz-compressed
-# service-registry JSON files. Missing Python leaves the files informational.
+# service-registry JSON files. Missing Python leaves the files informational;
+# a .xz file is reported not-validated, and not counted, without Python lzma.
 # Inputs: registry list, report destination, and positive per-file timeout.
 # Output: no stdout. Returns: 0 when no invalid files are found, 1 otherwise,
 # or 3 for invalid input. Exports PD_MAPPER_REGISTRY_* counters and validator.
@@ -610,10 +611,16 @@ pd_mapper_validate_registry_files() {
             continue
         fi
 
-        if run_with_timeout "$pmvrf_timeout" python3 -c '
-import json, lzma, pathlib, sys
+        run_with_timeout "$pmvrf_timeout" python3 -c '
+import json, pathlib, sys
 path = pathlib.Path(sys.argv[1])
-opener = lzma.open if path.name.endswith(".xz") else open
+opener = open
+if path.name.endswith(".xz"):
+    try:
+        import lzma
+    except ImportError:
+        sys.exit(3)
+    opener = lzma.open
 with opener(path, "rt", encoding="utf-8") as stream:
     root = json.load(stream)
 if not isinstance(root, dict):
@@ -634,9 +641,13 @@ for entry in services:
     for key in ("provider", "service"):
         if not isinstance(entry.get(key), str) or not entry[key]:
             raise ValueError("sr_service.%s is missing or invalid" % key)
-' "$pmvrf_file" >/dev/null 2>&1; then
+' "$pmvrf_file" >/dev/null 2>&1
+        pmvrf_rc=$?
+        if [ "$pmvrf_rc" -eq 0 ]; then
             PD_MAPPER_REGISTRY_VALIDATED_COUNT=$((PD_MAPPER_REGISTRY_VALIDATED_COUNT + 1))
             printf '%s\tvalid\n' "$pmvrf_file" >>"$pmvrf_report_file"
+        elif [ "$pmvrf_rc" -eq 3 ]; then
+            printf '%s\tnot-validated\n' "$pmvrf_file" >>"$pmvrf_report_file"
         else
             PD_MAPPER_REGISTRY_INVALID_COUNT=$((PD_MAPPER_REGISTRY_INVALID_COUNT + 1))
             printf '%s\tinvalid\n' "$pmvrf_file" >>"$pmvrf_report_file"

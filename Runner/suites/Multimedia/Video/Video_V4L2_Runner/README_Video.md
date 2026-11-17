@@ -153,6 +153,29 @@ Format: `platform|mode|codec|control|value` (one row per line, pipe-separated).
 
 ---
 
+## Output verification
+
+Without a check on its output, a case passes whenever `iris_v4l2_test`
+exits cleanly; that stays the default (`VIDEO_VERIFY=off`) so existing jobs
+keep their verdicts. With `VIDEO_VERIFY=on` the runner points each config's
+`Outputpath` at `logs_*/<case>.out.*` and checks it after a clean exit, using
+`ffmpeg` (or `VIDEO_FFMPEG`) as the reference decoder:
+
+- decode (NV12): per-frame md5 equal to an FFmpeg software decode of
+  `InputPath`, same frame count (`<case>.ref.framemd5`, `<case>.out.framemd5`);
+- encode: the stream decodes in FFmpeg to one frame per input frame, with an
+  average luma PSNR against the NV12 input of at least `VIDEO_MIN_PSNR`
+  (default 25 dB; `<case>.psnr.log`).
+
+A mismatch fails the case (`VALIDATION=FAIL reason=output-mismatch`) whatever
+`--repeat-policy` says, and is neither repeated nor retried; its log and
+output stay in the log dir, a verified output is deleted.
+Without `ffmpeg` the suite SKIPs; a case SKIPs when its output cannot be
+compared: a format other than NV12 (UBWC `QC08C`, `QC10C`, or `P010`), a
+config without exactly one `Outputpath` (one test case), an FFmpeg without
+the stream's decoder.
+Each FFmpeg run is bounded by `VIDEO_VERIFY_TIMEOUT` (default 600 s).
+
 ## Stability waits, retries & timeouts (defaults & overrides)
 
 These are **environment variables** (not user‑visible CLI flags) so your LAVA job YAML can stay minimal. All are **optional**—defaults are sane.

@@ -25,6 +25,10 @@ params:
   VIDEO_CLIP_URL: ""
   VIDEO_CLIP_PATH: ""   # dir/file/archive (tar/tar.gz/tar.xz/xz)
   LAVA_TESTCASE_ID: "Video_Encode_Decode"
+  # output check against an FFmpeg software decode (needs ffmpeg and,
+  # for decodes, checksumsink): off (default) | on; VIDEO_MIN_PSNR for encodes
+  VIDEO_VERIFY: "off"
+  VIDEO_MIN_PSNR: "25"
 
 run:
   steps:
@@ -33,5 +37,6 @@ run:
     - VIDEO_SHARED_ENCODE_DIR="${REPO_PATH%%/tests/*}/shared/video-encode-decode"
     - export VIDEO_TEST_MODE VIDEO_TEST_TYPE VIDEO_CODECS VIDEO_RESOLUTIONS VIDEO_DURATION VIDEO_FRAMERATE
     - export VIDEO_STACK VIDEO_GST_DEBUG VIDEO_CLIP_URL VIDEO_CLIP_PATH VIDEO_SHARED_ENCODE_DIR
+    - export VIDEO_VERIFY VIDEO_MIN_PSNR
     - ./run.sh --mode "${VIDEO_TEST_MODE}" --test-type "${VIDEO_TEST_TYPE}" --codecs "${VIDEO_CODECS}" --resolutions "${VIDEO_RESOLUTIONS}" --duration "${VIDEO_DURATION}" --framerate "${VIDEO_FRAMERATE}" --stack "${VIDEO_STACK}" --gst-debug "${VIDEO_GST_DEBUG}" --clip-url "${VIDEO_CLIP_URL}" --clip-path "${VIDEO_CLIP_PATH}" --lava-testcase-id "${LAVA_TESTCASE_ID}" || true
     - $REPO_PATH/Runner/utils/send-to-lava.sh Video_Encode_Decode.res

@@ -406,6 +406,9 @@ ENVIRONMENT VARIABLES:
   VIDEO_GST_DEBUG       Same as --gst-debug
   VIDEO_CLIP_URL        Same as --clip-url
   VIDEO_CLIP_PATH       Same as --clip-path (directory only)
+  VIDEO_VERIFY          off (default) | on: check outputs against an
+                        FFmpeg software decode (SKIP without ffmpeg)
+  VIDEO_MIN_PSNR        Minimum encode luma PSNR in dB (default: 25)
   GST_DEBUG_LEVEL       Alternative to VIDEO_GST_DEBUG
   RUNTIMESEC            Alternative to VIDEO_DURATION
 
@@ -549,6 +552,60 @@ if [ -n "$clipPath" ]; then
   fi
 fi
 
+# Output checks: lib_video.sh's FFmpeg helpers and checksumsink.
+VIDEO_VERIFY="${VIDEO_VERIFY:-off}"
+verify=0
+if ! command -v video_verify_settings_valid >/dev/null 2>&1; then
+  if [ "$VIDEO_VERIFY" != "off" ]; then
+    log_skip "Output verification needs lib_video.sh (or VIDEO_VERIFY=off)"
+    echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
+    exit 0
+  fi
+elif ! video_verify_settings_valid; then
+  log_warn "Invalid VIDEO_VERIFY '$VIDEO_VERIFY' (allowed: on, off), VIDEO_MIN_PSNR '$VIDEO_MIN_PSNR' or VIDEO_VERIFY_TIMEOUT '$VIDEO_VERIFY_TIMEOUT'"
+  echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
+  exit 0
+elif [ "$VIDEO_VERIFY" = "on" ]; then
+  if ! command -v "$VIDEO_FFMPEG" >/dev/null 2>&1; then
+    log_skip "Output verification needs $VIDEO_FFMPEG: install FFmpeg, or set VIDEO_VERIFY=off"
+    echo "$RESULT_TESTNAME SKIP" >"$RES_FILE"
+    exit 0
+  fi
+  verify=1
+fi
+
+# verify_case_ok <testname> <codec> <width> <height> [decode]: with
+# verification on, 0 when this case's output can be checked. Otherwise it
+# counts the case as SKIP (or FAIL for a wedged checksumsink probe) and
+# returns 1.
+verify_case_ok() {
+  [ "$verify" -eq 1 ] || return 0
+  vc_dec=$(gstreamer_ffmpeg_codec "$2")
+  if ! video_ffmpeg_has_decoder "$vc_dec"; then
+    log_skip "$1: SKIP (output check: $VIDEO_FFMPEG has no $vc_dec decoder)"
+    skip_count=$((skip_count + 1))
+    return 1
+  fi
+  if ! gstreamer_verify_size_ok "$3" "$4"; then
+    log_skip "$1: SKIP (output check needs a width divisible by 8 and an even height)"
+    skip_count=$((skip_count + 1))
+    return 1
+  fi
+  [ -n "${5:-}" ] || return 0
+  has_element checksumsink
+  vc_rc=$?
+  if gstreamer_probe_unhealthy "$vc_rc"; then
+    log_fail "$1: FAIL (checksumsink unusable: $(gstreamer_probe_reason "$vc_rc"))"
+    fail_count=$((fail_count + 1))
+    return 1
+  elif [ "$vc_rc" -ne 0 ]; then
+    log_skip "$1: SKIP (output check needs the checksumsink element, gst-plugins-bad)"
+    skip_count=$((skip_count + 1))
+    return 1
+  fi
+  return 0
+}
+
 log_info "Checking dependencies: gst-launch-1.0 gst-inspect-1.0 awk grep head sed tr stat find curl tar"
 log_info "Test: $TESTNAME"
 log_info "Mode: $testMode"
@@ -556,6 +613,7 @@ log_info "Codecs: $codecList"
 log_info "Resolutions: $resolutionList"
 log_info "Duration: ${duration}s, Framerate: ${framerate}fps"
 log_info "GST debug: GST_DEBUG=$gstDebugLevel"
+log_info "Output verification: VIDEO_VERIFY=$VIDEO_VERIFY"
 log_info "Logs: $OUTDIR"
 log_info "Encoded artifact dir: $ENCODED_DIR"
 log_info "VP9 clip URL: $clipUrl"
@@ -612,6 +670,8 @@ run_encode_test() {
     skip_count=$((skip_count + 1))
     return 1
   fi
+
+  verify_case_ok "$testname" "$codec" "$width" "$height" || return 1
 
   ext=$(gstreamer_container_ext_for_codec "$codec")
   output_file="$ENCODED_DIR/${testname}.${ext}"
@@ -670,6 +730,12 @@ run_encode_test() {
     log_info "Encoded file: $output_file (size: $file_size bytes)"
 
     if [ "$file_size" -gt 1000 ]; then
+      if [ "$verify" -eq 1 ] && ! gstreamer_verify_encode "$testname" "$output_file" "$width" "$height" \
+           "$((duration * framerate))" "$framerate" "$OUTDIR"; then
+        log_fail "$testname: FAIL (encoded output does not match the source)"
+        fail_count=$((fail_count + 1))
+        return 1
+      fi
       log_pass "$testname: PASS"
       pass_count=$((pass_count + 1))
       return 0
@@ -731,8 +797,22 @@ run_decode_test() {
   test_log="$OUTDIR/${testname}.log"
   : >"$test_log"
 
-  # Build pipeline using library function
-  pipeline=$(gstreamer_build_v4l2_decode_pipeline "$codec" "$input_file" "$detected_stack")
+  # With verification, checksumsink logs one md5 per decoded frame.
+  dec_sink=""
+  bound=$((duration + 10))
+  if [ "$verify" -eq 1 ]; then
+    # The VP9 clip is 640x480 whatever resolution was asked for.
+    if [ "$codec" = "vp9" ]; then
+      dec_wh="640 480"
+    else
+      dec_wh=$(gstreamer_resolution_to_wh "$resolution")
+    fi
+    verify_case_ok "$testname" "$codec" "${dec_wh%% *}" "${dec_wh##* }" decode || return 1
+    dec_sink="videoconvert ! video/x-raw,format=I420 ! checksumsink hash=md5"
+    # The software I420 conversion and hashing run inside the bound.
+    bound=$((2 * duration + 10))
+  fi
+  pipeline=$(gstreamer_build_v4l2_decode_pipeline "$codec" "$input_file" "$detected_stack" "$dec_sink")
 
   if [ -z "$pipeline" ]; then
     log_fail "$testname: FAIL (could not build pipeline)"
@@ -743,7 +823,7 @@ run_decode_test() {
   log_info "Pipeline: $pipeline"
 
   # Run decoding
-  if gstreamer_run_gstlaunch_timeout "$((duration + 10))" "$pipeline" >>"$test_log" 2>&1; then
+  if gstreamer_run_gstlaunch_timeout "$bound" "$pipeline" >>"$test_log" 2>&1; then
     gstRc=0
   else
     gstRc=$?
@@ -760,6 +840,11 @@ run_decode_test() {
 
   # Check for successful completion
   if [ "$gstRc" -eq 0 ]; then
+    if [ "$verify" -eq 1 ] && ! gstreamer_verify_decode "$testname" "$input_file" "$test_log" "$OUTDIR"; then
+      log_fail "$testname: FAIL (decoded frames differ from the software decode)"
+      fail_count=$((fail_count + 1))
+      return 1
+    fi
     log_pass "$testname: PASS"
     pass_count=$((pass_count + 1))
     return 0
