@@ -15,7 +15,7 @@ import shlex
 import subprocess
 import sys
 import tarfile
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 import zipfile
 
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
@@ -28,7 +28,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(1, str(ROOT / "scripts"))
 
 import generate_test_inventory_html as inventory
-from lava_pr_validation import API, GITHUB, REPOSITORY, artifact_token_name, digest, github, previous_request, save_json
+from lava_pr_validation import API, GITHUB, REPOSITORY, artifact_token_name, digest, github, lava, previous_request, save_json
 
 
 def git(directory, *arguments):
@@ -80,22 +80,54 @@ def snapshot(folder, pr, requested):
     return destination, sha, base, changed, repository
 
 
-def check_download(url):
-    """Probe exact objects when runner credentials exist, otherwise defer to LAVA."""
+def check_download(url, access=None):
+    """Check artifact access before allocating hardware, without retaining secrets."""
     parsed = urlsplit(url)
-    if parsed.scheme != "https" or parsed.hostname != "qli-prod-artifacts.qualcomm.com":
+    public = (parsed.hostname == "github.com" and
+              parsed.path.startswith(f"/{REPOSITORY}/releases/download/"))
+    if (parsed.scheme != "https" or parsed.username or parsed.password or
+            parsed.port not in {None, 443} or parsed.fragment or
+            (parsed.hostname != "qli-prod-artifacts.qualcomm.com" and not public)):
         raise ValueError("Artifact URL is outside the configured HTTPS artifact service")
-    token = os.environ.get("QLI_S3_TOKEN") or os.environ.get("QLI_ARTIFACT_TOKEN", "")
-    if not token:
-        print(f"Artifact access awaits authenticated LAVA download: {parsed.path}")
-        return
-    headers = {"QLIAuthorization": token}
-    with requests.get(url, headers=headers, stream=True, allow_redirects=False,
-                      timeout=(15, 60)) as response:
-        if response.status_code not in (200, 206):
-            raise ValueError(f"Required artifact unavailable: {parsed.path}, HTTP {response.status_code}")
-        if "text/html" in response.headers.get("Content-Type", ""):
-            raise ValueError(f"Artifact service returned an HTML page: {parsed.path}")
+    access = {} if access is None else access
+    headers = {}
+    if not public:
+        if "qli_token" not in access:
+            token = os.environ.get("QLI_S3_TOKEN") or os.environ.get("QLI_ARTIFACT_TOKEN", "")
+            if not token:
+                # This endpoint returns only the authenticated user's token.
+                # Use it in memory for preflight, never in a manifest or job YAML.
+                record = lava().get(f"/api/v0.2/remote-artifact-tokens/{artifact_token_name()}/")
+                token = record.get("token")
+            if not isinstance(token, str) or not token or any(char in token for char in "\r\n"):
+                raise ValueError("QLI artifact authentication is unavailable")
+            access["qli_token"] = token
+        headers["QLIAuthorization"] = access["qli_token"]
+    for redirect in range(4):
+        try:
+            with requests.get(url, headers=headers, stream=True, allow_redirects=False,
+                              timeout=(15, 60)) as response:
+                if public and response.status_code in {301, 302, 303, 307, 308}:
+                    url = urljoin(url, response.headers.get("Location", ""))
+                    destination = urlsplit(url)
+                    if (destination.scheme != "https" or destination.username or destination.password or
+                            destination.port not in {None, 443} or destination.hostname not in
+                            {"github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com"}):
+                        raise ValueError("Audio release redirect left the public GitHub artifact hosts")
+                    continue
+                if response.status_code not in (200, 206):
+                    if response.status_code in (401, 403):
+                        raise RuntimeError(f"Artifact access denied: {parsed.path}, HTTP {response.status_code}")
+                    raise ValueError(f"Required artifact unavailable: {parsed.path}, HTTP {response.status_code}")
+                if "text/html" in response.headers.get("Content-Type", "").lower():
+                    raise ValueError(f"Artifact service returned an HTML page: {parsed.path}")
+                if not next(response.iter_content(chunk_size=1), b""):
+                    raise ValueError(f"Artifact service returned an empty file: {parsed.path}")
+                print(f"Artifact access verified: {parsed.path}")
+                return
+        except requests.RequestException:
+            raise RuntimeError(f"Artifact access check failed for {parsed.path}, connection or TLS error") from None
+    raise ValueError(f"Too many redirects checking artifact: {parsed.path}")
 
 
 def select_targets(gh, config, distro, requested):
@@ -145,7 +177,7 @@ def validate_target_templates(plans, targets, config):
         raise ValueError("Pre-merge targets cannot be silently omitted. " + ", ".join(gaps))
 
 
-def select_build(gh, config, targets, distro, override, image_name):
+def select_build(gh, config, targets, distro, override, image_name, access=None):
     repository = config["artifact_repository"]
     endpoint = f"/repos/{repository}/actions"
     if override:
@@ -191,7 +223,7 @@ def select_build(gh, config, targets, distro, override, image_name):
             continue
         # Missing published images are an error, not a silent downgrade to an older build.
         for url in urls.values():
-            check_download(url)
+            check_download(url, access)
         return dict(id=run["id"], url=run["html_url"], sha=run["head_sha"],
                     prefix=prefixes.pop(), images=urls)
     raise ValueError("No recent successful published build covers all targets, supply an explicit run ID. " +
@@ -493,13 +525,20 @@ def prepare(folder):
         if suite not in owners:
             raise ValueError(f"Unknown suite in selections: {suite}")
         affected[suite].add("explicit maintainer selection")
+    access = {}
+    if previous and not all(previous.get(key) for key in ("audio_url", "audio_sha256")):
+        raise ValueError("The earlier request did not pin its audio asset, use a new manual validation run")
+    audio_url = previous["audio_url"] if previous else config["audio_url"]
+    audio_sha256 = previous["audio_sha256"] if previous else config["audio_sha256"]
+    if not re.fullmatch(r"[0-9a-f]{64}", audio_sha256):
+        raise ValueError("Configure the published AudioClips SHA256")
+    check_download(audio_url, access)
     if previous:
         build = previous["build"]
         for url in build["images"].values():
-            check_download(url)
+            check_download(url, access)
     else:
-        build = select_build(producer, config, targets, distro, os.environ.get("NIGHTLY_RUN_ID", ""), image_name)
-    check_download(config["audio_url"])
+        build = select_build(producer, config, targets, distro, os.environ.get("NIGHTLY_RUN_ID", ""), image_name, access)
     source_url = f"https://github.com/{repository}/archive/{sha}.tar.gz"
     manifest = dict(pr=number, sha=sha, merge_base=base, repository=repository,
                     distro=distro, image_type=image_type, build=build, run_id=run_id,
@@ -507,10 +546,9 @@ def prepare(folder):
                     target_matrix=target_matrix,
                     plans_revision=config["plans_revision"], jobs=[], selections=[], exclusions=[],
                     baseline_helpers=[],
+                    audio_url=audio_url, audio_sha256=audio_sha256,
                     artifact_token_name=token_name,
-                    artifact_verification=("controller" if (os.environ.get("QLI_S3_TOKEN") or
-                                                             os.environ.get("QLI_ARTIFACT_TOKEN"))
-                                           else "awaiting-lava-download"),
+                    artifact_verification="controller",
                     submit_requested=os.environ.get("SUBMIT_REQUEST", "false").lower() == "true",
                     request_minutes=config["request_minutes"], max_active_jobs=config["max_active_jobs"])
     (folder / "jobs").mkdir()
@@ -521,7 +559,7 @@ def prepare(folder):
                        ROOTFS_URL=build["images"][target], DEVICE_TYPE=target, overlays=[],
                        IMAGE_FILE_NAME=f"{image_name}-{target}.rootfs.qcomflash.tar.gz",
                        AUTO_LOGIN_PASSWORD_PROMPT="Password", AUTO_LOGIN_PASSWORD="oelinux123",
-                       AUDIO_CLIPS_BASE_DIR="/home/AudioClips/", AUDIO_CLIPS_URL=config["audio_url"],
+                       AUDIO_CLIPS_BASE_DIR="/home/AudioClips/", AUDIO_CLIPS_URL=audio_url,
                        AUTH_HEADER_NAME="QLIAuthorization", AUTH_HEADER_TOKEN=token_name,
                        DOCKER_IMAGE_POSTPROCESS=config["postprocess_image"],
                        target_downloads_timeout=40, target_deploy_timeout=20, TARGET_BOOT_TIMEOUT=10,
@@ -565,8 +603,12 @@ def prepare(folder):
                         'echo "ROOTFS_IMAGE=rootfs.img" >> $IMAGE_PATH/flash.settings',
                         f'echo "PORT={config["flasher_port"]}" >> $IMAGE_PATH/flash.settings'])
                 if "audio" in deploy.get("images", {}):
-                    deploy["images"]["audio"]["headers"] = {
-                        "QLIAuthorization": token_name}
+                    audio = deploy["images"]["audio"]
+                    audio["sha256sum"] = audio_sha256
+                    if urlsplit(audio_url).hostname == "qli-prod-artifacts.qualcomm.com":
+                        audio["headers"] = {"QLIAuthorization": token_name}
+                    else:
+                        audio.pop("headers", None)
             definitions = entries(job)
             if any(item.get("repository") != source_url for item in definitions):
                 raise ValueError("All test definitions must use the exact PR archive")
@@ -576,7 +618,7 @@ def prepare(folder):
                 definition.update({"from": "git", "repository": f"https://github.com/{repository}.git",
                                    "revision": sha})
                 definition.pop("strip-components", None)
-            key = "testkit-" + digest(dict(sha=sha, repository=repository, build=build["prefix"],
+            key = "testkit-" + digest(dict(run_id=run_id, sha=sha, repository=repository, build=build["prefix"],
                                           distro=distro, target=target, group=group, job=job))[:32]
             job["job_name"] = key
             job.setdefault("metadata", {}).update({"testkit-request-key": key,
