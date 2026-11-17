@@ -85,7 +85,9 @@ jobs:
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: lava-context-${{ github.run_id }}-${{ github.run_attempt }}
-          path: lava-output/context.json
+          path: |
+            lava-output/context.json
+            lava-output/controller-errors.json
           if-no-files-found: error
           retention-days: 30
 
@@ -165,6 +167,13 @@ jobs:
           SUBMIT_REQUEST: ${{ inputs.submit }}
         run: python .github/workflows/lava_pr_validation.py prepare
 
+      - name: Validate preparation-only job definitions
+        if: ${{ !inputs.submit }}
+        env:
+          LAVA_OSS_USER: ${{ secrets.LAVA_OSS_USER }}
+          LAVA_OSS_TOKEN: ${{ secrets.LAVA_OSS_TOKEN }}
+        run: python .github/workflows/lava_pr_validation.py validate
+
       # Publish before submitting. The independent finalizer can recover IDs
       # from LAVA metadata even if this runner disappears during a POST.
       - name: Save immutable request
@@ -203,6 +212,10 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
+      - name: Remove temporary source snapshots
+        if: always()
+        run: python .github/workflows/lava_pr_validation.py cleanup
+
       - name: Save controller progress
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
@@ -211,12 +224,9 @@ jobs:
           path: |
             lava-output/execution.json
             lava-output/target-matrix.json
+            lava-output/controller-errors.json
           if-no-files-found: ignore
           retention-days: 30
-
-      - name: Remove temporary source snapshots
-        if: always()
-        run: python .github/workflows/lava_pr_validation.py cleanup
 
       - name: Report controller status
         if: always()
