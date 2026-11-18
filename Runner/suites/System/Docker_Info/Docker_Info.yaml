@@ -1,0 +1,14 @@
+metadata:
+  name: docker_info
+  format: "Lava-Test Test Definition 1.0"
+  description: "Check Docker daemon information and required configuration"
+  maintainer:
+    - "Qualcomm Linux Testkit"
+params: {}
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/System/Docker_Info
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh docker_info.res
