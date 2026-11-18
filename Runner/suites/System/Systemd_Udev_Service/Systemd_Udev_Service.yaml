@@ -1,0 +1,15 @@
+metadata:
+  name: udev_service_info
+  format: Lava-Test Test Definition 1.0
+  description: "Check that systemd-udevd is running on the DUT"
+  maintainer:
+    - "Qualcomm Linux Testkit"
+
+params: {}
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/System/Systemd_Udev_Service
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh Systemd_Udev_Service.res
