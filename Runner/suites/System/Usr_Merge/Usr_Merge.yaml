@@ -1,0 +1,15 @@
+metadata:
+  name: check_usr_dir
+  format: Lava-Test Test Definition 1.0
+  description: "Check /bin, /sbin, and /lib symlinks and their directories under /usr"
+  maintainer:
+    - "Qualcomm Linux Testkit"
+
+params: {}
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/System/Usr_Merge
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh check_usr_dir.res
