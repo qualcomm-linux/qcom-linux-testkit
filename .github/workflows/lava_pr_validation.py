@@ -14,6 +14,7 @@ from pathlib import Path
 import re
 import shutil
 import signal
+import subprocess
 import sys
 import time
 from urllib.parse import urljoin, urlsplit
@@ -23,7 +24,7 @@ import requests
 import yaml
 
 REPOSITORY = "qualcomm-linux/qcom-linux-testkit"
-LAVA = "https://lava-oss.qualcomm.com"
+LAVA = "https://lava.infra.foundries.io"
 GITHUB = "https://api.github.com"
 TERMINAL = {"Finished", "Canceled"}
 
@@ -39,6 +40,39 @@ def save_json(path, data):
 
 def digest(data):
     return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
+
+
+def record_failure(folder, stage, failure):
+    """Retain a sanitized controller error even before a manifest exists."""
+    message = str(failure)
+    if isinstance(failure, subprocess.SubprocessError):
+        message = "Controller subprocess failed or timed out, check the preceding step output"
+    elif isinstance(failure, yaml.YAMLError):
+        message = "Invalid YAML in the selected definitions or templates"
+    for name in ("GH_TOKEN", "META_QCOM_READ_TOKEN", "LAVATOKEN", "LAVA_OSS_TOKEN", "QLI_S3_TOKEN", "QLI_ARTIFACT_TOKEN"):
+        value = os.environ.get(name)
+        if value:
+            message = message.replace(value, "[redacted]")
+    # Signed URLs and URL userinfo must not reach artifacts or PR comments.
+    message = re.sub(r"https?://[^\s<>\"']+", "[URL omitted]", message)
+    message = " ".join(message.split())[:2000]
+    if stage not in {"begin", "start", "preflight", "prepare", "validate", "cleanup"}:
+        return message
+    context_path = folder / "context.json"
+    context = json.loads(context_path.read_text(encoding="utf-8")) if context_path.is_file() else {}
+    if not isinstance(context, dict):
+        raise ValueError("Invalid controller context")
+    saved = dict(run_id=os.environ.get("VALIDATION_RUN_ID", ""),
+                 run_attempt=os.environ.get("GITHUB_RUN_ATTEMPT", "1"),
+                 sha=context.get("sha", os.environ.get("PR_REVISION", "")),
+                 stage=stage, error=message)
+    path = folder / "controller-errors.json"
+    errors = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else []
+    if not isinstance(errors, list):
+        raise ValueError("Invalid controller error evidence")
+    errors.append(saved)
+    save_json(path, errors)
+    return message
 
 
 class API:
@@ -165,7 +199,7 @@ def update_check(gh, context, status, summary, conclusion=None):
 
 
 def begin_request(folder):
-    """Bind the PR SHA before waiting for an OSS runner, without executing PR code."""
+    """Bind the PR SHA before waiting for a runner, without executing PR code."""
     gh = github()
     run_id = os.environ["VALIDATION_RUN_ID"]
     attempt = os.environ["GITHUB_RUN_ATTEMPT"]
@@ -177,6 +211,8 @@ def begin_request(folder):
         raise ValueError("Select an open PR targeting main")
     previous = previous_request(gh, run_id, attempt) or previous_request(
         gh, run_id, attempt, "context", "context.json")
+    if previous and previous.get("lava_url") != LAVA:
+        raise ValueError("The previous attempt used another LAVA instance, start a new workflow run")
     sha = previous["sha"] if previous else os.environ.get("PR_REVISION") or pr["head"]["sha"]
     if not re.fullmatch(r"[0-9a-f]{40}", sha):
         raise ValueError("revision must be a full lowercase commit SHA")
@@ -185,7 +221,7 @@ def begin_request(folder):
     comparison = gh.get(f"/repos/{REPOSITORY}/compare/{sha}...{pr['head']['sha']}")
     if comparison.get("status") not in {"identical", "ahead"}:
         raise ValueError("Requested revision is not an ancestor of the current PR head")
-    context = dict(pr=int(number), sha=sha, run_id=run_id, run_attempt=attempt,
+    context = dict(pr=int(number), sha=sha, run_id=run_id, run_attempt=attempt, lava_url=LAVA,
                    submit_requested=os.environ.get("SUBMIT_REQUEST", "false") == "true")
     save_json(folder / "context.json", context)
     with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
@@ -269,13 +305,13 @@ def resolve_request():
 
 
 def lava():
-    token = os.environ.get("LAVA_OSS_TOKEN", "")
-    user = os.environ.get("LAVA_OSS_USER", "")
-    if not token or not user:
-        raise ValueError("Configure LAVA_OSS_USER and LAVA_OSS_TOKEN for this repository")
+    token = os.environ.get("LAVATOKEN", "")
+    if not token:
+        raise ValueError("Grant this repository access to the Foundries LAVATOKEN secret used by meta-qcom")
     api = API(LAVA, token, "Token")
-    if api.get("/api/v0.2/system/whoami/").get("user") != user:
-        raise ValueError("LAVA_OSS_USER does not match the configured API token owner")
+    api.username = api.get("/api/v0.2/system/whoami/").get("user")
+    if not isinstance(api.username, str) or not api.username or api.username == "AnonymousUser":
+        raise ValueError("Foundries did not identify the configured API token owner")
     return api
 
 
@@ -283,28 +319,28 @@ def artifact_token_name():
     """Validate the non-secret LAVA reference before building any job definitions."""
     name = os.environ.get("LAVA_ARTIFACT_TOKEN_NAME", "")
     if not re.fullmatch(r"[A-Za-z0-9_-]+", name):
-        raise ValueError("Configure LAVA_ARTIFACT_TOKEN_NAME with the registered OSS artifact token name")
+        raise ValueError("Configure FOUNDRIES_ARTIFACT_TOKEN_NAME with the registered Foundries artifact token name")
     return name
 
 
 def preflight():
     """Check org credentials and token registration without submitting jobs."""
     api = lava()
-    print("LAVA authentication succeeded and the configured account matches.")
+    print("Foundries authentication succeeded and the job owner was resolved from the API token.")
     if not os.environ.get("LAVA_ARTIFACT_TOKEN_NAME"):
         # The API can return secret values. Retain and print only validated names.
         names = sorted({row["name"] for row in api.pages("/api/v0.2/remote-artifact-tokens/")
                         if isinstance(row.get("name"), str) and
                         re.fullmatch(r"[A-Za-z0-9_-]+", row["name"])})
         print("Registered LAVA artifact token names: " + (", ".join(names) or "none"))
-        raise ValueError("Set LAVA_ARTIFACT_TOKEN_NAME to the token registered for QLI image downloads")
+        raise ValueError("Set FOUNDRIES_ARTIFACT_TOKEN_NAME to the token registered for QLI image downloads")
     name = artifact_token_name()
     api.request("HEAD", f"/api/v0.2/remote-artifact-tokens/{name}/")
     print("LAVA artifact token is registered. Download permission is verified when fetching artifacts.")
 
 
 def job_details(api, job):
-    """Normalize ownership from OSS's saved definition without executing it."""
+    """Normalize ownership from LAVA's saved definition without executing it."""
     fetched = not isinstance(job, dict)
     if not isinstance(job, dict):
         identifier = int(job)
@@ -360,7 +396,7 @@ def matching_jobs(api, entry, include_active=False, known_id=None):
     for job in candidates:
         if job.get("description") != entry["key"]:
             continue
-        if job.get("submitter") != os.environ["LAVA_OSS_USER"]:
+        if job.get("submitter") != api.username:
             continue
         job = job_details(api, job)
         metadata = job["metadata"]
@@ -407,7 +443,7 @@ def cancel_owned_job(api, job, run_id, wait_seconds=60, run_attempt=None):
     if job["state"] in TERMINAL:
         return job
     job = job_details(api, job)
-    if (job.get("submitter") != os.environ["LAVA_OSS_USER"] or
+    if (job.get("submitter") != api.username or
             str(job["metadata"].get("testkit-workflow-run")) != run_id or
             (run_attempt is not None and
              str(job["metadata"].get("testkit-workflow-attempt", "1")) != run_attempt)):
@@ -457,6 +493,8 @@ def cleanup_workspace(folder):
 
 def validate_jobs(api, folder, manifest):
     """Validate all jobs before spending a single device slot."""
+    if manifest.get("lava_url") != LAVA:
+        raise ValueError("This request belongs to another LAVA instance, start a new workflow run")
     # HEAD confirms registration without fetching the stored credential.
     api.request("HEAD", f"/api/v0.2/remote-artifact-tokens/{manifest['artifact_token_name']}/")
     paths = {definition["path"] for entry in manifest["jobs"] for definition in entry["definitions"]}
@@ -466,20 +504,59 @@ def validate_jobs(api, folder, manifest):
         }).json()
         if result.get("message") != "Test definition valid.":
             raise ValueError(f"Invalid test definition {path}: {result.get('message')}")
+    # Read the authenticated inventory once. Tags must all match the same
+    # device, a global tag definition alone does not make a job schedulable.
+    tags = {tag["name"]: tag["id"] for tag in api.pages("/api/v0.2/tags/", limit=100)}
+    devices = list(api.pages("/api/v0.2/devices/", limit=100))
+    workers = {worker["hostname"]: worker for worker in api.pages("/api/v0.2/workers/", limit=100)}
+    scheduling, gaps = [], []
     for entry in manifest["jobs"]:
         definition = (folder / entry["file"]).read_text(encoding="utf-8")
-        if digest(yaml.safe_load(definition)) != entry["definition_hash"]:
+        job = yaml.safe_load(definition)
+        if digest(job) != entry["definition_hash"] or job.get("device_type") != entry["device_type"]:
             raise ValueError("Prepared job changed after its manifest was written")
         result = api.request("POST", "/api/v0.2/jobs/validate/", json={
             "definition": definition, "strict": True,
         }).json()
         if result.get("message") != "Job valid.":
             raise ValueError(f"Invalid job {entry['file']}: {result.get('message')}")
-        api.get(f"/api/v0.2/devicetypes/{entry['device_type']}/")
+        required = set(job.get("tags", []))
+        unknown = required - tags.keys()
+        candidates = [device for device in devices
+                      if device["device_type"] == entry["device_type"] and
+                      (not job.get("device") or device["hostname"] == job["device"]) and
+                      (not job.get("worker") or device.get("worker_host") == job["worker"]) and
+                      not unknown and {tags[tag] for tag in required}.issubset(device.get("tags", []))]
+        eligible = []
+        for device in candidates:
+            worker = workers.get(device.get("worker_host"), {})
+            # Busy devices can serve queued jobs. Do not require an idle device
+            # or treat unknown health as failed when LAVA permits health checks.
+            if (device.get("health") in {"Good", "Unknown"} and
+                    worker.get("state") == "Online" and worker.get("health") == "Active"):
+                eligible.append(device["hostname"])
+        reason = ""
+        if unknown:
+            reason = "Unregistered required tags: " + ", ".join(sorted(unknown))
+        elif not candidates:
+            reason = "No visible device matches the type, all required tags and device/worker constraints"
+        elif not eligible:
+            reason = "Matching devices are unhealthy or their workers are unavailable"
+        scheduling.append(dict(file=entry["file"], device_type=entry["device_type"],
+                               tags=sorted(required), eligible=eligible, error=reason))
+        if reason:
+            gaps.append(f"{entry['target']}/{entry['group']}: {reason}")
+    save_json(folder / "scheduling.json", dict(lava_url=LAVA, run_id=manifest["run_id"], jobs=scheduling))
+    if gaps:
+        raise ValueError("LAVA scheduling preflight failed. " + ". ".join(gaps))
+    print(f"Validated {len(scheduling)} jobs against the visible device and worker inventory. "
+          "LAVA still controls permissions, availability and queue allocation.")
 
 
 def run_jobs(folder, manifest):
     """Hold slots until LAVA terminates, including time spent queued."""
+    if manifest.get("lava_url") != LAVA:
+        raise ValueError("This request belongs to another LAVA instance, start a new workflow run")
     state = execution_state(folder, manifest)
     state.update(started=True, error="")
     state_path = folder / "execution.json"
@@ -527,9 +604,9 @@ def run_jobs(folder, manifest):
                     # A previous workflow's cleanup may still be running.
                     outstanding = [job_details(api, item) for item in api.pages(
                         "/api/v0.2/jobs/", end_time__isnull="true", description__startswith="testkit-",
-                        submitter__username=os.environ["LAVA_OSS_USER"], limit=100)
+                        submitter__username=api.username, limit=100)
                         if item.get("state") not in TERMINAL and
-                        item.get("submitter") == os.environ["LAVA_OSS_USER"] and
+                        item.get("submitter") == api.username and
                         str(item.get("description", "")).startswith("testkit-")]
                     if len(outstanding) >= manifest["max_active_jobs"]:
                         break
@@ -657,7 +734,7 @@ def collect_results(api, job, entry):
     return rows, observed
 
 
-def result_matrix(rows, targets, by_group=True):
+def result_matrix(rows, targets, by_group=True, lava_url=LAVA):
     """Render the same linked target matrix for job groups and configurations."""
     def cell(value):
         return str(value).replace("|", "&#124;").replace("\n", " ").replace("\r", " ").replace("<", "&lt;")
@@ -673,6 +750,8 @@ def result_matrix(rows, targets, by_group=True):
         if row["job"]:
             value["jobs"].add(row["job"])
     title = "Test group" if by_group else "Test/configuration"
+    if not grouped:
+        return ["No functional test results are available."]
     lines = ["| " + " | ".join([title] + [cell(target) for target in targets]) + " |",
              "|" + "---|" * (len(targets) + 1)]
     for label in sorted({label for label, target in grouped}):
@@ -690,17 +769,19 @@ def result_matrix(rows, targets, by_group=True):
                           set(value["errors"]) == {"No executed PASS/FAIL validation"} else "ERROR")
             else:
                 status = "PASS" if counts["pass"] else "SKIP" if counts["skip"] else "NOT RUN"
-            links = " ".join(f"[{status} #{job}]({LAVA}/scheduler/job/{job})" for job in sorted(value["jobs"]))
+            links = " ".join(f"[{status} #{job}]({lava_url}/scheduler/job/{job})" for job in sorted(value["jobs"]))
             values.append(f"{links or status} {counts['pass']}/{counts['fail']}/{counts['skip']}")
         lines.append("| " + " | ".join(values) + " |")
     return lines
 
 
 def collect_jobs(folder, manifest):
-    """Reconcile owned jobs on the OSS runner and retain data for hosted reporting."""
+    """Reconcile owned jobs and retain data for hosted reporting."""
     if not manifest["submit_requested"]:
         print("Preparation only, no LAVA jobs or PR results comment requested.")
         return 0
+    if manifest.get("lava_url") != LAVA:
+        raise ValueError("Cannot recover OSS jobs through Foundries, use the original OSS workflow revision")
     rows, evidence = [], []
     cleanup_complete = True
     identity = dict(run_id=manifest["run_id"], run_attempt=str(manifest.get("run_attempt", "1")),
@@ -757,12 +838,27 @@ def collect_jobs(folder, manifest):
 
 
 def finish_jobs(folder, manifest, lifecycle=True):
-    """Publish saved results using GitHub only, even when the OSS runner was lost."""
+    """Publish saved results using GitHub only, even when the runner was lost."""
+    # Pre-migration requests used OSS and did not record their server.
+    lava_url = manifest.get("lava_url", "https://lava-oss.qualcomm.com")
+    if lava_url not in {LAVA, "https://lava-oss.qualcomm.com"}:
+        raise ValueError("Unknown LAVA instance in saved results")
     folder.mkdir(parents=True, exist_ok=True)
     result_path = folder / "results.json"
     rows, evidence = [], []
     cleanup_complete = not manifest.get("jobs")
     state = execution_state(folder, manifest)
+    failure_path = folder / "controller-errors.json"
+    controller_errors = []
+    if failure_path.is_file():
+        controller_errors = json.loads(failure_path.read_text(encoding="utf-8"))
+        if not isinstance(controller_errors, list) or any(
+                not isinstance(error, dict) or error.get("run_id") != manifest["run_id"] or
+                str(error.get("run_attempt")) != str(manifest.get("run_attempt", "1")) or
+                error.get("sha") != manifest["sha"] or not isinstance(error.get("error"), str) or
+                error.get("stage") not in {"begin", "start", "preflight", "prepare", "validate", "cleanup"}
+                for error in controller_errors):
+            raise ValueError("Controller errors do not match this workflow request")
     if result_path.is_file():
         saved = json.loads(result_path.read_text(encoding="utf-8"))
         if (saved.get("run_id") != manifest["run_id"] or saved.get("sha") != manifest["sha"] or
@@ -791,6 +887,9 @@ def finish_jobs(folder, manifest, lifecycle=True):
                                       state["error"] in row["errors"] for row in rows):
         rows.append(dict(target="All", group="Controller", coverage="Workflow", name="Validation controller",
                          counts={}, job=None, errors=[state["error"]]))
+    for error in controller_errors:
+        rows.append(dict(target="All", group="Controller", coverage="Workflow", name=error["stage"],
+                         counts={}, job=None, errors=[f"{error['stage']}: {error['error']}"]))
     outcome = os.environ.get("VALIDATION_RESULT", "")
     if outcome and outcome != "success":
         rows.append(dict(target="All", group="Controller", coverage="Workflow",
@@ -816,6 +915,8 @@ def finish_jobs(folder, manifest, lifecycle=True):
                      f"producer `{manifest['build']['prefix'].rstrip('/').rsplit('/', 1)[-1]}`.")
     if not manifest["submit_requested"]:
         lines[3] = "Result: **Preparation only, no hardware validation requested**"
+    elif not manifest.get("jobs"):
+        lines.append("No hardware jobs were submitted. Validation stopped before a submission request was saved.")
     elif not cleanup_complete:
         lines.append("Cleanup is unconfirmed. Use the LAVA PR results workflow with this run and attempt "
                      "to recover remote jobs and results. No hardware PASS is claimed without evidence.")
@@ -844,10 +945,11 @@ def finish_jobs(folder, manifest, lifecycle=True):
     lines += ["", f"[Workflow run]({workflow_url}) · [Validation request]({request_url})",
               f"PASS: {totals['pass']} | FAIL: {totals['fail']} | SKIP: {totals['skip']}",
               "Counts in each cell are PASS/FAIL/SKIP. SKIP is not completed validation.", ""]
-    lines += result_matrix(rows, targets)
+    lines += result_matrix(rows, targets, lava_url=lava_url)
     controller_errors = [error for row in rows if row["coverage"] == "Workflow" for error in row["errors"]]
     if controller_errors:
-        lines += ["", "Workflow: " + ", ".join(controller_errors)]
+        detail = ", ".join(controller_errors).replace("<", "&lt;").replace("\n", " ").replace("\r", " ")
+        lines += ["", "Workflow: " + detail]
     # Keep infrastructure and collection failures visible, not just ERROR counts.
     diagnostics = []
     for row in rows:
@@ -861,8 +963,9 @@ def finish_jobs(folder, manifest, lifecycle=True):
         lines += ["", "Failure details:"] + diagnostics[:12]
         if len(diagnostics) > 12:
             lines.append("Remaining failure details are in diagnostics.md in the results artifact.")
-    lines += ["", f"[Complete testcase matrix and evidence]({workflow_url}) are in the results artifact. "
-              "The matrix includes baseline tests and PR additions. LAVA setup bookkeeping is excluded."]
+    if manifest.get("jobs"):
+        lines += ["", f"[Complete testcase matrix and evidence]({workflow_url}) are in the results artifact. "
+                  "The matrix includes baseline tests and PR additions. LAVA setup bookkeeping is excluded."]
     case_rows = []
     for row in rows:
         if not row.get("tests") or row["errors"]:
@@ -872,7 +975,7 @@ def finish_jobs(folder, manifest, lifecycle=True):
             case_rows.append(row | {"name": row["name"] + " / " + case["name"],
                                     "counts": {result: 1},
                                     "errors": [] if result in {"pass", "fail", "skip"} else ["Unexpected result status"]})
-    test_lines = result_matrix(case_rows, targets, by_group=False)
+    test_lines = result_matrix(case_rows, targets, by_group=False, lava_url=lava_url)
     (folder / "test-results.md").write_text("\n".join(test_lines) + "\n", encoding="utf-8")
     lines += ["", "<details>", "<summary>Testcase results by target</summary>", ""]
     # Keep both summaries identical within GitHub's comment limit. The artifact
@@ -934,10 +1037,25 @@ def finish_jobs(folder, manifest, lifecycle=True):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["begin", "start", "preflight", "prepare", "run", "resolve",
+    parser.add_argument("command", choices=["begin", "start", "preflight", "prepare", "validate", "run", "resolve",
                                             "collect", "publish", "finish", "cleanup"])
     parser.add_argument("--output", type=Path, default=Path("lava-output"))
     args = parser.parse_args()
+    try:
+        return execute(args)
+    except Exception as failure:
+        # Unexpected parsing/template errors need the same early-failure evidence.
+        # Do not include tracebacks or raw HTTP responses in the published artifact.
+        try:
+            message = record_failure(args.output, args.command, failure)
+        except (OSError, ValueError, TypeError):
+            message = f"{args.command} failed ({type(failure).__name__}), controller evidence could not be saved"
+        print(f"Validation stopped: {message}", file=sys.stderr)
+        return 1
+
+
+def execute(args):
+    """Run one controller stage, preserving failures at the CLI boundary."""
     if args.command == "begin":
         begin_request(args.output)
         return 0
@@ -987,6 +1105,9 @@ def main():
     if args.command == "run":
         run_jobs(args.output, manifest)
         return 0
+    if args.command == "validate":
+        validate_jobs(lava(), args.output, manifest)
+        return 0
     if args.command == "start":
         update_check(github(), manifest, "in_progress", "The validation runner is preparing the LAVA request.")
         return 0
@@ -1001,8 +1122,4 @@ def main():
 
 
 if __name__ == "__main__":
-    try:
-        sys.exit(main())
-    except (ValueError, RuntimeError, requests.RequestException, OSError) as failure:
-        print(f"Validation stopped: {failure}", file=sys.stderr)
-        sys.exit(1)
+    sys.exit(main())

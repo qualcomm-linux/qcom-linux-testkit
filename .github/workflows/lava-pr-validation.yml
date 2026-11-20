@@ -46,13 +46,13 @@ permissions:
 
 # Keep the total queued/running job cap across manual invocations, too.
 concurrency:
-  group: testkit-lava-oss
+  group: testkit-lava-foundries
   cancel-in-progress: false
 
 jobs:
   request:
     if: github.repository == 'qualcomm-linux/qcom-linux-testkit' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: read
@@ -80,23 +80,25 @@ jobs:
           PR_REVISION: ${{ inputs.revision }}
           SUBMIT_REQUEST: ${{ inputs.submit }}
         run: python .github/workflows/lava_pr_validation.py begin
-      - name: Save request context before waiting for an OSS runner
+      - name: Save request context before waiting for a validation runner
         if: always() && steps.context.outputs.sha != ''
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: lava-context-${{ github.run_id }}-${{ github.run_attempt }}
-          path: lava-output/context.json
+          path: |
+            lava-output/context.json
+            lava-output/controller-errors.json
           if-no-files-found: error
           retention-days: 30
 
   validate:
     needs: request
     if: github.repository == 'qualcomm-linux/qcom-linux-testkit' && github.ref == 'refs/heads/main'
-    environment: lava-oss
-    runs-on:
-      group: GHA-Kernel-SelfHosted-RG
-      labels: kernel-prd-u2404-x64-large-od-ephem
-    timeout-minutes: 1320
+    environment: lava-foundries
+    runs-on: ubuntu-latest
+    # Hosted jobs are limited to six hours. The five-hour request deadline
+    # leaves time for preparation, cancellation, collection and artifact upload.
+    timeout-minutes: 350
     permissions:
       contents: read
       actions: read
@@ -140,9 +142,8 @@ jobs:
 
       - name: Check LAVA identity and artifact access configuration
         env:
-          LAVA_OSS_USER: ${{ secrets.LAVA_OSS_USER }}
-          LAVA_OSS_TOKEN: ${{ secrets.LAVA_OSS_TOKEN }}
-          LAVA_ARTIFACT_TOKEN_NAME: ${{ vars.LAVA_ARTIFACT_TOKEN_NAME }}
+          LAVATOKEN: ${{ secrets.LAVATOKEN }}
+          LAVA_ARTIFACT_TOKEN_NAME: ${{ vars.FOUNDRIES_ARTIFACT_TOKEN_NAME || 'Q_QLI_S3_TOKEN' }}
         run: python .github/workflows/lava_pr_validation.py preflight
 
       - name: Prepare mandatory baseline and PR additions
@@ -151,9 +152,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           META_QCOM_READ_TOKEN: ${{ secrets.META_QCOM_READ_TOKEN }}
           QLI_S3_TOKEN: ${{ secrets.QLI_S3_TOKEN }}
-          LAVA_OSS_USER: ${{ secrets.LAVA_OSS_USER }}
-          LAVA_OSS_TOKEN: ${{ secrets.LAVA_OSS_TOKEN }}
-          LAVA_ARTIFACT_TOKEN_NAME: ${{ vars.LAVA_ARTIFACT_TOKEN_NAME }}
+          LAVATOKEN: ${{ secrets.LAVATOKEN }}
+          LAVA_ARTIFACT_TOKEN_NAME: ${{ vars.FOUNDRIES_ARTIFACT_TOKEN_NAME || 'Q_QLI_S3_TOKEN' }}
           LAVA_PLANS_PATH: lava-test-plans
           PR_NUMBER: ${{ inputs.pr }}
           TARGETS: ${{ inputs.targets }}
@@ -164,6 +164,12 @@ jobs:
           TEST_SELECTIONS: ${{ inputs.selections }}
           SUBMIT_REQUEST: ${{ inputs.submit }}
         run: python .github/workflows/lava_pr_validation.py prepare
+
+      - name: Validate preparation-only job definitions
+        if: ${{ !inputs.submit }}
+        env:
+          LAVATOKEN: ${{ secrets.LAVATOKEN }}
+        run: python .github/workflows/lava_pr_validation.py validate
 
       # Publish before submitting. The independent finalizer can recover IDs
       # from LAVA metadata even if this runner disappears during a POST.
@@ -182,16 +188,14 @@ jobs:
       - name: Submit and await bounded LAVA jobs
         if: inputs.submit
         env:
-          LAVA_OSS_USER: ${{ secrets.LAVA_OSS_USER }}
-          LAVA_OSS_TOKEN: ${{ secrets.LAVA_OSS_TOKEN }}
+          LAVATOKEN: ${{ secrets.LAVATOKEN }}
         run: python .github/workflows/lava_pr_validation.py run
 
       - name: Reconcile owned LAVA jobs and collect results
         if: always() && steps.request.outcome == 'success' && inputs.submit
         timeout-minutes: 10
         env:
-          LAVA_OSS_USER: ${{ secrets.LAVA_OSS_USER }}
-          LAVA_OSS_TOKEN: ${{ secrets.LAVA_OSS_TOKEN }}
+          LAVATOKEN: ${{ secrets.LAVATOKEN }}
         run: python .github/workflows/lava_pr_validation.py collect
 
       - name: Save collected LAVA evidence
@@ -203,6 +207,10 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
+      - name: Remove temporary source snapshots
+        if: always()
+        run: python .github/workflows/lava_pr_validation.py cleanup
+
       - name: Save controller progress
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
@@ -211,12 +219,10 @@ jobs:
           path: |
             lava-output/execution.json
             lava-output/target-matrix.json
+            lava-output/controller-errors.json
+            lava-output/scheduling.json
           if-no-files-found: ignore
           retention-days: 30
-
-      - name: Remove temporary source snapshots
-        if: always()
-        run: python .github/workflows/lava_pr_validation.py cleanup
 
       - name: Report controller status
         if: always()
