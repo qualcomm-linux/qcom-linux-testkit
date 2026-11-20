@@ -226,14 +226,22 @@ def begin_request(folder):
         raise ValueError("revision must be a full lowercase commit SHA")
     if previous and previous["pr"] != int(number):
         raise ValueError("Rerun PR differs from the saved request")
+    baseline_input = os.environ.get("INCLUDE_META_QCOM", "true").lower()
+    if baseline_input not in {"true", "false"}:
+        raise ValueError("include_meta_qcom must be true or false")
+    include_meta_qcom = previous.get("include_meta_qcom", True) if previous else baseline_input == "true"
+    if not isinstance(include_meta_qcom, bool):
+        raise ValueError("Invalid saved meta-qcom test selection")
     comparison = gh.get(f"/repos/{REPOSITORY}/compare/{sha}...{pr['head']['sha']}")
     if comparison.get("status") not in {"identical", "ahead"}:
         raise ValueError("Requested revision is not an ancestor of the current PR head")
     context = dict(pr=int(number), sha=sha, run_id=run_id, run_attempt=attempt, lava_url=LAVA,
+                   include_meta_qcom=include_meta_qcom,
                    submit_requested=os.environ.get("SUBMIT_REQUEST", "false") == "true")
     save_json(folder / "context.json", context)
     with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
         output.write(f"sha={sha}\ncontext_attempt={attempt}\n")
+        output.write(f"include_meta_qcom={str(include_meta_qcom).lower()}\n")
     update_check(gh, context, "queued", "Waiting for a runner to prepare and submit the selected LAVA tests.")
 
 
@@ -553,7 +561,7 @@ def validate_jobs(api, folder, manifest):
         scheduling.append(dict(file=entry["file"], device_type=entry["device_type"],
                                tags=sorted(required), eligible=eligible, error=reason))
         if reason:
-            gaps.append(f"{entry['target']}/{entry['group']}: {reason}")
+            gaps.append(f"{result_target(entry)}/{entry['group']}: {reason}")
     save_json(folder / "scheduling.json", dict(lava_url=LAVA, run_id=manifest["run_id"], jobs=scheduling))
     if gaps:
         raise ValueError("LAVA scheduling preflight failed. " + ". ".join(gaps))
@@ -651,7 +659,7 @@ def run_jobs(folder, manifest):
                         job = matches[0]
                         state["error"] = ""
                 pending.pop(0)
-                print(f"{entry['target']} {entry['group']}: {LAVA}/scheduler/job/{job['id']}",
+                print(f"{result_target(entry)} {entry['group']}: {LAVA}/scheduler/job/{job['id']}",
                       flush=True)
                 state["jobs"][entry["key"]] = {"id": job["id"], "state": job["state"]}
                 if job["state"] not in TERMINAL:
@@ -665,10 +673,10 @@ def run_jobs(folder, manifest):
         for entry in manifest["jobs"]:
             matches = matching_jobs(api, entry, known_id=state["jobs"].get(entry["key"], {}).get("id"))
             if not matches:
-                raise RuntimeError(f"LAVA results missing for {entry['target']} {entry['group']}")
+                raise RuntimeError(f"LAVA results missing for {result_target(entry)} {entry['group']}")
             rows, evidence = collect_results(api, matches[0], entry)
             if not rows or any(row["errors"] or row["counts"].get("fail") for row in rows):
-                raise RuntimeError(f"LAVA validation failed for {entry['target']} {entry['group']}")
+                raise RuntimeError(f"LAVA validation failed for {result_target(entry)} {entry['group']}")
     except (Exception, KeyboardInterrupt) as error:
         state["error"] = str(error)
         save_json(state_path, state)
@@ -701,6 +709,12 @@ def run_jobs(folder, manifest):
                 print("Could not save cleanup progress, recover using the immutable request", file=sys.stderr)
 
 
+def result_target(entry):
+    """Keep base and overlay results separate while retaining legacy target labels."""
+    variant = entry.get("image_variant")
+    return f"{entry['target']} ({variant})" if variant else entry["target"]
+
+
 def collect_results(api, job, entry):
     """Count functional results, retaining infrastructure and missing evidence."""
     observed = []
@@ -729,13 +743,13 @@ def collect_results(api, job, entry):
             errors.append("No executed PASS/FAIL validation")
         if any(result not in {"pass", "fail", "skip"} for result in counts):
             errors.append("Unexpected result status")
-        rows.append(dict(target=entry["target"], group=entry["group"],
+        rows.append(dict(target=result_target(entry), group=entry["group"],
                          coverage=definition["coverage"], name=definition["name"],
                          counts=dict(counts), errors=errors, job=job["id"], tests=cases))
     infrastructure = [case for suite in observed if suite["suite"] == "lava"
                       for case in suite["cases"] if case["result"].lower() == "fail"]
     if job["state"] != "Finished" or job["health"] != "Complete" or infrastructure:
-        rows.append(dict(target=entry["target"], group=entry["group"], coverage="Job",
+        rows.append(dict(target=result_target(entry), group=entry["group"], coverage="Job",
                          name="Deploy/boot/execution", counts={}, job=job["id"],
                          errors=[f"{job['state']}/{job['health']}"] +
                          [case["name"] for case in infrastructure]))
@@ -748,26 +762,27 @@ def result_matrix(rows, targets, by_group=True, lava_url=LAVA, compact=False):
         return str(value).replace("|", "&#124;").replace("\n", " ").replace("\r", " ").replace("<", "&lt;")
 
     labels = {}
-    if compact:
+    if compact and not by_group:
         for row in rows:
             if row["coverage"] != "Workflow":
                 labels.setdefault(row.get("display_name", row["name"]), set()).add(
-                    (row["group"], row["coverage"], row["name"]))
+                    (row["group"], row.get("definition_name", row["name"])))
     grouped = {}
     for row in rows:
         if row["coverage"] == "Workflow":
             continue
         label = row["group"] if by_group else f"{row['group']} / {row['coverage']} / {row['name']}"
-        if compact:
+        if compact and not by_group:
             label = row.get("display_name", row["name"])
             if len(labels[label]) > 1:
-                label = f"{row['group']} / {row['coverage']} / {row['name']}"
+                qualifiers = [row.get("definition_name", row["name"]), row["group"]]
+                label += " (" + ", ".join(dict.fromkeys(value for value in qualifiers if value != label)) + ")"
         value = grouped.setdefault((label, row["target"]), {"counts": Counter(), "errors": [], "jobs": set()})
         value["counts"].update(row["counts"])
         value["errors"].extend(row["errors"])
         if row["job"]:
             value["jobs"].add(row["job"])
-    title = "Test" if compact else "Test group" if by_group else "Test/configuration"
+    title = "Test group" if by_group else "Test" if compact else "Test/configuration"
     if not grouped:
         return ["No functional test results are available."]
     lines = ["| " + " | ".join([title] + [cell(target) for target in targets]) + " |",
@@ -824,7 +839,7 @@ def collect_jobs(folder, manifest):
         terminal = known.get("state") in TERMINAL
         try:
             if state.get("started") and not known:
-                rows.append(dict(target=entry["target"], group=entry["group"], coverage="Job",
+                rows.append(dict(target=result_target(entry), group=entry["group"], coverage="Job",
                                  name="Submission", counts={}, job=None,
                                  errors=["Not submitted, controller stopped before this job"]))
                 continue
@@ -841,7 +856,7 @@ def collect_jobs(folder, manifest):
                                        run_attempt=manifest.get("run_attempt", "1"))
             except (requests.RequestException, RuntimeError, ValueError) as error:
                 cleanup_complete = False
-                rows.append(dict(target=entry["target"], group=entry["group"], coverage="Job",
+                rows.append(dict(target=result_target(entry), group=entry["group"], coverage="Job",
                                  name="Cleanup", counts={}, job=job["id"], errors=[str(error)]))
             terminal = job["state"] in TERMINAL
             result, raw = collect_results(api, job, entry)
@@ -852,7 +867,7 @@ def collect_jobs(folder, manifest):
         except (requests.RequestException, RuntimeError, ValueError) as error:
             if not terminal:
                 cleanup_complete = False
-            rows.append(dict(target=entry["target"], group=entry["group"], coverage="Job",
+            rows.append(dict(target=result_target(entry), group=entry["group"], coverage="Job",
                              name="Collection", counts={}, job=known.get("id"), errors=[str(error)]))
         save_json(folder / "results.json", identity | dict(rows=rows, evidence=evidence, cleanup_complete=False))
     if state.get("error"):
@@ -897,7 +912,7 @@ def finish_jobs(folder, manifest, lifecycle=True):
     observed = {(row["target"], row["group"]) for row in rows}
     if manifest["submit_requested"]:
         for entry in manifest.get("jobs", []):
-            if (entry["target"], entry["group"]) in observed:
+            if (result_target(entry), entry["group"]) in observed:
                 continue
             known = state["jobs"].get(entry["key"], {})
             if state.get("started") and not known:
@@ -906,7 +921,7 @@ def finish_jobs(folder, manifest, lifecycle=True):
                 error = "Job completed, result collection unavailable"
             else:
                 error = "Result collection unavailable, cleanup is unconfirmed"
-            rows.append(dict(target=entry["target"], group=entry["group"], coverage="Job", name="Collection",
+            rows.append(dict(target=result_target(entry), group=entry["group"], coverage="Job", name="Collection",
                              counts={}, job=known.get("id"), errors=[error]))
     if state.get("error") and not any(row["coverage"] == "Workflow" and
                                       state["error"] in row["errors"] for row in rows):
@@ -934,23 +949,27 @@ def finish_jobs(folder, manifest, lifecycle=True):
     lines = [marker, f"<!-- testkit-lava-attempt:{attempt} -->",
              f"LAVA validation for `{manifest['sha']}`, attempt {attempt}",
              "Result: **Needs attention**" if failed else "Result: **PASS**"]
+    if manifest.get("include_meta_qcom") is False:
+        lines[2] += ", PR tests only"
     if manifest.get("build"):
         lines.append(f"[Nightly {manifest['build']['id']}]({manifest['build']['url']})")
+    notices = []
     if not manifest["submit_requested"]:
         lines[3] = "Result: **Preparation only, no hardware validation requested**"
     elif not manifest.get("jobs"):
-        lines.append("No hardware jobs were submitted. Validation stopped before a submission request was saved.")
+        notices.append("No hardware jobs were submitted. Validation stopped before a submission request was saved.")
     elif not cleanup_complete:
-        lines.append("Cleanup is unconfirmed. Recover jobs using the LAVA PR results workflow.")
+        notices.append("Cleanup is unconfirmed. Recover jobs using the LAVA PR results workflow.")
     if pr is None:
-        lines.append("PR access is unavailable. Results are retained in this workflow for publication recovery.")
+        notices.append("PR access is unavailable. Results are retained in this workflow for publication recovery.")
     elif pr["head"]["sha"] != manifest["sha"]:
-        lines.append("The PR head has changed. These results apply only to the commit above.")
+        notices.append("The PR head has changed. These results apply only to the commit above.")
+    lines += notices
     workflow_url = f"https://github.com/{REPOSITORY}/actions/runs/{os.environ.get('GITHUB_RUN_ID', manifest['run_id'])}"
     totals = Counter()
     for row in rows:
         totals.update(row["counts"])
-    targets = sorted({entry["target"] for entry in manifest.get("jobs", [])})
+    targets = sorted({result_target(entry) for entry in manifest.get("jobs", [])})
     lines += ["", f"[Workflow and artifacts]({workflow_url})",
               f"PASS: {totals['pass']} | FAIL: {totals['fail']} | SKIP: {totals['skip']}", ""]
     # Keep full diagnostics in the artifact, while the summary shows the verdict.
@@ -965,7 +984,8 @@ def finish_jobs(folder, manifest, lifecycle=True):
         (folder / "diagnostics.md").write_text("\n".join(diagnostics) + "\n", encoding="utf-8")
     if any(row["coverage"] == "Workflow" and row["errors"] for row in rows) and not any(
             row["errors"] or row["counts"].get("fail") for row in rows if row["coverage"] != "Workflow"):
-        lines += ["Workflow did not complete successfully. See the workflow artifacts.", ""]
+        notices.append("Workflow did not complete successfully. See the workflow artifacts.")
+        lines += [notices[-1], ""]
     case_rows = []
     for row in rows:
         if not row.get("tests") or row["errors"]:
@@ -974,17 +994,17 @@ def finish_jobs(folder, manifest, lifecycle=True):
         for case in row.get("tests", []):
             result = case["result"].lower()
             case_rows.append(row | {"name": row["name"] + " / " + case["name"],
-                                    "display_name": case["name"] if row["name"] == case["name"] or
-                                    row["coverage"] == "PR addition" else
-                                    row["name"] + " / " + case["name"],
+                                    "display_name": case["name"], "definition_name": row["name"],
                                     "counts": {result: 1},
                                     "errors": [] if result in {"pass", "fail", "skip"} else ["Unexpected result status"]})
-    test_lines = result_matrix(case_rows, targets, by_group=False, lava_url=lava_url)
-    (folder / "test-results.md").write_text("\n".join(test_lines) + "\n", encoding="utf-8")
     # A SKIP row already exposes the lack of execution, avoid a duplicate ERROR row.
     summary_rows = [row for row in case_rows if not (
         row.get("tests") and not row["counts"] and row["errors"] == ["No executed PASS/FAIL validation"])]
+    group_lines = result_matrix(rows, targets, lava_url=lava_url, compact=True) if any(
+        row["coverage"] != "Workflow" for row in rows) else []
     summary_lines = result_matrix(summary_rows, targets, by_group=False, lava_url=lava_url, compact=True)
+    (folder / "test-results.md").write_text("\n".join(group_lines + [""] + summary_lines) + "\n", encoding="utf-8")
+    lines += group_lines + [""]
     # Both summaries share GitHub's comment limit. The artifact retains every row.
     size = len("\n".join(lines).encode("utf-8"))
     displayed = 0
@@ -999,6 +1019,32 @@ def finish_jobs(folder, manifest, lifecycle=True):
                   "Download test-results.md from the results artifact for the complete matrix."]
     body = "\n".join(lines)
     (folder / "summary.md").write_text(body + "\n", encoding="utf-8")
+    pr_lines = [marker, f"<!-- testkit-lava-attempt:{attempt} -->",
+                f"## Test run [workflow]({workflow_url})",
+                f"## Test jobs for commit `{manifest['sha']}`", ""]
+    if failed or not manifest["submit_requested"]:
+        pr_lines += [lines[3], ""]
+    if manifest.get("include_meta_qcom") is False:
+        pr_lines += ["PR tests only", ""]
+    build_label = {"qcom-distro": "meta-qcom-main", "qcom-distro_linux-qcom-6.18": "meta-qcom-lts-6.18"}.get(
+        manifest.get("distro"), manifest.get("distro") or "Validation")
+    image_type = manifest.get("image_type")
+    variants = ("base", "overlay") if image_type == "both" else (
+        "overlay" if image_type in {"proprietary", "overlay"} else "base",)
+    for variant in variants:
+        variant_targets = {result_target(entry) for entry in manifest.get("jobs", [])
+                           if entry.get("image_variant") == variant}
+        counts = Counter()
+        for row in rows:
+            if row["coverage"] != "Workflow" and (len(variants) == 1 or row["target"] in variant_targets):
+                counts.update(row["counts"])
+        label = f"{build_label} ({variant})" if image_type else build_label
+        total = counts["pass"] + counts["fail"] + counts["skip"]
+        pr_lines += [f"### {label}", "",
+                     f"Pass: {counts['pass']} | Fail: {counts['fail']} | Skip: {counts['skip']} | Total: {total}", ""]
+    pr_lines += notices
+    pr_body = "\n".join(pr_lines).rstrip()
+    (folder / "pr-summary.md").write_text(pr_body + "\n", encoding="utf-8")
     if os.environ.get("GITHUB_STEP_SUMMARY"):
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as stream:
             stream.write(body)
@@ -1025,9 +1071,9 @@ def finish_jobs(folder, manifest, lifecycle=True):
             return int(failed)
     try:
         if previous:
-            gh.request("PATCH", f"/repos/{REPOSITORY}/issues/comments/{previous['id']}", json={"body": body})
+            gh.request("PATCH", f"/repos/{REPOSITORY}/issues/comments/{previous['id']}", json={"body": pr_body})
         else:
-            gh.request("POST", f"/repos/{REPOSITORY}/issues/{manifest['pr']}/comments", json={"body": body})
+            gh.request("POST", f"/repos/{REPOSITORY}/issues/{manifest['pr']}/comments", json={"body": pr_body})
     except (requests.RequestException, RuntimeError):
         if lifecycle:
             update_check(gh, manifest, "completed", "PR comment publication failed. Results remain in the workflow artifacts.",

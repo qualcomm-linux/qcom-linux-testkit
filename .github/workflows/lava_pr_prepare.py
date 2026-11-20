@@ -436,8 +436,10 @@ def group_for(suite):
     return next((group for prefix, group in groups.items() if prefix in suite), "pre-merge-basic")
 
 
-def append_tests(jobs, affected, documents, by_suite, selections, config, source_url, source=None):
+def append_tests(jobs, affected, documents, by_suite, selections, config, source_url, source=None,
+                 include_meta_qcom=True):
     manifest = []
+    selected = set()
     baseline = [(group, definition) for group, job in jobs.items() for definition in entries(job)]
     for suite, reasons in sorted(affected.items()):
         candidates = by_suite.get(suite, [])
@@ -478,11 +480,11 @@ def append_tests(jobs, affected, documents, by_suite, selections, config, source
                 raise ValueError("expected must be a list of result names")
             definition = dict(path=path, params=params)
             # Do not collapse baseline instances, only avoid equivalent additions.
-            equivalent = any(old["path"] == path and old_group == group and
-                             effective_params(old, documents) == effective_params(definition, documents)
-                             for old_group, old in baseline)
-            if equivalent:
-                disposition = "covered by baseline"
+            equivalent = [old for old_group, old in baseline if old["path"] == path and old_group == group and
+                          effective_params(old, documents) == effective_params(definition, documents)]
+            if equivalent and not choice.get("fresh_boot", False):
+                selected.update(id(old) for old in equivalent)
+                disposition = "covered by baseline" if include_meta_qcom else "selected from baseline"
             else:
                 name = "pr-" + Path(path).stem + "-" + digest(choice)[:8]
                 if not re.fullmatch(r"[A-Za-z0-9_.-]+", name):
@@ -528,10 +530,28 @@ def append_tests(jobs, affected, documents, by_suite, selections, config, source
                     jobs[unique] = destination
                 destination["actions"].append({"test": {"timeout": {"minutes": minutes},
                                                          "definitions": [definition]}})
+                selected.add(id(definition))
                 destination["timeouts"]["job"]["minutes"] += minutes
                 disposition = "added with fresh boot" if fresh else "appended"
             manifest.append(dict(suite=suite, path=path, group=group, params=params,
                                  reasons=sorted(reasons), disposition=disposition))
+    if not include_meta_qcom:
+        for group in list(jobs):
+            job = jobs[group]
+            if not any(id(item) in selected for item in entries(job)):
+                del jobs[group]
+                continue
+            actions = []
+            for action in job["actions"]:
+                test = action.get("test", {})
+                if "definitions" in test:
+                    # Keep only selected tests and the existing graphics setup.
+                    test["definitions"] = [item for item in test["definitions"] if id(item) in selected or
+                                           "Weston_Runtime_Preflight" in item["path"]]
+                    if not test["definitions"]:
+                        continue
+                actions.append(action)
+            job["actions"] = actions
     return manifest
 
 
@@ -548,11 +568,22 @@ def prepare(folder):
     previous = previous_request(gh, run_id, attempt)
     if previous and previous.get("lava_url") != LAVA:
         raise ValueError("The previous attempt used another LAVA instance, start a new workflow run")
+    baseline_input = os.environ.get("INCLUDE_META_QCOM", "true").lower()
+    if baseline_input not in {"true", "false"}:
+        raise ValueError("include_meta_qcom must be true or false")
+    include_meta_qcom = previous.get("include_meta_qcom", True) if previous else baseline_input == "true"
+    if not isinstance(include_meta_qcom, bool):
+        raise ValueError("Invalid saved meta-qcom test selection")
     number = int(os.environ["PR_NUMBER"])
     pr = gh.get(f"/repos/{REPOSITORY}/pulls/{number}")
     if pr["state"] != "open" or pr["base"]["ref"] != "main":
         raise ValueError("Select an open PR targeting main")
-    distro = os.environ.get("IMAGE_DISTRO", "qcom-distro")
+    distro_names = {"meta-qcom-main": "qcom-distro", "meta-qcom-lts-6.18": "qcom-distro_linux-qcom-6.18",
+                    "qcom-distro": "qcom-distro", "qcom-distro_linux-qcom-6.18": "qcom-distro_linux-qcom-6.18"}
+    distro_choice = os.environ.get("IMAGE_DISTRO", "meta-qcom-main")
+    if distro_choice not in distro_names:
+        raise ValueError("Choose meta-qcom-main or meta-qcom-lts-6.18")
+    distro = distro_names[distro_choice]
     producer = API(GITHUB, os.environ.get("META_QCOM_READ_TOKEN") or os.environ.get("GH_TOKEN", ""))
     target_matrix = (previous["target_matrix"] if previous else
                      select_targets(producer, config, distro, os.environ.get("TARGETS", "meta-qcom")))
@@ -562,14 +593,22 @@ def prepare(folder):
     if git(plans, "rev-parse", "HEAD").decode().strip() != config["plans_revision"]:
         raise ValueError("lava-test-plans checkout does not match the trusted pin")
     validate_target_templates(plans, targets, config)
-    image_type = os.environ.get("IMAGE_TYPE", "multimedia")
-    if image_type not in {"multimedia", "proprietary"}:
-        raise ValueError("Choose the multimedia or proprietary image variant")
+    # Keep historical names in saved requests so older reruns select the same artifact.
+    image_variants = {"base": "multimedia", "overlay": "proprietary",
+                      "multimedia": "multimedia", "proprietary": "proprietary", "both": "both"}
+    image_choice = os.environ.get("IMAGE_TYPE", "base")
+    if image_choice not in image_variants:
+        raise ValueError("Choose the base or overlay multimedia image, or both")
+    image_type = image_variants[image_choice]
     if previous and (previous["pr"] != number or previous["distro"] != distro or
                      previous["image_type"] != image_type or
                      previous["plans_revision"] != config["plans_revision"]):
         raise ValueError("Rerun inputs differ from the saved request, use a new manual validation run")
-    image_name = "qcom-multimedia-image" if image_type == "multimedia" else "qcom-multimedia-proprietary-image"
+    variants = {"base": "qcom-multimedia-image", "overlay": "qcom-multimedia-proprietary-image"}
+    if image_type != "both":
+        variant = "base" if image_type == "multimedia" else "overlay"
+        variants = {variant: variants[variant]}
+    image_name = next(iter(variants.values()))
     source, sha, base, changes, repository = snapshot(
         folder, pr, previous["sha"] if previous else os.environ.get("PR_REVISION", ""))
     if previous:
@@ -583,6 +622,8 @@ def prepare(folder):
         if suite not in owners:
             raise ValueError(f"Unknown suite in selections: {suite}")
         affected[suite].add("explicit maintainer selection")
+    if not include_meta_qcom and not affected:
+        raise ValueError("No PR tests selected. Enable include_meta_qcom or provide explicit suite selections.")
     access = {}
     if previous and not all(previous.get(key) for key in ("audio_url", "audio_sha256")):
         raise ValueError("The earlier request did not pin its audio asset, use a new manual validation run")
@@ -593,23 +634,33 @@ def prepare(folder):
     check_download(audio_url, access)
     if previous:
         build = previous["build"]
-        for url in build["images"].values():
-            check_download(url, access)
     else:
         build = select_build(producer, config, targets, distro, os.environ.get("NIGHTLY_RUN_ID", ""), image_name, access)
+        if image_type == "both":
+            # Both images must come from the same successful producer attempt.
+            build["overlay_images"] = {target: build["prefix"] +
+                                       f"{distro}/{target}/{variants['overlay']}-{target}.rootfs.qcomflash.tar.gz"
+                                       for target in targets}
+    overlay_images = build.get("overlay_images", {}) if image_type == "both" else {}
+    if image_type == "both" and set(overlay_images) != set(targets):
+        raise ValueError("Saved request does not contain both images for every selected target")
+    for url in [*(build["images"].values() if previous else []), *overlay_images.values()]:
+        check_download(url, access)
+    image_urls = [*build["images"].values(), *overlay_images.values()]
     if os.environ.get("QLI_S3_TOKEN") or os.environ.get("QLI_ARTIFACT_TOKEN"):
         # GitHub and the dispatcher can use different registered credentials.
         # A successful controller probe alone cannot prove LAVA can fetch images.
         record = lava().get(f"/api/v0.2/remote-artifact-tokens/{token_name}/")
         dispatcher_access = {"qli_token": record.get("token")}
         if dispatcher_access["qli_token"] != access.get("qli_token"):
-            for url in [audio_url, *build["images"].values()]:
+            for url in [audio_url, *image_urls]:
                 if urlsplit(url).hostname == "qli-prod-artifacts.qualcomm.com":
                     check_download(url, dispatcher_access)
     source_url = f"https://github.com/{repository}/archive/{sha}.tar.gz"
     manifest = dict(pr=number, sha=sha, merge_base=base, repository=repository,
                     distro=distro, image_type=image_type, build=build, run_id=run_id,
                     run_attempt=attempt, changes=changes, lava_url=LAVA,
+                    include_meta_qcom=include_meta_qcom,
                     target_matrix=target_matrix,
                     plans_revision=config["plans_revision"], jobs=[], selections=[], exclusions=[],
                     baseline_helpers=[],
@@ -620,10 +671,13 @@ def prepare(folder):
                     request_minutes=config["request_minutes"], max_active_jobs=config["max_active_jobs"])
     (folder / "jobs").mkdir()
     baseline_job_count = 0
-    for target in targets:
+    for target, variant in ((target, variant) for target in targets for variant in variants):
+        image_name = variants[variant]
+        rootfs_url = (overlay_images if image_type == "both" and variant == "overlay" else build["images"])[target]
+        variant_fields = {"image_variant": variant} if image_type == "both" else {}
         context = dict(PROJECT="projects/meta-qcom/", PROJECT_NAME="meta-qcom", OS_INFO="qcom-distro",
                        BUILD_NUMBER=f"testkit-pr-{number}", BUILD_URL=build["prefix"],
-                       ROOTFS_URL=build["images"][target], DEVICE_TYPE=target, overlays=[],
+                       ROOTFS_URL=rootfs_url, DEVICE_TYPE=target, overlays=[],
                        IMAGE_FILE_NAME=f"{image_name}-{target}.rootfs.qcomflash.tar.gz",
                        AUTO_LOGIN_PASSWORD_PROMPT="Password", AUTO_LOGIN_PASSWORD="oelinux123",
                        AUDIO_CLIPS_BASE_DIR="/home/AudioClips/", AUDIO_CLIPS_URL=audio_url,
@@ -634,21 +688,32 @@ def prepare(folder):
                        TEST_DEFINITIONS_REVISION=sha, TEST_DEFINITIONS_REVISION_SHA=sha,
                        PR_NUMBER=str(number), PR_URL=pr["html_url"])
         jobs, excluded = render_baseline(plans, target, context, config)
-        baseline_job_count += len(jobs)
-        manifest["exclusions"].extend(excluded)
+        if include_meta_qcom:
+            baseline_job_count += len(jobs)
+        manifest["exclusions"].extend(f"{variant}: {item}" if image_type == "both" else item for item in excluded)
         baseline_ids = {id(definition) for job in jobs.values() for definition in entries(job)}
-        for job in jobs.values():
-            for definition in entries(job):
-                if definition["path"] not in documents:
-                    raise ValueError(f"Missing baseline YAML in PR: {definition['path']}")
+        if include_meta_qcom:
+            for job in jobs.values():
+                for definition in entries(job):
+                    if definition["path"] not in documents:
+                        raise ValueError(f"Missing baseline YAML in PR: {definition['path']}")
+        selection = append_tests(jobs, affected, documents, by_suite, selections, config, source_url, source,
+                                 include_meta_qcom=include_meta_qcom)
+        if not include_meta_qcom:
+            baseline_job_count += sum(group in config["groups"] for group in jobs)
+            for job in jobs.values():
+                for definition in entries(job):
+                    if definition["path"] not in documents:
+                        raise ValueError(f"Missing selected YAML in PR: {definition['path']}")
         for changed in sorted({change["path"] for change in changes} & set(config.get("baseline_helpers", []))):
             coverage = sorted({definition["path"] for job in jobs.values() for definition in entries(job)
-                               if invokes_helper(documents[definition["path"]], changed)})
+                               if (not include_meta_qcom or id(definition) in baseline_ids) and
+                               invokes_helper(documents[definition["path"]], changed)})
             if not (source / changed).is_file() or not coverage:
-                raise ValueError(f"{changed} has no mandatory baseline coverage on {target}")
-            manifest["baseline_helpers"].append(dict(target=target, path=changed, definitions=coverage))
-        selection = append_tests(jobs, affected, documents, by_suite, selections, config, source_url, source)
-        manifest["selections"].extend(dict(target=target, **row) for row in selection)
+                raise ValueError(f"{changed} has no selected test coverage on {target}. "
+                                 "Enable include_meta_qcom or select suites that invoke it.")
+            manifest["baseline_helpers"].append(dict(target=target, path=changed, definitions=coverage, **variant_fields))
+        manifest["selections"].extend(dict(target=target, **variant_fields, **row) for row in selection)
         for group, job in jobs.items():
             if job["device_type"] != config["targets"][target]:
                 raise ValueError(f"{target}: Foundries device type differs from the pinned template")
@@ -680,17 +745,23 @@ def prepare(folder):
                                                      "testkit-workflow-attempt": attempt,
                                                      "testkit-sha": sha})
             filename = f"jobs/{target}-{group}.yaml"
+            if image_type == "both":
+                filename = f"jobs/{target}-{variant}-{group}.yaml"
             (folder / filename).write_text(yaml.safe_dump(job, sort_keys=False), encoding="utf-8")
             manifest["jobs"].append(dict(file=filename, key=key, target=target, group=group,
+                                         **variant_fields,
                                          run_id=run_id, run_attempt=attempt,
                                          device_type=job["device_type"], definition_hash=digest(job),
                                          definitions=[dict(name=item["name"], path=item["path"],
                                                            params=item.get("params", {}), expected=item.get("expected", []),
-                                                           coverage="Baseline" if id(item) in baseline_ids else "PR addition")
+                                                           coverage=("PR change" if not include_meta_qcom else
+                                                                     "Baseline" if id(item) in baseline_ids else "PR addition"))
                                                       for item in definitions]))
     job_limit = baseline_job_count + config["max_additional_jobs"]
     manifest["job_limit"] = job_limit
     save_json(folder / "manifest.json", manifest)
+    if not manifest["jobs"]:
+        raise ValueError("No runnable PR tests for the selected targets. Check exclusions or provide suite selections.")
     if len(manifest["jobs"]) > job_limit:
         raise ValueError(f"Prepared {len(manifest['jobs'])} jobs exceeds the {job_limit} job budget")
     if os.environ.get("GITHUB_OUTPUT"):

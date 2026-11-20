@@ -14,20 +14,28 @@ on:
         required: true
         default: meta-qcom
         type: string
+      include_meta_qcom:
+        description: Include meta-qcom pre-merge tests alongside the PR tests
+        default: true
+        type: boolean
       revision:
         description: Full PR commit SHA, empty resolves current PR head. Reruns retain the original SHA.
         type: string
       distro:
-        description: qcom-distro or qcom-distro_linux-qcom-6.18
-        default: qcom-distro
-        type: string
-      image_type:
-        description: Published image variant, never substituted with another variant
-        default: multimedia
+        description: Meta-qcom build
+        default: meta-qcom-main
         type: choice
         options:
-          - multimedia
-          - proprietary
+          - meta-qcom-main
+          - meta-qcom-lts-6.18
+      image_type:
+        description: Multimedia image configuration
+        default: base
+        type: choice
+        options:
+          - base
+          - overlay
+          - both
       nightly_run:
         description: Optional successful meta-qcom nightly or extended build run ID. Reruns reuse the original images.
         type: string
@@ -61,6 +69,7 @@ jobs:
     outputs:
       sha: ${{ steps.context.outputs.sha }}
       context_attempt: ${{ steps.context.outputs.context_attempt }}
+      include_meta_qcom: ${{ steps.context.outputs.include_meta_qcom }}
     steps:
       - name: Checkout trusted controller
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -79,6 +88,7 @@ jobs:
           PR_NUMBER: ${{ inputs.pr }}
           PR_REVISION: ${{ inputs.revision }}
           SUBMIT_REQUEST: ${{ inputs.submit }}
+          INCLUDE_META_QCOM: ${{ inputs.include_meta_qcom }}
         run: python .github/workflows/lava_pr_validation.py begin
       - name: Save request context before waiting for a validation runner
         if: always() && steps.context.outputs.sha != ''
@@ -146,7 +156,7 @@ jobs:
           LAVA_ARTIFACT_TOKEN_NAME: ${{ vars.FOUNDRIES_ARTIFACT_TOKEN_NAME || 'Q_QLI_S3_TOKEN' }}
         run: python .github/workflows/lava_pr_validation.py preflight
 
-      - name: Prepare mandatory baseline and PR additions
+      - name: Prepare selected PR tests and optional meta-qcom baseline
         id: prepare
         env:
           GH_TOKEN: ${{ github.token }}
@@ -162,6 +172,7 @@ jobs:
           IMAGE_TYPE: ${{ inputs.image_type }}
           NIGHTLY_RUN_ID: ${{ inputs.nightly_run }}
           TEST_SELECTIONS: ${{ inputs.selections }}
+          INCLUDE_META_QCOM: ${{ needs.request.outputs.include_meta_qcom }}
           SUBMIT_REQUEST: ${{ inputs.submit }}
         run: python .github/workflows/lava_pr_validation.py prepare
 
