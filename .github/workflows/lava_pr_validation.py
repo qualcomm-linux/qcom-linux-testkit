@@ -742,26 +742,37 @@ def collect_results(api, job, entry):
     return rows, observed
 
 
-def result_matrix(rows, targets, by_group=True, lava_url=LAVA):
+def result_matrix(rows, targets, by_group=True, lava_url=LAVA, compact=False):
     """Render the same linked target matrix for job groups and configurations."""
     def cell(value):
         return str(value).replace("|", "&#124;").replace("\n", " ").replace("\r", " ").replace("<", "&lt;")
 
+    labels = {}
+    if compact:
+        for row in rows:
+            if row["coverage"] != "Workflow":
+                labels.setdefault(row.get("display_name", row["name"]), set()).add(
+                    (row["group"], row["coverage"], row["name"]))
     grouped = {}
     for row in rows:
         if row["coverage"] == "Workflow":
             continue
         label = row["group"] if by_group else f"{row['group']} / {row['coverage']} / {row['name']}"
+        if compact:
+            label = row.get("display_name", row["name"])
+            if len(labels[label]) > 1:
+                label = f"{row['group']} / {row['coverage']} / {row['name']}"
         value = grouped.setdefault((label, row["target"]), {"counts": Counter(), "errors": [], "jobs": set()})
         value["counts"].update(row["counts"])
         value["errors"].extend(row["errors"])
         if row["job"]:
             value["jobs"].add(row["job"])
-    title = "Test group" if by_group else "Test/configuration"
+    title = "Test" if compact else "Test group" if by_group else "Test/configuration"
     if not grouped:
         return ["No functional test results are available."]
     lines = ["| " + " | ".join([title] + [cell(target) for target in targets]) + " |",
              "|" + "---|" * (len(targets) + 1)]
+    colors = {"PASS": "🟢", "FAIL": "🔴", "SKIP": "🟡", "ERROR": "🔴", "NOT RUN": "⚪"}
     for label in sorted({label for label, target in grouped}):
         values = [cell(label)]
         for target in targets:
@@ -777,8 +788,14 @@ def result_matrix(rows, targets, by_group=True, lava_url=LAVA):
                           set(value["errors"]) == {"No executed PASS/FAIL validation"} else "ERROR")
             else:
                 status = "PASS" if counts["pass"] else "SKIP" if counts["skip"] else "NOT RUN"
-            links = " ".join(f"[{status} #{job}]({lava_url}/scheduler/job/{job})" for job in sorted(value["jobs"]))
-            values.append(f"{links or status} {counts['pass']}/{counts['fail']}/{counts['skip']}")
+            if compact:
+                status = f"{colors[status]} {status}"
+                links = " ".join(f"[{status}]({lava_url}/results/{job})" for job in sorted(value["jobs"]))
+                values.append(links or status)
+            else:
+                links = " ".join(f"[{status} #{job}]({lava_url}/scheduler/job/{job})"
+                                 for job in sorted(value["jobs"]))
+                values.append(f"{links or status} {counts['pass']}/{counts['fail']}/{counts['skip']}")
         lines.append("| " + " | ".join(values) + " |")
     return lines
 
@@ -918,88 +935,68 @@ def finish_jobs(folder, manifest, lifecycle=True):
              f"LAVA validation for `{manifest['sha']}`, attempt {attempt}",
              "Result: **Needs attention**" if failed else "Result: **PASS**"]
     if manifest.get("build"):
-        lines.append(f"Images: [meta-qcom {manifest['build']['id']}]({manifest['build']['url']}), "
-                     f"`{manifest['distro']}`, `{manifest['image_type']}`, "
-                     f"producer `{manifest['build']['prefix'].rstrip('/').rsplit('/', 1)[-1]}`.")
+        lines.append(f"[Nightly {manifest['build']['id']}]({manifest['build']['url']})")
     if not manifest["submit_requested"]:
         lines[3] = "Result: **Preparation only, no hardware validation requested**"
     elif not manifest.get("jobs"):
         lines.append("No hardware jobs were submitted. Validation stopped before a submission request was saved.")
     elif not cleanup_complete:
-        lines.append("Cleanup is unconfirmed. Use the LAVA PR results workflow with this run and attempt "
-                     "to recover remote jobs and results. No hardware PASS is claimed without evidence.")
+        lines.append("Cleanup is unconfirmed. Recover jobs using the LAVA PR results workflow.")
     if pr is None:
         lines.append("PR access is unavailable. Results are retained in this workflow for publication recovery.")
     elif pr["head"]["sha"] != manifest["sha"]:
         lines.append("The PR head has changed. These results apply only to the commit above.")
-    if manifest.get("target_matrix"):
-        matrix = manifest["target_matrix"]
-        matrix_url = f"https://github.com/{matrix['repository']}/blob/{matrix['revision']}/{matrix['workflow']}"
-        lines.append(f"Targets: {len(matrix['selected'])}/{len(matrix['targets'])} from "
-                     f"[meta-qcom {matrix['job']}]({matrix_url}).")
-        if matrix.get("excluded"):
-            lines.append("Configured target exclusions: " + ", ".join(matrix["excluded"]) + ".")
-    if manifest.get("exclusions"):
-        lines.append("Template exclusions: " + ", ".join(manifest["exclusions"]) + ".")
-    if manifest.get("baseline_helpers"):
-        helpers = sorted({entry["path"] for entry in manifest["baseline_helpers"]})
-        lines.append("Shared-helper coverage assigned to the mandatory baseline: " + ", ".join(helpers) + ".")
     workflow_url = f"https://github.com/{REPOSITORY}/actions/runs/{os.environ.get('GITHUB_RUN_ID', manifest['run_id'])}"
-    request_url = f"https://github.com/{REPOSITORY}/actions/runs/{manifest['run_id']}"
     totals = Counter()
     for row in rows:
         totals.update(row["counts"])
     targets = sorted({entry["target"] for entry in manifest.get("jobs", [])})
-    lines += ["", f"[Workflow run]({workflow_url}) · [Validation request]({request_url})",
-              f"PASS: {totals['pass']} | FAIL: {totals['fail']} | SKIP: {totals['skip']}",
-              "Counts in each cell are PASS/FAIL/SKIP. SKIP is not completed validation.", ""]
-    lines += result_matrix(rows, targets, lava_url=lava_url)
-    controller_errors = [error for row in rows if row["coverage"] == "Workflow" for error in row["errors"]]
-    if controller_errors:
-        detail = ", ".join(controller_errors).replace("<", "&lt;").replace("\n", " ").replace("\r", " ")
-        lines += ["", "Workflow: " + detail]
-    # Keep infrastructure and collection failures visible, not just ERROR counts.
+    lines += ["", f"[Workflow and artifacts]({workflow_url})",
+              f"PASS: {totals['pass']} | FAIL: {totals['fail']} | SKIP: {totals['skip']}", ""]
+    # Keep full diagnostics in the artifact, while the summary shows the verdict.
     diagnostics = []
     for row in rows:
-        if row["coverage"] == "Workflow" or not row["errors"]:
+        if not row["errors"]:
             continue
         label = f"{row['target']} / {row['group']} / {row['name']}"
         detail = ", ".join(row["errors"]).replace("\n", " ").replace("\r", " ").replace("<", "&lt;")
         diagnostics.append(f"- {label}: {detail[:1000]}")
     if diagnostics:
         (folder / "diagnostics.md").write_text("\n".join(diagnostics) + "\n", encoding="utf-8")
-        lines += ["", "Failure details:"] + diagnostics[:12]
-        if len(diagnostics) > 12:
-            lines.append("Remaining failure details are in diagnostics.md in the results artifact.")
-    if manifest.get("jobs"):
-        lines += ["", f"[Complete testcase matrix and evidence]({workflow_url}) are in the results artifact. "
-                  "The matrix includes baseline tests and PR additions. LAVA setup bookkeeping is excluded."]
+    if any(row["coverage"] == "Workflow" and row["errors"] for row in rows) and not any(
+            row["errors"] or row["counts"].get("fail") for row in rows if row["coverage"] != "Workflow"):
+        lines += ["Workflow did not complete successfully. See the workflow artifacts.", ""]
     case_rows = []
     for row in rows:
         if not row.get("tests") or row["errors"]:
-            case_rows.append(row if not row.get("tests") else row | {"counts": {}})
+            case_rows.append(row if not row.get("tests") else row | {
+                "counts": {}, "display_name": row["name"] + " (validation)"})
         for case in row.get("tests", []):
             result = case["result"].lower()
             case_rows.append(row | {"name": row["name"] + " / " + case["name"],
+                                    "display_name": case["name"] if row["name"] == case["name"] or
+                                    row["coverage"] == "PR addition" else
+                                    row["name"] + " / " + case["name"],
                                     "counts": {result: 1},
                                     "errors": [] if result in {"pass", "fail", "skip"} else ["Unexpected result status"]})
     test_lines = result_matrix(case_rows, targets, by_group=False, lava_url=lava_url)
     (folder / "test-results.md").write_text("\n".join(test_lines) + "\n", encoding="utf-8")
-    lines += ["", "<details>", "<summary>Testcase results by target</summary>", ""]
-    # Keep both summaries identical within GitHub's comment limit. The artifact
-    # always retains every row when a large result matrix needs a preview.
+    # A SKIP row already exposes the lack of execution, avoid a duplicate ERROR row.
+    summary_rows = [row for row in case_rows if not (
+        row.get("tests") and not row["counts"] and row["errors"] == ["No executed PASS/FAIL validation"])]
+    summary_lines = result_matrix(summary_rows, targets, by_group=False, lava_url=lava_url, compact=True)
+    # Both summaries share GitHub's comment limit. The artifact retains every row.
     size = len("\n".join(lines).encode("utf-8"))
     displayed = 0
-    for line in test_lines:
+    for line in summary_lines:
         size += len(line.encode("utf-8")) + 1
         if size > 60000:
             break
         lines.append(line)
         displayed += 1
-    if displayed < len(test_lines):
-        lines += ["", f"Showing {max(0, displayed - 2)} of {len(test_lines) - 2} rows. "
+    if displayed < len(summary_lines):
+        lines += ["", f"Showing {max(0, displayed - 2)} of {len(summary_lines) - 2} rows. "
                   "Download test-results.md from the results artifact for the complete matrix."]
-    lines += ["", "</details>"]
     body = "\n".join(lines)
     (folder / "summary.md").write_text(body + "\n", encoding="utf-8")
     if os.environ.get("GITHUB_STEP_SUMMARY"):
