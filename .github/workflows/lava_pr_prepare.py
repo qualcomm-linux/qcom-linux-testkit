@@ -106,8 +106,10 @@ def check_download(url, access=None):
             raise ValueError("QLI artifact authentication is unavailable")
         headers["QLIAuthorization"] = access["qli_token"]
     origin = parsed.hostname
-    object_path = parsed.path
+    # The QLI gateway exposes both the object URL and its /download/ route.
+    object_path = parsed.path[9:] if parsed.path.startswith("/download/") else parsed.path
     bucket, separator, object_key = object_path.lstrip("/").partition("/")
+    cdn_host = None
     visited = set()
     deadline = time.monotonic() + 120
     for redirect in range(5):
@@ -144,19 +146,30 @@ def check_download(url, access=None):
                         if destination.hostname not in {
                                 "github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com"}:
                             raise ValueError("Audio release redirect left the public GitHub artifact hosts")
-                    elif destination.hostname != origin:
-                        # The gateway can hand off to the same S3 object. Never
-                        # forward its custom authentication header to that host.
+                    else:
+                        # QLI can serve an object through S3 or CloudFront. Trust
+                        # the gateway's CDN choice, never a host chosen by a CDN.
                         endpoint = r"s3(?:[.-](?:dualstack\.)?[a-z0-9-]+)?\.amazonaws\.com"
                         virtual = re.fullmatch(re.escape(bucket) + r"\." + endpoint, destination.hostname or "")
                         path_style = re.fullmatch(endpoint, destination.hostname or "")
-                        if not separator or not ((virtual and destination.path == "/" + object_key) or
-                                                 (path_style and destination.path == object_path)):
+                        cloudfront = re.fullmatch(r"[a-z0-9-]+\.cloudfront\.net", destination.hostname or "")
+                        same_origin = (destination.hostname == origin and
+                                       destination.path in {object_path, "/download" + object_path})
+                        same_s3 = ((virtual and destination.path == "/" + object_key) or
+                                   (path_style and destination.path == object_path))
+                        same_cdn = (cloudfront and destination.path in {object_path, "/" + object_key} and
+                                    (urlsplit(url).hostname == origin or destination.hostname == cdn_host))
+                        if not separator or not (same_origin or same_s3 or same_cdn):
                             raise ValueError(f"Artifact redirect left the configured object: {parsed.path}, "
                                              f"destination host {destination.hostname or 'missing'}")
-                        headers = {}
+                        if same_cdn:
+                            cdn_host = destination.hostname
+                        if destination.hostname != origin:
+                            # The redirected URL carries any required signature.
+                            # Never forward QLI credentials outside its gateway.
+                            headers = {}
                     # Once credentials are removed, a later redirect cannot add them back.
-                    print(f"Artifact redirect HTTP {response.status_code}: {parsed.hostname} -> {destination.hostname}")
+                    print(f"Artifact redirect HTTP {response.status_code}: {urlsplit(url).hostname} -> {destination.hostname}")
                     url = destination_url
                     continue
                 if response.status_code not in (200, 206):
