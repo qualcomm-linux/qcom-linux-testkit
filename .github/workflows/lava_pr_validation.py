@@ -17,7 +17,7 @@ import signal
 import subprocess
 import sys
 import time
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urljoin, urlsplit, urlunsplit
 import zipfile
 
 import requests
@@ -119,10 +119,16 @@ class API:
         visited = set()
         while path:
             page = urljoin(self.base + "/", path)
+            parsed = urlsplit(page)
+            if (self.base == LAVA and parsed.scheme == "http" and
+                    parsed.netloc == urlsplit(LAVA).netloc):
+                # Foundries advertises HTTP next links behind its HTTPS proxy.
+                # Request the same page over TLS without relaxing origin checks.
+                page = urlunsplit(("https", parsed.netloc, parsed.path, parsed.query, parsed.fragment))
             if page in visited:
                 raise RuntimeError("API pagination repeated a page")
             visited.add(page)
-            response = self.request("GET", path, params=params)
+            response = self.request("GET", page, params=params)
             data = response.json()
             if isinstance(data, list):
                 yield from data
@@ -131,6 +137,8 @@ class API:
             path = response.links.get("next", {}).get("url")
             if isinstance(data, dict) and data.get("next"):
                 path = data["next"]
+            if path:
+                path = urljoin(page, path)
             params = {}
 
 
