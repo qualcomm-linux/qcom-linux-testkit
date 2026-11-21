@@ -51,22 +51,18 @@ fi
 
 test_result_init "$LAVA_CASE_ID" "$RES_FILE" || exit 1
 
-fail_test() {
-    test_result_record FAIL "$1"
-    test_result_finish
-    exit 0
-}
-
 log_info "Starting $TEST_NAME"
 log_info "Checking whether systemd is the init process with PID 1"
 
 if [ ! -r /proc/1/comm ]; then
-    fail_test "/proc/1/comm is unavailable or unreadable"
+    test_result_record FAIL "/proc/1/comm is unavailable or unreadable"
+    test_result_finish
 fi
 
 INIT_NAME=""
 IFS= read -r INIT_NAME < /proc/1/comm || {
-    fail_test "Could not read the process name for PID 1"
+    test_result_record FAIL "Could not read the process name for PID 1"
+    test_result_finish
 }
 
 # Remove a possible carriage return from proc output.
@@ -75,7 +71,8 @@ INIT_NAME=$(printf '%s' "$INIT_NAME" | tr -d '\r')
 log_info "PID 1 process name: $INIT_NAME"
 
 if [ "$INIT_NAME" != "systemd" ]; then
-    fail_test "Expected systemd to be PID 1, found '${INIT_NAME:-empty}'"
+    test_result_record FAIL "Expected systemd to be PID 1, found '${INIT_NAME:-empty}'"
+    test_result_finish
 fi
 
 log_info "Verified systemd is running as PID 1"
