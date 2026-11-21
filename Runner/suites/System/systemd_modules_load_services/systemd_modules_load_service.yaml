@@ -1,0 +1,15 @@
+metadata:
+  name: systemd_modules_load_service
+  format: "Lava-Test Test Definition 1.0"
+  description: "Verify systemd-modules-load.service completed successfully"
+  maintainer:
+    - "Qualcomm Linux Testkit"
+
+params: {}
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/System/systemd_modules_load_services
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh systemd_modules_load_service.res

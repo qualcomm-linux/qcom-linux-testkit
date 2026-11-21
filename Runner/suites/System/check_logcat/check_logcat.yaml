@@ -1,0 +1,15 @@
+metadata:
+  name: check_logcat
+  format: "Lava-Test Test Definition 1.0"
+  description: "Verify that the logcat command is not installed on the DUT"
+  maintainer:
+    - "Qualcomm Linux Testkit"
+
+params: {}
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/System/check_logcat
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh check_logcat.res

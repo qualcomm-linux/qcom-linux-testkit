@@ -1,0 +1,15 @@
+metadata:
+  name: adsprpcd_service
+  format: "Lava-Test Test Definition 1.0"
+  description: "Verify adsprpcd.service stop/start behavior on the DUT"
+  maintainer:
+    - "Qualcomm Linux Testkit"
+
+params: {}
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/System/check_systemctl_start_stop_services
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh adsprpcd_service.res
