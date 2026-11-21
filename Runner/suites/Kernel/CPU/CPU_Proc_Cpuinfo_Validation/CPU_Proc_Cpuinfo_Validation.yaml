@@ -1,0 +1,14 @@
+metadata:
+  name: cpu-proc-cpuinfo-validation
+  format: "Lava-Test Test Definition 1.0"
+  description: "Validate /proc/cpuinfo processor count against online CPUs and required aarch64/x86 fields."
+  os:
+    - linux
+  scope:
+    - functional
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/CPU/CPU_Proc_Cpuinfo_Validation
+    - ./run.sh
+    - $REPO_PATH/Runner/utils/send-to-lava.sh CPU_Proc_Cpuinfo_Validation.res

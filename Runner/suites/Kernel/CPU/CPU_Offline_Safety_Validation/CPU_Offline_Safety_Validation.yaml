@@ -1,0 +1,14 @@
+metadata:
+  name: cpu-offline-safety-validation
+  format: "Lava-Test Test Definition 1.0"
+  description: "Validate CPU hotplug sysfs safety: boot CPU remains online and online files exist. Does not offline CPUs (see hotplug suite)."
+  os:
+    - linux
+  scope:
+    - functional
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/CPU/CPU_Offline_Safety_Validation
+    - ./run.sh
+    - $REPO_PATH/Runner/utils/send-to-lava.sh CPU_Offline_Safety_Validation.res

@@ -1,0 +1,14 @@
+metadata:
+  name: cpu-cacheinfo-validation
+  format: "Lava-Test Test Definition 1.0"
+  description: "Validate CPU cacheinfo sysfs (level, type, size, shared_cpu_list) for at least one online CPU."
+  os:
+    - linux
+  scope:
+    - functional
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/CPU/CPU_Cacheinfo_Validation
+    - ./run.sh
+    - $REPO_PATH/Runner/utils/send-to-lava.sh CPU_Cacheinfo_Validation.res
