@@ -1,0 +1,18 @@
+metadata:
+  name: weston-simple-damage
+  format: "Lava-Test Test Definition 1.0"
+  description: "Validate weston-simple-damage using the shared Weston runtime."
+
+params:
+  DURATION: "30s"
+  WAIT_SECS: "10"
+  ALLOW_RELAUNCH: "0"
+  VALIDATE_WAYLAND_PROTO: "1"
+  VALIDATE_SCREENSHOT: "0"
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Multimedia/Display/weston-simple-damage/
+    - DURATION="${DURATION}" WAIT_SECS="${WAIT_SECS}" ALLOW_RELAUNCH="${ALLOW_RELAUNCH}" VALIDATE_WAYLAND_PROTO="${VALIDATE_WAYLAND_PROTO}" VALIDATE_SCREENSHOT="${VALIDATE_SCREENSHOT}" ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh weston-simple-damage.res || true
