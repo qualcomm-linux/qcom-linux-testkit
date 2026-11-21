@@ -2,7 +2,7 @@
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause
 #
-# Common KVM/virtualization validation helpers.
+# Common KVM/virtualization and native Arm64 CPU feature validation helpers.
 #
 # This library must be sourced after functestlib.sh.
 #
@@ -574,4 +574,224 @@ kvm_log_optional_kernel_config() {
 
     log_warn "Optional KVM config not enabled or not visible: $cfg"
     return 1
+}
+
+# ---------- Native Arm64 CPU and KVM feature validation ----------
+# cpu_features_views <register-log> <online-cpu-list>
+# Require a complete, identical system-wide EL0 view on every selected CPU.
+cpu_features_views() {
+    awk -v cpus="$2" '
+        BEGIN { total = split(cpus, list, /[[:space:]]+/); for (i = 1; i <= total; i++) if (list[i] != "") expected["cpu" list[i]] = 1 }
+        $1 == "el0" && $2 in expected && $3 ~ /^ID_AA64/ && $4 ~ /^0x[0-9a-fA-F]+$/ {
+            if (length($4) != 18) bad = 1
+            key = $2 SUBSEP $3
+            if (key in observed) bad = 1
+            observed[key] = tolower($4)
+            registers[$3] = 1
+            if ($3 in value && value[$3] != tolower($4)) bad = 1
+            value[$3] = tolower($4)
+            count++
+        }
+        END {
+            for (cpu in expected) for (reg in registers) if (!(cpu SUBSEP reg in observed)) bad = 1
+            exit bad || !count
+        }
+    ' "$1"
+}
+
+# cpu_features_validate_pac <log> <online-cpu-list>
+# Require all per-CPU keys, corrupt-modifier faults and key-reset evidence.
+cpu_features_validate_pac() {
+    awk -v cpus="$2" '
+        BEGIN { n = split(cpus, list, /[[:space:]]+/); for (i = 1; i <= n; i++) if (list[i] != "") expected["cpu" list[i]] = 1 }
+        $2 in expected && $4 == "sign" {
+            if ($8 !~ /^(ok|unsigned)$/) bad = 1
+            if ($8 == "ok") signed_keys++
+            keys[$2, $3]++
+        }
+        $2 in expected && $3 == "APGA" { if ($6 != "ok") bad = 1; keys[$2, $3]++ }
+        $2 in expected && $4 == "corrupt" {
+            if ($5 != "signal" || ($6 != 4 && $6 != 11)) bad = 1
+            faults[$2, $3]++
+        }
+        $2 == "reset" && $3 ~ /^AP/ { if ($4 != "changed") bad = 1; resets[$3]++ }
+        END {
+            split("APIA APIB APDA APDB APGA", names, " ")
+            for (key_index in names) {
+                key = names[key_index]
+                if (resets[key] != 1) bad = 1
+                for (cpu in expected) {
+                    if (keys[cpu, key] != 1) bad = 1
+                    if (key != "APGA" && faults[cpu, key] != 1) bad = 1
+                }
+            }
+            exit bad || !signed_keys
+        }
+    ' "$1"
+}
+
+# cpu_features_vector <vector-log> <feature> <instruction> <online-cpu-list> <decoded-features>
+# Compare instruction availability, HWCAP, decoded registers and CPU flags.
+cpu_features_vector() {
+    local log="$1" feature="$2" instruction="$3" cpus="$4" decoded_features="$5" hw register_value flags
+    hw=$(awk -v feature="$feature" '
+        $1 == "vec" && $2 == "hwcap" { for (i = 3; i < NF; i += 2) if ($i == feature) print $(i + 1) }
+    ' "$log")
+    case "$hw" in
+        0|1)
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    flags=$(awk -v feature="$feature" '
+        /^Features[[:space:]]*:/ { count++; have = 0; for (i = 3; i <= NF; i++) if ($i == feature) have = 1; if (!have) absent++ }
+        END { if (!count) print "unknown"; else if (absent == count) print 0; else if (!absent) print 1; else print "mixed" }
+    ' /proc/cpuinfo)
+    [ "$flags" = "$hw" ] || return 1
+    if [ -s "$decoded_features" ]; then
+        register_value=$(awk -v feature="FEAT_$(printf '%s' "$feature" | tr '[:lower:]' '[:upper:]')" '$1 == feature {print $2}' "$decoded_features")
+        case "$register_value:$hw" in
+            present:1|absent:0)
+                ;;
+            unknown:*|'':*)
+                return 2
+                ;;
+            *)
+                return 1
+                ;;
+        esac
+    else
+        return 2
+    fi
+    [ -n "$instruction" ] || return 0
+    awk -v cpus="$cpus" -v instruction="$instruction" -v present="$hw" '
+        BEGIN { n = split(cpus, list, /[[:space:]]+/); for (i = 1; i <= n; i++) if (list[i] != "") expected["cpu" list[i]] = 1 }
+        $2 in expected && $3 == instruction {
+            seen[$2]++
+            if (present && ($4 != "exit" || $5 != 0)) bad = 1
+            if (!present && ($4 != "signal" || $5 != 4)) bad = 1
+        }
+        END { for (cpu in expected) if (seen[cpu] != 1) bad = 1; exit bad }
+    ' "$log"
+}
+
+
+# cpu_reporting_flags <cpuinfo-file> <online-cpu-list>
+# Emit CPU/flag rows and verify complete, consistent Arm64 userspace exposure.
+cpu_reporting_flags() {
+    awk -F ':' -v online="$2" '
+        BEGIN {
+            n = split(online, cpus, /[[:space:]]+/)
+            for (i = 1; i <= n; i++) if (cpus[i] != "") { expected[cpus[i]] = 1; expected_count++ }
+        }
+        {
+            key = $1
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", key)
+            if (key == "processor") {
+                cpu = $2
+                gsub(/^[[:space:]]+|[[:space:]]+$/, "", cpu)
+                if (cpu !~ /^[0-9]+$/ || seen[cpu]++) bad = 1
+            }
+            if (key == "Features" && cpu in expected) {
+                if (features[cpu]++) bad = 1
+                n = split($2, tokens, /[[:space:]]+/)
+                for (i = 1; i <= n; i++) {
+                    flag = tokens[i]
+                    if (flag == "") continue
+                    if (flag !~ /^[a-z][a-z0-9_]*$/ || exposed[cpu, flag]++) bad = 1
+                    flags[flag] = 1
+                    count[cpu]++
+                    print cpu "|" flag
+                }
+            }
+        }
+        END {
+            for (cpu in expected) {
+                if (seen[cpu] != 1 || features[cpu] != 1 || !count[cpu]) bad = 1
+                for (flag in flags) if (!exposed[cpu, flag]) bad = 1
+            }
+            if (!expected_count) bad = 1
+            exit bad
+        }
+    ' "$1"
+}
+
+# cpu_reporting_auxv <elf-byte-file> <auxv-byte-file>
+# Decode ABI-sized/endian auxiliary entries as hexadecimal strings, avoiding 64-bit awk arithmetic.
+cpu_reporting_auxv() {
+    awk '
+        NR == FNR {
+            for (i = 1; i <= NF; i++) elf[++header] = tolower($i)
+            next
+        }
+        {
+            for (i = 1; i <= NF; i++) bytes[++total] = tolower($i)
+        }
+        function word(start, result, j) {
+            result = ""
+            if (endian == "01") {
+                for (j = width - 1; j >= 0; j--) result = result bytes[start + j]
+            } else {
+                for (j = 0; j < width; j++) result = result bytes[start + j]
+            }
+            return result
+        }
+        END {
+            if (header != 6 || elf[1] != "7f" || elf[2] != "45" || elf[3] != "4c" || elf[4] != "46") exit 1
+            if (elf[5] == "02") width = 8
+            else if (elf[5] == "01") width = 4
+            else exit 1
+            endian = elf[6]
+            if (endian != "01" && endian != "02") exit 1
+            if (!total || total % (2 * width)) exit 1
+            for (i = 1; i <= total; i++) if (bytes[i] !~ /^[0-9a-f][0-9a-f]$/) exit 1
+            print "word_bytes|" width
+            print "endian|" (endian == "01" ? "little" : "big")
+            for (start = 1; start <= total; start += 2 * width) {
+                type = word(start)
+                sub(/^0+/, "", type)
+                if (type == "") { terminated = 1; break }
+                if (type == "10" || type == "1a") {
+                    if (seen[type]++) exit 1
+                    print (type == "10" ? "HWCAP" : "HWCAP2") "|" word(start + width)
+                }
+            }
+            if (!terminated || !seen["10"]) exit 1
+        }
+    ' "$1" "$2"
+}
+
+# cpu_reporting_hwcap_flags <decoded-auxv-file> <flag-file>
+# Compare selected public Arm64 HWCAP bits with kernel-reported flags as individual bits.
+cpu_reporting_hwcap_flags() {
+    awk -F '|' '
+        NR == FNR { values[$1] = $2; next }
+        { flags[$2] = 1 }
+        function bit(hex, position, digit) {
+            digit = substr(hex, length(hex) - int(position / 4), 1)
+            digit = index("0123456789abcdef", digit) - 1
+            return int(digit / (2 ^ (position % 4))) % 2
+        }
+        END {
+            if (values["word_bytes"] != 8) exit 2
+            n = split("fp asimd aes pmull sha1 sha2 crc32 atomics sve paca pacg", names, " ")
+            split("0 1 3 4 5 6 7 8 22 30 31", positions, " ")
+            for (i = 1; i <= n; i++) {
+                present = bit(values["HWCAP"], positions[i])
+                print names[i] "|hwcap=" present "|cpuinfo=" (names[i] in flags)
+                if (present != (names[i] in flags)) bad = 1
+            }
+            if ("HWCAP2" in values) {
+                n = split("sve2 sme sme2", names, " ")
+                split("1 23 37", positions, " ")
+                for (i = 1; i <= n; i++) {
+                    present = bit(values["HWCAP2"], positions[i])
+                    print names[i] "|hwcap2=" present "|cpuinfo=" (names[i] in flags)
+                    if (present != (names[i] in flags)) bad = 1
+                }
+            }
+            exit bad
+        }
+    ' "$1" "$2"
 }

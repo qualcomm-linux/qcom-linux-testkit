@@ -5891,3 +5891,224 @@ cpufreq_validate_policy() (
     done
     [ "$cpufreq_exercised" -gt 0 ] || exit 4
 )
+
+# ---------- CPU policy and hotplug stress helpers ----------
+# cpu_allowed_cpus
+# Intersect runtime-online CPUs with the current process's permitted CPU set.
+cpu_allowed_cpus() (
+    allowed=$(awk '/^Cpus_allowed_list:/ { print $2 }' /proc/self/status)
+    [ -n "$allowed" ] || exit 1
+    online=$(get_online_cpus)
+    allowed=$(expand_cpu_list "$allowed")
+    printf '%s\n' "$online" | awk -v allowed="$allowed" '
+        BEGIN { n = split(allowed, list, /[[:space:]]+/); for (i = 1; i <= n; i++) permitted[list[i]] = 1 }
+        $1 in permitted { print $1 }
+    '
+)
+
+# cpu_restore_policies
+# Restore saved limits, governor and a readable userspace speed in safe order.
+# shellcheck disable=SC2016
+cpu_restore_policies() {
+    local policy saved low high governor ceiling speed failed=0
+    for saved in "$TEST_RUN_DIR"/policies/*; do
+        [ -f "$saved/changed" ] || continue
+        policy=$(cat "$saved/path")
+        low=$(cat "$saved/min")
+        high=$(cat "$saved/max")
+        governor=$(cat "$saved/governor")
+        ceiling=$(cat "$policy/cpuinfo_max_freq")
+        if ! test_run_command "restore-${policy##*/}" sh -c '
+            printf "%s\n" "$2" >"$1/scaling_max_freq" &&
+            printf "%s\n" "$3" >"$1/scaling_min_freq" &&
+            printf "%s\n" "$4" >"$1/scaling_max_freq" &&
+            printf "%s\n" "$5" >"$1/scaling_governor"
+        ' sh "$policy" "$ceiling" "$low" "$high" "$governor"; then
+            failed=1
+            continue
+        fi
+        speed=$(cat "$saved/speed")
+        if [ "$governor" = userspace ] && is_bounded_positive_integer "$speed" 100000000; then
+            test_run_command "restore-speed-${policy##*/}" sh -c \
+                'printf "%s\n" "$2" >"$1/scaling_setspeed"' sh "$policy" "$speed" || failed=1
+        fi
+        if [ "$(cat "$policy/scaling_min_freq")" != "$low" ] ||
+           [ "$(cat "$policy/scaling_max_freq")" != "$high" ] ||
+           [ "$(cat "$policy/scaling_governor")" != "$governor" ]; then
+            failed=1
+        fi
+    done
+    [ "$failed" -eq 0 ]
+}
+
+# cpu_set_frequency <policy> <frequency>
+# Widen bounds safely before selecting an image-supported frequency.
+# shellcheck disable=SC2016
+cpu_set_frequency() {
+    # Register before the first write so partial changes are restored too.
+    : >"$TEST_RUN_DIR/policies/${1##*/}/changed" || return 1
+    test_run_command "set-${1##*/}-$2" sh -c '
+        printf "%s\n" "$3" >"$1/scaling_max_freq" &&
+        printf "%s\n" "$4" >"$1/scaling_min_freq" &&
+        printf "userspace\n" >"$1/scaling_governor" &&
+        printf "%s\n" "$2" >"$1/scaling_setspeed"
+    ' sh "$1" "$2" "$(cat "$1/cpuinfo_max_freq")" "$(cat "$1/cpuinfo_min_freq")"
+}
+
+# cpu_frequency_samples <policy> <cpu> <frequency> <label> <sample-count> <tolerance-percent>
+# Wait for two in-tolerance observations, then read every requested measured sample.
+# Bound settling and measurement, retain evidence and return 1 on invalid feedback without recording a testcase verdict.
+# shellcheck disable=SC2016
+cpu_frequency_samples() {
+    local policy="$1" cpu="$2" requested="$3" label="$4" source failed=0
+    local samples="$5" tolerance="$6"
+    source="$policy/cpuinfo_cur_freq"
+    if ! is_bounded_positive_integer "$(cat "$source" 2>/dev/null)" 100000000; then
+        source="$policy/scaling_cur_freq"
+    fi
+    if ! printf '%s' '' >"$TEST_RUN_DIR/$label-settling.log"; then
+        log_error "Cannot retain CPUFreq settling evidence under $TEST_RUN_DIR"
+        return 1
+    fi
+    if ! test_run_command --stdout-only "$label" taskset -c "$cpu" sh -c '
+        . "$7"
+        start=$(get_monotonic_seconds)
+        settled=0
+        while [ "$settled" -lt 2 ]; do
+            busy=0
+            while [ "$busy" -lt 10000 ]; do
+                busy=$((busy + 1))
+            done
+            value=$(cat "$1") || exit 1
+            elapsed=$(($(get_monotonic_seconds) - start))
+            printf "elapsed=%ss requested=%s observed=%s provider=%s\n" \
+                "$elapsed" "$3" "$value" "$1" >>"$6"
+            if ! is_bounded_positive_integer "$value" 100000000; then
+                printf "status=invalid-feedback\n" >>"$6"
+                exit 1
+            fi
+            if [ "$elapsed" -ge "$5" ]; then
+                printf "status=settling-deadline\n" >>"$6"
+                exit 1
+            fi
+            if awk -v value="$value" -v target="$3" -v tolerance="$4" \
+                "
+                BEGIN {
+                    difference = value - target
+                    if (difference < 0) difference = -difference
+                    exit difference * 100 > target * tolerance
+                }
+                "; then
+                settled=$((settled + 1))
+            else
+                settled=0
+            fi
+            sleep 0.2
+        done
+        printf "status=settled consecutive=%s elapsed=%ss\n" "$settled" "$elapsed" >>"$6"
+        sample=0
+        while [ "$sample" -lt "$2" ]; do
+            busy=0
+            while [ "$busy" -lt 10000 ]; do
+                busy=$((busy + 1))
+            done
+            cat "$1" || exit 1
+            sleep 0.2
+            sample=$((sample + 1))
+        done
+    ' sh "$source" "$samples" "$requested" "$tolerance" \
+        "$TEST_RUN_TIMEOUT" "$TEST_RUN_DIR/$label-settling.log" "$TOOLS/functestlib.sh"; then
+        log_file_with_label CPUFREQ-SETTLING "$TEST_RUN_DIR/$label-settling.log" 20
+        log_error "$label feedback did not settle or complete within ${TEST_RUN_TIMEOUT}s, inspect $TEST_RUN_DIR/$label-settling.log and $TEST_RUN_DIR/$label.log"
+        return 1
+    fi
+    log_file_with_label CPUFREQ-SETTLING "$TEST_RUN_DIR/$label-settling.log" 20
+    if ! awk -v target="$requested" -v tolerance="$tolerance" \
+        -v expected="$samples" '
+        {
+            count++
+            if ($0 !~ /^[0-9]+$/ || $1 <= 0 || $1 > 100000000) bad = 1
+            difference = $1 - target
+            if (difference < 0) difference = -difference
+            if (difference * 100 > target * tolerance) bad = 1
+        }
+        END { exit bad || count != expected }
+    ' "$TEST_RUN_DIR/$label.log"; then
+        failed=1
+    fi
+    if [ "$failed" -eq 0 ]; then
+        log_info "$label repeated feedback within ${tolerance}% of $requested kHz, provider=${source##*/}"
+    else
+        log_error "$label frequency feedback differs from request=$requested kHz, provider=${source##*/}"
+    fi
+    return "$failed"
+}
+
+# cpu_timed_loop <cpu> <iterations> <label>
+# Measure a fixed pinned workload using monotonic procfs time, no Python needed.
+# shellcheck disable=SC2016
+cpu_timed_loop() {
+    test_run_command --stdout-only "$3" taskset -c "$1" sh -c '
+        start=$(awk "{print int(\$1 * 100)}" /proc/uptime)
+        iteration=0
+        while [ "$iteration" -lt "$1" ]; do
+            iteration=$((iteration + 1))
+        done
+        end=$(awk "{print int(\$1 * 100)}" /proc/uptime)
+        printf "%s\n" "$((end - start))"
+    ' sh "$2"
+}
+
+
+# cpu_hotplug_restore
+# Stop owned load workers, restore the initial online mask and verify it.
+# shellcheck disable=SC2016
+cpu_hotplug_restore() {
+    local cpu pid remaining="" failed=0
+    for pid in ${TEST_RUN_RACE_PIDS:-}; do
+        if ! kill_process "$pid"; then
+            remaining="$remaining $pid"
+            failed=1
+        fi
+    done
+    TEST_RUN_RACE_PIDS="${remaining# }"
+    [ "$failed" -eq 0 ] || return 1
+    for cpu in $CPU_HOTPLUG_OFFLINED_CPUS; do
+        if ! cpu_hotplug_in_online_mask "$cpu"; then
+            if ! test_run_command "restore-cpu$cpu" sh -c \
+                '
+                    . "$1"
+                    cpu_hotplug_write_state "$2" 1 restore "$3"
+                ' \
+                sh "$TOOLS/functestlib.sh" "$cpu" "$TEST_RUN_DIR"; then
+                failed=1
+            fi
+        fi
+    done
+    [ "$(get_online_cpus)" = "$TEST_RUN_INITIAL_CPUS" ] || failed=1
+    [ "$failed" -eq 0 ]
+}
+
+# cpu_hotplug_transition <cpu> <0|1> <label>
+# Reuse bounded state writes and require sysfs plus scheduler-mask readback.
+# shellcheck disable=SC2016
+cpu_hotplug_transition() {
+    local cpu="$1" state="$2" label="$3"
+    if [ "$state" = 0 ]; then
+        cpu_hotplug_record_offlined_cpu "$cpu"
+    fi
+    if ! test_run_command "$label" sh -c \
+        '
+            . "$1"
+            cpu_hotplug_write_state "$2" "$3" "$4" "$5"
+        ' \
+        sh "$TOOLS/functestlib.sh" "$cpu" "$state" "$label" "$TEST_RUN_DIR"; then
+        return 1
+    fi
+    [ "$(cpu_hotplug_read_state "$cpu")" = "$state" ] || return 1
+    if [ "$state" = 1 ]; then
+        cpu_hotplug_in_online_mask "$cpu" && cpu_is_schedulable "$cpu"
+    else
+        ! cpu_hotplug_in_online_mask "$cpu"
+    fi
+}
