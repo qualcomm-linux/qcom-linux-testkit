@@ -194,6 +194,7 @@ jobs:
           path: |
             lava-output/results.json
             lava-output/summary.md
+            lava-output/pr-summary.md
             lava-output/test-results.md
             lava-output/diagnostics.md
             lava-output/controller-errors.json
