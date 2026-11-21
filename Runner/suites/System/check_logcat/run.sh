@@ -51,24 +51,13 @@ fi
 
 test_result_init "$LAVA_CASE_ID" "$RES_FILE" || exit 1
 
-fail_test() {
-    test_result_record FAIL "$1"
-    test_result_finish
-    exit 0
-}
-
-pass_test() {
-    test_result_record PASS "$1"
-    test_result_finish
-    exit 0
-}
-
 log_info "Starting $TEST_NAME"
 log_info "Checking that logcat is unavailable on the DUT"
 
 if command -v logcat >/dev/null 2>&1; then
     LOGCAT_PATH=$(command -v logcat)
-    fail_test "logcat is installed at $LOGCAT_PATH; expected it to be unavailable"
+    test_result_record FAIL "logcat is installed at $LOGCAT_PATH; expected it to be unavailable"
+    test_result_finish
 fi
 
 # Because command -v confirmed that logcat is absent, this should terminate
@@ -81,7 +70,10 @@ log_info "$LOGCAT_OUTPUT"
 log_info "logcat command exit status: $LOGCAT_STATUS"
 
 if [ "$LOGCAT_STATUS" -ne 127 ]; then
-    fail_test "Running logcat returned status $LOGCAT_STATUS; expected command-not-found status 127"
+    test_result_record FAIL "Running logcat returned status $LOGCAT_STATUS; expected command-not-found status 127"
+    test_result_finish
 fi
 
-pass_test "logcat is unavailable, as expected"
+test_result_record PASS "logcat is unavailable, as expected"
+
+test_result_finish
