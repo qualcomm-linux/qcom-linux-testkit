@@ -11,8 +11,8 @@ TEST_NAME="adsprpcd_service"
 LAVA_CASE_ID="adsprpcd_service"
 SERVICE_NAME="adsprpcd.service"
 RES_FILE="$SCRIPT_DIR/${TEST_NAME}.res"
-COMMAND_LOG="$SCRIPT_DIR/${TEST_NAME}.command.log"
 COMMAND_TIMEOUT=30
+STATE_PREFIX="$SCRIPT_DIR/${TEST_NAME}.state"
 
 RUNNER_DIR=""
 SEARCH="$SCRIPT_DIR"
@@ -53,66 +53,16 @@ fi
 . "$TOOLS/functestlib.sh"
 
 test_result_init "$LAVA_CASE_ID" "$RES_FILE" || exit 1
-rm -f "$COMMAND_LOG"
 SERVICE_RESTORE_REQUIRED=0
-SERVICE_CLEANUP_CANCEL_FAILED=0
 
-fail_test() {
-    test_result_record FAIL "$1"
-    test_result_finish
-    exit 0
-}
-
-run_bounded() {
-    BOUNDED_TIMEOUT_EXPIRED=0
-
-    run_with_bounded_timeout "$COMMAND_TIMEOUT" "$@" \
-        > "$COMMAND_LOG" 2>&1
-    COMMAND_STATUS=$?
-    COMMAND_TIMED_OUT=${BOUNDED_TIMEOUT_EXPIRED:-0}
-    COMMAND_OUTPUT=$(cat "$COMMAND_LOG" 2>/dev/null)
-}
-
-check_state() {
-    expected_active="$1"
-    expected_sub="$2"
-    phase="$3"
-
-    run_bounded systemctl show "$SERVICE_NAME" \
-        --property=ActiveState --property=SubState
-
-    if [ "$COMMAND_TIMED_OUT" -eq 1 ]; then
-        log_info "$phase: systemctl show timed out"
-        return 2
-    fi
-
-    if [ "$COMMAND_STATUS" -ne 0 ]; then
-        log_info "systemctl show output: $COMMAND_OUTPUT"
-        log_info "$phase: unable to query $SERVICE_NAME state"
-        return 2
-    fi
-
-    ACTIVE_STATE=$(printf '%s\n' "$COMMAND_OUTPUT" |
-        sed -n 's/^ActiveState=//p' | head -n 1)
-    SUB_STATE=$(printf '%s\n' "$COMMAND_OUTPUT" |
-        sed -n 's/^SubState=//p' | head -n 1)
-
-    log_info "$phase state: ActiveState=${ACTIVE_STATE:-unknown}, SubState=${SUB_STATE:-unknown}"
-
-    if [ "$ACTIVE_STATE" != "$expected_active" ] ||
-        [ "$SUB_STATE" != "$expected_sub" ]; then
-        return 1
-    fi
-
-    return 0
+read_service_unit() {
+    service_output_prefix="$1"
+    shift
+    systemd_unit_read_properties "$service_output_prefix" 5 \
+        "Id,ActiveState,SubState,Result,Job,LoadState" "$@"
 }
 
 cleanup_service_state() {
-    if [ "${SERVICE_CLEANUP_CANCEL_FAILED:-0}" -eq 1 ]; then
-        log_fail "Cannot safely restore $SERVICE_NAME because the interrupted command is still running"
-        return 1
-    fi
-
     if ! bounded_timeout_cancel; then
         log_fail "Cannot safely restore $SERVICE_NAME because its command did not stop"
         return 1
@@ -120,48 +70,22 @@ cleanup_service_state() {
 
     [ "${SERVICE_RESTORE_REQUIRED:-0}" -eq 1 ] || return 0
 
-    check_state active running "Cleanup verification"
-    cleanup_state_status=$?
-    if [ "$cleanup_state_status" -eq 0 ]; then
+    if systemd_unit_restore_active "$STATE_PREFIX" "$COMMAND_TIMEOUT" \
+        read_service_unit "$SERVICE_NAME"; then
         SERVICE_RESTORE_REQUIRED=0
-        log_info "$SERVICE_NAME is active/running after cleanup"
+        log_info "$SERVICE_NAME is active/running with no pending job after cleanup"
         return 0
     fi
-
-    log_info "Attempting to restore $SERVICE_NAME"
-    run_bounded systemctl start "$SERVICE_NAME"
-    if [ "$COMMAND_TIMED_OUT" -eq 1 ]; then
-        log_fail "Recovery start for $SERVICE_NAME timed out"
-        return 1
-    fi
-    if [ "$COMMAND_STATUS" -ne 0 ]; then
-        log_fail "Recovery start for $SERVICE_NAME failed: $COMMAND_OUTPUT"
-        return 1
-    fi
-
-    check_state active running "Recovery verification"
-    cleanup_state_status=$?
-    if [ "$cleanup_state_status" -ne 0 ]; then
-        log_fail "$SERVICE_NAME was not active/running after recovery (state check=$cleanup_state_status)"
-        return 1
-    fi
-
-    SERVICE_RESTORE_REQUIRED=0
-    log_info "Verified $SERVICE_NAME is active/running after recovery"
-    return 0
+    log_fail "Could not restore $SERVICE_NAME to active/running with no pending job"
+    log_file_with_label SYSTEMD-UNIT-JOB "$STATE_PREFIX.current" 32
+    return 1
 }
 
 handle_signal() {
     signal_name="$1"
     trap '' HUP INT TERM
 
-    if ! bounded_timeout_cancel; then
-        SERVICE_CLEANUP_CANCEL_FAILED=1
-        log_fail "Could not stop the running command before service cleanup"
-    fi
-
     test_result_finish FAIL "Test interrupted by $signal_name"
-    exit 0
 }
 
 trap 'handle_signal HUP' HUP
@@ -169,27 +93,28 @@ trap 'handle_signal INT' INT
 trap 'handle_signal TERM' TERM
 
 if ! command -v systemctl >/dev/null 2>&1; then
-    fail_test "systemctl command not found on the DUT"
-fi
-
-if ! systemd_service_exists "$SERVICE_NAME"; then
-    fail_test "$SERVICE_NAME is not installed on the DUT"
+    test_result_record FAIL "systemctl command not found on the DUT"
+    test_result_finish
 fi
 
 log_info "Starting $TEST_NAME"
 log_info "Testing stop/start behavior for $SERVICE_NAME locally on the DUT"
 
-check_state active running "Initial check"
-STATE_STATUS=$?
-if [ "$STATE_STATUS" -eq 2 ]; then
-    fail_test "Could not query the initial state of $SERVICE_NAME"
-fi
-if [ "$STATE_STATUS" -ne 0 ]; then
-    fail_test "$SERVICE_NAME was not active and running before the test"
+if ! read_service_unit "$STATE_PREFIX.initial" "$SERVICE_NAME"; then
+    log_file_with_label SYSTEMD-UNIT-QUERY "$STATE_PREFIX.initial.raw" 40
+    test_result_record FAIL "Could not query the initial state of $SERVICE_NAME (status=${SYSTEMD_UNIT_QUERY_STATUS:-unknown}, timeout=${SYSTEMD_UNIT_QUERY_TIMED_OUT:-unknown})"
+    test_result_finish
 fi
 
-if ! systemd_service_is_active "$SERVICE_NAME"; then
-    fail_test "$SERVICE_NAME is not active before the test"
+INITIAL_LOAD_STATE=$(systemd_unit_property_value "$STATE_PREFIX.initial.raw" LoadState) || INITIAL_LOAD_STATE=""
+if [ "$INITIAL_LOAD_STATE" != "loaded" ]; then
+    test_result_record FAIL "$SERVICE_NAME is not installed on the DUT (LoadState=${INITIAL_LOAD_STATE:-unknown})"
+    test_result_finish
+fi
+
+if ! systemd_unit_rows_match_state "$STATE_PREFIX.initial" active running "$SERVICE_NAME"; then
+    test_result_record FAIL "$SERVICE_NAME was not active/running with no pending job before the test"
+    test_result_finish
 fi
 
 # Shared result finalization invokes this hook on pass, failure, or signal.
@@ -198,49 +123,17 @@ SERVICE_RESTORE_REQUIRED=1
 TEST_RESULT_CLEANUP=cleanup_service_state
 
 log_info "Stopping $SERVICE_NAME"
-run_bounded systemctl stop "$SERVICE_NAME"
-
-if [ "$COMMAND_TIMED_OUT" -eq 1 ]; then
-    fail_test "systemctl stop $SERVICE_NAME timed out"
-fi
-
-if [ "$COMMAND_STATUS" -ne 0 ]; then
-    log_info "systemctl stop output: $COMMAND_OUTPUT"
-    fail_test "systemctl stop $SERVICE_NAME failed"
-fi
-
-check_state inactive dead "After stop"
-STATE_STATUS=$?
-if [ "$STATE_STATUS" -eq 2 ]; then
-    fail_test "Could not query $SERVICE_NAME state after stop"
-fi
-if [ "$STATE_STATUS" -ne 0 ]; then
-    fail_test "$SERVICE_NAME did not reach inactive/dead after stop"
+if ! systemd_unit_transition "$STATE_PREFIX" "$COMMAND_TIMEOUT" \
+    read_service_unit stop dead "$SERVICE_NAME"; then
+    test_result_record FAIL "Could not stop $SERVICE_NAME and verify inactive/dead with no pending job"
+    test_result_finish
 fi
 
 log_info "Starting $SERVICE_NAME"
-run_bounded systemctl start "$SERVICE_NAME"
-
-if [ "$COMMAND_TIMED_OUT" -eq 1 ]; then
-    fail_test "systemctl start $SERVICE_NAME timed out"
-fi
-
-if [ "$COMMAND_STATUS" -ne 0 ]; then
-    log_info "systemctl start output: $COMMAND_OUTPUT"
-    fail_test "systemctl start $SERVICE_NAME failed"
-fi
-
-check_state active running "After start"
-STATE_STATUS=$?
-if [ "$STATE_STATUS" -eq 2 ]; then
-    fail_test "Could not query $SERVICE_NAME state after start"
-fi
-if [ "$STATE_STATUS" -ne 0 ]; then
-    fail_test "$SERVICE_NAME did not return to active/running after start"
-fi
-
-if ! systemd_service_is_active "$SERVICE_NAME"; then
-    fail_test "$SERVICE_NAME is not active after start"
+if ! systemd_unit_transition "$STATE_PREFIX" "$COMMAND_TIMEOUT" \
+    read_service_unit start running "$SERVICE_NAME"; then
+    test_result_record FAIL "Could not start $SERVICE_NAME and verify active/running with no pending job"
+    test_result_finish
 fi
 
 log_info "$SERVICE_NAME stop/start behavior verified"
