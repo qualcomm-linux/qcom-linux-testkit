@@ -52,45 +52,46 @@ fi
 
 test_result_init "$LAVA_CASE_ID" "$RES_FILE" || exit 1
 
-fail_test() {
-    test_result_record FAIL "$1"
-    test_result_finish
-    exit 0
-}
-
 log_info "Starting $TEST_NAME"
 log_info "Checking ESRT directory: $ESRT_DIR"
 
 if [ ! -d "$ESRT_DIR" ]; then
-    fail_test "$ESRT_DIR is missing or is not a directory"
+    test_result_record FAIL "$ESRT_DIR is missing or is not a directory"
+    test_result_finish
 fi
 
 if ! command -v ls >/dev/null 2>&1; then
-    fail_test "ls command not found on the DUT"
+    test_result_record FAIL "ls command not found on the DUT"
+    test_result_finish
 fi
 
 ESRT_LISTING=$(ls -la "$ESRT_DIR" 2>&1) || {
     log_info "ESRT listing error: $ESRT_LISTING"
-    fail_test "Could not list $ESRT_DIR"
+    test_result_record FAIL "Could not list $ESRT_DIR"
+    test_result_finish
 }
 log_info "ESRT directory listing:"
 log_info "$ESRT_LISTING"
 
 if [ ! -d "$ESRT_DIR/entries" ]; then
-    fail_test "Expected ESRT directory entry is missing or is not a directory: entries"
+    test_result_record FAIL "Expected ESRT directory entry is missing or is not a directory: entries"
+    test_result_finish
 fi
 
 for name in fw_resource_count fw_resource_count_max fw_resource_version; do
     if [ ! -f "$ESRT_DIR/$name" ]; then
-        fail_test "Expected ESRT attribute is missing or is not a file: $name"
+        test_result_record FAIL "Expected ESRT attribute is missing or is not a file: $name"
+        test_result_finish
     fi
 
     if [ ! -r "$ESRT_DIR/$name" ]; then
-        fail_test "ESRT attribute is not readable: $name"
+        test_result_record FAIL "ESRT attribute is not readable: $name"
+        test_result_finish
     fi
 
     value=$(cat "$ESRT_DIR/$name" 2>/dev/null) || {
-        fail_test "Could not read ESRT attribute: $name"
+        test_result_record FAIL "Could not read ESRT attribute: $name"
+        test_result_finish
     }
     log_info "$name: $value"
 done
