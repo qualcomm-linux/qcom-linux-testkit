@@ -1,0 +1,14 @@
+metadata:
+  name: lockup-detector-validation
+  format: "Lava-Test Test Definition 1.0"
+  description: "Validate the kernel lockup detector (softlockup/NMI watchdog) sysctls used to catch spinlock and IRQ lockups."
+  os:
+    - linux
+  scope:
+    - functional
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/Lockup_Detector_Validation
+    - ./run.sh
+    - $REPO_PATH/Runner/utils/send-to-lava.sh Lockup_Detector_Validation.res
