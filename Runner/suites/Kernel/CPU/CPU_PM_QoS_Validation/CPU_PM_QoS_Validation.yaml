@@ -1,0 +1,14 @@
+metadata:
+  name: cpu-pm-qos-validation
+  format: "Lava-Test Test Definition 1.0"
+  description: "Validate CPU PM QoS / cpu_dma_latency and cpuidle PM QoS nodes when exported."
+  os:
+    - linux
+  scope:
+    - functional
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/CPU/CPU_PM_QoS_Validation
+    - ./run.sh
+    - $REPO_PATH/Runner/utils/send-to-lava.sh CPU_PM_QoS_Validation.res
