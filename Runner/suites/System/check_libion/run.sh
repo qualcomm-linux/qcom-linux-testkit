@@ -51,14 +51,9 @@ fi
 
 test_result_init "$LAVA_CASE_ID" "$RES_FILE" || exit 1
 
-fail_test() {
-    test_result_record FAIL "$1"
-    test_result_finish
-    exit 0
-}
-
 if ! command -v find >/dev/null 2>&1; then
-    fail_test "find command not found on the DUT"
+    test_result_record FAIL "find command not found on the DUT"
+    test_result_finish
 fi
 
 FIND_LOG="$SCRIPT_DIR/${TEST_NAME}.find.log"
@@ -74,13 +69,15 @@ run_with_timeout_log "$FIND_TIMEOUT" "$FIND_LOG" \
 FIND_STATUS=$?
 if [ "$FIND_STATUS" -ne 0 ]; then
     log_file_with_label "LIBION-SCAN" "$FIND_LOG"
-    fail_test "Filesystem scan failed or timed out (status=$FIND_STATUS); see $FIND_LOG"
+    test_result_record FAIL "Filesystem scan failed or timed out (status=$FIND_STATUS); see $FIND_LOG"
+    test_result_finish
 fi
 
 if [ -s "$FIND_LOG" ]; then
     log_info "Found matching paths:"
     log_file_with_label "LIBION-SCAN" "$FIND_LOG"
-    fail_test "libion-related path(s) found in userspace"
+    test_result_record FAIL "libion-related path(s) found in userspace"
+    test_result_finish
 fi
 
 log_pass "$LAVA_CASE_ID: no paths matching libion* were found"
