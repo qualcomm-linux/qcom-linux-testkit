@@ -479,11 +479,13 @@ def append_tests(jobs, affected, documents, by_suite, selections, config, source
                                          not all(isinstance(name, str) and name for name in choice["expected"])):
                 raise ValueError("expected must be a list of result names")
             definition = dict(path=path, params=params)
+            execution_group = group
             # Do not collapse baseline instances, only avoid equivalent additions.
             equivalent = [old for old_group, old in baseline if old["path"] == path and old_group == group and
                           effective_params(old, documents) == effective_params(definition, documents)]
             if equivalent and not choice.get("fresh_boot", False):
                 selected.update(id(old) for old in equivalent)
+                selected_names = [old["name"] for old in equivalent]
                 disposition = "covered by baseline" if include_meta_qcom else "selected from baseline"
             else:
                 name = "pr-" + Path(path).stem + "-" + digest(choice)[:8]
@@ -491,6 +493,7 @@ def append_tests(jobs, affected, documents, by_suite, selections, config, source
                     raise ValueError("Definition filename must form a valid LAVA name")
                 definition.update(name=name, repository=source_url,
                                   **{"from": "url", "strip-components": 1})
+                selected_names = [name]
                 if choice.get("expected"):
                     definition["expected"] = choice["expected"]
                 minutes = int(choice.get("minutes", config["addition_minutes"]))
@@ -518,6 +521,7 @@ def append_tests(jobs, affected, documents, by_suite, selections, config, source
                 destination = jobs[group]
                 if fresh:
                     unique = group + "-" + name
+                    execution_group = unique
                     if unique in jobs:
                         raise ValueError(f"Duplicate fresh-boot selection: {path}")
                     destination = deepcopy(jobs[group])
@@ -534,6 +538,7 @@ def append_tests(jobs, affected, documents, by_suite, selections, config, source
                 destination["timeouts"]["job"]["minutes"] += minutes
                 disposition = "added with fresh boot" if fresh else "appended"
             manifest.append(dict(suite=suite, path=path, group=group, params=params,
+                                 execution_group=execution_group, definitions=selected_names,
                                  reasons=sorted(reasons), disposition=disposition))
     if not include_meta_qcom:
         for group in list(jobs):
@@ -699,6 +704,8 @@ def prepare(folder):
                         raise ValueError(f"Missing baseline YAML in PR: {definition['path']}")
         selection = append_tests(jobs, affected, documents, by_suite, selections, config, source_url, source,
                                  include_meta_qcom=include_meta_qcom)
+        pr_definitions = {(row["execution_group"], name) for row in selection
+                          for name in row.get("definitions", [])}
         if not include_meta_qcom:
             baseline_job_count += sum(group in config["groups"] for group in jobs)
             for job in jobs.values():
@@ -748,15 +755,19 @@ def prepare(folder):
             if image_type == "both":
                 filename = f"jobs/{target}-{variant}-{group}.yaml"
             (folder / filename).write_text(yaml.safe_dump(job, sort_keys=False), encoding="utf-8")
+            result_definitions = []
+            for item in definitions:
+                coverage = "Baseline" if include_meta_qcom and id(item) in baseline_ids else "Setup"
+                if (group, item["name"]) in pr_definitions:
+                    coverage = "PR change" if id(item) in baseline_ids else "PR addition"
+                result_definitions.append(dict(name=item["name"], path=item["path"],
+                                               params=item.get("params", {}), expected=item.get("expected", []),
+                                               coverage=coverage))
             manifest["jobs"].append(dict(file=filename, key=key, target=target, group=group,
                                          **variant_fields,
                                          run_id=run_id, run_attempt=attempt,
                                          device_type=job["device_type"], definition_hash=digest(job),
-                                         definitions=[dict(name=item["name"], path=item["path"],
-                                                           params=item.get("params", {}), expected=item.get("expected", []),
-                                                           coverage=("PR change" if not include_meta_qcom else
-                                                                     "Baseline" if id(item) in baseline_ids else "PR addition"))
-                                                      for item in definitions]))
+                                          definitions=result_definitions))
     job_limit = baseline_job_count + config["max_additional_jobs"]
     manifest["job_limit"] = job_limit
     save_json(folder / "manifest.json", manifest)
