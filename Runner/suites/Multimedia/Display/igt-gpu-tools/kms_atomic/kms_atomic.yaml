@@ -1,0 +1,21 @@
+metadata:
+  name: kms-atomic
+  format: "Lava-Test Test Definition 1.0"
+  description: "Validates the KMS atomic modesetting API using the IGT kms_atomic test suite. Runs all subtests except those matching *test* or *immutable* patterns. Stops any active Weston compositor before running and restores it afterwards."
+  os:
+    - linux
+  scope:
+    - functional
+
+params:
+  KMS_ATOMIC_PATH: "/usr/libexec/igt-gpu-tools/kms_atomic"
+  RUN_SUBTEST: "*,!*test*,!*immutable*"
+  IGT_TIMEOUT: "300"
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Multimedia/Display/igt-gpu-tools/kms_atomic
+    - export IGT_TIMEOUT="${IGT_TIMEOUT}"
+    - ./run.sh --kms-atomic-path "${KMS_ATOMIC_PATH}" --run-subtest "${RUN_SUBTEST}" || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh kms_atomic.res || true
