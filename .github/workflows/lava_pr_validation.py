@@ -670,6 +670,7 @@ def run_jobs(folder, manifest):
                 time.sleep(30)
         # Fail the validation job as well as the reporter, so GitHub's failed-job
         # rerun includes hardware execution instead of repeating only reporting.
+        executed = 0
         for entry in manifest["jobs"]:
             matches = matching_jobs(api, entry, known_id=state["jobs"].get(entry["key"], {}).get("id"))
             if not matches:
@@ -677,6 +678,9 @@ def run_jobs(folder, manifest):
             rows, evidence = collect_results(api, matches[0], entry)
             if not rows or any(row["errors"] or row["counts"].get("fail") for row in rows):
                 raise RuntimeError(f"LAVA validation failed for {result_target(entry)} {entry['group']}")
+            executed += sum(row["counts"].get("pass", 0) + row["counts"].get("fail", 0) for row in rows)
+        if not executed:
+            raise RuntimeError("No executed PASS/FAIL validation across requested tests")
     except (Exception, KeyboardInterrupt) as error:
         state["error"] = str(error)
         save_json(state_path, state)
@@ -739,7 +743,8 @@ def collect_results(api, job, entry):
             errors.append("Ambiguous result suites")
         if missing:
             errors.append("Missing: " + ", ".join(missing))
-        if not counts["pass"] and not counts["fail"]:
+        if (definition["coverage"] not in {"Baseline", "Setup"} and
+                not counts["pass"] and not counts["fail"]):
             errors.append("No executed PASS/FAIL validation")
         if any(result not in {"pass", "fail", "skip"} for result in counts):
             errors.append("Unexpected result status")
@@ -805,6 +810,8 @@ def result_matrix(rows, targets, by_group=True, lava_url=LAVA, compact=False):
                 status = "PASS" if counts["pass"] else "SKIP" if counts["skip"] else "NOT RUN"
             if compact:
                 status = f"{colors[status]} {status}"
+                if by_group and counts["pass"] and counts["skip"] and not counts["fail"] and not value["errors"]:
+                    status += f" / {colors['SKIP']} SKIP"
                 links = " ".join(f"[{status}]({lava_url}/results/{job})" for job in sorted(value["jobs"]))
                 values.append(links or status)
             else:
@@ -935,8 +942,9 @@ def finish_jobs(folder, manifest, lifecycle=True):
         rows.append(dict(target="All", group="Controller", coverage="Workflow",
                          name="Validation controller", counts={}, job=None,
                          errors=[f"Controller outcome: {outcome}"]))
+    executed = any(row["counts"].get("pass") or row["counts"].get("fail") for row in rows)
     failed = (any(row["errors"] or row["counts"].get("fail") for row in rows) or
-              not rows or not cleanup_complete)
+              not executed or not cleanup_complete)
     gh = github()
     publication_error = None
     try:
@@ -960,6 +968,8 @@ def finish_jobs(folder, manifest, lifecycle=True):
         notices.append("No hardware jobs were submitted. Validation stopped before a submission request was saved.")
     elif not cleanup_complete:
         notices.append("Cleanup is unconfirmed. Recover jobs using the LAVA PR results workflow.")
+    elif not executed:
+        notices.append("No tests produced an executed PASS/FAIL result.")
     if pr is None:
         notices.append("PR access is unavailable. Results are retained in this workflow for publication recovery.")
     elif pr["head"]["sha"] != manifest["sha"]:
@@ -1000,25 +1010,24 @@ def finish_jobs(folder, manifest, lifecycle=True):
     # A SKIP row already exposes the lack of execution, avoid a duplicate ERROR row.
     summary_rows = [row for row in case_rows if not (
         row.get("tests") and not row["counts"] and row["errors"] == ["No executed PASS/FAIL validation"])]
-    group_lines = result_matrix(rows, targets, lava_url=lava_url, compact=True) if any(
-        row["coverage"] != "Workflow" for row in rows) else []
-    summary_lines = result_matrix(summary_rows, targets, by_group=False, lava_url=lava_url, compact=True)
-    (folder / "test-results.md").write_text("\n".join(group_lines + [""] + summary_lines) + "\n", encoding="utf-8")
-    lines += group_lines + [""]
-    # Both summaries share GitHub's comment limit. The artifact retains every row.
-    size = len("\n".join(lines).encode("utf-8"))
-    displayed = 0
-    for line in summary_lines:
-        size += len(line.encode("utf-8")) + 1
-        if size > 60000:
-            break
-        lines.append(line)
-        displayed += 1
-    if displayed < len(summary_lines):
-        lines += ["", f"Showing {max(0, displayed - 2)} of {len(summary_lines) - 2} rows. "
-                  "Download test-results.md from the results artifact for the complete matrix."]
-    body = "\n".join(lines)
-    (folder / "summary.md").write_text(body + "\n", encoding="utf-8")
+    table_sections = []
+    sections = [("Default pre-merge tests", {"Baseline"}),
+                ("PR tests", {"PR change", "PR addition"}),
+                ("Setup and job status", {row["coverage"] for row in rows} -
+                 {"Baseline", "PR change", "PR addition", "Workflow"})]
+    for title, coverage in sections:
+        section_rows = [row for row in rows if row["coverage"] in coverage]
+        if not section_rows:
+            continue
+        section_cases = [row for row in summary_rows if row["coverage"] in coverage]
+        section_lines = [f"## {title}", ""]
+        section_lines += result_matrix(section_rows, targets, lava_url=lava_url, compact=True) + [""]
+        section_lines += result_matrix(section_cases, targets, by_group=False, lava_url=lava_url, compact=True) + [""]
+        table_sections.append(section_lines)
+    if not table_sections:
+        table_sections = [["No functional test results are available."]]
+    table_lines = [line for section in table_sections for line in section]
+    (folder / "test-results.md").write_text("\n".join(table_lines) + "\n", encoding="utf-8")
     pr_lines = [marker, f"<!-- testkit-lava-attempt:{attempt} -->",
                 f"## Test run [workflow]({workflow_url})",
                 f"## Test jobs for commit `{manifest['sha']}`", ""]
@@ -1042,7 +1051,25 @@ def finish_jobs(folder, manifest, lifecycle=True):
         total = counts["pass"] + counts["fail"] + counts["skip"]
         pr_lines += [f"### {label}", "",
                      f"Pass: {counts['pass']} | Fail: {counts['fail']} | Skip: {counts['skip']} | Total: {total}", ""]
-    pr_lines += notices
+    pr_lines += notices + [""]
+    # Keep the same detailed matrices in the workflow and PR comment.
+    # Bound both GitHub summaries, retaining every row in the artifact.
+    for summary in (lines, pr_lines):
+        # Reserve space for each coverage section, even with a large baseline.
+        budget = (60000 - len("\n".join(summary).encode("utf-8"))) // len(table_sections)
+        for section in table_sections:
+            size = 0
+            displayed = 0
+            for line in section:
+                size += len(line.encode("utf-8")) + 1
+                if size > budget - 200:
+                    break
+                summary.append(line)
+                displayed += 1
+            if displayed < len(section):
+                summary += ["", "Summary shortened. Download test-results.md from the results artifact for all tables.", ""]
+    body = "\n".join(lines).rstrip()
+    (folder / "summary.md").write_text(body + "\n", encoding="utf-8")
     pr_body = "\n".join(pr_lines).rstrip()
     (folder / "pr-summary.md").write_text(pr_body + "\n", encoding="utf-8")
     if os.environ.get("GITHUB_STEP_SUMMARY"):
