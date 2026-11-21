@@ -1,0 +1,93 @@
+metadata:
+    format: Lava-Test Test Definition 1.0
+    name: kernel-cpu-locking-watchdog
+    description: "Kernel watchdog, hrtimer/timekeeping, locking, CPU topology/idle, and core kernel sysfs validation"
+    maintainer:
+        - vnarapar@qti.qualcomm.com
+    os:
+        - openembedded
+    scope:
+        - functional
+    devices:
+        - rb3gen2
+
+run:
+    steps:
+        - cd Runner
+        - $PWD/suites/Kernel/Baseport/Watchdog_Sysfs_Validation/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/Watchdog_Sysfs_Validation/Watchdog_Sysfs_Validation.res || true
+        - $PWD/suites/Kernel/Baseport/Watchdog_Keepalive_Validation/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/Watchdog_Keepalive_Validation/Watchdog_Keepalive_Validation.res || true
+        - $PWD/suites/Kernel/Baseport/Watchdog_Pretimeout_Validation/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/Watchdog_Pretimeout_Validation/Watchdog_Pretimeout_Validation.res || true
+        - $PWD/suites/Kernel/Baseport/HRTimer_Validation/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/HRTimer_Validation/HRTimer_Validation.res || true
+        - $PWD/suites/Kernel/Baseport/Clocksource_Validation/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/Clocksource_Validation/Clocksource_Validation.res || true
+        - $PWD/suites/Kernel/Baseport/Timekeeping_Validation/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/Timekeeping_Validation/Timekeeping_Validation.res || true
+        - $PWD/suites/Kernel/Baseport/Clockevents_Validation/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/Clockevents_Validation/Clockevents_Validation.res || true
+        - $PWD/suites/Kernel/Baseport/Spinlock_Config_Validation/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/Spinlock_Config_Validation/Spinlock_Config_Validation.res || true
+        - $PWD/suites/Kernel/Baseport/Lockup_Detector_Validation/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/Lockup_Detector_Validation/Lockup_Detector_Validation.res || true
+        - $PWD/suites/Kernel/Baseport/Lock_Debug_Validation/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/Lock_Debug_Validation/Lock_Debug_Validation.res || true
+        - $PWD/suites/Kernel/Baseport/File_Lock_Validation/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/File_Lock_Validation/File_Lock_Validation.res || true
+        - $PWD/suites/Kernel/CPU/CPU_Topology_Validation/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/CPU/CPU_Topology_Validation/CPU_Topology_Validation.res || true
+        - $PWD/suites/Kernel/CPU/CPU_Online_Mask_Validation/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/CPU/CPU_Online_Mask_Validation/CPU_Online_Mask_Validation.res || true
+        - $PWD/suites/Kernel/CPU/CPU_Idle_Validation/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/CPU/CPU_Idle_Validation/CPU_Idle_Validation.res || true
+        - $PWD/suites/Kernel/CPU/CPU_Cacheinfo_Validation/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/CPU/CPU_Cacheinfo_Validation/CPU_Cacheinfo_Validation.res || true
+        - $PWD/suites/Kernel/CPU/CPU_Vulnerabilities_Validation/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/CPU/CPU_Vulnerabilities_Validation/CPU_Vulnerabilities_Validation.res || true
+        - $PWD/suites/Kernel/CPU/CPU_Capacity_Validation/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/CPU/CPU_Capacity_Validation/CPU_Capacity_Validation.res || true
+        - $PWD/suites/Kernel/CPU/CPU_Freq_Sysfs_Validation/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/CPU/CPU_Freq_Sysfs_Validation/CPU_Freq_Sysfs_Validation.res || true
+        - $PWD/suites/Kernel/CPU/CPU_SMT_Isolcpus_Validation/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/CPU/CPU_SMT_Isolcpus_Validation/CPU_SMT_Isolcpus_Validation.res || true
+        - $PWD/suites/Kernel/CPU/CPU_Accounting_Validation/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/CPU/CPU_Accounting_Validation/CPU_Accounting_Validation.res || true
+        - $PWD/suites/Kernel/CPU/CPU_Cpuset_Validation/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/CPU/CPU_Cpuset_Validation/CPU_Cpuset_Validation.res || true
+        - $PWD/suites/Kernel/CPU/CPU_IRQ_Affinity_Validation/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/CPU/CPU_IRQ_Affinity_Validation/CPU_IRQ_Affinity_Validation.res || true
+        - $PWD/suites/Kernel/CPU/CPU_Offline_Safety_Validation/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/CPU/CPU_Offline_Safety_Validation/CPU_Offline_Safety_Validation.res || true
+        - $PWD/suites/Kernel/CPU/CPU_Proc_Cpuinfo_Validation/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/CPU/CPU_Proc_Cpuinfo_Validation/CPU_Proc_Cpuinfo_Validation.res || true
+        - $PWD/suites/Kernel/CPU/CPU_PM_QoS_Validation/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/CPU/CPU_PM_QoS_Validation/CPU_PM_QoS_Validation.res || true
+        - $PWD/suites/Kernel/Baseport/RCU_Validation/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/RCU_Validation/RCU_Validation.res || true
+        - $PWD/suites/Kernel/Baseport/Workqueue_Validation/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/Workqueue_Validation/Workqueue_Validation.res || true
+        - $PWD/suites/Kernel/Baseport/Memory_VM_Validation/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/Memory_VM_Validation/Memory_VM_Validation.res || true
+        - $PWD/suites/Kernel/Baseport/Cgroup_V2_Validation/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/Cgroup_V2_Validation/Cgroup_V2_Validation.res || true
+        - $PWD/suites/Kernel/Baseport/Kernel_Sysctl_Validation/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/Kernel_Sysctl_Validation/Kernel_Sysctl_Validation.res || true
+        - $PWD/suites/Kernel/Baseport/Ftrace_Perf_Validation/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/Ftrace_Perf_Validation/Ftrace_Perf_Validation.res || true
+        - $PWD/suites/Kernel/Baseport/VDSO_Validation/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/VDSO_Validation/VDSO_Validation.res || true
+        - $PWD/suites/Kernel/Baseport/Modules_Firmware_Validation/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/Modules_Firmware_Validation/Modules_Firmware_Validation.res || true
+        - $PWD/suites/Kernel/Baseport/Hung_Task_Sysctl_Validation/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/Hung_Task_Sysctl_Validation/Hung_Task_Sysctl_Validation.res || true
+        - $PWD/suites/Kernel/Scheduler/Sched_Debug_Proc_Validation/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Scheduler/Sched_Debug_Proc_Validation/Sched_Debug_Proc_Validation.res || true
+        - $PWD/suites/Kernel/Baseport/Kernel_Taint_Oops_Validation/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/Kernel_Taint_Oops_Validation/Kernel_Taint_Oops_Validation.res || true
+        - $PWD/suites/Kernel/Baseport/Softirq_Proc_Validation/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/Softirq_Proc_Validation/Softirq_Proc_Validation.res || true
+        - $PWD/suites/Kernel/Baseport/Random_CRNG_Validation/run.sh || true
+        - $PWD/utils/send-to-lava.sh $PWD/suites/Kernel/Baseport/Random_CRNG_Validation/Random_CRNG_Validation.res || true
+        - $PWD/utils/result_parse.sh

@@ -1,0 +1,14 @@
+metadata:
+  name: rcu-validation
+  format: "Lava-Test Test Definition 1.0"
+  description: "Validate RCU sysfs/sysctl surfaces and absence of RCU stall warnings."
+  os:
+    - linux
+  scope:
+    - functional
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/RCU_Validation
+    - ./run.sh
+    - $REPO_PATH/Runner/utils/send-to-lava.sh RCU_Validation.res

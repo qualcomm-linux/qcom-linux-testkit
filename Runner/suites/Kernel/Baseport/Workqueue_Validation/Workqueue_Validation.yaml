@@ -1,0 +1,14 @@
+metadata:
+  name: workqueue-validation
+  format: "Lava-Test Test Definition 1.0"
+  description: "Validate kernel workqueue sysfs (cpumask, max_active) for at least one exported workqueue."
+  os:
+    - linux
+  scope:
+    - functional
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/Workqueue_Validation
+    - ./run.sh
+    - $REPO_PATH/Runner/utils/send-to-lava.sh Workqueue_Validation.res

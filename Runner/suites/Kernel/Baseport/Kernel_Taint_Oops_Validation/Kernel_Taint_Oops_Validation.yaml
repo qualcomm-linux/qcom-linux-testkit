@@ -1,0 +1,14 @@
+metadata:
+  name: kernel-taint-oops-validation
+  format: "Lava-Test Test Definition 1.0"
+  description: "Validate /proc/sys/kernel/tainted is readable and fail if the current boot log contains an Oops or BUG splat."
+  os:
+    - linux
+  scope:
+    - functional
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/Kernel_Taint_Oops_Validation
+    - ./run.sh
+    - $REPO_PATH/Runner/utils/send-to-lava.sh Kernel_Taint_Oops_Validation.res
