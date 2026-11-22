@@ -1,0 +1,14 @@
+metadata:
+  name: cpu-idle-validation
+  format: "Lava-Test Test Definition 1.0"
+  description: "Validate cpuidle driver, governor, idle states, and that idle-state usage counters increase while the CPU is idle."
+  os:
+    - linux
+  scope:
+    - functional
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/CPU/CPU_Idle_Validation
+    - ./run.sh
+    - $REPO_PATH/Runner/utils/send-to-lava.sh CPU_Idle_Validation.res
