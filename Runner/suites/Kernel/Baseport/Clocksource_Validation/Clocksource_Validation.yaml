@@ -1,0 +1,14 @@
+metadata:
+  name: clocksource-validation
+  format: "Lava-Test Test Definition 1.0"
+  description: "Validate the clocksource sysfs ABI, current clocksource, available list, and absence of clocksource-unstable messages."
+  os:
+    - linux
+  scope:
+    - functional
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/Clocksource_Validation
+    - ./run.sh
+    - $REPO_PATH/Runner/utils/send-to-lava.sh Clocksource_Validation.res
