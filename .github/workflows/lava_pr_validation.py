@@ -27,6 +27,7 @@ REPOSITORY = "qualcomm-linux/qcom-linux-testkit"
 LAVA = "https://lava.infra.foundries.io"
 GITHUB = "https://api.github.com"
 TERMINAL = {"Finished", "Canceled"}
+PRECHECK_STATES = {"PrecheckFailed", "PrecheckSkipped"}
 
 
 def save_json(path, data):
@@ -75,6 +76,14 @@ def record_failure(folder, stage, failure):
     return message
 
 
+class APIError(RuntimeError):
+    """Retain HTTP status so definition rejections do not hide service failures."""
+
+    def __init__(self, message, status):
+        super().__init__(message)
+        self.status = status
+
+
 class API:
     """Small authenticated REST client with bounded reads and no mutation retries."""
 
@@ -108,7 +117,7 @@ class API:
                                  urlsplit(url).path)):
                 message += (". PR comment access denied. Check pull-requests: write in the calling and "
                             "reusable workflows, and repository policy.")
-            raise RuntimeError(message)
+            raise APIError(message, response.status_code)
         return response
 
     def get(self, path, **params):
@@ -507,66 +516,106 @@ def cleanup_workspace(folder):
         print(f"Temporary snapshot cleared: {name}")
 
 
+def definition_validation_error(api, endpoint, payload, expected):
+    """Return a definition rejection, while propagating authentication/service failures."""
+    try:
+        result = api.request("POST", endpoint, json=payload).json()
+    except APIError as error:
+        if error.status not in {400, 422}:
+            raise
+        return str(error)
+    if result.get("message") != expected:
+        return str(result.get("message", "LAVA did not confirm the definition is valid"))
+    return ""
+
+
 def validate_jobs(api, folder, manifest):
-    """Validate all jobs before spending a single device slot."""
+    """Check each workload independently against the live authenticated inventory."""
     if manifest.get("lava_url") != LAVA:
         raise ValueError("This request belongs to another LAVA instance, start a new workflow run")
     # HEAD confirms registration without fetching the stored credential.
     api.request("HEAD", f"/api/v0.2/remote-artifact-tokens/{manifest['artifact_token_name']}/")
     paths = {definition["path"] for entry in manifest["jobs"] for definition in entry["definitions"]}
+    definition_errors = {}
     for path in sorted(paths):
-        result = api.request("POST", "/api/v0.2/jobs/validate_testdef/", json={
-            "definition": (folder / "source" / path).read_text(encoding="utf-8"),
-        }).json()
-        if result.get("message") != "Test definition valid.":
-            raise ValueError(f"Invalid test definition {path}: {result.get('message')}")
+        try:
+            definition = (folder / "source" / path).read_text(encoding="utf-8")
+        except FileNotFoundError:
+            definition_errors[path] = f"Missing test definition {path}"
+            continue
+        error = definition_validation_error(api, "/api/v0.2/jobs/validate_testdef/", {
+            "definition": definition,
+        }, "Test definition valid.")
+        if error:
+            definition_errors[path] = f"Invalid test definition {path}: {error}"
     # Read the authenticated inventory once. Tags must all match the same
     # device, a global tag definition alone does not make a job schedulable.
     tags = {tag["name"]: tag["id"] for tag in api.pages("/api/v0.2/tags/", limit=100)}
     devices = list(api.pages("/api/v0.2/devices/", limit=100))
     workers = {worker["hostname"]: worker for worker in api.pages("/api/v0.2/workers/", limit=100)}
-    scheduling, gaps = [], []
+    scheduling = []
     for entry in manifest["jobs"]:
         definition = (folder / entry["file"]).read_text(encoding="utf-8")
         job = yaml.safe_load(definition)
         if digest(job) != entry["definition_hash"] or job.get("device_type") != entry["device_type"]:
             raise ValueError("Prepared job changed after its manifest was written")
-        result = api.request("POST", "/api/v0.2/jobs/validate/", json={
+        errors = [definition_errors[item["path"]] for item in entry["definitions"]
+                  if item["path"] in definition_errors]
+        error = definition_validation_error(api, "/api/v0.2/jobs/validate/", {
             "definition": definition, "strict": True,
-        }).json()
-        if result.get("message") != "Job valid.":
-            raise ValueError(f"Invalid job {entry['file']}: {result.get('message')}")
+        }, "Job valid.")
+        if error:
+            errors.append(f"Invalid job {entry['file']}: {error}")
+        invalid = bool(errors)
         required = set(job.get("tags", []))
         unknown = required - tags.keys()
-        candidates = [device for device in devices
-                      if device["device_type"] == entry["device_type"] and
-                      (not job.get("device") or device["hostname"] == job["device"]) and
-                      (not job.get("worker") or device.get("worker_host") == job["worker"]) and
-                      not unknown and {tags[tag] for tag in required}.issubset(device.get("tags", []))]
-        eligible = []
-        for device in candidates:
+        boards, eligible = [], []
+        for device in devices:
+            if device["device_type"] != entry["device_type"]:
+                continue
             worker = workers.get(device.get("worker_host"), {})
+            available = sorted(name for name, tag_id in tags.items() if tag_id in device.get("tags", []))
+            reasons = []
+            missing = sorted(required - set(available))
+            if missing:
+                reasons.append("missing tags " + ", ".join(missing))
+            if job.get("device") and device["hostname"] != job["device"]:
+                reasons.append(f"requires device {job['device']}")
+            if job.get("worker") and device.get("worker_host") != job["worker"]:
+                reasons.append(f"requires worker {job['worker']}")
             # Busy devices can serve queued jobs. Do not require an idle device
             # or treat unknown health as failed when LAVA permits health checks.
-            if (device.get("health") in {"Good", "Unknown"} and
-                    worker.get("state") == "Online" and worker.get("health") == "Active"):
+            if device.get("health") not in {"Good", "Unknown"}:
+                reasons.append(f"device health {device.get('health', 'unknown')}")
+            if worker.get("state") != "Online" or worker.get("health") != "Active":
+                reasons.append(f"worker {device.get('worker_host', 'unknown')} "
+                               f"{worker.get('state', 'unknown')}/{worker.get('health', 'unknown')}")
+            boards.append(dict(hostname=device["hostname"], tags=available, reasons=reasons,
+                               state=device.get("state"), health=device.get("health"),
+                               worker=device.get("worker_host")))
+            if not reasons:
                 eligible.append(device["hostname"])
-        reason = ""
         if unknown:
-            reason = "Unregistered required tags: " + ", ".join(sorted(unknown))
-        elif not candidates:
-            reason = "No visible device matches the type, all required tags and device/worker constraints"
+            errors.append("Unregistered required tags: " + ", ".join(sorted(unknown)))
+        if not boards:
+            errors.append(f"No visible boards of device type {entry['device_type']}")
         elif not eligible:
-            reason = "Matching devices are unhealthy or their workers are unavailable"
-        scheduling.append(dict(file=entry["file"], device_type=entry["device_type"],
-                               tags=sorted(required), eligible=eligible, error=reason))
-        if reason:
-            gaps.append(f"{result_target(entry)}/{entry['group']}: {reason}")
+            errors.append("No matching board. " + ". ".join(
+                board["hostname"] + ": " + ", ".join(board["reasons"]) for board in boards))
+        error = record_failure(folder, "job-precheck", ". ".join(dict.fromkeys(errors)))
+        scheduling.append(dict(key=entry["key"], target=result_target(entry), group=entry["group"],
+                               file=entry["file"], device_type=entry["device_type"], boards=boards,
+                               tags=sorted(required), eligible=eligible, error=error,
+                               skip=bool(error) and not invalid))
+        if error:
+            status = "ERROR" if invalid else "SKIP"
+            print(f"{status} {result_target(entry)} ({entry['device_type']}) / "
+                  f"{entry['group']}: {error}", flush=True)
     save_json(folder / "scheduling.json", dict(lava_url=LAVA, run_id=manifest["run_id"], jobs=scheduling))
-    if gaps:
-        raise ValueError("LAVA scheduling preflight failed. " + ". ".join(gaps))
-    print(f"Validated {len(scheduling)} jobs against the visible device and worker inventory. "
+    blocked = sum(bool(job["error"]) for job in scheduling)
+    print(f"Pre-checks: ready={len(scheduling) - blocked}, blocked={blocked}. "
           "LAVA still controls permissions, availability and queue allocation.")
+    return scheduling
 
 
 def run_jobs(folder, manifest):
@@ -590,7 +639,7 @@ def run_jobs(folder, manifest):
     signal.signal(signal.SIGINT, interrupted)
     try:
         api = lava()
-        validate_jobs(api, folder, manifest)
+        prechecks = {item["key"]: item for item in validate_jobs(api, folder, manifest)}
         while pending or active:
             if time.monotonic() >= deadline:
                 raise TimeoutError("Validation request deadline expired")
@@ -618,6 +667,13 @@ def run_jobs(folder, manifest):
                 if matches:
                     job = matches[0]
                 else:
+                    error = prechecks[entry["key"]]["error"]
+                    if error:
+                        status = "PrecheckSkipped" if prechecks[entry["key"]]["skip"] else "PrecheckFailed"
+                        state["jobs"][entry["key"]] = {"state": status, "error": error}
+                        save_json(state_path, state)
+                        pending.pop(0)
+                        continue
                     # Mark intent before POST. A timeout is never blindly retried.
                     state["jobs"][entry["key"]] = {"state": "Submitting"}
                     save_json(state_path, state)
@@ -660,23 +716,33 @@ def run_jobs(folder, manifest):
             save_json(state_path, state)
             progress = (len(pending), len(active))
             if progress != last_progress:
-                finished = len(manifest["jobs"]) - len(pending) - len(active)
+                blocked = sum(job.get("state") in PRECHECK_STATES for job in state["jobs"].values())
+                finished = len(manifest["jobs"]) - len(pending) - len(active) - blocked
                 print(f"LAVA jobs: total={len(manifest['jobs'])}, finished={finished}, "
-                      f"queued_or_running={len(active)}, pending_submission={len(pending)}", flush=True)
+                      f"blocked={blocked}, queued_or_running={len(active)}, "
+                      f"pending_submission={len(pending)}", flush=True)
                 last_progress = progress
             if pending or active:
                 time.sleep(30)
         # Fail the validation job as well as the reporter, so GitHub's failed-job
         # rerun includes hardware execution instead of repeating only reporting.
         executed = 0
+        failures = []
         for entry in manifest["jobs"]:
+            if state["jobs"].get(entry["key"], {}).get("state") == "PrecheckSkipped":
+                continue
+            if state["jobs"].get(entry["key"], {}).get("state") == "PrecheckFailed":
+                failures.append(f"{result_target(entry)} {entry['group']}: pre-check failed")
+                continue
             matches = matching_jobs(api, entry, known_id=state["jobs"].get(entry["key"], {}).get("id"))
             if not matches:
                 raise RuntimeError(f"LAVA results missing for {result_target(entry)} {entry['group']}")
             rows, evidence = collect_results(api, matches[0], entry)
             if not rows or any(row["errors"] or row["counts"].get("fail") for row in rows):
-                raise RuntimeError(f"LAVA validation failed for {result_target(entry)} {entry['group']}")
+                failures.append(f"{result_target(entry)} {entry['group']}: validation failed")
             executed += sum(row["counts"].get("pass", 0) + row["counts"].get("fail", 0) for row in rows)
+        if failures:
+            raise RuntimeError("Validation needs attention. " + ". ".join(failures))
         if not executed:
             raise RuntimeError("No executed PASS/FAIL validation across requested tests")
     except (Exception, KeyboardInterrupt) as error:
@@ -689,7 +755,7 @@ def run_jobs(folder, manifest):
         cleanup = {}
         for entry in manifest["jobs"]:
             known = state["jobs"].get(entry["key"])
-            if not known or known.get("state") in TERMINAL:
+            if not known or known.get("state") in TERMINAL | PRECHECK_STATES:
                 continue
             try:
                 if api is None:
@@ -715,6 +781,16 @@ def result_target(entry):
     """Keep base and overlay results separate while retaining legacy target labels."""
     variant = entry.get("image_variant")
     return f"{entry['target']} ({variant})" if variant else entry["target"]
+
+
+def unsubmitted_results(entry, error, precheck=False, skip=False):
+    """Report named tests that did not run, distinct from observed LAVA results."""
+    return [dict(target=result_target(entry), group=entry["group"], coverage=definition["coverage"],
+                 name=definition["name"], definition_name=definition["name"], display_name=name,
+                 counts={"skip": 1} if skip else {}, job=None, errors=[] if skip else [error],
+                 reason=error, precheck=precheck, device_type=entry["device_type"])
+            for definition in entry["definitions"]
+            for name in definition.get("expected") or [Path(definition["path"]).stem]]
 
 
 def collect_results(api, job, entry):
@@ -768,6 +844,9 @@ def result_matrix(rows, targets, by_group=True, lava_url=LAVA, compact=False):
                    "pre-merge-bt": "Bluetooth", "pre-merge-camera": "Camera",
                    "pre-merge-display-gfx": "Display/graphics", "pre-merge-gstr-video": "Video (GStreamer)"}
     labels = {}
+    mixed = (compact and not by_group and any(row["coverage"] == "Baseline" for row in rows) and
+             any(row["coverage"] in {"PR change", "PR addition"} for row in rows))
+    sources = {}
     if compact and not by_group:
         for row in rows:
             if row["coverage"] != "Workflow":
@@ -788,6 +867,7 @@ def result_matrix(rows, targets, by_group=True, lava_url=LAVA, compact=False):
             if len(labels[label]) > 1:
                 qualifiers = [row.get("definition_name", row["name"]), row["group"]]
                 label += " (" + ", ".join(dict.fromkeys(value for value in qualifiers if value != label)) + ")"
+            sources.setdefault(label, set()).add("Default" if row["coverage"] == "Baseline" else "PR")
         value = grouped.setdefault((label, row["target"]), {"counts": Counter(), "errors": [], "jobs": set()})
         value["counts"].update(row["counts"])
         value["errors"].extend(row["errors"])
@@ -796,11 +876,13 @@ def result_matrix(rows, targets, by_group=True, lava_url=LAVA, compact=False):
     title = "Test group" if by_group else "Test" if compact else "Test/configuration"
     if not grouped:
         return ["No functional test results are available."]
-    lines = ["| " + " | ".join([title] + [cell(target) for target in targets]) + " |",
-             "|" + "---|" * (len(targets) + 1)]
+    columns = [title] + (["Source"] if mixed else []) + [cell(target) for target in targets]
+    lines = ["| " + " | ".join(columns) + " |", "|" + "---|" * len(columns)]
     colors = {"PASS": "🟢", "FAIL": "🔴", "SKIP": "🟡", "ERROR": "🔴", "NOT RUN": "⚪"}
     for label in sorted({label for label, target in grouped}):
         values = [cell(label)]
+        if mixed:
+            values.append(" / ".join(sorted(sources[label])))
         for target in targets:
             value = grouped.get((label, target))
             if value is None:
@@ -851,10 +933,12 @@ def collect_jobs(folder, manifest):
         known = state["jobs"].get(entry["key"], {})
         terminal = known.get("state") in TERMINAL
         try:
+            if known.get("state") in PRECHECK_STATES:
+                rows.extend(unsubmitted_results(entry, known["error"], precheck=True,
+                                                skip=known["state"] == "PrecheckSkipped"))
+                continue
             if state.get("started") and not known:
-                rows.append(dict(target=result_target(entry), group=entry["group"], coverage="Job",
-                                 name="Submission", counts={}, job=None,
-                                 errors=["Not submitted, controller stopped before this job"]))
+                rows.extend(unsubmitted_results(entry, "Not submitted, controller stopped before this job"))
                 continue
             if api is None:
                 raise RuntimeError(api_error)
@@ -921,21 +1005,28 @@ def finish_jobs(folder, manifest, lifecycle=True):
         rows, evidence = saved["rows"], saved["evidence"]
         cleanup_complete = saved.get("cleanup_complete") is True
     elif state.get("started"):
-        cleanup_complete = all(job.get("state") in TERMINAL for job in state["jobs"].values())
-    observed = {(row["target"], row["group"]) for row in rows}
+        cleanup_complete = all(job.get("state") in TERMINAL | PRECHECK_STATES
+                               for job in state["jobs"].values())
+    observed = {(row["target"], row["group"], row["name"]) for row in rows}
     if manifest["submit_requested"]:
         for entry in manifest.get("jobs", []):
-            if (result_target(entry), entry["group"]) in observed:
+            missing = [definition for definition in entry["definitions"] if
+                       (result_target(entry), entry["group"], definition["name"]) not in observed]
+            if not missing:
                 continue
+            entry = entry | {"definitions": missing}
             known = state["jobs"].get(entry["key"], {})
+            if known.get("state") in PRECHECK_STATES:
+                rows.extend(unsubmitted_results(entry, known["error"], precheck=True,
+                                                skip=known["state"] == "PrecheckSkipped"))
+                continue
             if state.get("started") and not known:
                 error = "Not submitted, controller stopped before this job"
             elif known.get("state") in TERMINAL:
                 error = "Job completed, result collection unavailable"
             else:
                 error = "Result collection unavailable, cleanup is unconfirmed"
-            rows.append(dict(target=result_target(entry), group=entry["group"], coverage="Job", name="Collection",
-                             counts={}, job=known.get("id"), errors=[error]))
+            rows.extend(row | {"job": known.get("id")} for row in unsubmitted_results(entry, error))
     if state.get("error") and not any(row["coverage"] == "Workflow" and
                                       state["error"] in row["errors"] for row in rows):
         rows.append(dict(target="All", group="Controller", coverage="Workflow", name="Validation controller",
@@ -987,10 +1078,11 @@ def finish_jobs(folder, manifest, lifecycle=True):
     # Keep full diagnostics in the artifact, while the summary shows the verdict.
     diagnostics = []
     for row in rows:
-        if not row["errors"]:
+        reasons = row["errors"] or ([row["reason"]] if row.get("reason") else [])
+        if not reasons:
             continue
         label = f"{row['target']} / {row['group']} / {row['name']}"
-        detail = ", ".join(row["errors"]).replace("\n", " ").replace("\r", " ").replace("<", "&lt;")
+        detail = ", ".join(reasons).replace("\n", " ").replace("\r", " ").replace("<", "&lt;")
         diagnostics.append(f"- {label}: {detail[:1000]}")
     if diagnostics:
         (folder / "diagnostics.md").write_text("\n".join(diagnostics) + "\n", encoding="utf-8")
@@ -1012,23 +1104,26 @@ def finish_jobs(folder, manifest, lifecycle=True):
     # A SKIP row already exposes the lack of execution, avoid a duplicate ERROR row.
     summary_rows = [row for row in case_rows if not (
         row.get("tests") and not row["counts"] and row["errors"] == ["No executed PASS/FAIL validation"])]
-    table_sections = []
-    sections = [("Default pre-merge tests", {"Baseline"}),
-                ("PR tests", {"PR change", "PR addition"}),
-                ("Setup and job status", {row["coverage"] for row in rows} -
-                 {"Baseline", "PR change", "PR addition", "Workflow"})]
-    for title, coverage in sections:
-        section_rows = [row for row in rows if row["coverage"] in coverage]
-        if not section_rows:
-            continue
-        section_cases = [row for row in summary_rows if row["coverage"] in coverage]
-        section_lines = [f"## {title}", ""]
-        section_lines += result_matrix(section_rows, targets, lava_url=lava_url, compact=True) + [""]
-        section_lines += result_matrix(section_cases, targets, by_group=False, lava_url=lava_url, compact=True) + [""]
-        table_sections.append(section_lines)
-    if not table_sections:
-        table_sections = [["No functional test results are available."]]
-    table_lines = [line for section in table_sections for line in section]
+    functional = {"Baseline", "PR change", "PR addition"}
+    test_rows = [row for row in summary_rows if row["coverage"] in functional]
+    table_lines = result_matrix(test_rows, targets, by_group=False, lava_url=lava_url, compact=True) + [""]
+    # One testcase matrix, followed by concise reasons rather than duplicate
+    # group/setup tables. Keep every detailed board rejection in the artifacts.
+    prechecks = {}
+    for row in rows:
+        if row.get("precheck") and row["coverage"] in functional:
+            key = (row["target"], row["device_type"], row["reason"])
+            prechecks.setdefault(key, set()).add(row.get("display_name", row["name"]))
+    if prechecks:
+        table_lines += ["Pre-check details:", ""]
+        for (target, device_type, reason), tests in prechecks.items():
+            detail = f"{target} ({device_type}), {', '.join(sorted(tests))}: {reason}"
+            table_lines.append("- " + detail.replace("\n", " ").replace("\r", " ").replace("<", "&lt;"))
+        table_lines.append("")
+    status_errors = sorted({error for row in rows if row["coverage"] in {"Job", "Workflow", "Setup"}
+                            for error in row["errors"]})
+    if status_errors:
+        table_lines += ["Setup or workflow errors are recorded in diagnostics.md in the workflow artifacts.", ""]
     (folder / "test-results.md").write_text("\n".join(table_lines) + "\n", encoding="utf-8")
     pr_lines = [marker, f"<!-- testkit-lava-attempt:{attempt} -->",
                 f"## Test run [workflow]({workflow_url})",
@@ -1059,30 +1154,33 @@ def finish_jobs(folder, manifest, lifecycle=True):
                 unique_tests.update((*definition, case["name"]) for case in row.get("tests", []))
         label = f"{build_label} ({variant})" if image_type else build_label
         total = counts["pass"] + counts["fail"] + counts["skip"]
+        precheck_skips = sum(row["counts"].get("skip", 0) for row in rows
+                             if row.get("precheck") and row["coverage"] in functional and
+                             row["target"] in variant_targets)
         test_label = "Unique PR tests" if manifest.get("include_meta_qcom") is False else "Unique functional tests"
         count_lines = [f"### {label}", "",
                        f"{test_label}: {len(unique_tests)} | Targets: {len(variant_targets)} | Testcase results: {total}",
                        "",
                        f"Pass: {counts['pass']} | Fail: {counts['fail']} | Skip: {counts['skip']}", ""]
+        if precheck_skips:
+            count_lines += [f"Includes {precheck_skips} tests skipped before submission due to missing requirements.", ""]
         lines += count_lines
         pr_lines += count_lines
     pr_lines += notices + [""]
     # Keep the same detailed matrices in the workflow and PR comment.
     # Bound both GitHub summaries, retaining every row in the artifact.
     for summary in (lines, pr_lines):
-        # Reserve space for each coverage section, even with a large baseline.
-        budget = (60000 - len("\n".join(summary).encode("utf-8"))) // len(table_sections)
-        for section in table_sections:
-            size = 0
-            displayed = 0
-            for line in section:
-                size += len(line.encode("utf-8")) + 1
-                if size > budget - 200:
-                    break
-                summary.append(line)
-                displayed += 1
-            if displayed < len(section):
-                summary += ["", "Summary shortened. Download test-results.md from the results artifact for all tables.", ""]
+        budget = 60000 - len("\n".join(summary).encode("utf-8"))
+        size = 0
+        displayed = 0
+        for line in table_lines:
+            size += len(line.encode("utf-8")) + 1
+            if size > budget - 200:
+                break
+            summary.append(line)
+            displayed += 1
+        if displayed < len(table_lines):
+            summary += ["", "Summary shortened. Download test-results.md from the results artifact for all tests.", ""]
     body = "\n".join(lines).rstrip()
     (folder / "summary.md").write_text(body + "\n", encoding="utf-8")
     pr_body = "\n".join(pr_lines).rstrip()
@@ -1199,8 +1297,8 @@ def execute(args):
         run_jobs(args.output, manifest)
         return 0
     if args.command == "validate":
-        validate_jobs(lava(), args.output, manifest)
-        return 0
+        checks = validate_jobs(lava(), args.output, manifest)
+        return int(any(item["error"] and not item["skip"] for item in checks))
     if args.command == "start":
         update_check(github(), manifest, "in_progress", "The validation runner is preparing the LAVA request.")
         return 0
