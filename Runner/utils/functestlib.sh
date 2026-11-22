@@ -8430,6 +8430,306 @@ systemd_service_is_active() {
     systemctl is-active --quiet "$svc"
 }
 
+# systemd_unit_read_properties PREFIX SECONDS PROPERTIES_CSV UNIT...
+# Query systemd with a bounded command and write both raw output (PREFIX.raw)
+# and validated pipe-separated rows (PREFIX). The column order matches the
+# requested property list. Query errors and timeouts remain visible to callers.
+systemd_unit_read_properties() {
+    surp_prefix="$1"
+    surp_seconds="$2"
+    surp_properties="$3"
+    shift 3
+    [ -n "$surp_prefix" ] && [ -n "$surp_properties" ] && [ "$#" -gt 0 ] || return 125
+
+    SYSTEMD_UNIT_QUERY_STATUS=0
+    SYSTEMD_UNIT_QUERY_TIMED_OUT=0
+    run_with_bounded_timeout "$surp_seconds" systemctl show --all --no-pager \
+        "--property=$surp_properties" "$@" >"$surp_prefix.raw" 2>&1
+    SYSTEMD_UNIT_QUERY_STATUS=$?
+    # shellcheck disable=SC2034 # Read by callers to report query timeout status.
+    SYSTEMD_UNIT_QUERY_TIMED_OUT=${BOUNDED_TIMEOUT_EXPIRED:-0}
+    if [ "$SYSTEMD_UNIT_QUERY_STATUS" -ne 0 ]; then
+        log_fail "systemctl show failed: rc=$SYSTEMD_UNIT_QUERY_STATUS units=$*, artifact=$surp_prefix.raw"
+        return "$SYSTEMD_UNIT_QUERY_STATUS"
+    fi
+
+    surp_fields=$(printf '%s' "$surp_properties" | tr ',' ' ')
+    if ! systemd_unit_parse_show "$surp_prefix.raw" "$surp_prefix" "$surp_fields"; then
+        log_fail "systemctl show returned incomplete unit properties, units=$*, artifact=$surp_prefix.raw"
+        return 1
+    fi
+    return 0
+}
+
+# systemd_unit_parse_show RAW OUTPUT PROPERTY...
+# Parse systemctl show records, requiring each requested property in every
+# record. Preserve empty properties, normalize an empty Job value to zero, and
+# write one pipe-separated row per unit.
+systemd_unit_parse_show() {
+    [ "$#" -ge 3 ] || return 1
+    sups_raw="$1"
+    sups_output="$2"
+    shift 2
+    sups_fields="$*"
+    awk -v requested="$sups_fields" '
+        BEGIN { RS=""; FS="\n"; count=split(requested, fields, " ") }
+        {
+            record_bad=0
+            for (key in values) delete values[key]
+            for (key in present) delete present[key]
+            for (i=1; i<=NF; i++) {
+                key=$i
+                sub(/=.*/, "", key)
+                value=$i
+                sub(/^[^=]*=/, "", value)
+                values[key]=value
+                present[key]=1
+            }
+            for (i=1; i<=count; i++) {
+                if (!present[fields[i]]) record_bad=1
+                else if ((fields[i]=="ActiveState" || fields[i]=="SubState") &&
+                         values[fields[i]]=="") record_bad=1
+            }
+            if (present["Job"]) {
+                sub(/[[:space:]].*$/, "", values["Job"])
+                if (values["Job"] == "") values["Job"]="0"
+            }
+            if (!present["Id"] || values["Id"] == "") record_bad=1
+            if (present["Job"] && values["Job"] !~ /^[0-9]+$/) record_bad=1
+            if (record_bad) bad=1
+            else if (seen[values["Id"]]++) next
+            else {
+                for (i=1; i<=count; i++) {
+                    if (i>1) printf "|"
+                    printf "%s", values[fields[i]]
+                }
+                printf "\n"
+            }
+        }
+        END { if (bad || NR==0) exit 1 }
+    ' "$sups_raw" >"$sups_output"
+}
+
+# systemd_unit_property_value RAW PROPERTY
+# Print a property value only when the query contained that property.
+systemd_unit_property_value() {
+    [ "$#" -eq 2 ] || return 1
+    supv_raw="$1"
+    supv_property="$2"
+    awk -v wanted="$supv_property" '
+        index($0, "=") {
+            key=$0
+            sub(/=.*/, "", key)
+            if (key==wanted) {
+                value=$0
+                sub(/^[^=]*=/, "", value)
+                print value
+                found=1
+                exit
+            }
+        }
+        END { if (!found) exit 1 }
+    ' "$supv_raw"
+}
+
+# systemd_unit_no_pending_jobs ROWS [UNIT...]
+# Return success only when each requested unit is represented and Job=0.
+systemd_unit_no_pending_jobs() {
+    sunpj_rows="$1"
+    shift
+    awk -F '|' -v requested="$*" '
+        BEGIN { count=0; if (requested!="") count=split(requested, units, " ") }
+        NF >= 5 {
+            if (count==0) wanted[$1]=1
+            for (i=1; i<=count; i++) if ($1==units[i]) wanted[$1]=1
+            if ($5 != "0") pending=1
+        }
+        END {
+            if (count==0) { if (NR==0) exit 1 }
+            else for (i=1; i<=count; i++) if (!wanted[units[i]]) missing=1
+            exit (pending || missing)
+        }
+    ' "$sunpj_rows"
+}
+
+systemd_unit_timeout_valid() {
+    case "${1:-}" in ''|*[!0-9]*) return 1 ;; esac
+    [ "${#1}" -le 9 ] && [ "$1" -gt 0 ] 2>/dev/null
+}
+
+# systemd_unit_wait_for_no_jobs PREFIX SECONDS READER UNIT...
+# Poll through READER until all requested units have Job=0, under one deadline.
+systemd_unit_wait_for_no_jobs() {
+    sunj_prefix="$1"
+    sunj_limit="$2"
+    sunj_reader="$3"
+    shift 3
+    systemd_unit_timeout_valid "$sunj_limit" || return 1
+    sunj_start=$(get_monotonic_seconds)
+    while :; do
+        "$sunj_reader" "$sunj_prefix.current" "$@" || return 1
+        if systemd_unit_no_pending_jobs "$sunj_prefix.current" "$@"; then
+            return 0
+        fi
+        sunj_elapsed=$(( $(get_monotonic_seconds) - sunj_start ))
+        if [ "$sunj_elapsed" -ge "$sunj_limit" ]; then
+            log_fail "Timed out waiting for systemd jobs to finish; current state is in $sunj_prefix.current.raw"
+            return 124
+        fi
+        sleep 1
+    done
+}
+
+# systemd_unit_wait_for_action PREFIX SECONDS READER start|stop SUBSTATE UNIT...
+# Wait for the requested transaction to finish with no unit jobs outstanding.
+# SUBSTATE may be * when only ActiveState matters. A stop may retain an
+# already-failed unit, matching the audio overlay transaction policy.
+systemd_unit_wait_for_action() {
+    suwa_prefix="$1"
+    suwa_limit="$2"
+    suwa_reader="$3"
+    suwa_action="$4"
+    suwa_substate="$5"
+    shift 5
+    [ "$#" -gt 0 ] || return 1
+    case "$suwa_action" in start|stop) ;; *) return 1 ;; esac
+    systemd_unit_timeout_valid "$suwa_limit" || return 1
+    suwa_start=$(get_monotonic_seconds)
+    suwa_previous=""
+    while :; do
+        "$suwa_reader" "$suwa_prefix.current" "$@" || return 1
+        if awk -F '|' -v action="$suwa_action" -v expected_sub="$suwa_substate" '
+            NR==FNR { initial[$1]=$2; count++; next }
+            {
+                seen++
+                if (!($1 in initial)) bad=1
+                if ($5 != "0") { pending=1; next }
+                if (action=="start") {
+                    if ($2=="failed") bad=1
+                    else if ($2!="active" || (expected_sub!="*" && $3!=expected_sub)) pending=1
+                } else {
+                    if ($2=="failed" && initial[$1]!="failed") bad=1
+                    else if ($2!="inactive" && $2!="failed") pending=1
+                    else if ($2=="inactive" && expected_sub!="*" && $3!=expected_sub) pending=1
+                }
+            }
+            END {
+                if (bad || seen!=count) exit 3
+                if (pending) exit 1
+            }
+        ' "$suwa_prefix.before" "$suwa_prefix.current"; then
+            return 0
+        else
+            suwa_state_rc=$?
+            [ "$suwa_state_rc" -ne 3 ] || {
+                log_fail "Systemd $suwa_action failed or returned an unexpected unit set; state is in $suwa_prefix.current.raw"
+                return 1
+            }
+        fi
+        suwa_elapsed=$(( $(get_monotonic_seconds) - suwa_start ))
+        suwa_current=$(cat "$suwa_prefix.current" 2>/dev/null)
+        if [ "$suwa_current" != "$suwa_previous" ]; then
+            log_info "Systemd $suwa_action progress: elapsed_s=$suwa_elapsed, state artifact=$suwa_prefix.current"
+            suwa_previous="$suwa_current"
+        fi
+        if [ "$suwa_elapsed" -ge "$suwa_limit" ]; then
+            log_fail "Timed out waiting for systemd $suwa_action; jobs may still be pending, state is in $suwa_prefix.current.raw"
+            return 124
+        fi
+        sleep 1
+    done
+}
+
+# systemd_unit_rows_match_state ROWS ACTIVE_STATE SUBSTATE [UNIT...]
+# Return success when every requested unit has the given state and Job=0.
+systemd_unit_rows_match_state() {
+    sumrs_rows="$1"
+    sumrs_active="$2"
+    sumrs_substate="$3"
+    shift 3
+    awk -F '|' -v requested="$*" -v active="$sumrs_active" -v substate="$sumrs_substate" '
+        BEGIN { count=0; if (requested!="") count=split(requested, units, " ") }
+        NF >= 5 {
+            if (count==0) {
+                seen++
+                if ($2!=active || $3!=substate || $5!="0") bad=1
+            } else {
+                for (i=1; i<=count; i++) {
+                    if ($1==units[i]) {
+                        if (!matched[$1]++) seen++
+                        if ($2!=active || $3!=substate || $5!="0") bad=1
+                    }
+                }
+            }
+        }
+        END {
+            if (count==0) { if (seen==0) bad=1 }
+            else for (i=1; i<=count; i++) if (!matched[units[i]]) bad=1
+            if (bad) exit 1
+        }
+    ' "$sumrs_rows"
+}
+
+# systemd_unit_transition PREFIX SECONDS READER start|stop SUBSTATE UNIT...
+# Refuse pre-existing jobs, submit one bounded nonblocking request, and wait
+# until the transaction completes with the requested state and no pending job.
+systemd_unit_transition() {
+    sutr_prefix="$1"
+    sutr_limit="$2"
+    sutr_reader="$3"
+    sutr_action="$4"
+    sutr_substate="$5"
+    shift 5
+    [ "$#" -gt 0 ] || return 1
+    case "$sutr_action" in start|stop) ;; *) return 1 ;; esac
+    systemd_unit_timeout_valid "$sutr_limit" || return 1
+
+    "$sutr_reader" "$sutr_prefix.before" "$@" || return 1
+    if ! systemd_unit_no_pending_jobs "$sutr_prefix.before" "$@"; then
+        log_fail "Refusing systemctl $sutr_action because a requested unit already has a pending job"
+        return 1
+    fi
+
+    BOUNDED_TIMEOUT_EXPIRED=0
+    run_with_bounded_timeout 10 systemctl --no-block --no-ask-password \
+        "$sutr_action" "$@" >"$sutr_prefix.command.log" 2>&1
+    sutr_command_status=$?
+    if [ "$sutr_command_status" -ne 0 ]; then
+        log_file_with_label SYSTEMD-UNIT-COMMAND "$sutr_prefix.command.log" 40
+        if [ "${BOUNDED_TIMEOUT_EXPIRED:-0}" -eq 1 ]; then
+            log_fail "systemctl $sutr_action command submission timed out"
+        else
+            log_fail "systemctl $sutr_action command submission failed (status=$sutr_command_status)"
+        fi
+        return 1
+    fi
+
+    systemd_unit_wait_for_action "$sutr_prefix" "$sutr_limit" \
+        "$sutr_reader" "$sutr_action" "$sutr_substate" "$@"
+}
+
+# systemd_unit_restore_active PREFIX SECONDS READER UNIT...
+# Wait out existing jobs, then ensure each unit is active/running and job-free.
+# If restoration is needed, perform a guarded start transaction and verify it.
+systemd_unit_restore_active() {
+    sura_prefix="$1"
+    sura_limit="$2"
+    sura_reader="$3"
+    shift 3
+    [ "$#" -gt 0 ] || return 1
+    systemd_unit_timeout_valid "$sura_limit" || return 1
+
+    if ! systemd_unit_wait_for_no_jobs "$sura_prefix" "$sura_limit" \
+        "$sura_reader" "$@"; then
+        return 1
+    fi
+    if systemd_unit_rows_match_state "$sura_prefix.current" active running "$@"; then
+        return 0
+    fi
+    systemd_unit_transition "$sura_prefix" "$sura_limit" \
+        "$sura_reader" start running "$@"
+}
+
 # Start a systemd service/unit quietly.
 systemd_service_start_safe() {
     svc="$1"
