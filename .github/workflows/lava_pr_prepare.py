@@ -188,7 +188,7 @@ def check_download(url, access=None):
 
 
 def select_targets(gh, config, distro, requested):
-    """Read the real pre-merge list, preserving the source revision and omissions."""
+    """Resolve machines or configured device types against the selected pre-merge list."""
     repository = config["artifact_repository"]
     revision = gh.get(f"/repos/{repository}/commits/{config['target_ref']}")["sha"]
     response = gh.get(f"/repos/{repository}/contents/{config['target_workflow']}", ref=revision)
@@ -208,13 +208,32 @@ def select_targets(gh, config, distro, requested):
         raise ValueError("meta-qcom devices_premerge must contain unique literal machine names")
     excluded = [target for target in targets if target in config.get("excluded_targets", [])]
     eligible = [target for target in targets if target not in excluded]
-    selected = eligible if requested.strip() == "meta-qcom" else list(dict.fromkeys(
-        target.strip() for target in requested.split(",")))
+    selected = []
+    invalid = []
+    if requested.strip() == "meta-qcom":
+        selected = eligible
+    else:
+        supplied = [target.strip() for target in requested.split(",") if target.strip()]
+        for target in dict.fromkeys(supplied):
+            if target not in targets:
+                machines = [machine for machine in targets if config["targets"].get(machine) == target]
+                if len(machines) > 1:
+                    raise ValueError(f"Foundries device type {target} maps to multiple machines: "
+                                     f"{', '.join(machines)}. Select an explicit machine name.")
+                if not machines:
+                    invalid.append(target)
+                    continue
+                print(f"Resolved Foundries device type {target} to meta-qcom machine {machines[0]}")
+                target = machines[0]
+            if target not in selected:
+                selected.append(target)
     if set(selected) & set(excluded):
         raise ValueError("Targets excluded from Testkit PR validation: " +
                          ", ".join(target for target in selected if target in excluded))
-    if not selected or set(selected) - set(eligible):
-        raise ValueError(f"Choose enabled Testkit targets from meta-qcom {name}: {', '.join(eligible)}")
+    if invalid or not selected:
+        reason = f"Targets not enabled for {name}: {', '.join(invalid)}." if invalid else "No targets selected."
+        raise ValueError(f"{reason} Use meta-qcom or choose machine names from: {', '.join(eligible)}. "
+                         "Configured Foundries device types are also accepted.")
     return dict(repository=repository, revision=revision, workflow=config["target_workflow"],
                 job=name, kernel=settings.get("kernel"), targets=targets, selected=selected,
                 excluded=excluded)
@@ -430,9 +449,8 @@ def invokes_helper(document, helper):
 def group_for(suite):
     groups = {"Connectivity/BT/": "pre-merge-bt", "Connectivity/Bluetooth/": "pre-merge-bt",
               "Multimedia/Audio/": "pre-merge-audio", "Multimedia/Graphics/": "pre-merge-display-gfx",
+              "Multimedia/Display/": "pre-merge-display-gfx",
               "Multimedia/Video/": "pre-merge-gstr-video", "Multimedia/Camera/": "pre-merge-camera"}
-    if "/Camera_NHX" in suite:
-        raise ValueError("Camera_NHX needs an explicit compatible selection and image")
     return next((group for prefix, group in groups.items() if prefix in suite), "pre-merge-basic")
 
 
@@ -444,6 +462,8 @@ def append_tests(jobs, affected, documents, by_suite, selections, config, source
     for suite, reasons in sorted(affected.items()):
         candidates = by_suite.get(suite, [])
         explicit = selections.get(suite)
+        if not explicit and "/Camera_NHX" in suite:
+            raise ValueError("Camera_NHX needs an explicit compatible selection and image")
         changed_yamls = [path for path in candidates if path in reasons]
         if explicit:
             choices = explicit if isinstance(explicit, list) else [explicit]
@@ -478,6 +498,15 @@ def append_tests(jobs, affected, documents, by_suite, selections, config, source
             if "expected" in choice and (not isinstance(choice["expected"], list) or
                                          not all(isinstance(name, str) and name for name in choice["expected"])):
                 raise ValueError("expected must be a list of result names")
+            tags = choice.get("tags", [])
+            if (not isinstance(tags, list) or
+                    not all(isinstance(tag, str) and tag.strip() == tag and tag for tag in tags)):
+                raise ValueError("tags must be a list of nonempty LAVA tag names")
+            required_group = group_for(suite)
+            required_tags = set(jobs.get(required_group, {}).get("tags", []))
+            if required_tags - (set(jobs[group].get("tags", [])) | set(tags)):
+                raise ValueError(f"{path} requires the device tags from {required_group}: "
+                                 f"{', '.join(sorted(required_tags))}. Select that group or retain its tags.")
             definition = dict(path=path, params=params)
             execution_group = group
             # Do not collapse baseline instances, only avoid equivalent additions.
@@ -537,6 +566,10 @@ def append_tests(jobs, affected, documents, by_suite, selections, config, source
                 selected.add(id(definition))
                 destination["timeouts"]["job"]["minutes"] += minutes
                 disposition = "added with fresh boot" if fresh else "appended"
+            if tags:
+                destination = jobs[execution_group]
+                # Selection tags add requirements, never replace template tags.
+                destination["tags"] = sorted(set(destination.get("tags", [])) | set(tags))
             manifest.append(dict(suite=suite, path=path, group=group, params=params,
                                  execution_group=execution_group, definitions=selected_names,
                                  reasons=sorted(reasons), disposition=disposition))
@@ -673,7 +706,7 @@ def prepare(folder):
                     artifact_token_name=token_name,
                     artifact_verification="controller",
                     submit_requested=os.environ.get("SUBMIT_REQUEST", "false").lower() == "true",
-                    request_minutes=config["request_minutes"], max_active_jobs=config["max_active_jobs"])
+                    request_minutes=config["request_minutes"])
     (folder / "jobs").mkdir()
     baseline_job_count = 0
     for target, variant in ((target, variant) for target in targets for variant in variants):

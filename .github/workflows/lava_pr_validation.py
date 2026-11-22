@@ -570,7 +570,7 @@ def validate_jobs(api, folder, manifest):
 
 
 def run_jobs(folder, manifest):
-    """Hold slots until LAVA terminates, including time spent queued."""
+    """Submit every prepared job, then let LAVA schedule devices while tracking completion."""
     if manifest.get("lava_url") != LAVA:
         raise ValueError("This request belongs to another LAVA instance, start a new workflow run")
     state = execution_state(folder, manifest)
@@ -580,6 +580,7 @@ def run_jobs(folder, manifest):
     deadline = time.monotonic() + manifest["request_minutes"] * 60
     pending = list(manifest["jobs"])
     active = {}
+    last_progress = None
     api = None
 
     def interrupted(signum, frame):
@@ -599,7 +600,7 @@ def run_jobs(folder, manifest):
                     "id", "state", "health", "actual_device", "submit_time", "end_time")}
                 if current["state"] in TERMINAL:
                     del active[key]
-            while pending and len(active) < manifest["max_active_jobs"]:
+            while pending:
                 if time.monotonic() >= deadline:
                     raise TimeoutError("Validation request deadline expired")
                 entry = pending[0]
@@ -610,22 +611,13 @@ def run_jobs(folder, manifest):
                 if (matches and entry.get("run_attempt") and matches[0]["state"] not in TERMINAL and
                         str(matches[0]["metadata"].get("testkit-workflow-attempt", "1")) != entry["run_attempt"]):
                     # A rerun owns recovery of its earlier attempt for the same
-                    # workload. Confirm it stopped before spending another slot.
+                    # workload. Confirm it stopped before submitting a replacement.
                     previous_attempt = str(matches[0]["metadata"].get("testkit-workflow-attempt", "1"))
                     cancel_owned_job(api, matches[0], manifest["run_id"], run_attempt=previous_attempt)
                     matches = matching_jobs(api, entry)
                 if matches:
                     job = matches[0]
                 else:
-                    # A previous workflow's cleanup may still be running.
-                    outstanding = [job_details(api, item) for item in api.pages(
-                        "/api/v0.2/jobs/", end_time__isnull="true", description__startswith="testkit-",
-                        submitter__username=api.username, limit=100)
-                        if item.get("state") not in TERMINAL and
-                        item.get("submitter") == api.username and
-                        str(item.get("description", "")).startswith("testkit-")]
-                    if len(outstanding) >= manifest["max_active_jobs"]:
-                        break
                     # Mark intent before POST. A timeout is never blindly retried.
                     state["jobs"][entry["key"]] = {"state": "Submitting"}
                     save_json(state_path, state)
@@ -666,6 +658,12 @@ def run_jobs(folder, manifest):
                     active[entry["key"]] = job
                 save_json(state_path, state)
             save_json(state_path, state)
+            progress = (len(pending), len(active))
+            if progress != last_progress:
+                finished = len(manifest["jobs"]) - len(pending) - len(active)
+                print(f"LAVA jobs: total={len(manifest['jobs'])}, finished={finished}, "
+                      f"queued_or_running={len(active)}, pending_submission={len(pending)}", flush=True)
+                last_progress = progress
             if pending or active:
                 time.sleep(30)
         # Fail the validation job as well as the reporter, so GitHub's failed-job
@@ -766,6 +764,9 @@ def result_matrix(rows, targets, by_group=True, lava_url=LAVA, compact=False):
     def cell(value):
         return str(value).replace("|", "&#124;").replace("\n", " ").replace("\r", " ").replace("<", "&lt;")
 
+    group_names = {"pre-merge-basic": "Basic", "pre-merge-audio": "Audio",
+                   "pre-merge-bt": "Bluetooth", "pre-merge-camera": "Camera",
+                   "pre-merge-display-gfx": "Display/graphics", "pre-merge-gstr-video": "Video (GStreamer)"}
     labels = {}
     if compact and not by_group:
         for row in rows:
@@ -777,6 +778,11 @@ def result_matrix(rows, targets, by_group=True, lava_url=LAVA, compact=False):
         if row["coverage"] == "Workflow":
             continue
         label = row["group"] if by_group else f"{row['group']} / {row['coverage']} / {row['name']}"
+        if compact and by_group:
+            group, separator, selection = row["group"].partition("-pr-")
+            label = group_names.get(group, group)
+            if separator:
+                label += f" (pr-{selection})"
         if compact and not by_group:
             label = row.get("display_name", row["name"])
             if len(labels[label]) > 1:
@@ -976,12 +982,8 @@ def finish_jobs(folder, manifest, lifecycle=True):
         notices.append("The PR head has changed. These results apply only to the commit above.")
     lines += notices
     workflow_url = f"https://github.com/{REPOSITORY}/actions/runs/{os.environ.get('GITHUB_RUN_ID', manifest['run_id'])}"
-    totals = Counter()
-    for row in rows:
-        totals.update(row["counts"])
     targets = sorted({result_target(entry) for entry in manifest.get("jobs", [])})
-    lines += ["", f"[Workflow and artifacts]({workflow_url})",
-              f"PASS: {totals['pass']} | FAIL: {totals['fail']} | SKIP: {totals['skip']}", ""]
+    lines += ["", f"[Workflow and artifacts]({workflow_url})", ""]
     # Keep full diagnostics in the artifact, while the summary shows the verdict.
     diagnostics = []
     for row in rows:
@@ -1040,17 +1042,30 @@ def finish_jobs(folder, manifest, lifecycle=True):
     image_type = manifest.get("image_type")
     variants = ("base", "overlay") if image_type == "both" else (
         "overlay" if image_type in {"proprietary", "overlay"} else "base",)
+    definitions = {(result_target(entry), entry["group"], definition["name"]):
+                   (definition.get("path", definition["name"]), digest(definition.get("params", {})))
+                   for entry in manifest.get("jobs", []) for definition in entry.get("definitions", [])}
     for variant in variants:
         variant_targets = {result_target(entry) for entry in manifest.get("jobs", [])
-                           if entry.get("image_variant") == variant}
+                           if len(variants) == 1 or entry.get("image_variant") == variant}
         counts = Counter()
+        unique_tests = set()
         for row in rows:
-            if row["coverage"] != "Workflow" and (len(variants) == 1 or row["target"] in variant_targets):
+            if (row["coverage"] in {"Baseline", "PR change", "PR addition"} and
+                    row["target"] in variant_targets):
                 counts.update(row["counts"])
+                definition = definitions.get((row["target"], row["group"], row["name"]),
+                                             (row["group"], row["name"]))
+                unique_tests.update((*definition, case["name"]) for case in row.get("tests", []))
         label = f"{build_label} ({variant})" if image_type else build_label
         total = counts["pass"] + counts["fail"] + counts["skip"]
-        pr_lines += [f"### {label}", "",
-                     f"Pass: {counts['pass']} | Fail: {counts['fail']} | Skip: {counts['skip']} | Total: {total}", ""]
+        test_label = "Unique PR tests" if manifest.get("include_meta_qcom") is False else "Unique functional tests"
+        count_lines = [f"### {label}", "",
+                       f"{test_label}: {len(unique_tests)} | Targets: {len(variant_targets)} | Testcase results: {total}",
+                       "",
+                       f"Pass: {counts['pass']} | Fail: {counts['fail']} | Skip: {counts['skip']}", ""]
+        lines += count_lines
+        pr_lines += count_lines
     pr_lines += notices + [""]
     # Keep the same detailed matrices in the workflow and PR comment.
     # Bound both GitHub summaries, retaining every row in the artifact.

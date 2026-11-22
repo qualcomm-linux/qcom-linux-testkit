@@ -10,7 +10,7 @@ on:
         required: true
         type: string
       targets:
-        description: meta-qcom uses its pre-merge targets except qcm6490-idp, or enter comma-separated machines
+        description: meta-qcom selects all enabled machines except qcm6490-idp, or enter comma-separated machine names or configured Foundries device types
         required: true
         default: meta-qcom
         type: string
@@ -40,7 +40,7 @@ on:
         description: Optional successful meta-qcom nightly or extended build run ID. Reruns reuse the original images.
         type: string
       selections:
-        description: Optional JSON mapping suite paths to YAML/group/params selections
+        description: Optional JSON mapping suite paths to YAML/group/params selections and additional required LAVA tags
         default: '{}'
         type: string
       submit:
@@ -52,7 +52,7 @@ permissions:
   contents: read
   actions: read
 
-# Keep the total queued/running job cap across manual invocations, too.
+# Keep one controller active across manual invocations and cleanup.
 concurrency:
   group: testkit-lava-foundries
   cancel-in-progress: false
@@ -196,7 +196,7 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Submit and await bounded LAVA jobs
+      - name: Submit all prepared LAVA jobs and await results
         if: inputs.submit
         env:
           LAVATOKEN: ${{ secrets.LAVATOKEN }}
