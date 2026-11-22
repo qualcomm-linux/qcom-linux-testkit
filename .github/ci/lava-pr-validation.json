@@ -16,6 +16,7 @@
     "iq-9075-evk": "lemans-evk",
     "iq-8275-evk": "monaco-evk",
     "rb1-core-kit": "qrb2210-rb1",
+    "iq-x5121-evk": "purwa-iot-evk",
     "iq-x7181-evk": "hamoa-iot-evk",
     "shikra-evk": "shikra-iqs-evk",
     "kaanapali-mtp": "kaanapali-mtp",
@@ -24,7 +25,6 @@
     "qcs9100-ride-sx": "qcs9100-ride",
     "sm8750-mtp": "sm8750-mtp"
   },
-  "max_active_jobs": 2,
   "max_additional_jobs": 32,
   "queue_minutes": 120,
   "request_minutes": 300,
