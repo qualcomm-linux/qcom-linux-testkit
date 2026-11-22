@@ -125,20 +125,12 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
 
-      - name: Checkout meta-qcom PR templates
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          repository: qualcomm-linux/lava-test-plans
-          ref: 188770122773733a46370b71dab12b5a1023c630
-          path: lava-test-plans
-          persist-credentials: false
-
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         with:
           python-version: '3.11'
 
       - name: Install controller dependencies
-        run: python -m pip install -r .github/ci/lava-pr-requirements.txt ./lava-test-plans
+        run: python -m pip install -r .github/ci/lava-pr-requirements.txt
 
       - name: Download resolved PR context
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
@@ -155,6 +147,26 @@ jobs:
           LAVATOKEN: ${{ secrets.LAVATOKEN }}
           LAVA_ARTIFACT_TOKEN_NAME: ${{ vars.FOUNDRIES_ARTIFACT_TOKEN_NAME || 'Q_QLI_S3_TOKEN' }}
         run: python .github/workflows/lava_pr_validation.py preflight
+
+      - name: Resolve meta-qcom target list and plan revision
+        id: plans
+        env:
+          GH_TOKEN: ${{ github.token }}
+          META_QCOM_READ_TOKEN: ${{ secrets.META_QCOM_READ_TOKEN }}
+          IMAGE_DISTRO: ${{ inputs.distro }}
+          TARGETS: ${{ inputs.targets }}
+        run: python .github/workflows/lava_pr_validation.py plans
+
+      - name: Checkout resolved meta-qcom PR templates
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: qualcomm-linux/lava-test-plans
+          ref: ${{ steps.plans.outputs.plans_revision }}
+          path: lava-test-plans
+          persist-credentials: false
+
+      - name: Install the selected plan renderer
+        run: python -m pip install ./lava-test-plans
 
       - name: Prepare selected PR tests and optional meta-qcom baseline
         id: prepare

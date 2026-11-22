@@ -16,15 +16,15 @@ import subprocess
 import sys
 import tarfile
 import time
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import quote, urljoin, urlsplit
 import zipfile
 
-from jinja2 import Environment, FileSystemLoader, StrictUndefined
 import requests
 import yaml
-from lava_test_plans.utils import compression
 
 ROOT = Path(__file__).resolve().parents[2]
+IMAGE_DISTROS = {"meta-qcom-main": "qcom-distro", "meta-qcom-lts-6.18": "qcom-distro_linux-qcom-6.18",
+                 "qcom-distro": "qcom-distro", "qcom-distro_linux-qcom-6.18": "qcom-distro_linux-qcom-6.18"}
 # Reuse the trusted repository's inventory parser, independent of the launch directory.
 sys.path.insert(1, str(ROOT / "scripts"))
 
@@ -234,9 +234,52 @@ def select_targets(gh, config, distro, requested):
         reason = f"Targets not enabled for {name}: {', '.join(invalid)}." if invalid else "No targets selected."
         raise ValueError(f"{reason} Use meta-qcom or choose machine names from: {', '.join(eligible)}. "
                          "Configured Foundries device types are also accepted.")
+    plans_ref = settings.get("lava_test_plans_ref")
+    # Follow the selected profile's declared pin, including the prepare-env
+    # output used by meta-qcom. Never evaluate arbitrary workflow expressions.
+    for lookup in range(4):
+        if not isinstance(plans_ref, str):
+            break
+        env_ref = re.fullmatch(r"\$\{\{\s*env\.([A-Za-z0-9_-]+)\s*\}\}", plans_ref)
+        output_ref = re.fullmatch(r"\$\{\{\s*needs\.([A-Za-z0-9_-]+)\.outputs\.([A-Za-z0-9_-]+)\s*\}\}", plans_ref)
+        if env_ref:
+            plans_ref = document.get("env", {}).get(env_ref[1])
+        elif output_ref:
+            plans_ref = document["jobs"].get(output_ref[1], {}).get("outputs", {}).get(output_ref[2])
+        else:
+            break
+    if not isinstance(plans_ref, str) or not re.fullmatch(r"[A-Za-z0-9_./-]+", plans_ref):
+        raise ValueError(f"meta-qcom {name} must resolve lava_test_plans_ref to a literal commit, tag or branch")
+    plans_revision = gh.get("/repos/qualcomm-linux/lava-test-plans/commits/" + quote(plans_ref, safe=""))["sha"]
+    if not re.fullmatch(r"[0-9a-f]{40}", plans_revision):
+        raise ValueError("meta-qcom lava-test-plans reference did not resolve to a commit")
     return dict(repository=repository, revision=revision, workflow=config["target_workflow"],
+                plans_ref=plans_ref, plans_revision=plans_revision,
                 job=name, kernel=settings.get("kernel"), targets=targets, selected=selected,
                 excluded=excluded)
+
+
+def resolve_plans(folder):
+    """Freeze meta-qcom's target list and template pin before installing its renderer."""
+    config = json.loads((ROOT / ".github/ci/lava-pr-validation.json").read_text(encoding="utf-8"))
+    previous = previous_request(github(), os.environ["VALIDATION_RUN_ID"], os.environ.get("GITHUB_RUN_ATTEMPT", "1"))
+    if previous:
+        target_matrix = dict(previous["target_matrix"], plans_revision=previous["plans_revision"])
+    else:
+        distro_choice = os.environ.get("IMAGE_DISTRO", "meta-qcom-main")
+        if distro_choice not in IMAGE_DISTROS:
+            raise ValueError("Choose meta-qcom-main or meta-qcom-lts-6.18")
+        distro = IMAGE_DISTROS[distro_choice]
+        producer = API(GITHUB, os.environ.get("META_QCOM_READ_TOKEN") or os.environ.get("GH_TOKEN", ""))
+        target_matrix = select_targets(producer, config, distro, os.environ.get("TARGETS", "meta-qcom"))
+    revision = target_matrix["plans_revision"]
+    if not re.fullmatch(r"[0-9a-f]{40}", revision):
+        raise ValueError("Invalid saved lava-test-plans commit")
+    save_json(folder / "target-matrix.json", target_matrix)
+    if os.environ.get("GITHUB_OUTPUT"):
+        with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+            output.write(f"plans_revision={revision}\n")
+    print(f"meta-qcom {target_matrix['revision']} selects lava-test-plans {revision}")
 
 
 def validate_target_templates(plans, targets, config):
@@ -311,22 +354,21 @@ def catalogue(source):
     inventory.BASE = source / "Runner/suites"
     owners = sorted([row["Suite Path"] for row in inventory.discover_tests()], key=len, reverse=True)
     definitions, by_suite = {}, defaultdict(list)
-    for path in sorted(path for path in (source / "Runner").rglob("*")
+    for path in sorted(path for path in (source / "Runner/suites").rglob("*")
                        if path.suffix in {".yaml", ".yml"}):
         document = yaml.safe_load(path.read_text(encoding="utf-8"))
         if not isinstance(document, dict) or not document.get("metadata"):
             continue
         steps = document.get("run", {}).get("steps")
-        if not isinstance(steps, list) or not all(isinstance(step, str) for step in steps):
+        if not isinstance(steps, list) or not steps or not all(isinstance(step, str) for step in steps):
             continue
         relative = path.relative_to(source).as_posix()
-        invocations = [owner for owner in owners if any(owner in step for step in steps)]
+        # Suite-local definitions belong to their runner directory. Do not
+        # infer ownership from shell spelling, parameters or result publishers.
         local = owning_suite(relative, owners)
-        if not invocations and local and any("./run.sh" in step for step in steps):
-            invocations = [local]
         definitions[relative] = document
-        for owner in invocations:
-            by_suite[owner].append(relative)
+        if local:
+            by_suite[local].append(relative)
     return owners, definitions, by_suite
 
 
@@ -344,10 +386,6 @@ def affected_suites(source, changes, owners, config):
     for change in changes:
         changed = change["path"]
         if changed.lower().endswith((".md", ".rst")):
-            continue
-        # Transport helpers are exercised by the mandatory plan, not by adding
-        # every suite whose YAML publishes results. Verify that coverage below.
-        if changed in config.get("baseline_helpers", []):
             continue
         owner = owning_suite(changed, owners)
         if owner:
@@ -380,10 +418,16 @@ def affected_suites(source, changes, owners, config):
 
 
 def render_baseline(plans, target, context, config):
+    # Resolution runs before the selected plan's Python dependencies are installed.
+    from jinja2 import Environment, FileSystemLoader, StrictUndefined
+    from lava_test_plans.utils import compression
+
     templates = plans / "lava_test_plans"
     plan_groups = {path.stem for path in (templates / "testplans/meta-qcom/qcom-distro/pre-merge").glob("*.yaml")}
     if plan_groups != set(config["groups"]):
-        raise ValueError("Configured groups must cover the complete pinned meta-qcom PR plan")
+        raise ValueError("meta-qcom pre-merge groups changed, review the controller's supported groups. "
+                         f"Plan: {', '.join(sorted(plan_groups)) or 'none'}. "
+                         f"Controller: {', '.join(config['groups'])}")
     # Pinned LAVA templates produce YAML and shell, HTML escaping corrupts their values.
     environment = Environment(  # nosemgrep: python.flask.security.xss.audit.direct-use-of-jinja2.direct-use-of-jinja2
         loader=FileSystemLoader([
@@ -398,14 +442,23 @@ def render_baseline(plans, target, context, config):
     excluded_groups = getattr(device, "EXCLUDED_TESTPLANS", [])
     context["EXCLUDED_TESTS"] = getattr(device, "EXCLUDED_TESTS", [])
     jobs, excluded = {}, []
+    context["excluded_definitions"] = []
     for group in config["groups"]:
+        template = environment.get_template(f"testcases/{group}.yaml")
+        namespace = template.make_module(context)
+        if not isinstance(getattr(namespace, "all_tests", None), list):
+            raise ValueError(f"meta-qcom {group} must declare its test definitions in all_tests")
+        context["excluded_definitions"].extend((group, test) for test in namespace.all_tests
+            if group + ".yaml" in excluded_groups or test["name"] in context["EXCLUDED_TESTS"] or not test.get("include", True))
         if group + ".yaml" in excluded_groups:
             excluded.append(f"{target}/{group}")
             continue
-        template = environment.get_template(f"testcases/{group}.yaml")
-        namespace = template.make_module(context)
         excluded.extend(f"{target}/{group}/{test['name']}" for test in namespace.all_tests
                         if test["name"] in context["EXCLUDED_TESTS"] or not test.get("include", True))
+        if not any(test["name"] not in context["EXCLUDED_TESTS"] and test.get("include", True)
+                   for test in namespace.all_tests):
+            excluded.append(f"{target}/{group} (no eligible definitions)")
+            continue
         # This output is parsed as a LAVA job, never served as HTML.
         # nosemgrep: python.flask.security.xss.audit.direct-use-of-jinja2.direct-use-of-jinja2
         job = yaml.safe_load(template.render(context))
@@ -455,39 +508,67 @@ def group_for(suite):
 
 
 def append_tests(jobs, affected, documents, by_suite, selections, config, source_url, source=None,
-                 include_meta_qcom=True):
+                 include_meta_qcom=True, excluded_definitions=()):
     manifest = []
     selected = set()
     baseline = [(group, definition) for group, job in jobs.items() for definition in entries(job)]
+    owners = sorted(set(by_suite) | set(affected), key=len, reverse=True)
     for suite, reasons in sorted(affected.items()):
         candidates = by_suite.get(suite, [])
         explicit = selections.get(suite)
+        if suite in selections and (not isinstance(explicit, (dict, list)) or not explicit):
+            raise ValueError(f"Selection for {suite} must be an object or a nonempty list of objects")
+        direct = any(reason.startswith(suite + "/") for reason in reasons)
+        runtime_changed = any(reason.startswith(suite + "/") and
+                              not reason.endswith((".yaml", ".yml")) for reason in reasons)
+        changed_yamls = [path for path in candidates if path in reasons]
+        covered = [(group, old) for group, old in baseline if owning_suite(old["path"], owners) == suite]
+        for group, old in covered:
+            if old["path"] not in documents:
+                raise ValueError(f"Missing selected baseline YAML in PR: {old['path']}")
+        # Shared helpers use the eligible PR plan's regression coverage. Keep
+        # every configured instance, including parameter variants and exclusions.
+        if not explicit and (not direct or (covered and runtime_changed)):
+            for group, old in covered:
+                selected.add(id(old))
+                manifest.append(dict(suite=suite, path=old["path"], group=group,
+                                     params=old.get("params", {}), execution_group=group,
+                                     definitions=[old["name"]], reasons=sorted(reasons),
+                                     disposition="covered by baseline" if include_meta_qcom else "selected from baseline"))
+            if not covered:
+                manifest.append(dict(suite=suite, reasons=sorted(reasons),
+                                     disposition="outside eligible pre-merge coverage, use an explicit selection"))
+            changed_yamls = [path for path in changed_yamls if not any(old["path"] == path for group, old in covered)]
+            if not direct or not changed_yamls:
+                continue
         if not explicit and "/Camera_NHX" in suite:
             raise ValueError("Camera_NHX needs an explicit compatible selection and image")
-        changed_yamls = [path for path in candidates if path in reasons]
         if explicit:
             choices = explicit if isinstance(explicit, list) else [explicit]
         else:
             default = f"{suite}/{Path(suite).name}.yaml"
             paths = changed_yamls or ([default] if default in candidates else candidates)
-            if len(paths) != 1:
+            if not paths or (not changed_yamls and len(paths) != 1):
                 raise ValueError(f"Select YAML and group for {suite}, candidates: {', '.join(candidates) or 'none'}")
-            default_group = next((group for group, old in baseline
-                                  if old["path"] == paths[0] and
-                                  effective_params(old, documents) ==
-                                  effective_params({"path": paths[0]}, documents)), None)
-            choices = [{"path": paths[0], "group": default_group or group_for(suite)}]
+            choices = []
+            for path in paths:
+                instances = [(group, old) for group, old in covered if old["path"] == path]
+                if not instances:
+                    instances = [(group, old) for group, old in excluded_definitions if old["path"] == path]
+                if instances:
+                    choices.extend(dict(path=path, group=group, params=old.get("params", {}))
+                                   for group, old in instances)
+                else:
+                    choices.append({"path": path, "group": group_for(suite)})
         for choice in choices:
+            if not isinstance(choice, dict) or not all(isinstance(choice.get(key), str) for key in ("path", "group")):
+                raise ValueError(f"Selection for {suite} must specify path and group")
             path = choice["path"]
             if path not in candidates:
                 raise ValueError(f"{path} does not invoke {suite}")
             group = choice["group"]
             if group not in config["groups"]:
                 raise ValueError(f"Unknown execution group: {group}")
-            if group not in jobs:
-                manifest.append(dict(suite=suite, path=path, group=group, reasons=sorted(reasons),
-                                     disposition="excluded by target template"))
-                continue
             params = choice.get("params", {})
             if not isinstance(params, dict) or set(params) - set(documents[path].get("params") or {}):
                 raise ValueError(f"Unknown YAML parameters for {path}")
@@ -502,12 +583,21 @@ def append_tests(jobs, affected, documents, by_suite, selections, config, source
             if (not isinstance(tags, list) or
                     not all(isinstance(tag, str) and tag.strip() == tag and tag for tag in tags)):
                 raise ValueError("tags must be a list of nonempty LAVA tag names")
+            definition = dict(path=path, params=params)
+            # The same YAML may be eligible in one group/configuration and
+            # excluded in another. Do not turn an exclusion into a new addition.
+            excluded = any(old_group == group and old["path"] == path and
+                           effective_params(old, documents) == effective_params(definition, documents)
+                           for old_group, old in excluded_definitions)
+            if group not in jobs or excluded:
+                manifest.append(dict(suite=suite, path=path, group=group, reasons=sorted(reasons),
+                                     disposition="excluded by target template"))
+                continue
             required_group = group_for(suite)
             required_tags = set(jobs.get(required_group, {}).get("tags", []))
             if required_tags - (set(jobs[group].get("tags", [])) | set(tags)):
                 raise ValueError(f"{path} requires the device tags from {required_group}: "
                                  f"{', '.join(sorted(required_tags))}. Select that group or retain its tags.")
-            definition = dict(path=path, params=params)
             execution_group = group
             # Do not collapse baseline instances, only avoid equivalent additions.
             equivalent = [old for old_group, old in baseline if old["path"] == path and old_group == group and
@@ -616,20 +706,17 @@ def prepare(folder):
     pr = gh.get(f"/repos/{REPOSITORY}/pulls/{number}")
     if pr["state"] != "open" or pr["base"]["ref"] != "main":
         raise ValueError("Select an open PR targeting main")
-    distro_names = {"meta-qcom-main": "qcom-distro", "meta-qcom-lts-6.18": "qcom-distro_linux-qcom-6.18",
-                    "qcom-distro": "qcom-distro", "qcom-distro_linux-qcom-6.18": "qcom-distro_linux-qcom-6.18"}
     distro_choice = os.environ.get("IMAGE_DISTRO", "meta-qcom-main")
-    if distro_choice not in distro_names:
+    if distro_choice not in IMAGE_DISTROS:
         raise ValueError("Choose meta-qcom-main or meta-qcom-lts-6.18")
-    distro = distro_names[distro_choice]
+    distro = IMAGE_DISTROS[distro_choice]
     producer = API(GITHUB, os.environ.get("META_QCOM_READ_TOKEN") or os.environ.get("GH_TOKEN", ""))
-    target_matrix = (previous["target_matrix"] if previous else
-                     select_targets(producer, config, distro, os.environ.get("TARGETS", "meta-qcom")))
+    target_matrix = json.loads((folder / "target-matrix.json").read_text(encoding="utf-8"))
     targets = target_matrix["selected"]
-    save_json(folder / "target-matrix.json", target_matrix)
+    plans_revision = target_matrix["plans_revision"]
     plans = Path(os.environ["LAVA_PLANS_PATH"]).resolve()
-    if git(plans, "rev-parse", "HEAD").decode().strip() != config["plans_revision"]:
-        raise ValueError("lava-test-plans checkout does not match the trusted pin")
+    if git(plans, "rev-parse", "HEAD").decode().strip() != plans_revision:
+        raise ValueError("lava-test-plans checkout does not match the resolved meta-qcom pin")
     validate_target_templates(plans, targets, config)
     # Keep historical names in saved requests so older reruns select the same artifact.
     image_variants = {"base": "multimedia", "overlay": "proprietary",
@@ -640,7 +727,7 @@ def prepare(folder):
     image_type = image_variants[image_choice]
     if previous and (previous["pr"] != number or previous["distro"] != distro or
                      previous["image_type"] != image_type or
-                     previous["plans_revision"] != config["plans_revision"]):
+                     previous["plans_revision"] != plans_revision):
         raise ValueError("Rerun inputs differ from the saved request, use a new manual validation run")
     variants = {"base": "qcom-multimedia-image", "overlay": "qcom-multimedia-proprietary-image"}
     if image_type != "both":
@@ -655,7 +742,10 @@ def prepare(folder):
         base, changes = previous["merge_base"], previous["changes"]
     owners, documents, by_suite = catalogue(source)
     affected = affected_suites(source, changes, owners, config)
-    selections = config["selections"] | json.loads(os.environ.get("TEST_SELECTIONS", "{}"))
+    requested_selections = json.loads(os.environ.get("TEST_SELECTIONS", "{}"))
+    if not isinstance(requested_selections, dict):
+        raise ValueError("TEST_SELECTIONS must map suite directories to selections")
+    selections = config["selections"] | requested_selections
     for suite in selections:
         if suite not in owners:
             raise ValueError(f"Unknown suite in selections: {suite}")
@@ -700,7 +790,7 @@ def prepare(folder):
                     run_attempt=attempt, changes=changes, lava_url=LAVA,
                     include_meta_qcom=include_meta_qcom,
                     target_matrix=target_matrix,
-                    plans_revision=config["plans_revision"], jobs=[], selections=[], exclusions=[],
+                    plans_revision=plans_revision, jobs=[], selections=[], exclusions=[],
                     baseline_helpers=[],
                     audio_url=audio_url, audio_sha256=audio_sha256,
                     artifact_token_name=token_name,
@@ -736,7 +826,8 @@ def prepare(folder):
                     if definition["path"] not in documents:
                         raise ValueError(f"Missing baseline YAML in PR: {definition['path']}")
         selection = append_tests(jobs, affected, documents, by_suite, selections, config, source_url, source,
-                                 include_meta_qcom=include_meta_qcom)
+                                 include_meta_qcom=include_meta_qcom,
+                                 excluded_definitions=context["excluded_definitions"])
         pr_definitions = {(row["execution_group"], name) for row in selection
                           for name in row.get("definitions", [])}
         if not include_meta_qcom:
