@@ -1,0 +1,14 @@
+metadata:
+  name: cpu-accounting-validation
+  format: "Lava-Test Test Definition 1.0"
+  description: "Validate CPU time accounting: /proc/stat counters increase, loadavg is parseable, and optional PSI / schedstat are coherent."
+  os:
+    - linux
+  scope:
+    - functional
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/CPU/CPU_Accounting_Validation
+    - ./run.sh
+    - $REPO_PATH/Runner/utils/send-to-lava.sh CPU_Accounting_Validation.res

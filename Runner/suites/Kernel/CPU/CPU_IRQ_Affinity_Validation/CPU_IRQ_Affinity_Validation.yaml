@@ -1,0 +1,14 @@
+metadata:
+  name: cpu-irq-affinity-validation
+  format: "Lava-Test Test Definition 1.0"
+  description: "Validate IRQ smp_affinity files exist, are readable, and cover a non-empty CPU mask."
+  os:
+    - linux
+  scope:
+    - functional
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/CPU/CPU_IRQ_Affinity_Validation
+    - ./run.sh
+    - $REPO_PATH/Runner/utils/send-to-lava.sh CPU_IRQ_Affinity_Validation.res
