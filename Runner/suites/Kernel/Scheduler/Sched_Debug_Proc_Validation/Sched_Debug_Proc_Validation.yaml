@@ -1,0 +1,14 @@
+metadata:
+  name: sched-debug-proc-validation
+  format: "Lava-Test Test Definition 1.0"
+  description: "Validate scheduler debug/proc interfaces: sched_debug, schedstat, and sched features when exported."
+  os:
+    - linux
+  scope:
+    - functional
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Scheduler/Sched_Debug_Proc_Validation
+    - ./run.sh
+    - $REPO_PATH/Runner/utils/send-to-lava.sh Sched_Debug_Proc_Validation.res
