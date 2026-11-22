@@ -1,0 +1,14 @@
+metadata:
+  name: softirq-proc-validation
+  format: "Lava-Test Test Definition 1.0"
+  description: "Validate /proc/softirqs exists and TIMER/SCHED/RCU softirq counters are present and non-decreasing."
+  os:
+    - linux
+  scope:
+    - functional
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/Softirq_Proc_Validation
+    - ./run.sh
+    - $REPO_PATH/Runner/utils/send-to-lava.sh Softirq_Proc_Validation.res

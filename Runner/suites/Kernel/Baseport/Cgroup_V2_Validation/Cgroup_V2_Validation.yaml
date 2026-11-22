@@ -1,0 +1,14 @@
+metadata:
+  name: cgroup-v2-validation
+  format: "Lava-Test Test Definition 1.0"
+  description: "Validate cgroup v2 mount and controllers (cpu, cpuset, memory, pids) when the unified hierarchy is in use."
+  os:
+    - linux
+  scope:
+    - functional
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/Cgroup_V2_Validation
+    - ./run.sh
+    - $REPO_PATH/Runner/utils/send-to-lava.sh Cgroup_V2_Validation.res

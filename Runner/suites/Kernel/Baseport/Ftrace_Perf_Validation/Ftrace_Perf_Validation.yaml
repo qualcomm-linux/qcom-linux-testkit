@@ -1,0 +1,14 @@
+metadata:
+  name: ftrace-perf-validation
+  format: "Lava-Test Test Definition 1.0"
+  description: "Validate ftrace and perf_event kernel ABIs without enabling tracing that would perturb the DUT."
+  os:
+    - linux
+  scope:
+    - functional
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/Ftrace_Perf_Validation
+    - ./run.sh
+    - $REPO_PATH/Runner/utils/send-to-lava.sh Ftrace_Perf_Validation.res
