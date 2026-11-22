@@ -1,0 +1,14 @@
+metadata:
+  name: file-lock-validation
+  format: "Lava-Test Test Definition 1.0"
+  description: "Validate kernel file-lock (flock) exclusive locking from userspace as a functional proxy for the locking subsystem."
+  os:
+    - linux
+  scope:
+    - functional
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/File_Lock_Validation
+    - ./run.sh
+    - $REPO_PATH/Runner/utils/send-to-lava.sh File_Lock_Validation.res

@@ -1,0 +1,14 @@
+metadata:
+  name: lock-debug-validation
+  format: "Lava-Test Test Definition 1.0"
+  description: "Validate optional lock debugging ABIs: /proc/lock_stat, /proc/lockdep, and /proc/locks content sanity."
+  os:
+    - linux
+  scope:
+    - functional
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/Lock_Debug_Validation
+    - ./run.sh
+    - $REPO_PATH/Runner/utils/send-to-lava.sh Lock_Debug_Validation.res
