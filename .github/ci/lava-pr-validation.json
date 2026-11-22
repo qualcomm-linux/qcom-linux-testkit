@@ -1,5 +1,4 @@
 {
-  "plans_revision": "188770122773733a46370b71dab12b5a1023c630",
   "artifact_repository": "qualcomm-linux/meta-qcom",
   "target_workflow": ".github/workflows/test.yml",
   "target_ref": "master",

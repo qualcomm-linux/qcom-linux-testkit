@@ -57,7 +57,7 @@ def record_failure(folder, stage, failure):
     # Signed URLs and URL userinfo must not reach artifacts or PR comments.
     message = re.sub(r"https?://[^\s<>\"']+", "[URL omitted]", message)
     message = " ".join(message.split())[:2000]
-    if stage not in {"begin", "start", "preflight", "prepare", "validate", "cleanup"}:
+    if stage not in {"begin", "start", "preflight", "plans", "prepare", "validate", "cleanup"}:
         return message
     context_path = folder / "context.json"
     context = json.loads(context_path.read_text(encoding="utf-8")) if context_path.is_file() else {}
@@ -993,7 +993,7 @@ def finish_jobs(folder, manifest, lifecycle=True):
                 not isinstance(error, dict) or error.get("run_id") != manifest["run_id"] or
                 str(error.get("run_attempt")) != str(manifest.get("run_attempt", "1")) or
                 error.get("sha") != manifest["sha"] or not isinstance(error.get("error"), str) or
-                error.get("stage") not in {"begin", "start", "preflight", "prepare", "validate", "cleanup"}
+                error.get("stage") not in {"begin", "start", "preflight", "plans", "prepare", "validate", "cleanup"}
                 for error in controller_errors):
             raise ValueError("Controller errors do not match this workflow request")
     if result_path.is_file():
@@ -1228,7 +1228,7 @@ def finish_jobs(folder, manifest, lifecycle=True):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["begin", "start", "preflight", "prepare", "validate", "run", "resolve",
+    parser.add_argument("command", choices=["begin", "start", "preflight", "plans", "prepare", "validate", "run", "resolve",
                                             "collect", "publish", "finish", "cleanup"])
     parser.add_argument("--output", type=Path, default=Path("lava-output"))
     args = parser.parse_args()
@@ -1265,6 +1265,10 @@ def execute(args):
     if args.command == "prepare":
         from lava_pr_prepare import prepare
         prepare(args.output)
+        return 0
+    if args.command == "plans":
+        from lava_pr_prepare import resolve_plans
+        resolve_plans(args.output)
         return 0
     path = args.output / "manifest.json"
     if not path.is_file() and args.command in {"start", "publish"}:
