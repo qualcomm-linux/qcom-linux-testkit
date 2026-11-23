@@ -1,6 +1,7 @@
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause
 name: LAVA PR validation
+run-name: 'LAVA PR validation - PR #${{ inputs.pr }}'
 
 on:
   workflow_dispatch:
