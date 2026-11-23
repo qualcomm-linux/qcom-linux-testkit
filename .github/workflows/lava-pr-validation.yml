@@ -15,7 +15,7 @@ on:
         default: meta-qcom
         type: string
       include_meta_qcom:
-        description: Include meta-qcom pre-merge tests alongside the PR tests
+        description: Include meta-qcom pre-merge tests. Unchecked runs only changed suites and explicit selections.
         default: true
         type: boolean
       revision:
@@ -40,7 +40,7 @@ on:
         description: Optional successful meta-qcom nightly or extended build run ID. Reruns reuse the original images.
         type: string
       selections:
-        description: Optional JSON mapping suite paths to YAML/group/params selections and additional required LAVA tags
+        description: JSON mapping suite paths to YAML/group/params/tags. Required for shared-helper-only PRs when pre-merge is unchecked.
         default: '{}'
         type: string
       submit:

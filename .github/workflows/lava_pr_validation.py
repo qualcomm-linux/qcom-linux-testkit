@@ -727,22 +727,40 @@ def run_jobs(folder, manifest):
         # Fail the validation job as well as the reporter, so GitHub's failed-job
         # rerun includes hardware execution instead of repeating only reporting.
         executed = 0
-        failures = []
+        failures = 0
+        totals = Counter()
         for entry in manifest["jobs"]:
             if state["jobs"].get(entry["key"], {}).get("state") == "PrecheckSkipped":
                 continue
             if state["jobs"].get(entry["key"], {}).get("state") == "PrecheckFailed":
-                failures.append(f"{result_target(entry)} {entry['group']}: pre-check failed")
+                failures += 1
+                print(f"{result_target(entry)} {entry['group']}: pre-check failed, "
+                      "see scheduling.json", flush=True)
                 continue
             matches = matching_jobs(api, entry, known_id=state["jobs"].get(entry["key"], {}).get("id"))
             if not matches:
                 raise RuntimeError(f"LAVA results missing for {result_target(entry)} {entry['group']}")
             rows, evidence = collect_results(api, matches[0], entry)
-            if not rows or any(row["errors"] or row["counts"].get("fail") for row in rows):
-                failures.append(f"{result_target(entry)} {entry['group']}: validation failed")
+            issues = [row for row in rows if row["errors"] or row["counts"].get("fail")]
+            if not rows or issues:
+                failures += 1
+                print(f"{result_target(entry)} {entry['group']}: "
+                      f"{LAVA}/results/{matches[0]['id']}", flush=True)
+                if not rows:
+                    print("  No result rows collected", flush=True)
+                for row in issues:
+                    detail = record_failure(folder, "results", ValueError(
+                        f"{row['name']}: " + ", ".join(result_issues(row))))
+                    print(f"  {detail}", flush=True)
+            for row in rows:
+                totals.update(row["counts"])
             executed += sum(row["counts"].get("pass", 0) + row["counts"].get("fail", 0) for row in rows)
+        print(f"LAVA jobs finished. Collected testcase results: PASS={totals['pass']}, "
+              f"FAIL={totals['fail']}, SKIP={totals['skip']}. "
+              f"Jobs needing attention={failures}", flush=True)
         if failures:
-            raise RuntimeError("Validation needs attention. " + ". ".join(failures))
+            raise RuntimeError(f"LAVA jobs finished with validation issues in {failures} jobs. "
+                               "See the per-job results above and diagnostics.md in the results artifact")
         if not executed:
             raise RuntimeError("No executed PASS/FAIL validation across requested tests")
     except (Exception, KeyboardInterrupt) as error:
@@ -833,6 +851,19 @@ def collect_results(api, job, entry):
                          errors=[f"{job['state']}/{job['health']}"] +
                          [case["name"] for case in infrastructure]))
     return rows, observed
+
+
+def result_issues(row):
+    """Describe failed testcases as well as missing or incomplete validation."""
+    issues = list(row["errors"])
+    if row["counts"].get("fail"):
+        names = sorted({case["name"] for case in row.get("tests", [])
+                        if case["result"].lower() == "fail"})
+        issues.append("Failed testcases: " + ", ".join(names) if names else
+                      f"Failed testcase results: {row['counts']['fail']}")
+    if row.get("reason") and row["reason"] not in issues:
+        issues.append(row["reason"])
+    return issues
 
 
 def result_matrix(rows, targets, by_group=True, lava_url=LAVA, compact=False):
@@ -1078,10 +1109,12 @@ def finish_jobs(folder, manifest, lifecycle=True):
     # Keep full diagnostics in the artifact, while the summary shows the verdict.
     diagnostics = []
     for row in rows:
-        reasons = row["errors"] or ([row["reason"]] if row.get("reason") else [])
+        reasons = result_issues(row)
         if not reasons:
             continue
         label = f"{row['target']} / {row['group']} / {row['name']}"
+        if row.get("job"):
+            label = f"[{label}]({lava_url}/results/{row['job']})"
         detail = ", ".join(reasons).replace("\n", " ").replace("\r", " ").replace("<", "&lt;")
         diagnostics.append(f"- {label}: {detail[:1000]}")
     if diagnostics:
@@ -1223,6 +1256,8 @@ def finish_jobs(folder, manifest, lifecycle=True):
         "failure" if failed or not cleanup_complete else "success")
     if lifecycle:
         update_check(gh, manifest, "completed", body, conclusion)
+    print("LAVA results published. Validation verdict: " + ("Needs attention" if failed else "PASS"),
+          flush=True)
     return int(failed)
 
 
@@ -1241,7 +1276,7 @@ def main():
             message = record_failure(args.output, args.command, failure)
         except (OSError, ValueError, TypeError):
             message = f"{args.command} failed ({type(failure).__name__}), controller evidence could not be saved"
-        print(f"Validation stopped: {message}", file=sys.stderr)
+        print(f"Validation {args.command} failed: {message}", file=sys.stderr)
         return 1
 
 

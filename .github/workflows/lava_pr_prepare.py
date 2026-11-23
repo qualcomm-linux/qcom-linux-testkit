@@ -376,13 +376,9 @@ def owning_suite(path, owners):
     return next((owner for owner in owners if path.startswith(owner + "/")), None)
 
 
-def affected_suites(source, changes, owners, config):
-    """Expand associated files and shared dependencies, conservatively on dynamic paths."""
+def affected_suites(changes, owners, config):
+    """Select direct suite changes and explicitly configured file associations."""
     reasons = defaultdict(set)
-    texts = {}
-    for path in (source / "Runner").rglob("*"):
-        if path.is_file() and path.suffix in {".sh", ".py", ".awk", ".yaml", ".json", ".conf"}:
-            texts[path.relative_to(source).as_posix()] = path.read_text(encoding="utf-8", errors="replace")
     for change in changes:
         changed = change["path"]
         if changed.lower().endswith((".md", ".rst")):
@@ -391,29 +387,25 @@ def affected_suites(source, changes, owners, config):
         if owner:
             reasons[owner].add(changed)
             continue
-        if not changed.startswith("Runner/"):
-            continue
-        if changed.startswith("Runner/suites/") and not (source / changed).exists():
-            continue  # Removed suite. Missing baseline paths are rejected during render.
+        # Sourcing a shared library does not establish which of its functions
+        # a suite exercises. Regression coverage is opted into through the
+        # meta-qcom checkbox, explicit selections or trusted associations.
         pending, visited = [changed], set()
         while pending:
             dependency = pending.pop()
             if dependency in visited:
                 continue
             visited.add(dependency)
-            consumers = [path for path, text in texts.items()
-                         if Path(dependency).name in text and path != dependency]
-            consumers.extend(config["associations"].get(dependency, []))
-            for consumer in consumers:
-                owner = owning_suite(consumer, owners)
+            for consumer in config["associations"].get(dependency, []):
+                owner = consumer if consumer in owners else owning_suite(consumer, owners)
                 if owner:
                     reasons[owner].add(changed)
-                else:
+                elif consumer in config["associations"]:
                     pending.append(consumer)
-        if not any(changed in paths for paths in reasons.values()):
-            # A dynamic shared dependency cannot safely be treated as no impact.
-            for owner in owners:
-                reasons[owner].add(changed + " (shared scope unresolved)")
+                else:
+                    raise ValueError(f"Configured association for {changed} has no suite: {consumer}")
+        if changed in config["associations"] and not any(changed in paths for paths in reasons.values()):
+            raise ValueError(f"Configured associations for {changed} select no suite")
     return reasons
 
 
@@ -518,28 +510,23 @@ def append_tests(jobs, affected, documents, by_suite, selections, config, source
         explicit = selections.get(suite)
         if suite in selections and (not isinstance(explicit, (dict, list)) or not explicit):
             raise ValueError(f"Selection for {suite} must be an object or a nonempty list of objects")
-        direct = any(reason.startswith(suite + "/") for reason in reasons)
-        runtime_changed = any(reason.startswith(suite + "/") and
-                              not reason.endswith((".yaml", ".yml")) for reason in reasons)
+        runtime_changed = any(reason not in candidates for reason in reasons)
         changed_yamls = [path for path in candidates if path in reasons]
         covered = [(group, old) for group, old in baseline if owning_suite(old["path"], owners) == suite]
         for group, old in covered:
             if old["path"] not in documents:
                 raise ValueError(f"Missing selected baseline YAML in PR: {old['path']}")
-        # Shared helpers use the eligible PR plan's regression coverage. Keep
-        # every configured instance, including parameter variants and exclusions.
-        if not explicit and (not direct or (covered and runtime_changed)):
+        # A runner or associated asset change keeps every eligible configuration
+        # of the selected suite, including existing parameter variants.
+        if not explicit and covered and runtime_changed:
             for group, old in covered:
                 selected.add(id(old))
                 manifest.append(dict(suite=suite, path=old["path"], group=group,
                                      params=old.get("params", {}), execution_group=group,
                                      definitions=[old["name"]], reasons=sorted(reasons),
                                      disposition="covered by baseline" if include_meta_qcom else "selected from baseline"))
-            if not covered:
-                manifest.append(dict(suite=suite, reasons=sorted(reasons),
-                                     disposition="outside eligible pre-merge coverage, use an explicit selection"))
             changed_yamls = [path for path in changed_yamls if not any(old["path"] == path for group, old in covered)]
-            if not direct or not changed_yamls:
+            if not changed_yamls:
                 continue
         if not explicit and "/Camera_NHX" in suite:
             raise ValueError("Camera_NHX needs an explicit compatible selection and image")
@@ -696,6 +683,8 @@ def prepare(folder):
     previous = previous_request(gh, run_id, attempt)
     if previous and previous.get("lava_url") != LAVA:
         raise ValueError("The previous attempt used another LAVA instance, start a new workflow run")
+    if previous and previous.get("selection_policy") != "direct-suites":
+        raise ValueError("The saved request uses an older test-selection policy, start a new manual validation run")
     baseline_input = os.environ.get("INCLUDE_META_QCOM", "true").lower()
     if baseline_input not in {"true", "false"}:
         raise ValueError("include_meta_qcom must be true or false")
@@ -741,7 +730,7 @@ def prepare(folder):
             raise ValueError("The PR source repository changed, use a new manual validation run")
         base, changes = previous["merge_base"], previous["changes"]
     owners, documents, by_suite = catalogue(source)
-    affected = affected_suites(source, changes, owners, config)
+    affected = affected_suites(changes, owners, config)
     requested_selections = json.loads(os.environ.get("TEST_SELECTIONS", "{}"))
     if not isinstance(requested_selections, dict):
         raise ValueError("TEST_SELECTIONS must map suite directories to selections")
@@ -751,7 +740,8 @@ def prepare(folder):
             raise ValueError(f"Unknown suite in selections: {suite}")
         affected[suite].add("explicit maintainer selection")
     if not include_meta_qcom and not affected:
-        raise ValueError("No PR tests selected. Enable include_meta_qcom or provide explicit suite selections.")
+        raise ValueError("No PR suites selected. PR-only runs use direct suite changes or explicit selections, "
+                         "not automatic shared-library consumers. Provide selections or enable include_meta_qcom.")
     access = {}
     if previous and not all(previous.get(key) for key in ("audio_url", "audio_sha256")):
         raise ValueError("The earlier request did not pin its audio asset, use a new manual validation run")
@@ -789,6 +779,7 @@ def prepare(folder):
                     distro=distro, image_type=image_type, build=build, run_id=run_id,
                     run_attempt=attempt, changes=changes, lava_url=LAVA,
                     include_meta_qcom=include_meta_qcom,
+                    selection_policy="direct-suites",
                     target_matrix=target_matrix,
                     plans_revision=plans_revision, jobs=[], selections=[], exclusions=[],
                     baseline_helpers=[],
@@ -837,6 +828,8 @@ def prepare(folder):
                     if definition["path"] not in documents:
                         raise ValueError(f"Missing selected YAML in PR: {definition['path']}")
         for changed in sorted({change["path"] for change in changes} & set(config.get("baseline_helpers", []))):
+            if not jobs:
+                continue
             coverage = sorted({definition["path"] for job in jobs.values() for definition in entries(job)
                                if (not include_meta_qcom or id(definition) in baseline_ids) and
                                invokes_helper(documents[definition["path"]], changed)})
