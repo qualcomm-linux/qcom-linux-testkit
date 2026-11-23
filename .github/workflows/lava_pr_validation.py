@@ -629,6 +629,7 @@ def run_jobs(folder, manifest):
     deadline = time.monotonic() + manifest["request_minutes"] * 60
     pending = list(manifest["jobs"])
     active = {}
+    job_fields = ("id", "state", "health", "actual_device", "submit_time", "end_time")
     last_progress = None
     api = None
 
@@ -645,8 +646,7 @@ def run_jobs(folder, manifest):
                 raise TimeoutError("Validation request deadline expired")
             for key, job in list(active.items()):
                 current = api.get(f"/api/v0.2/jobs/{job['id']}/")
-                state["jobs"][key] = {field: current.get(field) for field in (
-                    "id", "state", "health", "actual_device", "submit_time", "end_time")}
+                state["jobs"][key] = {field: current.get(field) for field in job_fields}
                 if current["state"] in TERMINAL:
                     del active[key]
             while pending:
@@ -709,18 +709,38 @@ def run_jobs(folder, manifest):
                 pending.pop(0)
                 print(f"{result_target(entry)} {entry['group']}: {LAVA}/scheduler/job/{job['id']}",
                       flush=True)
-                state["jobs"][entry["key"]] = {"id": job["id"], "state": job["state"]}
+                state["jobs"][entry["key"]] = {field: job.get(field) for field in job_fields}
                 if job["state"] not in TERMINAL:
                     active[entry["key"]] = job
                 save_json(state_path, state)
             save_json(state_path, state)
-            progress = (len(pending), len(active))
+            progress = {}
+            for entry in manifest["jobs"]:
+                known = state["jobs"].get(entry["key"], {})
+                job_state = known.get("state") or "Pending submission"
+                category = job_state
+                if job_state in {"Submitted", "Scheduling", "Scheduled"}:
+                    category = "Queued"
+                elif job_state in PRECHECK_STATES:
+                    category = "Blocked"
+                detail = f"{result_target(entry)} / {entry['group']}: {job_state}"
+                if known.get("health"):
+                    detail += f"/{known['health']}"
+                if known.get("actual_device"):
+                    detail += f", device={known['actual_device']}"
+                if known.get("id"):
+                    detail += f" - {LAVA}/scheduler/job/{known['id']}"
+                progress.setdefault(category, []).append(detail)
             if progress != last_progress:
                 blocked = sum(job.get("state") in PRECHECK_STATES for job in state["jobs"].values())
                 finished = len(manifest["jobs"]) - len(pending) - len(active) - blocked
                 print(f"LAVA jobs: total={len(manifest['jobs'])}, finished={finished}, "
                       f"blocked={blocked}, queued_or_running={len(active)}, "
                       f"pending_submission={len(pending)}", flush=True)
+                for category, details in progress.items():
+                    print(f"  {category} ({len(details)}):", flush=True)
+                    for detail in details:
+                        print(f"    {detail}", flush=True)
                 last_progress = progress
             if pending or active:
                 time.sleep(30)
