@@ -2204,6 +2204,67 @@ display_wayland_proto_validate() {
   return 1
 }
 
+
+# Validate that the Wayland tablet protocol (zwp_tablet_v2) was exercised.
+# Expects WAYLAND_DEBUG output in the provided logfile.
+#
+# weston-tablet binds zwp_tablet_manager_v2 and creates a tablet seat so the
+# compositor can enumerate physical tablet devices. Both must appear in the log
+# for this validator to pass.
+#
+# Usage:
+# display_wayland_tablet_validate "/path/to/run.log"
+# Returns:
+# 0 = zwp_tablet_manager_v2 was bound and at least one tablet seat was created
+# 1 = missing required evidence
+display_wayland_tablet_validate() {
+  logf="${1:-}"
+  [ -n "$logf" ] && [ -f "$logf" ] || return 1
+
+  # zwp_tablet_manager_v2 must have been bound via the registry.
+  if ! grep -Eq 'zwp_tablet_manager_v2[@#]' "$logf"; then
+    return 1
+  fi
+
+  # At least one zwp_tablet_seat_v2 must have been created, confirming the
+  # client successfully queried the compositor for tablet seat enumeration.
+  if ! grep -Eq 'zwp_tablet_seat_v2[@#]' "$logf"; then
+    return 1
+  fi
+
+  return 0
+}
+
+# Validate that the Wayland XDG-shell toplevel window was created by the
+# terminal client. Expects WAYLAND_DEBUG output in the provided logfile.
+#
+# weston-terminal binds xdg_wm_base (or the legacy xdg_shell/wl_shell on
+# older Weston builds), creates an xdg_surface, and assigns it the xdg_toplevel
+# role. Both the shell binding and the toplevel role must appear for the client
+# to have produced a visible window.
+#
+# Usage:
+# display_wayland_terminal_validate "/path/to/run.log"
+# Returns:
+# 0 = shell protocol was bound and an xdg_toplevel window was created
+# 1 = missing required evidence
+display_wayland_terminal_validate() {
+  logf="${1:-}"
+  [ -n "$logf" ] && [ -f "$logf" ] || return 1
+
+  # xdg_wm_base (or legacy xdg_shell / wl_shell) must have been bound.
+  if ! grep -Eq '(xdg_wm_base|xdg_shell|wl_shell)[@#]' "$logf"; then
+    return 1
+  fi
+
+  # An xdg_toplevel window role must have been assigned, confirming the client
+  # produced a visible decorated window and not just an unmapped surface.
+  if ! grep -Eq 'xdg_toplevel[@#][0-9]+\.' "$logf"; then
+    return 1
+  fi
+
+  return 0
+}
 ###############################################################################
 # Screenshot capture + delta validation
 ###############################################################################
