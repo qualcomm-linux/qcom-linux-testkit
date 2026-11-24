@@ -948,11 +948,13 @@ def result_matrix(rows, targets, by_group=True, lava_url=LAVA, compact=False):
             else:
                 status = "PASS" if counts["pass"] else "SKIP" if counts["skip"] else "NOT RUN"
             if compact:
-                status = f"{colors[status]} {status}"
+                statuses = [status]
                 if by_group and counts["pass"] and counts["skip"] and not counts["fail"] and not value["errors"]:
-                    status += f" / {colors['SKIP']} SKIP"
-                links = " ".join(f"[{status}]({lava_url}/results/{job})" for job in sorted(value["jobs"]))
-                values.append(links or status)
+                    statuses.append("SKIP")
+                links = " ".join(
+                    " / ".join(f"{colors[result]} [{result}]({lava_url}/results/{job})" for result in statuses)
+                    for job in sorted(value["jobs"]))
+                values.append(links or " / ".join(f"{colors[result]} {result}" for result in statuses))
             else:
                 links = " ".join(f"[{status} #{job}]({lava_url}/scheduler/job/{job})"
                                  for job in sorted(value["jobs"]))
