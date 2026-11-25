@@ -1,0 +1,17 @@
+metadata:
+  name: CPU_Idle_Residency_Validation
+  format: Lava-Test Test Definition 1.0
+  description: Measure actual idle residency across online CPUs without changing idle policy.
+  os:
+    - linux
+  scope:
+    - functional
+params:
+  OBSERVE_SECONDS: "10"
+  MIN_PERCENT: null
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/CPU_Idle_Residency_Validation
+    - ./run.sh ${OBSERVE_SECONDS:+--seconds "${OBSERVE_SECONDS}"} ${MIN_PERCENT:+--min-percent "${MIN_PERCENT}"} || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh CPU_Idle_Residency_Validation.res

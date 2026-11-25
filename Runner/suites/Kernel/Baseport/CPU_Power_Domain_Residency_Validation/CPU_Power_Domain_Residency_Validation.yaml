@@ -1,0 +1,18 @@
+metadata:
+  name: CPU_Power_Domain_Residency_Validation
+  format: Lava-Test Test Definition 1.0
+  description: Measure idle residency of runtime-discovered CPU power domains and their parents.
+  os:
+    - linux
+  scope:
+    - functional
+params:
+  OBSERVE_SECONDS: "10"
+  DOMAIN_ROOT: null
+  MIN_PERCENT: null
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/CPU_Power_Domain_Residency_Validation
+    - ./run.sh ${OBSERVE_SECONDS:+--seconds "${OBSERVE_SECONDS}"} ${DOMAIN_ROOT:+--domain-root "${DOMAIN_ROOT}"} ${MIN_PERCENT:+--min-percent "${MIN_PERCENT}"} || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh CPU_Power_Domain_Residency_Validation.res
