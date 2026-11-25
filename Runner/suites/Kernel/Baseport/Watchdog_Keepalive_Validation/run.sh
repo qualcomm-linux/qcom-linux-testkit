@@ -133,6 +133,8 @@ rm -f "$release"
 # inside a timeout of at least two seconds until the parent releases the hold.
 watchdog_hold() {
     wd_opened=0
+    # Invoked by the EXIT/INT/TERM trap installed below.
+    # shellcheck disable=SC2329
     watchdog_disarm() {
         [ "$wd_opened" = 1 ] || return 0
         printf 'V' >&3 2>/dev/null || true
