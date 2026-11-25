@@ -71,15 +71,13 @@ OUT_DIR=$(test_create_run_directory "$PWD/results/$TESTNAME") ||
 log_info "Evidence: $OUT_DIR"
 
 providers=0
-for provider in /sys/class/watchdog/watchdog[0-9]*; do
-    [ -d "$provider" ] || continue
+for provider in $(watchdog_sysfs_dirs); do
     providers=$((providers + 1))
-    node="/dev/${provider##*/}"
-    identity=$(cat "$provider/identity" 2>/dev/null || true)
-    if [ -z "$identity" ] || [ ! -c "$node" ]; then
-        test_result_record FAIL "Registered watchdog ${provider##*/} lacks identity or character device $node"
-    else
+    if node=$(watchdog_provider_node "$provider"); then
+        identity=$(kernel_attribute_value "$provider/identity") || identity=""
         test_result_record PASS "Watchdog provider=$identity node=$node, device was not opened or armed"
+    else
+        test_result_record FAIL "Registered watchdog ${provider##*/} lacks a readable identity or character device"
     fi
 done
 if [ "$providers" -eq 0 ]; then
