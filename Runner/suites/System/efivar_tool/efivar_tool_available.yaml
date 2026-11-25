@@ -1,0 +1,18 @@
+metadata:
+  name: efivar_tool_available
+  format: "Lava-Test Test Definition 1.0"
+  description: "Check that the optional efivar tool is executable and responds successfully to --help"
+  maintainer:
+    - "Qualcomm Linux Testkit"
+
+params:
+  REQUIRE_EFIVAR: "false"
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd "$REPO_PATH/Runner/suites/System/efivar_tool"
+    - REQUIRE_EFIVAR="${REQUIRE_EFIVAR:-false}" ./run.sh || true
+    - grep -Eq '^efivar_tool_available (PASS|FAIL|SKIP)$' efivar_tool_available.res
+    - cat efivar_tool_available.res
+    - '"$REPO_PATH/Runner/utils/send-to-lava.sh" efivar_tool_available.res --expected-testcase-id efivar_tool_available'
