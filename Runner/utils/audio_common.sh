@@ -12239,3 +12239,102 @@ audio_validate_recording_result() {
 
   return 0
 }
+
+
+# audio_alsa_card_identity <stable-card-id>
+# Print one index|resolved-device|sysfs-inode record, reject missing/ambiguous IDs.
+audio_alsa_card_identity() (
+    count=0
+    record=""
+    for card in /sys/class/sound/card*; do
+        [ -r "$card/id" ] || continue
+        [ "$(cat "$card/id")" = "$1" ] || continue
+        index=${card##*/card}
+        case "$index" in
+            ''|*[!0-9]*)
+                continue
+                ;;
+        esac
+        device=$(readlink -f "$card/device") || exit 1
+        [ -d "$device" ] || exit 1
+        inode=$(stat -L -c %i "$card") || exit 1
+        count=$((count + 1))
+        record="$index|$device|$inode"
+    done
+    [ "$count" -eq 1 ] || exit 1
+    printf '%s\n' "$record"
+)
+
+# audio_alsa_card_uses_remoteproc <card-device> <remoteproc-owner>
+# Require a runtime ASoC component supplier below the selected DSP owner.
+# Direct descendants also qualify, absence is not proof of a platform defect.
+audio_alsa_card_uses_remoteproc() (
+    card=$(readlink -f "$1") || exit 1
+    owner=$(readlink -f "$2") || exit 1
+    [ -d "$card" ] && [ -d "$owner" ] || exit 1
+    case "$card" in
+        "$owner"/*)
+            exit 0
+            ;;
+    esac
+    for link in "$card"/supplier:*; do
+        [ -L "$link/supplier" ] || continue
+        supplier=$(readlink -f "$link/supplier") || continue
+        case "$supplier" in
+            "$owner"/*)
+                exit 0
+                ;;
+        esac
+    done
+    exit 1
+)
+
+# audio_alsa_pcm_owned_running <card-index> <pcm-number> <pid>
+# Confirm the selected playback PCM is RUNNING and owned by the spawned client.
+audio_alsa_pcm_owned_running() (
+    for status in /proc/asound/card"$1"/pcm"$2"p/sub*/status; do
+        [ -r "$status" ] || continue
+        if awk -F : -v expected="$3" '
+            $1 ~ /^state[[:space:]]*$/ {gsub(/[[:space:]]/, "", $2); running=($2=="RUNNING")}
+            $1 ~ /^owner_pid[[:space:]]*$/ {gsub(/[[:space:]]/, "", $2); owned=($2==expected)}
+            END {exit !(running && owned)}
+        ' "$status"; then
+            exit 0
+        fi
+    done
+    exit 1
+)
+
+# audio_alsa_restore_saved_state
+# Cleanup callback for a DSP recovery test, restore only the saved selected card.
+# Requires the shared test_run lifecycle and its already-stopped owned processes.
+audio_alsa_restore_saved_state() {
+    local identity index device inode
+    [ "${AUDIO_RECOVERY_RESTORE:-0}" = 1 ] || return 0
+    identity=$(audio_alsa_card_identity "$AUDIO_RECOVERY_CARD") || return 1
+    IFS='|' read -r index device inode <<EOF
+$identity
+EOF
+    [ "$device" = "$AUDIO_RECOVERY_DEVICE" ] || return 1
+    if test_run_command restore-mixer alsactl --no-init-fallback \
+        -f "$TEST_RUN_DIR/mixer.state" restore "$AUDIO_RECOVERY_CARD"; then
+        AUDIO_RECOVERY_RESTORE=0
+        return 0
+    fi
+    return 1
+}
+
+
+# audio_alsa_validate_raw_playback <label> <card-id> <pcm> <seconds> <rate> <channels>
+# Bound an ALSA hardware playback and reject early success or recovered xruns.
+# Uses the caller's selected route without changing mixer/service configuration.
+audio_alsa_validate_raw_playback() {
+    local label="$1" started elapsed
+    started=$(get_monotonic_seconds)
+    test_run_command "$label" aplay -D "hw:CARD=$2,DEV=$3" \
+        -t raw -f S16_LE -r "$5" -c "$6" -d "$4" /dev/zero || return 1
+    elapsed=$(($(get_monotonic_seconds) - started))
+    log_info "Playback=$label requested_seconds=$4 observed_seconds=$elapsed"
+    [ "$elapsed" -ge "$(($4 - 1))" ] || return 1
+    ! grep -Eiq 'underrun|xrun|error|failed' "$TEST_RUN_DIR/$label.log"
+}
