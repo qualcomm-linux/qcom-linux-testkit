@@ -183,36 +183,65 @@ def previous_request(gh, run_id, attempt, kind="request", filename="manifest.jso
     return request
 
 
-def update_check(gh, context, status, summary, conclusion=None):
-    """Maintain one check per attempt, without overwriting newer validation."""
+def update_validation_status(gh, context, status, summary, conclusion=None):
+    """Report LAVA separately from Actions check suites and preserve newer runs."""
     if not context["submit_requested"]:
         return
-    prefix = f"testkit-lava:{context['run_id']}:"
-    matches = [check for check in gh.pages(
-        f"/repos/{REPOSITORY}/commits/{context['sha']}/check-runs", "check_runs", per_page=100, filter="all")
-        if check.get("name") == "LAVA PR validation" and
-        check.get("app", {}).get("slug") == "github-actions" and
-        str(check.get("external_id", "")).startswith(prefix)]
-    for check in matches:
-        previous = check["external_id"].removeprefix(prefix)
-        if not previous.isdigit():
-            raise ValueError("Invalid lifecycle check attempt")
-        if int(previous) > int(context["run_attempt"]):
-            return
-    matches = [check for check in matches if check["external_id"] == prefix + str(context["run_attempt"])]
-    if len(matches) > 1:
-        raise ValueError("Multiple lifecycle checks belong to this validation attempt")
-    payload = dict(name="LAVA PR validation", status=status,
-                   external_id=prefix + str(context["run_attempt"]),
-                   details_url=f"https://github.com/{REPOSITORY}/actions/runs/{context['run_id']}",
-                   output=dict(title="LAVA PR validation", summary=summary[:60000]))
-    if conclusion:
-        payload["conclusion"] = conclusion
-    if matches:
-        gh.request("PATCH", f"/repos/{REPOSITORY}/check-runs/{matches[0]['id']}", json=payload)
+    endpoint = f"/repos/{REPOSITORY}"
+    run_id, attempt = int(context["run_id"]), int(context["run_attempt"])
+    if status in {"queued", "in_progress"} and conclusion is None:
+        state = "pending"
+        description = " ".join(summary.split())[:140]
+    elif status == "completed" and conclusion in {"success", "failure", "cancelled", "timed_out"}:
+        state = {"success": "success", "failure": "failure"}.get(conclusion, "error")
+        description = {
+            "success": "LAVA validation passed. See the workflow for test results.",
+            "failure": "LAVA validation failed. See the workflow for test results and diagnostics.",
+            "cancelled": "LAVA validation was cancelled. Validation is incomplete.",
+            "timed_out": "LAVA validation timed out. Validation is incomplete.",
+        }[conclusion]
     else:
-        gh.request("POST", f"/repos/{REPOSITORY}/check-runs",
-                   json=payload | {"head_sha": context["sha"]})
+        raise ValueError("Invalid LAVA validation status or conclusion")
+    if status == "completed":
+        # Finish an existing legacy check during recovery, without creating
+        # another check or modifying the permissions job that shares its suite.
+        # This attempt's historical check can finish even if a newer run owns
+        # the standalone status below.
+        external_id = f"testkit-lava:{run_id}:{attempt}"
+        for check in gh.pages(f"{endpoint}/commits/{context['sha']}/check-runs", "check_runs",
+                              per_page=100, filter="all"):
+            if (check.get("name") == "LAVA PR validation" and
+                    check.get("app", {}).get("slug") == "github-actions" and
+                    check.get("external_id") == external_id):
+                gh.request("PATCH", f"{endpoint}/check-runs/{check['id']}", json=dict(
+                    status="completed", conclusion=conclusion,
+                    output=dict(title="LAVA PR validation", summary=summary[:60000])))
+    run = gh.get(f"{endpoint}/actions/runs/{run_id}")
+    if int(run["run_attempt"]) > attempt:
+        return
+    run_url = f"https://github.com/{REPOSITORY}/actions/runs/"
+    latest = None
+    for previous in gh.pages(f"{endpoint}/commits/{context['sha']}/statuses", per_page=100):
+        if (previous.get("context") != "LAVA PR validation" or
+                previous.get("creator", {}).get("login") != "github-actions[bot]"):
+            continue
+        owner = re.fullmatch(re.escape(run_url) + r"([1-9][0-9]*)/attempts/([1-9][0-9]*)",
+                             previous.get("target_url") or "")
+        if not owner:
+            continue
+        previous_run = (int(owner[1]), int(owner[2]))
+        if previous_run > (run_id, attempt):
+            return
+        if previous_run == (run_id, attempt) and latest is None:
+            latest = previous
+    if latest and latest["state"] != "pending" and state == "pending":
+        return
+    # A GITHUB_TOKEN-created check on a PR head can be attached to an unrelated
+    # Actions check suite. Commit statuses have an independent PR context.
+    payload = dict(context="LAVA PR validation", state=state, description=description,
+                   target_url=f"{run_url}{run_id}/attempts/{attempt}")
+    if not latest or any(latest.get(key) != value for key, value in payload.items()):
+        gh.request("POST", f"{endpoint}/statuses/{context['sha']}", json=payload)
 
 
 def begin_request(folder):
@@ -251,7 +280,7 @@ def begin_request(folder):
     with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
         output.write(f"sha={sha}\ncontext_attempt={attempt}\n")
         output.write(f"include_meta_qcom={str(include_meta_qcom).lower()}\n")
-    update_check(gh, context, "queued", "Waiting for a runner to prepare and submit the selected LAVA tests.")
+    update_validation_status(gh, context, "queued", "Waiting for a runner to prepare and submit the selected LAVA tests.")
 
 
 def resolve_request():
@@ -1258,14 +1287,14 @@ def finish_jobs(folder, manifest, lifecycle=True):
         return int(outcome not in {"", "success"})
     if publication_error is not None:
         if lifecycle:
-            update_check(gh, manifest, "completed", "PR access failed. Results remain in the workflow artifacts.",
+            update_validation_status(gh, manifest, "completed", "PR access failed. Results remain in the workflow artifacts.",
                          "failure")
         raise publication_error
     try:
         comments = list(gh.pages(f"/repos/{REPOSITORY}/issues/{manifest['pr']}/comments", per_page=100))
     except (requests.RequestException, RuntimeError, ValueError):
         if lifecycle:
-            update_check(gh, manifest, "completed", "PR comments could not be read. Results remain in the workflow artifacts.",
+            update_validation_status(gh, manifest, "completed", "PR comments could not be read. Results remain in the workflow artifacts.",
                          "failure")
         raise
     previous = next((comment for comment in comments if marker in comment.get("body", "")
@@ -1282,13 +1311,13 @@ def finish_jobs(folder, manifest, lifecycle=True):
             gh.request("POST", f"/repos/{REPOSITORY}/issues/{manifest['pr']}/comments", json={"body": pr_body})
     except (requests.RequestException, RuntimeError):
         if lifecycle:
-            update_check(gh, manifest, "completed", "PR comment publication failed. Results remain in the workflow artifacts.",
+            update_validation_status(gh, manifest, "completed", "PR comment publication failed. Results remain in the workflow artifacts.",
                          "failure")
         raise
     conclusion = "cancelled" if outcome == "cancelled" else "timed_out" if outcome == "timed_out" else (
         "failure" if failed or not cleanup_complete else "success")
     if lifecycle:
-        update_check(gh, manifest, "completed", body, conclusion)
+        update_validation_status(gh, manifest, "completed", body, conclusion)
     print("LAVA results published. Validation verdict: " + ("Needs attention" if failed else "PASS"),
           flush=True)
     return int(failed)
@@ -1372,13 +1401,13 @@ def execute(args):
         checks = validate_jobs(lava(), args.output, manifest)
         return int(any(item["error"] and not item["skip"] for item in checks))
     if args.command == "start":
-        update_check(github(), manifest, "in_progress", "The validation runner is preparing the LAVA request.")
+        update_validation_status(github(), manifest, "in_progress", "The validation runner is preparing the LAVA request.")
         return 0
     if args.command == "collect":
         return collect_jobs(args.output, manifest)
     if args.command == "finish":
         # Preserve the earlier combined CLI until consumers move to the split
-        # collect/publish steps and grant the hosted publisher checks:write.
+        # collect/publish steps and grant the hosted publisher statuses:write.
         collect_jobs(args.output, manifest)
         return finish_jobs(args.output, manifest, lifecycle=False)
     return finish_jobs(args.output, manifest)

@@ -118,6 +118,8 @@ jobs:
       contents: read
       actions: read
       pull-requests: write
+      statuses: write
+      # Recovery can still finalize a check created before commit-status reporting.
       checks: write
     steps:
       - name: Checkout trusted controller
@@ -175,7 +177,7 @@ jobs:
         with:
           artifact-ids: ${{ needs.recover.outputs.evidence_id }}
           path: lava-output
-      - name: Publish workflow matrix, PR comment and commit check
+      - name: Publish workflow matrix, PR comment and commit status
         if: always()
         env:
           GH_TOKEN: ${{ github.token }}
