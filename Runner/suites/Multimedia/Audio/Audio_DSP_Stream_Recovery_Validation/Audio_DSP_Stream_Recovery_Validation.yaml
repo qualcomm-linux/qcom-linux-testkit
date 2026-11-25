@@ -1,0 +1,23 @@
+metadata:
+  name: Audio_DSP_Stream_Recovery_Validation
+  format: Lava-Test Test Definition 1.0
+  description: Validate ALSA stream interruption and playback after a selected DSP synthetic crash.
+  os:
+    - linux
+  scope:
+    - functional
+params:
+  EXERCISE: "0"
+  CARD_ID: null
+  PCM: null
+  PROCESSOR: null
+  TIMEOUT: "60"
+  PLAY_SECONDS: "2"
+  RATE: "48000"
+  CHANNELS: "2"
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Multimedia/Audio/Audio_DSP_Stream_Recovery_Validation
+    - ./run.sh ${EXERCISE:+--exercise "${EXERCISE}"} ${CARD_ID:+--card-id "${CARD_ID}"} ${PCM:+--pcm "${PCM}"} ${PROCESSOR:+--processor "${PROCESSOR}"} ${TIMEOUT:+--timeout "${TIMEOUT}"} ${PLAY_SECONDS:+--play-seconds "${PLAY_SECONDS}"} ${RATE:+--rate "${RATE}"} ${CHANNELS:+--channels "${CHANNELS}"} || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh Audio_DSP_Stream_Recovery_Validation.res
