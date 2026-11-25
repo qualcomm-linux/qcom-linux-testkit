@@ -376,6 +376,39 @@ def owning_suite(path, owners):
     return next((owner for owner in owners if path.startswith(owner + "/")), None)
 
 
+def named_suites(test_names, by_suite):
+    """Resolve literal suite/YAML names in the PR snapshot without executing it."""
+    if not isinstance(test_names, str):
+        raise ValueError("test_names must be a comma-separated string")
+    selected = defaultdict(set)
+    if not test_names.strip():
+        return selected
+    names = [name.strip() for name in re.split(r"[,\n]", test_names) if name.strip()]
+    if not names:
+        raise ValueError("test_names must contain at least one suite or YAML name")
+    aliases = defaultdict(set)
+    for suite, paths in by_suite.items():
+        suite_name = PurePosixPath(suite).name
+        defaults = [path for path in paths if PurePosixPath(path).stem == suite_name]
+        # Without a default, accept a sole YAML or report all choices as ambiguous.
+        for path in defaults or paths:
+            for alias in (suite, suite_name):
+                aliases[alias.casefold()].add((suite, path))
+        for path in paths:
+            for alias in (path, PurePosixPath(path).name, PurePosixPath(path).stem):
+                aliases[alias.casefold()].add((suite, path))
+    for name in dict.fromkeys(names):
+        matches = aliases.get(name.casefold(), set())
+        if not matches:
+            raise ValueError(f"Unknown test name: {name}. Use a suite name or YAML filename from the PR revision.")
+        if len(matches) != 1:
+            candidates = ", ".join(sorted(path for suite, path in matches))
+            raise ValueError(f"Ambiguous test name: {name}. Select a YAML path: {candidates}")
+        suite, path = next(iter(matches))
+        selected[suite].add(path)
+    return selected
+
+
 def affected_suites(changes, owners, config):
     """Select direct suite changes and explicitly configured file associations."""
     reasons = defaultdict(set)
@@ -730,18 +763,25 @@ def prepare(folder):
             raise ValueError("The PR source repository changed, use a new manual validation run")
         base, changes = previous["merge_base"], previous["changes"]
     owners, documents, by_suite = catalogue(source)
-    affected = affected_suites(changes, owners, config)
+    test_names = previous.get("test_names", "") if previous else os.environ.get("TEST_NAMES", "")
+    named = named_suites(test_names, by_suite)
+    affected = named if named else affected_suites(changes, owners, config)
     requested_selections = json.loads(os.environ.get("TEST_SELECTIONS", "{}"))
     if not isinstance(requested_selections, dict):
         raise ValueError("TEST_SELECTIONS must map suite directories to selections")
     selections = config["selections"] | requested_selections
+    overlap = set(named) & set(selections)
+    if overlap:
+        raise ValueError("Suites appear in both test_names and selections: " + ", ".join(sorted(overlap)) +
+                         ". Use selections alone for those suites to specify parameters, tags or fresh_boot.")
     for suite in selections:
         if suite not in owners:
             raise ValueError(f"Unknown suite in selections: {suite}")
         affected[suite].add("explicit maintainer selection")
     if not include_meta_qcom and not affected:
         raise ValueError("No PR suites selected. PR-only runs use direct suite changes or explicit selections, "
-                         "not automatic shared-library consumers. Provide selections or enable include_meta_qcom.")
+                         "not automatic shared-library consumers. Provide test_names or selections, "
+                         "or enable include_meta_qcom.")
     access = {}
     if previous and not all(previous.get(key) for key in ("audio_url", "audio_sha256")):
         raise ValueError("The earlier request did not pin its audio asset, use a new manual validation run")
@@ -780,6 +820,7 @@ def prepare(folder):
                     run_attempt=attempt, changes=changes, lava_url=LAVA,
                     include_meta_qcom=include_meta_qcom,
                     selection_policy="direct-suites",
+                    test_names=test_names,
                     target_matrix=target_matrix,
                     plans_revision=plans_revision, jobs=[], selections=[], exclusions=[],
                     baseline_helpers=[],
