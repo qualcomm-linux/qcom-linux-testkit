@@ -85,23 +85,48 @@ if [ ! -r /proc/softirqs ]; then
     test_result_finish "FAIL"
 fi
 
-if grep -Eq 'TIMER|SCHED|RCU|HRTIMER' /proc/softirqs; then
-    test_result_record "PASS" "/proc/softirqs lists TIMER/SCHED/RCU/HRTIMER rows"
-else
-    test_result_record "FAIL" "/proc/softirqs is missing expected rows"
-fi
-
-t1="$(awk '$1 == "TIMER:" {s=0; for (i=2;i<=NF;i++) s+=$i; print s}' /proc/softirqs)"
+softirq_copy="$KERNEL_EVIDENCE_DIR/softirqs.first"
+cp /proc/softirqs "$softirq_copy" || {
+    test_result_record "FAIL" "could not snapshot /proc/softirqs"
+    test_result_finish "FAIL"
+}
 sleep 1
-t2="$(awk '$1 == "TIMER:" {s=0; for (i=2;i<=NF;i++) s+=$i; print s}' /proc/softirqs)"
-if is_unsigned_number "$t1" && is_unsigned_number "$t2"; then
-    if [ "$t2" -ge "$t1" ]; then
-        test_result_record "PASS" "TIMER softirq count is monotonic ($t1 -> $t2)"
-    else
-        test_result_record "FAIL" "TIMER softirq count went backwards ($t1 -> $t2)"
+softirq_copy2="$KERNEL_EVIDENCE_DIR/softirqs.second"
+cp /proc/softirqs "$softirq_copy2" || {
+    test_result_record "FAIL" "could not snapshot /proc/softirqs again"
+    test_result_finish "FAIL"
+}
+
+softirq_sum() {
+    awk -v row="$1" '
+        $1 == row {
+            found = 1
+            if (NF < 2) bad = 1
+            for (i = 2; i <= NF; i++) {
+                if ($i !~ /^[0-9]+$/) bad = 1
+                else total += $i
+            }
+        }
+        END {
+            if (!found || bad) exit 1
+            print total + 0
+        }
+    ' "$2"
+}
+
+for soft_row in "TIMER:" "SCHED:" "RCU:"; do
+    soft_before="$(softirq_sum "$soft_row" "$softirq_copy")" || soft_before=""
+    soft_after="$(softirq_sum "$soft_row" "$softirq_copy2")" || soft_after=""
+    if [ -z "$soft_before" ] || [ -z "$soft_after" ]; then
+        test_result_record "FAIL" "$soft_row row is missing or contains a non-numeric counter"
+        continue
     fi
-else
-    test_result_record "FAIL" "TIMER softirq row is missing or not numeric ($t1 -> $t2)"
-fi
+    soft_delta="$(interrupt_counter_delta "$soft_before" "$soft_after")"
+    if [ "$soft_delta" = "-1" ]; then
+        test_result_record "FAIL" "$soft_row went backwards ($soft_before -> $soft_after)"
+    else
+        test_result_record "PASS" "$soft_row is monotonic ($soft_before -> $soft_after, delta=$soft_delta)"
+    fi
+done
 
 test_result_finish

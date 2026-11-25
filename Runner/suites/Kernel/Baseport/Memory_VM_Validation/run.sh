@@ -98,7 +98,17 @@ else
 fi
 
 if [ -r /proc/buddyinfo ]; then
-    test_result_record "PASS" "/proc/buddyinfo is readable"
+    if awk '
+        $1 == "Node" && $3 == "zone" && NF >= 5 {
+            rows++
+            for (i = 5; i <= NF; i++) if ($i !~ /^[0-9]+$/) bad = 1
+        }
+        END { exit !(rows > 0 && !bad) }
+    ' /proc/buddyinfo; then
+        test_result_record "PASS" "/proc/buddyinfo has node/zone rows with nonnegative order counters"
+    else
+        test_result_record "FAIL" "/proc/buddyinfo has no parseable node/zone order counters"
+    fi
 else
     test_result_record "FAIL" "/proc/buddyinfo is not readable"
 fi

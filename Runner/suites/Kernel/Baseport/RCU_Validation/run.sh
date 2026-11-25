@@ -80,17 +80,32 @@ if [ "$k_ev_rc" -eq 1 ]; then
     test_result_finish FAIL "Cannot create kernel evidence under $SCRIPT_DIR"
 fi
 
-if [ -d /sys/kernel/rcu_expedited ] || [ -e /sys/kernel/rcu_expedited ]; then
-    kernel_record_attribute "rcu_expedited" "/sys/kernel/rcu_expedited"
-elif [ -e /proc/sys/kernel/sched_rt_runtime_us ]; then
-    test_result_record "SKIP" "/sys/kernel/rcu_expedited not present"
-fi
-
-if [ -e /sys/kernel/rcu_normal ]; then
-    kernel_record_attribute "rcu_normal" "/sys/kernel/rcu_normal"
-else
-    test_result_record "SKIP" "/sys/kernel/rcu_normal not present"
-fi
+rcu_tiny="$(kernel_config_state CONFIG_TINY_RCU)" || rcu_tiny=""
+for rcu_name in rcu_expedited rcu_normal; do
+    rcu_path=""
+    if [ -e "/sys/module/rcupdate/parameters/$rcu_name" ]; then
+        rcu_path="/sys/module/rcupdate/parameters/$rcu_name"
+    elif [ -e "/sys/kernel/$rcu_name" ]; then
+        rcu_path="/sys/kernel/$rcu_name"
+    fi
+    if [ -z "$rcu_path" ]; then
+        if [ "$rcu_tiny" = "y" ] || [ "$rcu_tiny" = "m" ]; then
+            test_result_record "SKIP" "$rcu_name is not exported with CONFIG_TINY_RCU"
+        else
+            test_result_record "SKIP" "$rcu_name is not exported"
+        fi
+        continue
+    fi
+    rcu_val="$(kernel_attribute_value "$rcu_path")" || rcu_val=""
+    case "$rcu_val" in
+        0|1)
+            test_result_record "PASS" "$rcu_name=$rcu_val ($rcu_path)"
+            ;;
+        *)
+            test_result_record "FAIL" "$rcu_name is not 0 or 1 at $rcu_path ('${rcu_val:-unreadable}')"
+            ;;
+    esac
+done
 
 if [ -e /proc/sys/kernel/panic_on_rcu_stall ]; then
     kernel_record_attribute "panic_on_rcu_stall" "/proc/sys/kernel/panic_on_rcu_stall" 1

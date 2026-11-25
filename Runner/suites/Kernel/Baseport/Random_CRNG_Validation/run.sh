@@ -87,22 +87,25 @@ if [ -r /proc/sys/kernel/random/poolsize ]; then
     kernel_record_attribute "poolsize" "/proc/sys/kernel/random/poolsize" 1
 fi
 if [ -r /proc/sys/kernel/random/uuid ]; then
-    uuid="$(kernel_attribute_value /proc/sys/kernel/random/uuid)"
-    case "$uuid" in
-        *-*-*-*-*)
-            test_result_record "PASS" "kernel uuid looks well-formed: $uuid"
-            ;;
-        *)
-            test_result_record "FAIL" "kernel uuid unexpected: '$uuid'"
-            ;;
-    esac
+    uuid="$(kernel_attribute_value /proc/sys/kernel/random/uuid)" || uuid=""
+    if printf '%s\n' "$uuid" | awk '/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/ { ok = 1 } END { exit !ok }'; then
+        test_result_record "PASS" "kernel uuid matches 8-4-4-4-12 hexadecimal form: $uuid"
+    else
+        test_result_record "FAIL" "kernel uuid is not 8-4-4-4-12 hexadecimal: '$uuid'"
+    fi
 fi
 
 if [ -r /dev/urandom ]; then
-    if dd if=/dev/urandom of=/dev/null bs=64 count=1 2>/dev/null; then
-        test_result_record "PASS" "/dev/urandom produced 64 bytes"
+    urandom_sample="$KERNEL_EVIDENCE_DIR/urandom.bin"
+    if dd if=/dev/urandom of="$urandom_sample" bs=64 count=1 2>/dev/null; then
+        urandom_bytes="$(wc -c < "$urandom_sample" | tr -d '[:space:]')"
     else
-        test_result_record "FAIL" "/dev/urandom read failed"
+        urandom_bytes=""
+    fi
+    if [ "$urandom_bytes" = "64" ]; then
+        test_result_record "PASS" "/dev/urandom returned 64 bytes"
+    else
+        test_result_record "FAIL" "/dev/urandom returned '${urandom_bytes:-none}' bytes, expected 64"
     fi
 else
     test_result_record "FAIL" "/dev/urandom is not readable"

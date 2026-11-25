@@ -93,7 +93,7 @@ if [ -e /proc/sys/kernel/hung_task_check_count ]; then
     kernel_record_attribute "hung_task_check_count" "/proc/sys/kernel/hung_task_check_count" 1
 fi
 if [ -e /proc/sys/kernel/hung_task_warnings ]; then
-    kernel_record_attribute "hung_task_warnings" "/proc/sys/kernel/hung_task_warnings"
+    kernel_record_attribute "hung_task_warnings" "/proc/sys/kernel/hung_task_warnings" signed
 fi
 
 if kernel_config_is_enabled CONFIG_DETECT_HUNG_TASK; then

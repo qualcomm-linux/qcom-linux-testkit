@@ -85,10 +85,18 @@ if [ ! -r /proc/self/maps ]; then
     test_result_finish "FAIL"
 fi
 
-if grep -Eq '\[vdso\]|\[vvar\]' /proc/self/maps; then
-    test_result_record "PASS" "vDSO/vvar mapping is present in /proc/self/maps"
+vdso_perm="$(awk '/\[vdso\]/ { print $2; exit }' /proc/self/maps)"
+if [ -z "$vdso_perm" ]; then
+    test_result_record "FAIL" "/proc/self/maps has no [vdso] mapping"
+elif printf '%s\n' "$vdso_perm" | awk 'index($0, "x") { ok = 1 } END { exit !ok }'; then
+    test_result_record "PASS" "[vdso] mapping is executable ($vdso_perm)"
 else
-    test_result_record "FAIL" "no [vdso]/[vvar] mapping in /proc/self/maps"
+    test_result_record "FAIL" "[vdso] mapping is not executable ($vdso_perm)"
+fi
+if grep -q '\[vvar\]' /proc/self/maps; then
+    test_result_record "PASS" "[vvar] mapping is present"
+else
+    test_result_record "SKIP" "[vvar] mapping is not present"
 fi
 
 if [ -r /proc/self/auxv ]; then

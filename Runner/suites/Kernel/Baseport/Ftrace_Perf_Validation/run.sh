@@ -88,7 +88,15 @@ elif [ -e /sys/kernel/debug/tracing/tracing_on ]; then
 fi
 
 if [ -n "$trdir" ]; then
-    kernel_record_attribute "tracing_on" "$trdir/tracing_on" 1
+    tracing_on="$(kernel_attribute_value "$trdir/tracing_on")" || tracing_on=""
+    case "$tracing_on" in
+        0|1)
+            test_result_record "PASS" "tracing_on=$tracing_on"
+            ;;
+        *)
+            test_result_record "FAIL" "tracing_on is not 0 or 1 ('${tracing_on:-unreadable}')"
+            ;;
+    esac
     if [ -r "$trdir/available_tracers" ]; then
         kernel_record_attribute "available_tracers" "$trdir/available_tracers"
     fi

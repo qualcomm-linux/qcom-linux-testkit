@@ -82,7 +82,12 @@ fi
 
 kernel_record_attribute "pid_max" "/proc/sys/kernel/pid_max" 1
 kernel_record_attribute "threads-max" "/proc/sys/kernel/threads-max" 1
-kernel_record_attribute "printk" "/proc/sys/kernel/printk"
+printk_val="$(kernel_attribute_value /proc/sys/kernel/printk)" || printk_val=""
+if printf '%s\n' "$printk_val" | awk 'NF == 4 { for (i = 1; i <= 4; i++) if ($i !~ /^-?[0-9]+$/) bad = 1; ok = !bad } END { exit !ok }'; then
+    test_result_record "PASS" "printk has four integer fields ($printk_val)"
+else
+    test_result_record "FAIL" "printk is not four integers ('${printk_val:-unreadable}')"
+fi
 
 if [ -e /proc/sys/kernel/panic ]; then
     kernel_record_attribute "panic" "/proc/sys/kernel/panic" signed

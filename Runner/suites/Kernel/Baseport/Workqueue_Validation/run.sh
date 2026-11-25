@@ -95,8 +95,12 @@ for wq in "$wq_root"/*; do
     wname="$(basename "$wq")"
     if [ -e "$wq/cpumask" ]; then
         attr_seen=$((attr_seen + 1))
-        if kernel_record_attribute "wq $wname cpumask" "$wq/cpumask"; then
+        mask="$(kernel_attribute_value "$wq/cpumask")" || mask=""
+        if kernel_cpumask_valid "$mask"; then
+            test_result_record "PASS" "wq $wname cpumask=$mask"
             attr_ok=$((attr_ok + 1))
+        else
+            test_result_record "FAIL" "wq $wname cpumask is not a hexadecimal mask ('${mask:-unreadable}')"
         fi
     fi
     if [ -e "$wq/max_active" ]; then
