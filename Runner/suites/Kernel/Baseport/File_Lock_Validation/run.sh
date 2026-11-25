@@ -98,6 +98,8 @@ cleanup_file_lock() {
 trap cleanup_file_lock EXIT INT TERM
 
 # Command mode keeps the lock for the whole holder, including the wait.
+# $1 and $2 belong to the child shell, not this script.
+# shellcheck disable=SC2016
 flock -x "$lockfile" sh -c 'touch "$1"; while [ ! -f "$2" ]; do sleep 1; done' sh "$ready" "$release" &
 holder=$!
 
