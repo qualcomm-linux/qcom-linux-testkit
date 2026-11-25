@@ -1,0 +1,17 @@
+metadata:
+  name: systemctl_kmod_static_nodes_state
+  format: "Lava-Test Test Definition 1.0"
+  description: "Check that kmod-static-nodes.service completed, or report an unmet installed-unit condition as SKIP"
+  maintainer:
+    - "Qualcomm Linux Testkit"
+
+params: {}
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd "$REPO_PATH/Runner/suites/System/systemctl_kmod_static_nodes_state"
+    - ./run.sh || true
+    - grep -Eq '^systemctl_kmod_static_nodes_state (PASS|FAIL|SKIP)$' systemctl_kmod_static_nodes_state.res
+    - cat systemctl_kmod_static_nodes_state.res
+    - '"$REPO_PATH/Runner/utils/send-to-lava.sh" systemctl_kmod_static_nodes_state.res --expected-testcase-id systemctl_kmod_static_nodes_state'
