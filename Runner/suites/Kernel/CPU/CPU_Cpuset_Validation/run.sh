@@ -83,35 +83,33 @@ fi
 cpuset_path=""
 if [ -e /sys/fs/cgroup/cpuset.cpus.effective ]; then
     cpuset_path="/sys/fs/cgroup/cpuset.cpus.effective"
-elif [ -e /sys/fs/cgroup/cpuset.cpus ]; then
-    cpuset_path="/sys/fs/cgroup/cpuset.cpus"
-elif [ -e /sys/fs/cgroup/cpuset/cpuset.cpus ]; then
-    cpuset_path="/sys/fs/cgroup/cpuset/cpuset.cpus"
-elif [ -e /proc/self/cpuset ]; then
-    test_result_record "SKIP" "only /proc/self/cpuset is present; cpuset mask was not checked"
+elif [ -e /sys/fs/cgroup/cpuset/cpuset.effective_cpus ]; then
+    cpuset_path="/sys/fs/cgroup/cpuset/cpuset.effective_cpus"
+elif [ -e /sys/fs/cgroup/cpuset.cpus ] || [ -e /sys/fs/cgroup/cpuset/cpuset.cpus ] || [ -e /proc/self/cpuset ]; then
+    test_result_record "SKIP" "only a configured cpuset mask is present; effective membership was not checked"
     test_result_finish
 else
     test_result_record "SKIP" "cpuset ABI is not present"
     test_result_finish "SKIP"
 fi
 
-if kernel_record_attribute "cpuset mask" "$cpuset_path"; then
+if kernel_record_attribute "cpuset effective mask" "$cpuset_path"; then
     cpuset_cpus="$(kernel_attribute_value "$cpuset_path")" || cpuset_cpus=""
     online="$(kernel_attribute_value /sys/devices/system/cpu/online)" || online=""
     if ! kernel_cpu_list_valid "$cpuset_cpus"; then
-        test_result_record "FAIL" "cpuset mask is empty or malformed ('$cpuset_cpus')"
+        test_result_record "FAIL" "effective cpuset mask is empty or malformed ('$cpuset_cpus')"
     elif ! kernel_cpu_list_valid "$online"; then
         test_result_record "FAIL" "online CPU mask is empty or malformed ('$online')"
     else
         cpuset_bad=0
-        for cpu in $(expand_cpu_list "$online"); do
-            if ! cpu_in_list "$cpu" "$cpuset_cpus"; then
-                test_result_record "FAIL" "online CPU$cpu is outside cpuset mask ($cpuset_cpus)"
+        for cpu in $(expand_cpu_list "$cpuset_cpus"); do
+            if ! cpu_in_list "$cpu" "$online"; then
+                test_result_record "FAIL" "effective CPU$cpu is outside the online mask ($online)"
                 cpuset_bad=1
             fi
         done
         if [ "$cpuset_bad" -eq 0 ]; then
-            test_result_record "PASS" "online CPUs are members of $cpuset_path ($cpuset_cpus)"
+            test_result_record "PASS" "effective cpuset $cpuset_cpus is inside online CPUs $online"
         fi
     fi
 fi

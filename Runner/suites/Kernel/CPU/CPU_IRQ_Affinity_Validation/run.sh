@@ -88,13 +88,29 @@ fi
 checked=0
 for irq_dir in /proc/irq/[0-9]*; do
     [ -d "$irq_dir" ] || continue
-    if [ -r "$irq_dir/smp_affinity" ]; then
+    irq_name="$(basename "$irq_dir")"
+    if [ -e "$irq_dir/smp_affinity" ]; then
         checked=$((checked + 1))
-        kernel_record_attribute "IRQ $(basename "$irq_dir") smp_affinity" "$irq_dir/smp_affinity"
+        irq_mask="$(kernel_attribute_value "$irq_dir/smp_affinity")" || irq_mask=""
+        if kernel_cpumask_valid "$irq_mask"; then
+            test_result_record "PASS" "IRQ $irq_name smp_affinity=$irq_mask"
+        else
+            test_result_record "FAIL" "IRQ $irq_name smp_affinity is not a hexadecimal mask ('${irq_mask:-unreadable}')"
+        fi
     fi
-    if [ -r "$irq_dir/smp_affinity_list" ]; then
-        kernel_record_attribute "IRQ $(basename "$irq_dir") smp_affinity_list" "$irq_dir/smp_affinity_list"
+    if [ -e "$irq_dir/smp_affinity_list" ]; then
+        irq_list="$(kernel_attribute_value "$irq_dir/smp_affinity_list")" || irq_list=""
+        if kernel_cpu_list_valid "$irq_list"; then
+            test_result_record "PASS" "IRQ $irq_name smp_affinity_list=$irq_list"
+        else
+            test_result_record "FAIL" "IRQ $irq_name smp_affinity_list is empty or malformed ('${irq_list:-unreadable}')"
+        fi
     fi
+    for irq_eff in effective_affinity effective_affinity_list; do
+        [ -e "$irq_dir/$irq_eff" ] || continue
+        irq_eff_val="$(kernel_attribute_value "$irq_dir/$irq_eff")" || irq_eff_val=""
+        test_result_record "SKIP" "IRQ $irq_name $irq_eff='$irq_eff_val' is recorded separately from configured affinity"
+    done
     if [ "$checked" -ge 8 ]; then
         break
     fi
@@ -106,7 +122,12 @@ if [ "$checked" -eq 0 ]; then
 fi
 
 if [ -r /proc/irq/default_smp_affinity ]; then
-    kernel_record_attribute "default_smp_affinity" "/proc/irq/default_smp_affinity"
+    irq_default="$(kernel_attribute_value /proc/irq/default_smp_affinity)" || irq_default=""
+    if kernel_cpumask_valid "$irq_default"; then
+        test_result_record "PASS" "default_smp_affinity=$irq_default"
+    else
+        test_result_record "FAIL" "default_smp_affinity is not a hexadecimal mask ('${irq_default:-unreadable}')"
+    fi
 fi
 
 test_result_finish

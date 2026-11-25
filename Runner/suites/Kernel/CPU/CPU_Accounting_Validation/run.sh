@@ -85,32 +85,49 @@ if [ ! -r /proc/stat ]; then
     test_result_finish "FAIL"
 fi
 
-s1="$(awk '/^cpu / {print $2+$3+$4+$5+$6+$7+$8}' /proc/stat)"
-sleep 1
-s2="$(awk '/^cpu / {print $2+$3+$4+$5+$6+$7+$8}' /proc/stat)"
-if is_unsigned_number "$s1" && is_unsigned_number "$s2"; then
-    if [ "$s2" -gt "$s1" ]; then
-        test_result_record "PASS" "/proc/stat cpu aggregate increased ($s1 -> $s2)"
-    else
-        test_result_record "FAIL" "/proc/stat cpu aggregate did not increase ($s1 -> $s2)"
-    fi
-else
-    test_result_record "FAIL" "could not parse /proc/stat cpu counters"
+if ! awk '
+    /^cpu[0-9]* / {
+        rows++
+        if (NF < 8) bad = 1
+        for (i = 2; i <= NF; i++) if ($i !~ /^[0-9]+$/) bad = 1
+    }
+    END { if (rows < 1 || bad) exit 1 }
+' /proc/stat; then
+    test_result_record "FAIL" "/proc/stat cpu rows contain a missing or non-numeric counter"
+    test_result_finish "FAIL"
 fi
 
-online_count="$(get_online_cpus | kernel_count_lines)"
-stat_cpu_lines="$(grep -cE '^cpu[0-9]+' /proc/stat || true)"
-log_info "online_cpus=$online_count proc_stat_cpu_lines=$stat_cpu_lines"
-if is_unsigned_number "$stat_cpu_lines" && [ "$stat_cpu_lines" -ge 1 ]; then
-    test_result_record "PASS" "/proc/stat has $stat_cpu_lines per-CPU rows"
+s1="$(awk '/^cpu / { sum = 0; for (i = 2; i <= NF; i++) sum += $i; print sum }' /proc/stat)"
+sleep 1
+s2="$(awk '/^cpu / { sum = 0; for (i = 2; i <= NF; i++) sum += $i; print sum }' /proc/stat)"
+if is_unsigned_number "$s1" && is_unsigned_number "$s2" && [ "$s2" -ge "$s1" ]; then
+    test_result_record "PASS" "/proc/stat cpu aggregate is monotonic ($s1 -> $s2)"
+else
+    test_result_record "FAIL" "/proc/stat cpu aggregate is not monotonic ($s1 -> $s2)"
+fi
+
+online_ids="$(get_online_cpus | sort -n | awk 'NF { printf "%s%s", sep, $0; sep="," }')"
+stat_ids="$(awk '/^cpu[0-9]+ / { sub(/^cpu/, "", $1); print $1 }' /proc/stat | sort -n | awk 'NF { printf "%s%s", sep, $0; sep="," }')"
+if [ "$stat_ids" != "$online_ids" ]; then
+    sleep 1
+    online_ids="$(get_online_cpus | sort -n | awk 'NF { printf "%s%s", sep, $0; sep="," }')"
+    stat_ids="$(awk '/^cpu[0-9]+ / { sub(/^cpu/, "", $1); print $1 }' /proc/stat | sort -n | awk 'NF { printf "%s%s", sep, $0; sep="," }')"
+fi
+if [ -n "$stat_ids" ] && [ "$stat_ids" = "$online_ids" ]; then
+    test_result_record "PASS" "/proc/stat per-CPU rows match online CPUs $online_ids"
+elif [ -n "$stat_ids" ]; then
+    test_result_record "FAIL" "/proc/stat CPUs ($stat_ids) do not match online CPUs ($online_ids)"
 else
     test_result_record "FAIL" "/proc/stat has no per-CPU rows"
 fi
 
 if [ -r /proc/loadavg ]; then
-    la="$(kernel_attribute_value /proc/loadavg)"
-    log_info "loadavg=$la"
-    test_result_record "PASS" "/proc/loadavg is readable"
+    la="$(kernel_attribute_value /proc/loadavg)" || la=""
+    if printf '%s\n' "$la" | awk 'NF >= 5 && $1 ~ /^[0-9]+([.][0-9]+)?$/ && $2 ~ /^[0-9]+([.][0-9]+)?$/ && $3 ~ /^[0-9]+([.][0-9]+)?$/ && $4 ~ /^[0-9]+\/[0-9]+$/ && $5 ~ /^[0-9]+$/ { ok = 1 } END { exit !ok }'; then
+        test_result_record "PASS" "/proc/loadavg has numeric load, entity, and pid fields ($la)"
+    else
+        test_result_record "FAIL" "/proc/loadavg is not in load/entity/pid form ('${la:-unreadable}')"
+    fi
 else
     test_result_record "FAIL" "/proc/loadavg is not readable"
 fi

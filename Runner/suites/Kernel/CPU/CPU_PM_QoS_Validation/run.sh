@@ -80,12 +80,13 @@ if [ "$k_ev_rc" -eq 1 ]; then
     test_result_finish FAIL "Cannot create kernel evidence under $SCRIPT_DIR"
 fi
 
-qos_found=0
+qos_seen=0
 if [ -c /dev/cpu_dma_latency ]; then
     test_result_record "PASS" "/dev/cpu_dma_latency is a character device"
-    qos_found=$((qos_found + 1))
+    qos_seen=1
 elif [ -e /dev/cpu_dma_latency ]; then
     test_result_record "FAIL" "/dev/cpu_dma_latency is not a character device"
+    qos_seen=1
 else
     test_result_record "SKIP" "/dev/cpu_dma_latency is not present"
 fi
@@ -93,17 +94,30 @@ fi
 for cpu_name in $(kernel_list_all_cpus); do
     for qos_attr in pm_qos_resume_latency_us pm_qos_latency_tolerance_us; do
         qos_node="/sys/devices/system/cpu/$cpu_name/power/$qos_attr"
-        if [ -e "$qos_node" ]; then
-            if kernel_record_attribute "$cpu_name $qos_attr" "$qos_node" 1; then
-                qos_found=$((qos_found + 1))
-            fi
-        fi
+        [ -e "$qos_node" ] || continue
+        qos_seen=1
+        qos_val="$(kernel_attribute_value "$qos_node")" || qos_val=""
+        case "$qos_attr" in
+            pm_qos_resume_latency_us)
+                if [ "$qos_val" = "n/a" ] || is_unsigned_number "$qos_val"; then
+                    test_result_record "PASS" "$cpu_name $qos_attr='$qos_val'"
+                else
+                    test_result_record "FAIL" "$cpu_name $qos_attr is not an unsigned latency or n/a ('${qos_val:-unreadable}')"
+                fi
+                ;;
+            pm_qos_latency_tolerance_us)
+                if [ "$qos_val" = "auto" ] || [ "$qos_val" = "any" ] || is_unsigned_number "$qos_val"; then
+                    test_result_record "PASS" "$cpu_name $qos_attr='$qos_val'"
+                else
+                    test_result_record "FAIL" "$cpu_name $qos_attr is not unsigned, auto, or any ('${qos_val:-unreadable}')"
+                fi
+                ;;
+        esac
     done
 done
 
-if [ "$qos_found" -eq 0 ]; then
+if [ "$qos_seen" -eq 0 ]; then
     test_result_record "SKIP" "no PM QoS interface is exposed"
-    test_result_finish "SKIP"
 fi
 
 test_result_finish

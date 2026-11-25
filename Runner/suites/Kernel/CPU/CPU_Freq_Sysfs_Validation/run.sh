@@ -91,15 +91,44 @@ for policy in "$policy_root"/policy*; do
     [ -d "$policy" ] || continue
     policies=$((policies + 1))
     pname="$(basename "$policy")"
-    kernel_record_attribute "$pname governor" "$policy/scaling_governor"
-    kernel_record_attribute "$pname available_governors" "$policy/scaling_available_governors"
     kernel_record_attribute "$pname cur_freq" "$policy/scaling_cur_freq" 1
     kernel_record_attribute "$pname min_freq" "$policy/cpuinfo_min_freq" 1
     kernel_record_attribute "$pname max_freq" "$policy/cpuinfo_max_freq" 1
-    kernel_record_attribute "$pname related_cpus" "$policy/related_cpus"
-    cur="$(kernel_attribute_value "$policy/scaling_cur_freq" || true)"
-    minf="$(kernel_attribute_value "$policy/cpuinfo_min_freq" || true)"
-    maxf="$(kernel_attribute_value "$policy/cpuinfo_max_freq" || true)"
+    gov="$(kernel_attribute_value "$policy/scaling_governor")" || gov=""
+    avail="$(kernel_attribute_value "$policy/scaling_available_governors")" || avail=""
+    case " $avail " in
+        *" $gov "*)
+            if [ -n "$gov" ]; then
+                test_result_record "PASS" "$pname governor $gov is available"
+            else
+                test_result_record "FAIL" "$pname governor is empty"
+            fi
+            ;;
+        *)
+            test_result_record "FAIL" "$pname governor '${gov:-unreadable}' is not in available governors '${avail:-unreadable}'"
+            ;;
+    esac
+    related="$(kernel_attribute_value "$policy/related_cpus")" || related=""
+    related_list="$(printf '%s\n' "$related" | tr -s ' ' | sed 's/^ //; s/ $//' | tr ' ' ',')"
+    possible="$(read_first_line /sys/devices/system/cpu/possible)" || possible=""
+    if ! kernel_cpu_list_valid "$related_list"; then
+        test_result_record "FAIL" "$pname related_cpus is not a CPU list ('${related:-unreadable}')"
+    else
+        related_bad=""
+        for rel_cpu in $(expand_cpu_list "$related_list"); do
+            if ! cpu_in_list "$rel_cpu" "$possible"; then
+                related_bad="${related_bad}${rel_cpu} "
+            fi
+        done
+        if [ -n "$related_bad" ]; then
+            test_result_record "FAIL" "$pname related_cpus ($related) is outside possible CPUs $possible"
+        else
+            test_result_record "PASS" "$pname related_cpus ($related) is inside possible CPUs"
+        fi
+    fi
+    cur="$(kernel_attribute_value "$policy/scaling_cur_freq")" || cur=""
+    minf="$(kernel_attribute_value "$policy/cpuinfo_min_freq")" || minf=""
+    maxf="$(kernel_attribute_value "$policy/cpuinfo_max_freq")" || maxf=""
     if is_unsigned_number "$cur" && is_unsigned_number "$minf" && is_unsigned_number "$maxf"; then
         if [ "$cur" -ge "$minf" ] && [ "$cur" -le "$maxf" ]; then
             test_result_record "PASS" "$pname cur_freq $cur is within [$minf,$maxf]"
