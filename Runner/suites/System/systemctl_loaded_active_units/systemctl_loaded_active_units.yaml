@@ -1,0 +1,17 @@
+metadata:
+  name: systemd_journald_loaded_active
+  format: "Lava-Test Test Definition 1.0"
+  description: "Check that systemd-journald.service is loaded and active (running) on a systemd image"
+  maintainer:
+    - "Qualcomm Linux Testkit"
+
+params: {}
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd "$REPO_PATH/Runner/suites/System/systemctl_loaded_active_units"
+    - ./run.sh || true
+    - grep -Eq '^systemd_journald_loaded_active (PASS|FAIL|SKIP)$' systemctl_loaded_active_units.res
+    - cat systemctl_loaded_active_units.res
+    - '"$REPO_PATH/Runner/utils/send-to-lava.sh" systemctl_loaded_active_units.res --expected-testcase-id systemd_journald_loaded_active'
