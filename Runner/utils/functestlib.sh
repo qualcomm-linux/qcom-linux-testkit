@@ -4986,6 +4986,59 @@ interconnect_debugfs_dir() {
     return 1
 }
 
+# ---------------------------------------------------------------------------
+# SoC Infra helpers
+# ---------------------------------------------------------------------------
+
+# socinfra_debugfs_root
+# Prints the mounted debugfs root (/sys/kernel/debug or /debug).
+# Returns: 0 when found, 1 when debugfs is not mounted or not readable.
+socinfra_debugfs_root() {
+    for sdr_root in /sys/kernel/debug /debug; do
+        if [ -d "$sdr_root" ] && [ -r "$sdr_root" ] &&
+           grep -q " $sdr_root debugfs " /proc/mounts 2>/dev/null; then
+            printf '%s\n' "$sdr_root"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# socinfra_check_clk_rates <debugfs_root> <clock_name_prefix> <report_file>
+# Reads <debugfs_root>/clk/<prefix>*/clk_rate and checks that every file holds
+# exactly one non-negative integer. The content is validated as read, so a value
+# with embedded whitespace such as "12 34" is rejected and not merged into 1234.
+# One line per clock is written to <report_file>: "<clock> <value>", or
+# "<clock> NOT_INTEGER(<value>)" / "<clock> READ_ERROR" for a bad clock.
+# Sets SOCINFRA_CLK_TOTAL and SOCINFRA_CLK_BAD.
+# Returns: 0 all values are integers, 1 at least one value is not an integer or
+# cannot be read, 2 no clock matched the prefix.
+socinfra_check_clk_rates() {
+    SOCINFRA_CLK_TOTAL=0
+    SOCINFRA_CLK_BAD=0
+    : >"$3"
+    for scr_file in "$1/clk/$2"*/clk_rate; do
+        [ -e "$scr_file" ] || continue
+        scr_name=$(basename "$(dirname "$scr_file")")
+        SOCINFRA_CLK_TOTAL=$((SOCINFRA_CLK_TOTAL + 1))
+        # Command substitution drops only the trailing newline of the value.
+        if ! scr_val=$(cat "$scr_file" 2>/dev/null); then
+            SOCINFRA_CLK_BAD=$((SOCINFRA_CLK_BAD + 1))
+            printf '%s READ_ERROR\n' "$scr_name" >>"$3"
+        elif is_unsigned_number "$scr_val"; then
+            printf '%s %s\n' "$scr_name" "$scr_val" >>"$3"
+        else
+            SOCINFRA_CLK_BAD=$((SOCINFRA_CLK_BAD + 1))
+            # Keep the report to one line per clock, whatever the file held.
+            scr_shown=$(printf '%s' "$scr_val" | tr -c '[:print:]' '?')
+            printf '%s NOT_INTEGER(%s)\n' "$scr_name" "$scr_shown" >>"$3"
+        fi
+    done
+    [ "$SOCINFRA_CLK_TOTAL" -gt 0 ] || return 2
+    [ "$SOCINFRA_CLK_BAD" -eq 0 ]
+}
+
+
 ###############################################################################
 # dt_node_has_property <node-dir> <property>
 # Returns 0 if the exact DT property file exists, otherwise 1.  The function
