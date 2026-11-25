@@ -1,0 +1,16 @@
+metadata:
+  name: CPU_Boot_Online_Validation
+  format: Lava-Test Test Definition 1.0
+  description: Validate first online transitions for CPUs excluded by maxcpus at boot.
+  os:
+    - linux
+  scope:
+    - functional
+params:
+  EXERCISE: "0"
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/CPU_Boot_Online_Validation
+    - ./run.sh ${EXERCISE:+--exercise "${EXERCISE}"} || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh CPU_Boot_Online_Validation.res
