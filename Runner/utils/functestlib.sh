@@ -8746,6 +8746,41 @@ storage_is_ufs() (
     return 1
 )
 
+# storage_ufs_host_node <sysfs-block-path>
+# Print the sysfs directory of the bound UFS host above a block device.
+# Returns: 0 with the path on stdout, 1 when no bound UFS host is found.
+storage_ufs_host_node() (
+    sufh_node=$(readlink -f "$1") || return 1
+    while [ -n "$sufh_node" ] && [ "$sufh_node" != / ]; do
+        sufh_driver=$(readlink -f "$sufh_node/driver" 2>/dev/null) || sufh_driver=""
+        case "${sufh_driver##*/}" in
+            ufshcd*|ufs-qcom)
+                printf '%s\n' "$sufh_node"
+                return 0
+                ;;
+        esac
+        sufh_node=${sufh_node%/*}
+    done
+    return 1
+)
+
+# storage_ufs_spec_version <ufs-host-sysfs-dir>
+# Print the UFS specification version as <major>.<minor>, for example 4.0.
+# Returns: 0 on success, 1 when the attribute is unreadable or not hexadecimal.
+storage_ufs_spec_version() (
+    susv_file="$1/device_descriptor/specification_version"
+    [ -r "$susv_file" ] || return 1
+    susv_raw=$(cat "$susv_file") || return 1
+    susv_hex=${susv_raw#0x}
+    case "$susv_hex" in
+        ''|*[!0-9a-fA-F]*)
+            return 1
+            ;;
+    esac
+    susv_val=$((0x$susv_hex))
+    printf '%s.%s\n' "$(( (susv_val >> 8) & 255 ))" "$(( (susv_val & 255) / 16 ))"
+)
+
 # detect_ufs_partition_block
 # Print one runtime UFS block device. Whole devices are safe for read-only I/O.
 detect_ufs_partition_block() {
