@@ -1,0 +1,17 @@
+metadata:
+  name: systemctl_unloaded_unit
+  format: "Lava-Test Test Definition 1.0"
+  description: "Verify systemd reports a test-owned nonexistent unit name as not found"
+  maintainer:
+    - "Qualcomm Linux Testkit"
+
+params: {}
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd "$REPO_PATH/Runner/suites/System/systemctl_unloaded_unit"
+    - ./run.sh || true
+    - grep -Eq '^systemctl_unloaded_unit (PASS|FAIL|SKIP)$' systemctl_unloaded_unit.res
+    - cat systemctl_unloaded_unit.res
+    - '"$REPO_PATH/Runner/utils/send-to-lava.sh" systemctl_unloaded_unit.res --expected-testcase-id systemctl_unloaded_unit'
