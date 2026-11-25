@@ -12802,6 +12802,45 @@ kernel_cpu_list_valid() {
         done
 }
 
+# kernel_cpuidle_snapshot <output-file>
+# Capture enabled and disabled state counters for the online CPU mask.
+# Columns: CPU, state, disabled, usage, time_us, rejected (- if unavailable).
+# Return 0 for a complete snapshot, 2 for no states, 1 for invalid/read errors.
+# No policy changes or kernel-log reads are performed.
+kernel_cpuidle_snapshot() (
+    kcs_output="$1"
+    kcs_online=$(cat /sys/devices/system/cpu/online 2>/dev/null) || exit 1
+    kernel_cpu_list_valid "$kcs_online" || exit 1
+    : >"$kcs_output" || exit 1
+    for kcs_cpu in $(expand_cpu_list "$kcs_online"); do
+        for kcs_state in /sys/devices/system/cpu/cpu"$kcs_cpu"/cpuidle/state[0-9]*; do
+            [ -d "$kcs_state" ] || continue
+            kcs_disabled=0
+            if [ -e "$kcs_state/disable" ]; then
+                kcs_disabled=$(kernel_attribute_value "$kcs_state/disable") || exit 1
+            fi
+            case "$kcs_disabled" in
+                0|1)
+                    ;;
+                *)
+                    exit 1
+                    ;;
+            esac
+            kcs_usage=$(kernel_attribute_value "$kcs_state/usage") || exit 1
+            kcs_time=$(kernel_attribute_value "$kcs_state/time") || exit 1
+            is_unsigned_number "$kcs_usage" && is_unsigned_number "$kcs_time" || exit 1
+            kcs_rejected=-
+            if [ -e "$kcs_state/rejected" ]; then
+                kcs_rejected=$(kernel_attribute_value "$kcs_state/rejected") || exit 1
+                is_unsigned_number "$kcs_rejected" || exit 1
+            fi
+            printf '%s %s %s %s %s %s\n' "$kcs_cpu" "${kcs_state##*/}" \
+                "$kcs_disabled" "$kcs_usage" "$kcs_time" "$kcs_rejected" >>"$kcs_output" || exit 1
+        done
+    done
+    [ -s "$kcs_output" ] || exit 2
+)
+
 # kernel_list_all_cpus
 # Print cpuN for every CPU directory, including CPUs that are offline.
 # shellcheck disable=SC2317
