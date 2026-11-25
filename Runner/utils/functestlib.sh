@@ -10477,21 +10477,12 @@ detect_platform() {
         PLATFORM_SOC_FAMILY=""
     fi
  
-    # --- Device Tree model / compatible (strip NULs) ---
-    if [ -r /proc/device-tree/model ]; then
-        PLATFORM_DT_MODEL="$(tr -d '\000' </proc/device-tree/model 2>/dev/null | head -n 1)"
-    else
-        PLATFORM_DT_MODEL=""
-    fi
- 
+    # --- Root device-tree identity, never a child peripheral's compatible ---
+    PLATFORM_DT_MODEL=""
     PLATFORM_DT_COMPAT=""
-    if [ -d /proc/device-tree ]; then
-        for f in /proc/device-tree/compatible /proc/device-tree/*/compatible; do
-            if [ -f "$f" ]; then
-                PLATFORM_DT_COMPAT="$(tr -d '\000' <"$f" 2>/dev/null | tr '\n' ' ')"
-                break
-            fi
-        done
+    if dp_dt_root=$(dt_runtime_root); then
+        PLATFORM_DT_MODEL="$(dt_property_text "$dp_dt_root" model 2>/dev/null | head -n 1)"
+        PLATFORM_DT_COMPAT="$(dt_property_text "$dp_dt_root" compatible 2>/dev/null || true)"
     fi
  
     # --- OS (parse, do not source /etc/os-release) ---
