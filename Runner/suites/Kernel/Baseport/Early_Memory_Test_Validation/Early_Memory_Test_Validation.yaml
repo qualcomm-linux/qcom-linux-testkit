@@ -1,0 +1,16 @@
+metadata:
+  name: Early_Memory_Test_Validation
+  format: Lava-Test Test Definition 1.0
+  description: Validate completed kernel early memory testing and retained pattern coverage.
+  os:
+    - linux
+  scope:
+    - functional
+params:
+  EXPECTED_PASSES: null
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/Early_Memory_Test_Validation
+    - ./run.sh ${EXPECTED_PASSES:+--expected-passes "${EXPECTED_PASSES}"} || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh Early_Memory_Test_Validation.res
