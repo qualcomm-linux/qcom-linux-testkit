@@ -1,8 +1,9 @@
 # CPU_Feature_Reporting
 
 Validate Arm64 kernel-reported CPU features on Yocto, Debian, Ubuntu and CentOS,
-including shell-only ramdisks. The suite uses image-provided tools and never
-installs packages, compiles a helper or changes CPU online state. If the image
+including shell-only ramdisks. All distributions use image-provided tools.
+Missing optional utilities produce SKIP, no packages are installed at runtime.
+The suite never compiles a helper or changes CPU online state. If the image
 already provides `idregs-arm64`, native feature validation runs after kernel
 reporting. `--idregs` can select another installed executable or disable that
 optional native path.

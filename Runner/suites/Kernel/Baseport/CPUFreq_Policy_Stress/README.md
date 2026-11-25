@@ -2,7 +2,7 @@
 
 Repeated policy frequency feedback, peer-policy coordination and pinned workload timing.
 
-This is a separate suite. Existing runners, plans and shared helper interfaces retain their current behavior. It uses runtime capability discovery on Yocto, Debian, Ubuntu and CentOS, including shell-only images. Required utilities and optional payloads must be supplied by the image or job. It does not install packages, change boot selection or start services.
+Uses runtime discovery and image-provided tools on Yocto, Debian, Ubuntu and CentOS, including fixed-tool ramdisks. Missing optional tools or test assets produce SKIP. No packages are installed at runtime.
 
 | Option | Default |
 |---|---|

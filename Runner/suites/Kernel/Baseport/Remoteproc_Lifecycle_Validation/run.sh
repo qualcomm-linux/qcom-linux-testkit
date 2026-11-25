@@ -105,6 +105,7 @@ parse_args "$@"
 test_run_start
 
 # ---------- Runtime validation ----------
+test_require_commands awk cat find grep readlink sort tr || test_run_finish
 if ! remoteproc_inventory; then
     test_result_record SKIP "No selected runtime remoteproc, check enabled DT and firmware"
     test_run_finish

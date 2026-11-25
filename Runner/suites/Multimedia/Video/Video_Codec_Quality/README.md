@@ -2,7 +2,7 @@
 
 Hardware decode reference-frame equality and encode frame-count/PSNR correctness across repeat runs.
 
-This is a separate suite. Existing runners, plans and shared helper interfaces retain their current behavior. It uses runtime capability discovery on Yocto, Debian, Ubuntu and CentOS, including shell-only images. Required utilities and optional payloads must be supplied by the image or job. It does not install packages, change boot selection or start services.
+Uses runtime discovery and image-provided tools on Yocto, Debian, Ubuntu and CentOS, including fixed-tool ramdisks. Missing optional tools or test assets produce SKIP. No packages are installed at runtime.
 
 | Option | Default |
 |---|---|
@@ -26,7 +26,7 @@ Run from this suite directory:
 ./run.sh --mode both --streams ./clips --rounds 3 --timeout 120
 ```
 
-Requires image-provided `ffmpeg` and `v4l2-ctl`, an accessible V4L2 memory-to-memory device and the corresponding FFmpeg v4l2m2m codec. Decode clips are read from `<codec>-*` under `--streams`, for example `h264-validation.h264`. All hardware-decoded NV12 frame hashes must equal an explicit software decode of the same clip. Encode creates a synthetic reference, then checks complete software decode frame count and PSNR. Every hardware result requires FFmpeg verbose evidence of the actual V4L2 node. This suite never reloads a driver or changes firmware. Resolution and codecs can be overridden to match the running device capability.
+Requires available `ffmpeg` and `v4l2-ctl`, an accessible V4L2 memory-to-memory device and the corresponding FFmpeg v4l2m2m codec. Decode clips are read from `<codec>-*` under `--streams`, for example `h264-validation.h264`. All hardware-decoded NV12 frame hashes must equal an explicit software decode of the same clip. Encode creates a synthetic reference, then checks complete software decode frame count and PSNR. Every hardware result requires FFmpeg verbose evidence of the actual V4L2 node. This suite never reloads a driver or changes firmware. Resolution and codecs can be overridden to match the running device capability.
 
 Kernel health uses an exact retained baseline, including a timestamped suffix
 after ring rotation. `kernel-after/kernel_delta.log`, `kernel_delta_status.log`
