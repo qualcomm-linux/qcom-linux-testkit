@@ -112,7 +112,7 @@ else
     test_result_record "SKIP" "lockup-detector Kconfig not visible"
 fi
 
-kernel_log_has_pattern "BUG: soft lockup|Watchdog detected hard LOCKUP|hung_task"
+kernel_log_has_pattern "BUG: soft lockup|Watchdog detected hard LOCKUP|blocked for more than"
 k_log_rc=$?
 if [ "$k_log_rc" -eq 0 ]; then
     test_result_record "FAIL" "kernel log contains a lockup/hung-task splat"

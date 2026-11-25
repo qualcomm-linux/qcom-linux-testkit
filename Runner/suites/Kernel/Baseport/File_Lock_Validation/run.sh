@@ -97,14 +97,8 @@ cleanup_file_lock() {
 }
 trap cleanup_file_lock EXIT INT TERM
 
-# Hold the lock until this process publishes a release file.
-(
-    flock -x "$lockfile" || exit 1
-    touch "$ready"
-    while [ ! -f "$release" ]; do
-        sleep 1
-    done
-) &
+# Command mode keeps the lock for the whole holder, including the wait.
+flock -x "$lockfile" sh -c 'touch "$1"; while [ ! -f "$2" ]; do sleep 1; done' sh "$ready" "$release" &
 holder=$!
 
 waited=0

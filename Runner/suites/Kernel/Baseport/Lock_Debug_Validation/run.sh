@@ -80,13 +80,30 @@ if [ "$k_ev_rc" -eq 1 ]; then
     test_result_finish FAIL "Cannot create kernel evidence under $SCRIPT_DIR"
 fi
 
-if [ -r /proc/locks ]; then
-    test_result_record "PASS" "/proc/locks is readable"
-    lock_lines="$(kernel_count_lines < /proc/locks)"
-    log_info "/proc/locks entries=$lock_lines"
-else
-    test_result_record "FAIL" "/proc/locks is not readable"
-fi
+file_lock_state="$(kernel_config_state CONFIG_FILE_LOCKING)" || file_lock_state=""
+case "$file_lock_state" in
+    n)
+        test_result_record "SKIP" "CONFIG_FILE_LOCKING is disabled; /proc/locks is not required"
+        ;;
+    y|m)
+        if [ -r /proc/locks ]; then
+            test_result_record "PASS" "/proc/locks is readable"
+            lock_lines="$(kernel_count_lines < /proc/locks)"
+            log_info "/proc/locks entries=$lock_lines"
+        else
+            test_result_record "FAIL" "CONFIG_FILE_LOCKING is enabled but /proc/locks is not readable"
+        fi
+        ;;
+    *)
+        if [ -r /proc/locks ]; then
+            test_result_record "PASS" "/proc/locks is readable"
+            lock_lines="$(kernel_count_lines < /proc/locks)"
+            log_info "/proc/locks entries=$lock_lines"
+        else
+            test_result_record "SKIP" "CONFIG_FILE_LOCKING state is unavailable and /proc/locks is absent"
+        fi
+        ;;
+esac
 
 if [ -r /proc/lock_stat ]; then
     if grep -q "lock_stat version" /proc/lock_stat; then
