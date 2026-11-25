@@ -109,7 +109,7 @@ for irq_dir in /proc/irq/[0-9]*; do
     for irq_eff in effective_affinity effective_affinity_list; do
         [ -e "$irq_dir/$irq_eff" ] || continue
         irq_eff_val="$(kernel_attribute_value "$irq_dir/$irq_eff")" || irq_eff_val=""
-        test_result_record "SKIP" "IRQ $irq_name $irq_eff='$irq_eff_val' is recorded separately from configured affinity"
+        log_info "IRQ $irq_name $irq_eff='${irq_eff_val:-empty}' is not part of the configured-affinity verdict"
     done
     if [ "$checked" -ge 8 ]; then
         break
