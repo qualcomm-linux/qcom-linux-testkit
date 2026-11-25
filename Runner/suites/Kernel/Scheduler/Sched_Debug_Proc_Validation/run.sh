@@ -89,11 +89,42 @@ fi
 
 if [ -z "$sched_debug" ]; then
     test_result_record "SKIP" "sched debug is not exported under debugfs or /proc"
-elif kernel_record_attribute "sched debug" "$sched_debug"; then
-    if grep -Eq 'cpu#|rq->nr_running|Sched Debug' "$sched_debug"; then
-        test_result_record "PASS" "$sched_debug has runqueue content"
+elif ! kernel_record_attribute "sched debug" "$sched_debug"; then
+    :
+else
+    sched_cpus_ok() {
+        sched_online="$(get_online_cpus | sort -n | awk 'NF { printf "%s%s", sep, $0; sep="," }')"
+        sched_missing=""
+        for sched_cpu in $(get_online_cpus); do
+            if ! grep -Eq "^cpu#${sched_cpu}(,|[[:space:]]|$)" "$sched_debug"; then
+                sched_missing="${sched_missing}${sched_cpu} "
+            fi
+        done
+        if grep -Eq 'Sched Debug|^version' "$sched_debug" &&
+            [ -z "$sched_missing" ] &&
+            awk '
+                /\.nr_running/ {
+                    seen = 1
+                    if ($NF !~ /^-?[0-9]+$/) bad = 1
+                }
+                END { exit !(seen && !bad) }
+            ' "$sched_debug"; then
+            return 0
+        fi
+        return 1
+    }
+    if sched_cpus_ok; then
+        test_result_record "PASS" "$sched_debug has a header and runqueue fields for online CPUs $sched_online"
     else
-        test_result_record "FAIL" "$sched_debug is readable but missing expected fields"
+        sched_before="$sched_online"
+        sleep 1
+        if sched_cpus_ok; then
+            test_result_record "PASS" "$sched_debug matched online CPUs after one resnapshot ($sched_online)"
+        elif [ "$sched_online" != "$sched_before" ]; then
+            test_result_record "SKIP" "online CPU set changed while reading $sched_debug"
+        else
+            test_result_record "FAIL" "$sched_debug is missing a CPU/runqueue section for online CPUs ${sched_missing:-$sched_online}"
+        fi
     fi
 fi
 
@@ -109,11 +140,20 @@ else
     test_result_record "SKIP" "sched features debugfs is not present"
 fi
 
-if [ -r /proc/sys/kernel/sched_rt_runtime_us ]; then
-    kernel_record_attribute "sched_rt_runtime_us" "/proc/sys/kernel/sched_rt_runtime_us"
-fi
-if [ -r /proc/sys/kernel/sched_rt_period_us ]; then
-    kernel_record_attribute "sched_rt_period_us" "/proc/sys/kernel/sched_rt_period_us" 1
+if [ -r /proc/sys/kernel/sched_rt_runtime_us ] && [ -r /proc/sys/kernel/sched_rt_period_us ]; then
+    rt_runtime="$(kernel_attribute_value /proc/sys/kernel/sched_rt_runtime_us)" || rt_runtime=""
+    rt_period="$(kernel_attribute_value /proc/sys/kernel/sched_rt_period_us)" || rt_period=""
+    if ! is_signed_number "$rt_runtime" || ! is_unsigned_number "$rt_period"; then
+        rt_runtime="$(kernel_attribute_value /proc/sys/kernel/sched_rt_runtime_us)" || rt_runtime=""
+        rt_period="$(kernel_attribute_value /proc/sys/kernel/sched_rt_period_us)" || rt_period=""
+    fi
+    if ! is_signed_number "$rt_runtime" || ! is_unsigned_number "$rt_period" || [ "$rt_period" -eq 0 ]; then
+        test_result_record "FAIL" "sched RT runtime='$rt_runtime' period='$rt_period' is not a valid pair"
+    elif [ "$rt_runtime" = "-1" ] || { [ "$rt_runtime" -ge 0 ] && [ "$rt_runtime" -le "$rt_period" ]; }; then
+        test_result_record "PASS" "sched RT runtime=$rt_runtime period=$rt_period"
+    else
+        test_result_record "FAIL" "sched RT runtime=$rt_runtime is outside -1 or 0..$rt_period"
+    fi
 fi
 
 test_result_finish
