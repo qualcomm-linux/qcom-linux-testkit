@@ -16,9 +16,12 @@ on:
         default: meta-qcom
         type: string
       include_meta_qcom:
-        description: Include meta-qcom pre-merge tests. Unchecked runs only changed suites and explicit selections.
+        description: Include meta-qcom pre-merge tests alongside selected PR tests.
         default: true
         type: boolean
+      test_names:
+        description: Comma-separated suite or YAML names, e.g. Ethernet_Inventory_Validation,AudioPlayback_Config01. Empty selects changed suites.
+        type: string
       revision:
         description: Full PR commit SHA, empty resolves current PR head. Reruns retain the original SHA.
         type: string
@@ -41,7 +44,7 @@ on:
         description: Optional successful meta-qcom nightly or extended build run ID. Reruns reuse the original images.
         type: string
       selections:
-        description: JSON mapping suite paths to YAML/group/params/tags. Required for shared-helper-only PRs when pre-merge is unchecked.
+        description: Advanced JSON suite selections for params, tags or fresh_boot. Do not repeat suites from test_names.
         default: '{}'
         type: string
       submit:
@@ -185,6 +188,7 @@ jobs:
           IMAGE_TYPE: ${{ inputs.image_type }}
           NIGHTLY_RUN_ID: ${{ inputs.nightly_run }}
           TEST_SELECTIONS: ${{ inputs.selections }}
+          TEST_NAMES: ${{ inputs.test_names }}
           INCLUDE_META_QCOM: ${{ needs.request.outputs.include_meta_qcom }}
           SUBMIT_REQUEST: ${{ inputs.submit }}
         run: python .github/workflows/lava_pr_validation.py prepare

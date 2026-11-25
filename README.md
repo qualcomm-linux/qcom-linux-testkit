@@ -156,6 +156,15 @@ dependencies, and assets. They are not arguments to `run-test.sh`.
 See the public [lava-test-plans](https://github.com/qualcomm-linux/lava-test-plans)
 repository for job orchestration.
 
+In **Actions → LAVA PR validation → Run workflow**, use `test_names` to select
+comma-separated suite or YAML names, for example
+`Ethernet_Inventory_Validation,AudioPlayback_Config01`. A suite name selects
+its default YAML, or its sole YAML when no default exists. Ambiguous names
+require a full YAML path. Leave the field empty to select changed PR suites
+automatically. Uncheck `include_meta_qcom` to omit baseline tests. Advanced
+`selections` JSON remains available for parameters, tags or fresh-boot tests,
+but a suite must not appear in both inputs.
+
 Other CI systems can invoke the same suites and collect their result files
 and artifacts.
 
