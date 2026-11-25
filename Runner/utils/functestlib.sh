@@ -12769,6 +12769,24 @@ kernel_count_lines() {
     awk 'NF { n++ } END { print n + 0 }'
 }
 
+# kernel_cpumask_valid <mask>
+# Return 0 for a nonempty comma-separated hexadecimal cpumask. Width is not
+# fixed, and offline CPU bits are allowed. Empty and non-hex masks fail.
+# shellcheck disable=SC2317
+kernel_cpumask_valid() {
+    kcm_mask="$1"
+    [ -n "$kcm_mask" ] || return 1
+    printf '%s\n' "$kcm_mask" | tr ',' '\n' |
+        while IFS= read -r kcm_part || [ -n "$kcm_part" ]; do
+            [ -n "$kcm_part" ] || exit 1
+            case "$kcm_part" in
+                *[!0-9a-fA-F]*)
+                    exit 1
+                    ;;
+            esac
+        done
+}
+
 # kernel_cpu_list_valid <list>
 # Return 0 only for a nonempty Linux CPU list whose every entry is numeric.
 # shellcheck disable=SC2317
