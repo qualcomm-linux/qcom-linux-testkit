@@ -12902,12 +12902,13 @@ is_bounded_positive_integer() {
 }
 
 # test_require_commands <command>...
-# Report absent image tools without installing packages or changing services.
+# Check image-provided commands without installing or changing packages.
+# Missing optional tools record SKIP and return 1, all available tools return 0.
 test_require_commands() {
     local tool missing=0
     for tool in "$@"; do
         if ! command -v "$tool" >/dev/null 2>&1; then
-            test_result_record SKIP "Image-provided utility is missing: $tool"
+            test_result_record SKIP "Image-provided utility=$tool is unavailable, provision it in the image or supply its installed path"
             missing=1
         fi
     done
