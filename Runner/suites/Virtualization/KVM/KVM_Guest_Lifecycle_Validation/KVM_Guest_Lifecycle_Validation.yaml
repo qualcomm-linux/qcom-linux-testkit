@@ -1,0 +1,21 @@
+metadata:
+  name: KVM_Guest_Lifecycle_Validation
+  format: Lava-Test Test Definition 1.0
+  description: Boot an isolated Linux KVM guest, execute a console command and verify clean shutdown.
+  os:
+    - linux
+  scope:
+    - functional
+params:
+  BINARY: null
+  KERNEL: "/opt/kvm-guest/Image"
+  INITRD: "/opt/kvm-guest/initramfs.cpio.gz"
+  VCPUS: null
+  MEMORY: "256"
+  TIMEOUT: "120"
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Virtualization/KVM/KVM_Guest_Lifecycle_Validation
+    - ./run.sh ${BINARY:+--binary "${BINARY}"} ${KERNEL:+--kernel "${KERNEL}"} ${INITRD:+--initrd "${INITRD}"} ${VCPUS:+--vcpus "${VCPUS}"} ${MEMORY:+--memory "${MEMORY}"} ${TIMEOUT:+--timeout "${TIMEOUT}"} || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh KVM_Guest_Lifecycle_Validation.res

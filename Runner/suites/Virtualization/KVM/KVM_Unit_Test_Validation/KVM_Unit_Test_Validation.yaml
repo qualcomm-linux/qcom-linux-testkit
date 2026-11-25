@@ -1,0 +1,18 @@
+metadata:
+  name: KVM_Unit_Test_Validation
+  format: Lava-Test Test Definition 1.0
+  description: Validate image-provided KVM unit tests with hardware acceleration.
+  os:
+    - linux
+  scope:
+    - functional
+params:
+  TEST_DIR: null
+  TESTS: null
+  TIMEOUT: "900"
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Virtualization/KVM/KVM_Unit_Test_Validation
+    - ./run.sh ${TEST_DIR:+--test-dir "${TEST_DIR}"} ${TESTS:+--tests "${TESTS}"} ${TIMEOUT:+--timeout "${TIMEOUT}"} || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh KVM_Unit_Test_Validation.res
