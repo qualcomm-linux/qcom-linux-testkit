@@ -1,0 +1,18 @@
+metadata:
+  name: docker_service_status
+  format: "Lava-Test Test Definition 1.0"
+  description: "Check the optional Docker systemd service when it is provided by a systemd image"
+  maintainer:
+    - "Qualcomm Linux Testkit"
+
+params:
+  REQUIRE_DOCKER_SERVICE: "false"
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd "$REPO_PATH/Runner/suites/System/systemctl_status_docker"
+    - REQUIRE_DOCKER_SERVICE="${REQUIRE_DOCKER_SERVICE:-false}" ./run.sh || true
+    - grep -Eq '^docker_service_status (PASS|FAIL|SKIP)$' docker_service_status.res
+    - cat docker_service_status.res
+    - '"$REPO_PATH/Runner/utils/send-to-lava.sh" docker_service_status.res --expected-testcase-id docker_service_status'
