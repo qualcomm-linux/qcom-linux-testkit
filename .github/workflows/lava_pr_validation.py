@@ -1145,10 +1145,21 @@ def finish_jobs(folder, manifest, lifecycle=True):
             row["errors"] or row["counts"].get("fail") for row in rows if row["coverage"] != "Workflow"):
         notices.append("Workflow did not complete successfully. See the workflow artifacts.")
         lines += [notices[-1], ""]
+    # Missing results need the same public names as prechecks, not LAVA's
+    # generated definition IDs. Keep those IDs for configuration disambiguation.
+    result_names = {(result_target(entry), entry["group"], definition["name"]):
+                    definition.get("expected") or [Path(definition["path"]).stem]
+                    for entry in manifest.get("jobs", []) for definition in entry.get("definitions", [])}
     case_rows = []
     for row in rows:
-        if not row.get("tests") or row["errors"]:
-            case_rows.append(row if not row.get("tests") else row | {
+        if not row.get("tests"):
+            names = ([row["display_name"]] if row.get("display_name") else
+                     result_names.get((row["target"], row["group"], row["name"]), [row["name"]]))
+            case_rows.extend(row | {"display_name": name,
+                                    "definition_name": row.get("definition_name", row["name"])}
+                             for name in names)
+        elif row["errors"]:
+            case_rows.append(row | {
                 "counts": {}, "display_name": row["name"] + " (validation)"})
         for case in row.get("tests", []):
             result = case["result"].lower()
