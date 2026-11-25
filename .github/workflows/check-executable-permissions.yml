@@ -1,56 +1,33 @@
+# Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+# SPDX-License-Identifier: BSD-3-Clause
 name: Enforce Script Executable Permissions
 
 on:
   pull_request:
     branches: [ "main" ]
-    paths:
-      - '**/run.sh'
-      - '**/*.sh'
 
   push:
     branches: [ "main" ]
-    paths:
-      - '**/run.sh'
-      - '**/*.sh'
 
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   permissions:
     name: Check script permissions
     runs-on: ubuntu-latest
+    timeout-minutes: 5
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
 
-      - name: Check for missing +x on shell scripts
-        run: |
-          echo "🔍 Checking shell script permissions..."
-          BAD=$(find . -type f \( -name "*.sh" -o -name "run.sh" \) ! -perm -u=x)
-
-          if [ -n "$BAD" ]; then
-            echo "::error file=run.sh,line=1::❌ Some shell scripts are missing executable permissions. CI and LAVA may break."
-            echo "::error file=run.sh,line=2::To fix: find . -name '*.sh' -o -name 'run.sh' | xargs chmod +x && git add . && git commit -m 'Fix: restore executable bits' && git push"
-            echo ""
-            echo "The following files need 'chmod +x':"
-            echo "$BAD"
-            echo "$BAD" | while read -r file; do
-              echo "::error file=$file,line=1::$file is not executable. Run: chmod +x \"$file\" && git add \"$file\""
-            done
-            exit 1
-          else
-            echo "✅ All shell scripts have executable permissions."
-          fi
-
-      - name: Warn about non-shell files marked executable (optional)
-        run: |
-          echo "🔍 Checking for accidental executables on non-shell files..."
-          OTHER_EXEC=$(find . -type f ! \( -name "*.sh" -o -name "run.sh" \) -perm -u=x)
-
-          if [ -n "$OTHER_EXEC" ]; then
-            echo "::warning file=run.sh,line=1::⚠️ Some non-shell files have executable bits. Review if appropriate."
-            echo "$OTHER_EXEC"
-          else
-            echo "✅ No unexpected executables detected."
-          fi
+      - name: Check tracked script permissions
+        env:
+          BASE_REVISION: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: python3 .github/ci/check_script_permissions.py
