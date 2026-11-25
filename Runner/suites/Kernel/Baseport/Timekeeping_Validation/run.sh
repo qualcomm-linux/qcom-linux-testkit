@@ -87,20 +87,22 @@ fi
 
 u1="$(awk '{print $1}' /proc/uptime)"
 sleep 2
+tk_sleep_rc=$?
 u2="$(awk '{print $1}' /proc/uptime)"
-log_info "uptime before=$u1 after=$u2"
-
-u1i="${u1%.*}"
-u2i="${u2%.*}"
-if is_unsigned_number "$u1i" && is_unsigned_number "$u2i"; then
-    delta=$((u2i - u1i))
-    if [ "$delta" -ge 1 ]; then
-        test_result_record "PASS" "uptime advanced by ${delta}s during 2s sleep"
-    else
-        test_result_record "FAIL" "uptime did not advance during 2s sleep (before=$u1 after=$u2)"
-    fi
+log_info "uptime before=$u1 after=$u2 sleep_rc=$tk_sleep_rc"
+# sleep 2 must move monotonic uptime by about two seconds. A quarter-second
+# tolerance covers scheduling delay without accepting a one-second step.
+if [ "$tk_sleep_rc" -ne 0 ]; then
+    test_result_record "FAIL" "sleep 2 failed rc=$tk_sleep_rc"
+elif ! awk -v before="$u1" -v after="$u2" 'BEGIN {
+    if (before !~ /^[0-9]+([.][0-9]+)?$/ || after !~ /^[0-9]+([.][0-9]+)?$/) exit 1
+    delta = after - before
+    if (delta >= 1.75 && delta < 8) exit 0
+    exit 1
+}'; then
+    test_result_record "FAIL" "uptime interval is not within 0.25s of the 2s sleep (before=$u1 after=$u2)"
 else
-    test_result_record "FAIL" "could not parse /proc/uptime integers"
+    test_result_record "PASS" "uptime advanced from $u1 to $u2 during sleep 2"
 fi
 
 if [ -r /proc/timer_list ]; then

@@ -86,12 +86,11 @@ if [ ! -d "$cs_dir" ]; then
     test_result_finish "SKIP"
 fi
 
-kernel_record_attribute "current_clocksource" "$cs_dir/current_clocksource"
-kernel_record_attribute "available_clocksource" "$cs_dir/available_clocksource"
-
-current="$(kernel_attribute_value "$cs_dir/current_clocksource" || true)"
-available="$(kernel_attribute_value "$cs_dir/available_clocksource" || true)"
-if [ -n "$current" ] && [ -n "$available" ]; then
+current="$(kernel_attribute_value "$cs_dir/current_clocksource")" || current=""
+available="$(kernel_attribute_value "$cs_dir/available_clocksource")" || available=""
+if [ -z "$current" ] || [ -z "$available" ]; then
+    test_result_record "FAIL" "clocksource current='${current:-empty}' available='${available:-empty}'"
+else
     case " $available " in
         *" $current "*)
             test_result_record "PASS" "current clocksource '$current' is in available list"

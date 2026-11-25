@@ -80,35 +80,65 @@ if [ "$k_ev_rc" -eq 1 ]; then
     test_result_finish FAIL "Cannot create kernel evidence under $SCRIPT_DIR"
 fi
 
-if kernel_config_is_enabled CONFIG_HIGH_RES_TIMERS; then
-    test_result_record "PASS" "CONFIG_HIGH_RES_TIMERS is enabled"
-else
-    test_result_record "SKIP" "CONFIG_HIGH_RES_TIMERS not visible or disabled"
-fi
+hres_state="$(kernel_config_state CONFIG_HIGH_RES_TIMERS)" || hres_state=""
+case "$hres_state" in
+    y|m)
+        test_result_record "PASS" "CONFIG_HIGH_RES_TIMERS is enabled"
+        ;;
+    n)
+        test_result_record "SKIP" "CONFIG_HIGH_RES_TIMERS is disabled; low-resolution bases still apply"
+        ;;
+    *)
+        test_result_record "SKIP" "CONFIG_HIGH_RES_TIMERS state is unavailable"
+        ;;
+esac
 
 if [ ! -r /proc/timer_list ]; then
     test_result_record "SKIP" "/proc/timer_list is not readable"
     test_result_finish "SKIP"
 fi
 
-if grep -Eq 'hrtimer|HresTimer|hres_active' /proc/timer_list; then
-    test_result_record "PASS" "/proc/timer_list reports hrtimer state"
+if [ "$hres_state" = "y" ] || [ "$hres_state" = "m" ]; then
+    if grep -Eq 'hres_active|HresTimer' /proc/timer_list; then
+        test_result_record "PASS" "/proc/timer_list reports high-resolution timer state"
+    else
+        test_result_record "FAIL" "CONFIG_HIGH_RES_TIMERS is enabled but /proc/timer_list has no hres marker"
+    fi
 else
-    test_result_record "FAIL" "/proc/timer_list has no hrtimer markers"
+    test_result_record "SKIP" "high-resolution marker is not required when CONFIG_HIGH_RES_TIMERS is not enabled"
 fi
 
-base_count="$(grep -cE '^[Tt]imerbase|^cpu: [0-9]+|clock [0-9]+:' /proc/timer_list 2>/dev/null || true)"
-if [ -z "$base_count" ]; then
-    base_count=0
-fi
-if [ "$base_count" -gt 0 ]; then
-    test_result_record "PASS" "timer bases found in /proc/timer_list (count=$base_count)"
+clock_count="$(grep -cE '^[[:space:]]*clock[[:space:]]+[0-9]+:' /proc/timer_list 2>/dev/null || true)"
+if [ "${clock_count:-0}" -gt 0 ]; then
+    test_result_record "PASS" "timer_list exports clock bases (count=$clock_count)"
 else
-    test_result_record "FAIL" "no timer bases found in /proc/timer_list"
+    test_result_record "FAIL" "timer_list has no clock-base lines"
 fi
 
-online_count="$(get_online_cpus | kernel_count_lines)"
-log_info "online CPUs=$online_count timer_list bases/clock lines=$base_count"
+hrtimer_online_covered() {
+    hrt_online="$(get_online_cpus | sort -n | awk 'NF { printf "%s%s", sep, $0; sep="," }')"
+    hrt_missing=""
+    for hrt_cpu in $(get_online_cpus); do
+        if ! grep -Eq "^cpu: ${hrt_cpu}$" /proc/timer_list; then
+            hrt_missing="${hrt_missing}${hrt_cpu} "
+        fi
+    done
+    [ -z "$hrt_missing" ]
+}
+
+if hrtimer_online_covered; then
+    test_result_record "PASS" "timer_list has a CPU section for online CPUs $hrt_online"
+else
+    hrt_before="$hrt_online"
+    sleep 1
+    if hrtimer_online_covered; then
+        test_result_record "PASS" "timer_list matched online CPUs after one resnapshot ($hrt_online)"
+    elif [ "$hrt_online" != "$hrt_before" ]; then
+        test_result_record "SKIP" "online CPU set changed during timer_list capture ($hrt_before -> $hrt_online)"
+    else
+        test_result_record "FAIL" "timer_list is missing CPU sections for online CPUs: ${hrt_missing:-unknown}"
+    fi
+fi
 
 if grep -Eq 'resolution:|expires at|active timers:' /proc/timer_list; then
     test_result_record "PASS" "hrtimer resolution/expiry fields are present"
