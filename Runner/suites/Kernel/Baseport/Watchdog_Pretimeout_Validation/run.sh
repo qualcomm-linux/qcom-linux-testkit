@@ -80,36 +80,49 @@ if [ "$k_ev_rc" -eq 1 ]; then
     test_result_finish FAIL "Cannot create kernel evidence under $SCRIPT_DIR"
 fi
 
-wd_dir="$(watchdog_sysfs_dirs | awk 'NR==1 { print; exit }')"
-if [ -z "$wd_dir" ]; then
-    test_result_record "SKIP" "No watchdog sysfs device found"
-    test_result_finish "SKIP"
-fi
-
-found=0
-for node in pretimeout pretimeout_governor pretimeout_available_governors; do
-    if [ -e "$wd_dir/$node" ]; then
-        found=1
-        kernel_record_attribute "watchdog $node" "$wd_dir/$node"
-    else
-        test_result_record "SKIP" "$wd_dir/$node not exported"
+wd_seen=0
+wd_checked=0
+for wd_dir in $(watchdog_sysfs_dirs); do
+    wd_seen=1
+    if [ ! -e "$wd_dir/pretimeout" ] && [ ! -e "$wd_dir/pretimeout_governor" ]; then
+        test_result_record "SKIP" "$wd_dir does not export pretimeout"
+        continue
+    fi
+    wd_checked=1
+    log_info "Inspecting $wd_dir"
+    if [ -e "$wd_dir/pretimeout" ]; then
+        pretimeout="$(kernel_attribute_value "$wd_dir/pretimeout")" || pretimeout=""
+        timeout="$(kernel_attribute_value "$wd_dir/timeout")" || timeout=""
+        if ! is_unsigned_number "$pretimeout" || ! is_unsigned_number "$timeout"; then
+            test_result_record "FAIL" "$wd_dir pretimeout='$pretimeout' or timeout='$timeout' is not an unsigned integer"
+        elif [ "$pretimeout" -eq 0 ]; then
+            test_result_record "PASS" "$wd_dir pretimeout is disabled (0), timeout=$timeout"
+        elif [ "$pretimeout" -lt "$timeout" ]; then
+            test_result_record "PASS" "$wd_dir pretimeout ($pretimeout) is below timeout ($timeout)"
+        else
+            test_result_record "FAIL" "$wd_dir pretimeout ($pretimeout) must be strictly below timeout ($timeout)"
+        fi
+    fi
+    if [ -e "$wd_dir/pretimeout_governor" ]; then
+        wd_gov="$(kernel_attribute_value "$wd_dir/pretimeout_governor")" || wd_gov=""
+        if [ -z "$wd_gov" ]; then
+            test_result_record "PASS" "$wd_dir has no pretimeout governor"
+        elif [ ! -r "$wd_dir/pretimeout_available_governors" ]; then
+            test_result_record "FAIL" "$wd_dir governor '$wd_gov' has no available-governor list"
+        elif grep -Fxq "$wd_gov" "$wd_dir/pretimeout_available_governors"; then
+            test_result_record "PASS" "$wd_dir governor '$wd_gov' is in the available list"
+        else
+            test_result_record "FAIL" "$wd_dir governor '$wd_gov' is not in the available list"
+        fi
     fi
 done
 
-if [ "$found" -eq 0 ]; then
-    test_result_finish "SKIP" "$TESTNAME SKIP: driver does not export pretimeout ABI"
+if [ "$wd_seen" -eq 0 ]; then
+    test_result_record "SKIP" "No watchdog sysfs device found"
+    test_result_finish "SKIP"
 fi
-
-pretimeout="$(kernel_attribute_value "$wd_dir/pretimeout")" || pretimeout=""
-timeout="$(kernel_attribute_value "$wd_dir/timeout")" || timeout=""
-if ! is_unsigned_number "$pretimeout" || ! is_unsigned_number "$timeout"; then
-    test_result_record "FAIL" "pretimeout='$pretimeout' or timeout='$timeout' is not an unsigned integer"
-elif [ "$pretimeout" -eq 0 ]; then
-    test_result_record "PASS" "pretimeout is disabled (0), timeout=$timeout"
-elif [ "$pretimeout" -lt "$timeout" ]; then
-    test_result_record "PASS" "pretimeout ($pretimeout) is below timeout ($timeout)"
-else
-    test_result_record "FAIL" "pretimeout ($pretimeout) must be strictly below timeout ($timeout)"
+if [ "$wd_checked" -eq 0 ]; then
+    test_result_finish "SKIP" "$TESTNAME SKIP: driver does not export pretimeout ABI"
 fi
 
 test_result_finish

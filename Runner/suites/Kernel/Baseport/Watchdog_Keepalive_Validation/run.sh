@@ -85,44 +85,68 @@ if ! isroot; then
     test_result_finish "SKIP"
 fi
 
-wd_dir="$(watchdog_sysfs_dirs | awk 'NR==1 { print; exit }')"
+wd_dir=""
+wd_dev=""
+wd_seen=0
+for wd_candidate in $(watchdog_sysfs_dirs); do
+    wd_seen=1
+    if ! wd_candidate_dev="$(watchdog_provider_node "$wd_candidate")"; then
+        test_result_record "SKIP" "watchdog provider has no character device: $wd_candidate"
+        continue
+    fi
+    if [ ! -c "$wd_candidate_dev" ] || [ ! -w "$wd_candidate_dev" ]; then
+        test_result_record "SKIP" "$wd_candidate_dev is not a writable character device"
+        continue
+    fi
+    wd_nowayout="$(kernel_attribute_value "$wd_candidate/nowayout")" || wd_nowayout=""
+    if [ "$wd_nowayout" != "0" ]; then
+        test_result_record "SKIP" "$wd_candidate nowayout is not a confirmed stoppable 0 (value='${wd_nowayout:-unreadable}')"
+        continue
+    fi
+    wd_state="$(kernel_attribute_value "$wd_candidate/state")" || wd_state=""
+    if [ "$wd_state" != "inactive" ]; then
+        test_result_record "SKIP" "$wd_candidate state is '${wd_state:-unreadable}'; leaving it unchanged"
+        continue
+    fi
+    wd_timeout="$(kernel_attribute_value "$wd_candidate/timeout")" || wd_timeout=""
+    if ! is_unsigned_number "$wd_timeout" || [ "$wd_timeout" -lt 2 ]; then
+        test_result_record "SKIP" "$wd_candidate timeout '${wd_timeout:-unreadable}' is too small to refresh once per second"
+        continue
+    fi
+    wd_dir="$wd_candidate"
+    wd_dev="$wd_candidate_dev"
+done
 if [ -z "$wd_dir" ]; then
-    test_result_record "SKIP" "No watchdog sysfs device found"
+    if [ "$wd_seen" -eq 0 ]; then
+        test_result_record "SKIP" "No watchdog sysfs device found"
+    else
+        test_result_record "SKIP" "No inactive stoppable watchdog can be refreshed safely"
+    fi
     test_result_finish "SKIP"
 fi
-
-if ! wd_dev="$(watchdog_provider_node "$wd_dir")"; then
-    test_result_record "SKIP" "watchdog provider has no character device: $wd_dir"
-    test_result_finish "SKIP"
-fi
-if [ ! -c "$wd_dev" ] || [ ! -w "$wd_dev" ]; then
-    test_result_record "SKIP" "$wd_dev is not a writable character device"
-    test_result_finish "SKIP"
-fi
-
-nowayout="$(kernel_attribute_value "$wd_dir/nowayout")" || nowayout=""
-if [ "$nowayout" != "0" ]; then
-    test_result_record "SKIP" "nowayout is not a confirmed stoppable 0 (value='${nowayout:-unreadable}')"
-    test_result_finish "SKIP"
-fi
-
-initial_state="$(kernel_attribute_value "$wd_dir/state")" || initial_state=""
-if [ "$initial_state" != "inactive" ]; then
-    test_result_record "SKIP" "watchdog state is '${initial_state:-unreadable}'; leaving an active watchdog unchanged"
-    test_result_finish "SKIP"
-fi
+log_info "Keepalive target $wd_dir $wd_dev"
 
 release="$KERNEL_EVIDENCE_DIR/watchdog.release"
 holder=""
 rm -f "$release"
-# Keep the device open until magic-close. A signal still writes V before close.
+# Install magic-close before the device is opened. One-second pings stay
+# inside a timeout of at least two seconds until the parent releases the hold.
 watchdog_hold() {
+    wd_opened=0
+    watchdog_disarm() {
+        [ "$wd_opened" = 1 ] || return 0
+        printf 'V' >&3 2>/dev/null || true
+        exec 3>&-
+        wd_opened=0
+    }
+    trap watchdog_disarm EXIT INT TERM
     exec 3>"$1" || exit 1
-    printf '1\n' >&3 || exit 1
-    trap 'printf "V" >&3; exec 3>&-' EXIT INT TERM
+    wd_opened=1
     while [ ! -f "$2" ]; do
+        printf '1\n' >&3 || exit 1
         sleep 1
     done
+    printf '1\n' >&3 || exit 1
 }
 watchdog_hold "$wd_dev" "$release" &
 holder=$!
@@ -134,9 +158,13 @@ cleanup_watchdog() {
     fi
 }
 trap cleanup_watchdog EXIT INT TERM
-sleep 1
+sleep 2
 if ! kill -0 "$holder" 2>/dev/null; then
-    test_result_record "FAIL" "watchdog keepalive holder exited before magic-close"
+    wait "$holder"
+    holder_rc=$?
+    holder=""
+    final_state="$(kernel_attribute_value "$wd_dir/state")" || final_state=""
+    test_result_record "FAIL" "watchdog keepalive holder exited early rc=$holder_rc state='${final_state:-unreadable}'"
     test_result_finish "FAIL"
 fi
 
@@ -145,14 +173,10 @@ wait "$holder"
 holder_rc=$?
 holder=""
 final_state="$(kernel_attribute_value "$wd_dir/state")" || final_state=""
-if [ "$holder_rc" -ne 0 ]; then
-    test_result_record "FAIL" "watchdog magic-close holder failed rc=$holder_rc state='${final_state:-unreadable}'"
+if [ "$holder_rc" -ne 0 ] || [ "$final_state" != "inactive" ]; then
+    test_result_record "FAIL" "watchdog did not return to inactive after magic-close rc=$holder_rc state='${final_state:-unreadable}'"
     test_result_finish "FAIL"
 fi
-if [ "$final_state" != "inactive" ]; then
-    test_result_record "FAIL" "watchdog stayed armed after magic-close, state='${final_state:-unreadable}'"
-    test_result_finish "FAIL"
-fi
-test_result_record "PASS" "keepalive armed $wd_dev and magic-close returned it to inactive"
+test_result_record "PASS" "keepalive refreshed $wd_dev and magic-close returned it to inactive"
 
 test_result_finish

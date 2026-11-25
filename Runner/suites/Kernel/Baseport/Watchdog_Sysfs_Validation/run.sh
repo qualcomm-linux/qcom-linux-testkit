@@ -89,21 +89,64 @@ wd_count=0
 for wd_dir in $(watchdog_sysfs_dirs); do
     wd_count=$((wd_count + 1))
     log_info "Inspecting $wd_dir"
-    kernel_record_attribute "watchdog identity" "$wd_dir/identity"
-    kernel_record_attribute "watchdog state" "$wd_dir/state"
-    kernel_record_attribute "watchdog timeout" "$wd_dir/timeout"
+    wd_identity="$(kernel_attribute_value "$wd_dir/identity")" || wd_identity=""
+    if [ -n "$wd_identity" ]; then
+        test_result_record "PASS" "watchdog identity ok: $wd_dir/identity='$wd_identity'"
+    else
+        test_result_record "FAIL" "watchdog identity is missing or empty: $wd_dir/identity"
+    fi
+    wd_state="$(kernel_attribute_value "$wd_dir/state")" || wd_state=""
+    case "$wd_state" in
+        active|inactive)
+            test_result_record "PASS" "watchdog state ok: $wd_dir/state='$wd_state'"
+            ;;
+        *)
+            test_result_record "FAIL" "watchdog state is not active or inactive: $wd_dir/state='${wd_state:-unreadable}'"
+            ;;
+    esac
+    kernel_record_attribute "watchdog timeout" "$wd_dir/timeout" unsigned
     if [ -e "$wd_dir/status" ]; then
-        kernel_record_attribute "watchdog status" "$wd_dir/status"
+        wd_status="$(kernel_attribute_value "$wd_dir/status")" || wd_status=""
+        case "$wd_status" in
+            0x|0x*[!0-9a-fA-F]*)
+                test_result_record "FAIL" "watchdog status is not hexadecimal: $wd_dir/status='$wd_status'"
+                ;;
+            0x*)
+                test_result_record "PASS" "watchdog status ok: $wd_dir/status='$wd_status'"
+                ;;
+            *)
+                test_result_record "FAIL" "watchdog status is not hexadecimal: $wd_dir/status='${wd_status:-unreadable}'"
+                ;;
+        esac
     else
         test_result_record "SKIP" "watchdog status not exported: $wd_dir/status"
     fi
     if [ -e "$wd_dir/bootstatus" ]; then
-        kernel_record_attribute "watchdog bootstatus" "$wd_dir/bootstatus"
+        wd_boot="$(kernel_attribute_value "$wd_dir/bootstatus")" || wd_boot=""
+        case "$wd_boot" in
+            0x|0x*[!0-9a-fA-F]*)
+                test_result_record "FAIL" "watchdog bootstatus is not hexadecimal: $wd_dir/bootstatus='$wd_boot'"
+                ;;
+            0x*)
+                test_result_record "PASS" "watchdog bootstatus ok: $wd_dir/bootstatus='$wd_boot'"
+                ;;
+            *)
+                test_result_record "FAIL" "watchdog bootstatus is not hexadecimal: $wd_dir/bootstatus='${wd_boot:-unreadable}'"
+                ;;
+        esac
     else
         test_result_record "SKIP" "watchdog bootstatus not exported: $wd_dir/bootstatus"
     fi
     if [ -e "$wd_dir/nowayout" ]; then
-        kernel_record_attribute "watchdog nowayout" "$wd_dir/nowayout" 1
+        wd_nowayout="$(kernel_attribute_value "$wd_dir/nowayout")" || wd_nowayout=""
+        case "$wd_nowayout" in
+            0|1)
+                test_result_record "PASS" "watchdog nowayout ok: $wd_dir/nowayout='$wd_nowayout'"
+                ;;
+            *)
+                test_result_record "FAIL" "watchdog nowayout is not 0 or 1: $wd_dir/nowayout='${wd_nowayout:-unreadable}'"
+                ;;
+        esac
     else
         test_result_record "SKIP" "watchdog nowayout not exported: $wd_dir/nowayout"
     fi
