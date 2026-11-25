@@ -1,0 +1,21 @@
+metadata:
+  name: TEE_Memory_Reclaim_Validation
+  format: Lava-Test Test Definition 1.0
+  description: Validate repeated TEE user-memory registration, release and re-registration.
+  os:
+    - linux
+  scope:
+    - functional
+params:
+  BINARY: null
+  ROUNDS: "20"
+  PAGES: "1 64 1024"
+  MIN_RANGES: "0"
+  TRANSPORT: "any"
+  TIMEOUT: "120"
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/TEE_Memory_Reclaim_Validation
+    - ./run.sh ${BINARY:+--binary "${BINARY}"} ${ROUNDS:+--rounds "${ROUNDS}"} ${PAGES:+--pages "${PAGES}"} ${MIN_RANGES:+--min-ranges "${MIN_RANGES}"} ${TRANSPORT:+--transport "${TRANSPORT}"} ${TIMEOUT:+--timeout "${TIMEOUT}"} || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh TEE_Memory_Reclaim_Validation.res
