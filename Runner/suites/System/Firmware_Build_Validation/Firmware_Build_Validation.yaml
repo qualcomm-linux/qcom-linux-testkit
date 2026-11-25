@@ -1,0 +1,16 @@
+metadata:
+  name: Firmware_Build_Validation
+  format: Lava-Test Test Definition 1.0
+  description: Validate the firmware-published BIOS version against the deployment contract.
+  os:
+    - linux
+  scope:
+    - functional
+params:
+  EXPECTED_VERSION: null
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/System/Firmware_Build_Validation
+    - ./run.sh ${EXPECTED_VERSION:+--expected-version "${EXPECTED_VERSION}"} || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh Firmware_Build_Validation.res
