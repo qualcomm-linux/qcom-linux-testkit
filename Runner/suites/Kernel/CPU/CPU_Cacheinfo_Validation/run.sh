@@ -81,9 +81,17 @@ if [ "$k_ev_rc" -eq 1 ]; then
 fi
 
 found=0
+checked_cpus=""
 for cpu_name in $(kernel_list_all_cpus); do
     cdir="/sys/devices/system/cpu/$cpu_name/cache"
-    [ -d "$cdir" ] || continue
+    cpu_id="${cpu_name#cpu}"
+    if [ ! -d "$cdir" ]; then
+        if cpu_in_list "$cpu_id" "$(read_first_line /sys/devices/system/cpu/online)"; then
+            test_result_record "SKIP" "$cpu_name is online but has no cache directory"
+        fi
+        continue
+    fi
+    checked_cpus="${checked_cpus}${cpu_name} "
     for index in "$cdir"/index[0-9]*; do
         [ -d "$index" ] || continue
         found=$((found + 1))
@@ -92,15 +100,20 @@ for cpu_name in $(kernel_list_all_cpus); do
         if [ -r "$index/size" ]; then
             kernel_record_attribute "$(basename "$index") size" "$index/size"
         fi
-        if [ -r "$index/shared_cpu_list" ]; then
-            kernel_record_attribute "$(basename "$index") shared_cpu_list" "$index/shared_cpu_list"
+        if [ -e "$index/shared_cpu_list" ]; then
+            share="$(kernel_attribute_value "$index/shared_cpu_list")" || share=""
+            if kernel_cpu_list_valid "$share"; then
+                test_result_record "PASS" "$index/shared_cpu_list=$share"
+            else
+                test_result_record "FAIL" "$index/shared_cpu_list is not a CPU list ('${share:-unreadable}')"
+            fi
         fi
         if [ -r "$index/coherency_line_size" ]; then
             kernel_record_attribute "$(basename "$index") coherency_line_size" "$index/coherency_line_size" 1
         fi
     done
-    [ "$found" -gt 0 ] && break
 done
+log_info "cacheinfo checked CPUs: ${checked_cpus:-none}"
 
 if [ "$found" -eq 0 ]; then
     test_result_record "SKIP" "CPU cacheinfo sysfs is not present"

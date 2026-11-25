@@ -98,50 +98,53 @@ else
 fi
 
 sampled=0
-for cpu_name in $(kernel_list_all_cpus); do
+idle_sample="$KERNEL_EVIDENCE_DIR/idle-usage.txt"
+: > "$idle_sample"
+for cpu_id in $(get_online_cpus); do
+    cpu_name="cpu${cpu_id}"
     sdir="/sys/devices/system/cpu/$cpu_name/cpuidle"
     [ -d "$sdir" ] || continue
     for state in "$sdir"/state[0-9]*; do
         [ -d "$state" ] || continue
         sampled=$((sampled + 1))
         kernel_record_attribute "$cpu_name $(basename "$state") name" "$state/name"
-        kernel_record_attribute "$cpu_name $(basename "$state") usage" "$state/usage" 1
-        if [ -r "$state/time" ]; then
-            kernel_record_attribute "$cpu_name $(basename "$state") time" "$state/time" 1
+        if [ -e "$state/disable" ]; then
+            idle_disable="$(kernel_attribute_value "$state/disable")" || idle_disable=""
+            if [ "$idle_disable" != "0" ] && [ "$idle_disable" != "1" ]; then
+                test_result_record "FAIL" "$state/disable is not 0 or 1 ('${idle_disable:-unreadable}')"
+                continue
+            fi
+            test_result_record "PASS" "$state/disable=$idle_disable"
+            [ "$idle_disable" = "0" ] || continue
         fi
-        if [ -r "$state/disable" ]; then
-            kernel_record_attribute "$cpu_name $(basename "$state") disable" "$state/disable" 1
+        idle_usage="$(kernel_attribute_value "$state/usage")" || idle_usage=""
+        if ! is_unsigned_number "$idle_usage"; then
+            test_result_record "FAIL" "$state/usage is not an unsigned counter ('${idle_usage:-unreadable}')"
+            continue
         fi
-        break
+        printf '%s %s\n' "$state/usage" "$idle_usage" >> "$idle_sample"
     done
-    [ "$sampled" -ge 1 ] && break
 done
 
 if [ "$sampled" -eq 0 ]; then
-    test_result_record "SKIP" "no per-CPU cpuidle states found"
+    test_result_record "SKIP" "no per-CPU cpuidle states found on online CPUs"
     test_result_finish "SKIP"
 fi
 
-# Pick first idle state's usage and confirm it can stay readable across a short idle window.
-state0=""
-for cpu_name in $(kernel_list_all_cpus); do
-    cand="/sys/devices/system/cpu/$cpu_name/cpuidle/state0/usage"
-    if [ -r "$cand" ]; then
-        state0="$cand"
-        break
-    fi
-done
-if [ -n "$state0" ]; then
-    u1="$(kernel_attribute_value "$state0")"
+if [ -s "$idle_sample" ]; then
     sleep 1
-    u2="$(kernel_attribute_value "$state0")"
-    if is_unsigned_number "$u1" && is_unsigned_number "$u2"; then
-        if [ "$u2" -ge "$u1" ]; then
-            test_result_record "PASS" "cpuidle usage is monotonic ($u1 -> $u2)"
+    while read -r idle_path idle_before; do
+        idle_after="$(kernel_attribute_value "$idle_path")" || idle_after=""
+        if ! is_unsigned_number "$idle_before" || ! is_unsigned_number "$idle_after"; then
+            test_result_record "FAIL" "$idle_path counter is invalid ('${idle_before:-unreadable}' -> '${idle_after:-unreadable}')"
+        elif [ "$idle_after" -lt "$idle_before" ]; then
+            test_result_record "FAIL" "$idle_path went backwards ($idle_before -> $idle_after)"
         else
-            test_result_record "FAIL" "cpuidle usage went backwards ($u1 -> $u2)"
+            test_result_record "PASS" "$idle_path is monotonic ($idle_before -> $idle_after); equality only means this state was not entered"
         fi
-    fi
+    done < "$idle_sample"
+else
+    test_result_record "SKIP" "online CPUs expose no enabled cpuidle usage counters"
 fi
 
 test_result_finish

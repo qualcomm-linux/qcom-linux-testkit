@@ -85,31 +85,58 @@ if [ ! -r /proc/cpuinfo ]; then
     test_result_finish "FAIL"
 fi
 
-online_count="$(get_online_cpus | kernel_count_lines)"
-proc_count="$(grep -cE '^processor[[:space:]]*:' /proc/cpuinfo || true)"
-if [ -z "$proc_count" ] || [ "$proc_count" -eq 0 ]; then
-    proc_count="$(grep -cE '^processor' /proc/cpuinfo || true)"
-fi
-log_info "online_cpus=$online_count cpuinfo_processors=$proc_count"
+cpuinfo_ids() {
+    awk '
+        /^processor[[:space:]]*:/ { print $NF }
+    ' /proc/cpuinfo | sort -n
+}
 
-if is_unsigned_number "$proc_count" && [ "$proc_count" -ge 1 ]; then
-    test_result_record "PASS" "/proc/cpuinfo lists $proc_count processor entries"
-    if [ "$proc_count" -eq "$online_count" ]; then
-        test_result_record "PASS" "cpuinfo processor count matches online CPU count"
-    else
-        test_result_record "SKIP" "cpuinfo count ($proc_count) != online ($online_count); possible offline CPUs omitted"
-    fi
-else
+cpuinfo_arm_ok() {
+    awk '
+        function flush() {
+            if (proc == "") return
+            if (imp == 0 || part == 0 || feat == 0) bad = 1
+        }
+        BEGIN { bad = 0; proc = "" }
+        /^$/ { flush(); proc = ""; imp = 0; part = 0; feat = 0; next }
+        /^processor[[:space:]]*:/ { proc = $NF }
+        /^CPU implementer[[:space:]]*:/ { imp = 1 }
+        /^CPU part[[:space:]]*:/ { part = 1 }
+        /^Features[[:space:]]*:/ { feat = 1 }
+        END { flush(); exit bad }
+    ' /proc/cpuinfo
+}
+
+online_ids="$(get_online_cpus | sort -n | awk 'NF { printf "%s%s", sep, $0; sep="," }')"
+proc_ids="$(cpuinfo_ids | awk 'NF { printf "%s%s", sep, $0; sep="," }')"
+log_info "online_cpus=$online_ids cpuinfo_processors=$proc_ids"
+
+if [ -z "$proc_ids" ]; then
     test_result_record "FAIL" "/proc/cpuinfo has no processor entries"
+else
+    test_result_record "PASS" "/proc/cpuinfo lists processors $proc_ids"
+    if [ "$proc_ids" != "$online_ids" ]; then
+        online_before="$online_ids"
+        sleep 1
+        online_ids="$(get_online_cpus | sort -n | awk 'NF { printf "%s%s", sep, $0; sep="," }')"
+        proc_ids="$(cpuinfo_ids | awk 'NF { printf "%s%s", sep, $0; sep="," }')"
+    fi
+    if [ "$proc_ids" = "$online_ids" ]; then
+        test_result_record "PASS" "cpuinfo processor ids match online CPUs ($online_ids)"
+    elif [ "$online_ids" != "${online_before:-$online_ids}" ]; then
+        test_result_record "SKIP" "online CPU set changed while reading cpuinfo"
+    else
+        test_result_record "FAIL" "cpuinfo processors ($proc_ids) do not match online CPUs ($online_ids)"
+    fi
 fi
 
 arch="$(uname -m 2>/dev/null || true)"
 case "$arch" in
     aarch64|arm64)
-        if grep -Eq 'CPU implementer|CPU part|BogoMIPS|Features' /proc/cpuinfo; then
-            test_result_record "PASS" "aarch64 cpuinfo fields are present"
+        if cpuinfo_arm_ok; then
+            test_result_record "PASS" "each aarch64 processor has implementer, part, and Features"
         else
-            test_result_record "FAIL" "aarch64 cpuinfo is missing implementer/part/features"
+            test_result_record "FAIL" "an aarch64 processor record is missing implementer, part, or Features"
         fi
         ;;
     *)

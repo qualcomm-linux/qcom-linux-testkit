@@ -1,6 +1,6 @@
 # CPU_Offline_Safety_Validation
 
-Validate CPU hotplug sysfs safety: boot CPU remains online and online files exist. Does not offline CPUs (see hotplug suite).
+Read CPU hotplug sysfs without changing online state. An initially offline CPU0 is accepted. This suite does not write `cpu*/online` (see the hotplug suite for transitions).
 
 This suite discovers kernel interfaces at runtime. It does not hard-code SoC
 names, fixed CPU lists, or board maps. Missing optional ABI is `SKIP`. A
@@ -11,7 +11,7 @@ broken required interface on an applicable device is `FAIL`.
 - Image-provided utilities: `cat grep sed awk tr`, plus `mkdir`, `mktemp`, and `date`
   for the shared evidence directory
 - POSIX `/bin/sh` (BusyBox-capable)
-- Root is required only to probe whether `cpu0/online` rejects offline. Non-root records that the node is not writable.
+- Read-only. The suite does not offline a CPU or write `cpu0/online` back online.
 - Optional `/proc/config.gz` for Kconfig cross-checks; absence is `SKIP`,
   not `FAIL`
 
@@ -47,13 +47,12 @@ with no extra parameters.
 Verdicts:
 
 - `PASS`: applicable checks ran and met their criteria
-- `FAIL`: an applicable interface was inconsistent, unreadable when required,
-  or a selected write path failed
+- `FAIL`: an applicable interface was inconsistent or unreadable when required
 - `SKIP`: the capability, optional debug ABI, or image-provided tool is absent
 
 ## Cleanup
 
-If a write of `0` to `cpu0/online` is unexpectedly accepted, the suite immediately writes `1` to restore it.
+The suite only reads CPU online files and does not restore a CPU it never offlined.
 
 Generated `.res` files and `results/` trees are local artifacts and are not
 part of the contribution.

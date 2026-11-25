@@ -81,6 +81,11 @@ if [ "$k_ev_rc" -eq 1 ]; then
 fi
 
 cpu_count=0
+possible="$(read_first_line /sys/devices/system/cpu/possible)" || possible=""
+if ! kernel_cpu_list_valid "$possible"; then
+    test_result_record "FAIL" "cpu possible mask is not a valid CPU list ('${possible:-unreadable}')"
+    test_result_finish "FAIL"
+fi
 for cpu_name in $(kernel_list_all_cpus); do
     topo="/sys/devices/system/cpu/$cpu_name/topology"
     if [ ! -d "$topo" ]; then
@@ -88,27 +93,37 @@ for cpu_name in $(kernel_list_all_cpus); do
         continue
     fi
     cpu_count=$((cpu_count + 1))
-    for node in physical_package_id core_id thread_siblings core_siblings; do
-        if [ -r "$topo/$node" ]; then
-            kernel_record_attribute "$cpu_name $node" "$topo/$node"
+    for node in physical_package_id core_id; do
+        if [ -e "$topo/$node" ]; then
+            kernel_record_attribute "$cpu_name $node" "$topo/$node" signed
         else
-            # Some kernels use _list variants only.
-            if [ -r "$topo/${node}_list" ]; then
-                kernel_record_attribute "$cpu_name ${node}_list" "$topo/${node}_list"
-            else
-                test_result_record "SKIP" "$topo/$node not exported"
-            fi
+            test_result_record "SKIP" "$topo/$node not exported"
         fi
     done
-    if [ -e "$topo/thread_siblings_list" ]; then
-        sib="$(kernel_attribute_value "$topo/thread_siblings_list")" || sib=""
-        cpu_idx="${cpu_name#cpu}"
-        if kernel_cpu_list_valid "$sib" && cpu_in_list "$cpu_idx" "$sib"; then
-            test_result_record "PASS" "$cpu_name is listed in thread_siblings_list ($sib)"
-        else
-            test_result_record "FAIL" "$cpu_name missing from thread_siblings_list ($sib)"
+    for node in thread_siblings_list core_siblings_list package_cpus_list; do
+        if [ ! -e "$topo/$node" ]; then
+            continue
         fi
-    fi
+        sib="$(kernel_attribute_value "$topo/$node")" || sib=""
+        if ! kernel_cpu_list_valid "$sib"; then
+            test_result_record "FAIL" "$cpu_name $node is not a CPU list ('${sib:-unreadable}')"
+            continue
+        fi
+        sib_bad=""
+        for sib_cpu in $(expand_cpu_list "$sib"); do
+            if ! cpu_in_list "$sib_cpu" "$possible"; then
+                sib_bad="${sib_bad}${sib_cpu} "
+            fi
+        done
+        cpu_idx="${cpu_name#cpu}"
+        if [ -n "$sib_bad" ]; then
+            test_result_record "FAIL" "$cpu_name $node ($sib) contains CPUs outside possible $possible: $sib_bad"
+        elif [ "$node" = "thread_siblings_list" ] && ! cpu_in_list "$cpu_idx" "$sib"; then
+            test_result_record "FAIL" "$cpu_name is missing from thread_siblings_list ($sib)"
+        else
+            test_result_record "PASS" "$cpu_name $node ($sib) is inside possible CPUs $possible"
+        fi
+    done
 done
 
 if [ "$cpu_count" -eq 0 ]; then
