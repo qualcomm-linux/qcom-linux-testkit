@@ -1,0 +1,18 @@
+metadata:
+  name: GPU_Pixel_Readback_Validation
+  format: Lava-Test Test Definition 1.0
+  description: Validate hardware GPU rendering through expected-pixel readback without a display.
+  os:
+    - linux
+  scope:
+    - functional
+params:
+  BINARY: null
+  EXPECTED_NODE: null
+  TIMEOUT: "120"
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Multimedia/Graphics/GPU_Pixel_Readback_Validation
+    - ./run.sh ${BINARY:+--binary "${BINARY}"} ${EXPECTED_NODE:+--expected-node "${EXPECTED_NODE}"} ${TIMEOUT:+--timeout "${TIMEOUT}"} || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh GPU_Pixel_Readback_Validation.res
