@@ -1,0 +1,16 @@
+metadata:
+  name: ufs-mcq-mode-validation
+  format: "Lava-Test Test Definition 1.0"
+  description: "Verify that UFS Multi-Circular Queue mode is enabled on UFS 4.0 or later hosts."
+  os:
+    - linux
+  scope:
+    - functional
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/Storage/ufs_mcq_mode_validation
+    - ./run.sh
+    - $REPO_PATH/Runner/utils/send-to-lava.sh ufs_mcq_mode_validation.res
+
