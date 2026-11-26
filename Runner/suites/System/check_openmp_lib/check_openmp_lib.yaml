@@ -1,0 +1,17 @@
+metadata:
+  name: check_openmp_lib
+  format: "Lava-Test Test Definition 1.0"
+  description: "Check for an OpenMP libgomp runtime library under /usr/lib"
+  maintainer:
+    - "Qualcomm Linux Testkit"
+
+params: {}
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd "$REPO_PATH/Runner/suites/System/check_openmp_lib"
+    - ./run.sh || true
+    - grep -Eq '^check_openmp_lib (PASS|FAIL|SKIP)$' check_openmp_lib.res
+    - cat check_openmp_lib.res
+    - '"$REPO_PATH/Runner/utils/send-to-lava.sh" check_openmp_lib.res --expected-testcase-id check_openmp_lib'
