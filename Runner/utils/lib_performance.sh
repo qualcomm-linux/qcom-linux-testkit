@@ -27,6 +27,249 @@ esc() {
     printf '%s' "$1" | sed 's/\\/\\\\/g;s/"/\\"/g'
 }
 
+# perf_uint_in_range VALUE MIN MAX
+# Validate decimal CLI limits before shell arithmetic, rejecting octal forms.
+perf_uint_in_range() {
+    case "$1" in
+        ''|*[!0-9]*|0[0-9]*)
+            return 1
+            ;;
+    esac
+    awk -v value="$1" -v minimum="$2" -v maximum="$3" \
+        'BEGIN { exit !(value >= minimum && value <= maximum) }'
+}
+
+# perf_allowed_cpus [REQUESTED-LIST]
+# Print allowed online CPU IDs as CSV. Reject invalid or unavailable requests.
+perf_allowed_cpus() (
+    allowed=$(awk '/^Cpus_allowed_list:/ {print $2}' /proc/self/status)
+    [ -n "$allowed" ] || return 1
+    online=$(get_online_cpus)
+    [ -n "$online" ] || return 1
+    requested=${1:-$allowed}
+    printf '%s\n' "$requested" | awk -F, '
+        {
+            for (i=1; i<=NF; i++) {
+                if ($i !~ /^[0-9]+(-[0-9]+)?$/) exit 1
+                n=split($i, bounds, "-")
+                if (bounds[1]+0 > 1048575) exit 1
+                if (n==2 && (bounds[2]+0 < bounds[1]+0 || bounds[2]+0 > 1048575)) exit 1
+            }
+        }' || return 1
+    selected=""
+    for index in $(expand_cpu_list "$requested" | sort -nu); do
+        if ! cpu_in_list "$index" "$allowed" ||
+           ! printf '%s\n' "$online" | grep -qx "$index"; then
+            [ -z "${1:-}" ] && continue
+            printf 'Requested CPU %s is outside the allowed online set\n' "$index" >&2
+            return 1
+        fi
+        selected="${selected}${selected:+,}$index"
+    done
+    [ -n "$selected" ] || return 1
+    printf '%s\n' "$selected"
+)
+
+# perf_available_memory_kb
+# Print MemAvailable bounded by remaining memory in the current cgroup and its
+# mounted ancestors. Read both v1 and v2 without changing controller state.
+perf_available_memory_kb() (
+    available=$(awk '
+        /^MemAvailable:/ {available=$2; found=1}
+        /^MemFree:/ {free=$2}
+        END {if (found) print available; else if (free != "") print free}
+    ' /proc/meminfo)
+    perf_uint_in_range "$available" 0 9007199254740991 || return 1
+    locations=$(awk -F: '
+        $1=="0" && $2=="" {print "v2 " $3}
+        $2 ~ /(^|,)memory(,|$)/ {print "v1 " $3}
+    ' /proc/self/cgroup) || return 1
+    while read -r version relative; do
+        [ -n "$version" ] || continue
+        mount=$(awk -v version="$version" '
+            {
+                split($0, halves, " - ")
+                split(halves[2], tail, " ")
+                if ((version=="v2" && tail[1]=="cgroup2") ||
+                    (version=="v1" && tail[1]=="cgroup" && tail[3] ~ /(^|,)memory(,|$)/)) {
+                    print $4 " " $5
+                    exit
+                }
+            }' /proc/self/mountinfo)
+        [ -n "$mount" ] || continue
+        root=${mount%% *}
+        directory=${mount#* }
+        root=$(printf '%b' "$root")
+        directory=$(printf '%b' "$directory")
+        boundary=$directory
+        if [ "$root" != / ]; then
+            case "$relative" in
+                "$root")
+                    relative=/
+                    ;;
+                "$root"/*)
+                    relative=${relative#"$root"}
+                    ;;
+                *)
+                    return 1
+                    ;;
+            esac
+        fi
+        case "$relative" in
+            *'/../'*|*/..|*'/./'*)
+                return 1
+                ;;
+        esac
+        directory=${directory}${relative%/}
+        [ -d "$directory" ] || return 1
+        while :; do
+            if [ "$version" = v2 ]; then
+                limit_file=$directory/memory.max
+                usage_file=$directory/memory.current
+            else
+                limit_file=$directory/memory.limit_in_bytes
+                usage_file=$directory/memory.usage_in_bytes
+            fi
+            if [ -e "$limit_file" ]; then
+                limit=$(cat "$limit_file") || return 1
+                if [ "$limit" != max ]; then
+                    usage=$(cat "$usage_file") || return 1
+                    available=$(awk -v available="$available" -v limit="$limit" -v usage="$usage" '
+                        BEGIN {
+                            if (limit !~ /^[0-9]+$/ || usage !~ /^[0-9]+$/) exit 1
+                            remaining=int((limit-usage)/1024)
+                            if (remaining<0) remaining=0
+                            printf "%.0f\n", (remaining<available ? remaining : available)
+                        }') || return 1
+                fi
+            fi
+            [ "$directory" = "$boundary" ] && break
+            directory=${directory%/*}
+        done
+    done <<EOF
+$locations
+EOF
+    printf '%s\n' "$available"
+)
+
+# perf_memory_budget_mib AVAILABLE-KB PERCENT HEADROOM-MIB [CAP-MIB]
+# Print a total positive workload budget, never raising a small result to a
+# minimum. Return 1 when no MiB remains. Callers enforce tool-specific minima.
+perf_memory_budget_mib() {
+    awk -v available="$1" -v percent="$2" -v headroom="$3" -v cap="${4:-}" '
+        BEGIN {
+            budget=int(available*percent/100/1024)
+            ceiling=int(available/1024)-headroom
+            if (budget>ceiling) budget=ceiling
+            if (cap!="" && budget>cap) budget=cap
+            if (budget<1) exit 1
+            printf "%.0f\n", budget
+        }'
+}
+
+# perf_stress_scratch [DIRECTORY]
+# Print an existing writable disk-backed directory. Do not select tmpfs or an
+# overlay of unknown backing, create directories or modify unrelated files.
+perf_stress_scratch() (
+    if [ -n "${1:-}" ]; then
+        candidate=$(CDPATH='' cd "$1" && pwd -P) || return 1
+        [ -w "$candidate" ] || return 1
+        case "$(perf_path_fstype "$candidate")" in
+            ext2|ext3|ext4|xfs|btrfs|f2fs|vfat|exfat|ubifs)
+                printf '%s\n' "$candidate"
+                return 0
+                ;;
+        esac
+        return 1
+    fi
+    selected=""
+    selected_free=0
+    while read -r point type options; do
+        case "$type" in
+            ext2|ext3|ext4|xfs|btrfs|f2fs|vfat|exfat|ubifs) ;;
+            *)
+                continue
+                ;;
+        esac
+        case ",$options," in
+            *,ro,*)
+                continue
+                ;;
+        esac
+        point=$(printf '%b' "$point")
+        if [ ! -d "$point" ] || [ ! -w "$point" ]; then
+            continue
+        fi
+        free=$(df -Pk "$point" | awk 'NR>1 && $4 ~ /^[0-9]+$/ {print $4; exit}')
+        if perf_uint_in_range "$free" 1 9007199254740991 && [ "$free" -gt "$selected_free" ]; then
+            selected=$point
+            selected_free=$free
+        fi
+    done <<EOF
+$(awk '{print $2, $3, $4}' /proc/mounts)
+EOF
+    [ -n "$selected" ] || return 1
+    printf '%s\n' "$selected"
+)
+
+# perf_disk_budget_bytes DIRECTORY PERCENT [CAP-MIB]
+# Print a scratch-file budget with free-space headroom, independent of workers.
+perf_disk_budget_bytes() {
+    df -Pk "$1" | awk -v percent="$2" -v cap="${3:-}" '
+        NR>1 && $4 ~ /^[0-9]+$/ {
+            free=$4*1024
+            reserve=free/10
+            if (reserve<67108864) reserve=67108864
+            budget=int(free*percent/100)
+            if (budget>free-reserve) budget=free-reserve
+            if (cap!="" && budget>cap*1048576) budget=cap*1048576
+            if (budget>=1048576) {printf "%.0f\n", budget; found=1}
+        }
+        END {if (!found) exit 1}'
+}
+
+# perf_run_stress_load DEADLINE DIRECTORY LOG COMMAND [ARG...]
+# Combine the existing live-log/heartbeat runner with managed process-group
+# cancellation. Callers retain the shared timeout cleanup callback ownership.
+perf_run_stress_load() {
+    prsl_deadline=$1
+    prsl_directory=$2
+    prsl_log=$3
+    shift 3
+    # shellcheck disable=SC2016  # The managed child expands its own arguments.
+    run_with_managed_timeout "$prsl_deadline" "$prsl_directory" stress \
+        sh -c '
+            . "$1"
+            . "$2"
+            shift 2
+            perf_run_cmd_with_progress "$@"
+        ' sh "$TOOLS/functestlib.sh" "$TOOLS/lib_performance.sh" \
+        "$prsl_directory" "$prsl_log" 30 "stress load" -- "$@"
+}
+
+# perf_stress_kernel_errors DIRECTORY START-UPTIME
+# Capture through the shared scanner and retain only timestamped load-period
+# faults. Return 0 for new faults, 1 for none, 2 for unavailable evidence.
+perf_stress_kernel_errors() {
+    scan_dmesg_errors "$1" '.*' '^$' >/dev/null 2>&1 || true
+    [ "${DMESG_ACCESS_STATUS:-}" = available ] || return 2
+    awk -v start="$2" '
+        /^\[[ ]*[0-9]+\.[0-9]+\]/ {
+            timestamped=1
+            stamp=$0
+            sub(/^\[[ ]*/, "", stamp)
+            sub(/\].*/, "", stamp)
+            selected=(stamp+0 >= start+0)
+        }
+        selected {print}
+        END {if (!timestamped) exit 2}
+    ' "$1/dmesg_snapshot.log" >"$1/dmesg_load.log" || return 2
+    kernel_log_filter_faults "$1/dmesg_load.log" '.*' '^$' >"$1/dmesg_errors.log"
+    grep -Ei 'soft lockup|hard LOCKUP|blocked for more than|rcu.*stall|Out of memory:|oom-kill:|invoked oom-killer|I/O error|EXT4-fs error|BTRFS.*(error|corrupt)|XFS.*[Cc]orrupt' \
+        "$1/dmesg_load.log" >>"$1/dmesg_errors.log" || true
+    [ -s "$1/dmesg_errors.log" ]
+}
+
 # ---------------------------------------------------------------------------
 # CPU governor helpers
 # ---------------------------------------------------------------------------
