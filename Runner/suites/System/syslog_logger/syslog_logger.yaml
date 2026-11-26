@@ -1,0 +1,17 @@
+metadata:
+  name: syslog_logger
+  format: "Lava-Test Test Definition 1.0"
+  description: "Verify that a logger message appears in /var/log/messages"
+  maintainer:
+    - "Qualcomm Linux Testkit"
+
+params: {}
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd "$REPO_PATH/Runner/suites/System/syslog_logger"
+    - ./run.sh || true
+    - grep -Eq '^syslog_logger (PASS|FAIL|SKIP)$' syslog_logger.res
+    - cat syslog_logger.res
+    - '"$REPO_PATH/Runner/utils/send-to-lava.sh" syslog_logger.res --expected-testcase-id syslog_logger'
