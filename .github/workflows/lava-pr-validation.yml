@@ -145,7 +145,7 @@ jobs:
         run: python -m pip install -r .github/ci/lava-pr-requirements.txt
 
       - name: Download resolved PR context
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: lava-context-${{ github.run_id }}-${{ needs.request.outputs.context_attempt }}
           path: lava-output
