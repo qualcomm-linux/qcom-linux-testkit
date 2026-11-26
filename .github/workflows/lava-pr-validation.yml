@@ -56,10 +56,11 @@ permissions:
   contents: read
   actions: read
 
-# Keep one controller active across manual invocations and cleanup.
+# Different PRs may validate together. Keep submissions for one PR serialized.
 concurrency:
-  group: testkit-lava-foundries
+  group: testkit-lava-foundries-pr-${{ inputs.pr }}
   cancel-in-progress: false
+  queue: max
 
 jobs:
   request:
@@ -74,6 +75,7 @@ jobs:
       sha: ${{ steps.context.outputs.sha }}
       context_attempt: ${{ steps.context.outputs.context_attempt }}
       include_meta_qcom: ${{ steps.context.outputs.include_meta_qcom }}
+      validation_slot: ${{ steps.context.outputs.validation_slot }}
     steps:
       - name: Checkout trusted controller
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -110,6 +112,12 @@ jobs:
     if: github.repository == 'qualcomm-linux/qcom-linux-testkit' && github.ref == 'refs/heads/main'
     environment: lava-foundries
     runs-on: ubuntu-latest
+    # Three native queues cap validation jobs across manual and approval runs.
+    # Pending jobs wait without occupying a hosted runner or replacing each other.
+    concurrency:
+      group: testkit-lava-foundries-slot-${{ needs.request.outputs.validation_slot }}
+      cancel-in-progress: false
+      queue: max
     # Hosted jobs are limited to six hours. The five-hour request deadline
     # leaves time for preparation, cancellation, collection and artifact upload.
     timeout-minutes: 350

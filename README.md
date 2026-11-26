@@ -165,6 +165,17 @@ automatically. Uncheck `include_meta_qcom` to omit baseline tests. Advanced
 `selections` JSON remains available for parameters, tags or fresh-boot tests,
 but a suite must not appear in both inputs.
 
+Approval by a repository writer or maintainer automatically requests one
+PR-only validation per approved commit, using the latest `meta-qcom-main`
+base multimedia images and enabled targets. Stale approvals and changes with
+no suite or configured association do not submit jobs. Shared-only changes,
+overlay images and tests needing explicit parameters use the manual workflow.
+Up to three validation jobs run concurrently on GitHub-hosted `ubuntu-latest`
+runners. Requests enter three queues in round-robin order, with up to 100 pending
+jobs per queue. A request waits for its assigned queue, even if another queue is
+idle. Runs for the same PR remain serialized. Short request, reporting and
+recovery jobs run separately, and LAVA schedules the selected board jobs.
+
 Other CI systems can invoke the same suites and collect their result files
 and artifacts.
 
