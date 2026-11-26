@@ -48,6 +48,8 @@ test_result_init "$LAVA_CASE_ID" "$RES_FILE" || exit 1
 TEST_UNIT_ID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null)
 [ -n "$TEST_UNIT_ID" ] || TEST_UNIT_ID=$$
 TEST_UNIT="qcom-linux-testkit-lifecycle-${TEST_UNIT_ID}.service"
+UNIT_FILE_DIR=/run/systemd/system
+UNIT_FILE="$UNIT_FILE_DIR/$TEST_UNIT"
 SERVICE_CREATED=0
 # shellcheck disable=SC2034  # test_result_finish invokes this named callback.
 TEST_RESULT_CLEANUP=cleanup_test_service
@@ -137,30 +139,48 @@ wait_for_unit_state() {
 cleanup_test_service() {
     [ "$SERVICE_CREATED" -eq 1 ] || return 0
 
-    log_info "Stopping test-owned unit $TEST_UNIT during cleanup"
-    cleanup_log="$SCRIPT_DIR/${TEST_NAME}.cleanup.log"
+    cleanup_status=0
+    if query_unit_state "$TEST_UNIT"; then
+        case "$UNIT_ACTIVE_STATE" in
+            active|activating|deactivating)
+                log_info "Stopping test-owned unit $TEST_UNIT during cleanup"
+                cleanup_log="$SCRIPT_DIR/${TEST_NAME}.cleanup.log"
+                if ! run_bounded_command \
+                    "systemctl stop $TEST_UNIT (cleanup)" \
+                    "$cleanup_log" \
+                    systemctl stop "$TEST_UNIT"; then
+                    cleanup_status=1
+                elif ! wait_for_unit_state "$TEST_UNIT" stopped; then
+                    log_error "$TEST_UNIT did not stop during cleanup"
+                    cleanup_status=1
+                fi
+                ;;
+        esac
+    else
+        cleanup_status=1
+    fi
+
+    if ! rm -f "$UNIT_FILE"; then
+        log_error "Could not remove test unit file $UNIT_FILE"
+        cleanup_status=1
+    fi
+
+    reload_log="$SCRIPT_DIR/${TEST_NAME}.cleanup-daemon-reload.log"
     if ! run_bounded_command \
-        "systemctl stop $TEST_UNIT (cleanup)" \
-        "$cleanup_log" \
-        systemctl stop "$TEST_UNIT"; then
-        return 1
+        "systemctl daemon-reload (cleanup)" \
+        "$reload_log" \
+        systemctl daemon-reload; then
+        cleanup_status=1
     fi
 
-    if ! wait_for_unit_state "$TEST_UNIT" stopped; then
-        log_error "$TEST_UNIT did not stop during cleanup"
-        return 1
+    if [ "$cleanup_status" -eq 0 ]; then
+        SERVICE_CREATED=0
     fi
-
-    SERVICE_CREATED=0
-    return 0
+    return "$cleanup_status"
 }
 
 if ! command -v systemctl >/dev/null 2>&1; then
     fail_test "systemctl command not found on the DUT"
-fi
-
-if ! command -v systemd-run >/dev/null 2>&1; then
-    fail_test "systemd-run command not found on the DUT"
 fi
 
 SLEEP_COMMAND=$(command -v sleep)
@@ -169,15 +189,40 @@ if [ -z "$SLEEP_COMMAND" ]; then
 fi
 
 log_info "Starting $TEST_NAME"
-log_info "Testing bounded stop/start behavior for an isolated transient systemd service"
+log_info "Testing bounded stop/start behavior for an isolated temporary systemd service"
 
-service_log="$SCRIPT_DIR/${TEST_NAME}.systemd-run.log"
+if [ ! -d "$UNIT_FILE_DIR" ]; then
+    fail_test "systemd unit directory is missing: $UNIT_FILE_DIR"
+fi
+
 SERVICE_CREATED=1
+if ! cat > "$UNIT_FILE" <<EOF
+[Unit]
+Description=Temporary qcom-linux-testkit service lifecycle test
+
+[Service]
+Type=simple
+ExecStart=$SLEEP_COMMAND 300
+TimeoutStopSec=5
+EOF
+then
+    fail_test "Could not create test-owned unit file $UNIT_FILE"
+fi
+
+reload_log="$SCRIPT_DIR/${TEST_NAME}.daemon-reload.log"
 if ! run_bounded_command \
-    "systemd-run $TEST_UNIT" \
+    "systemctl daemon-reload" \
+    "$reload_log" \
+    systemctl daemon-reload; then
+    fail_test "Could not load the test-owned unit $TEST_UNIT"
+fi
+
+service_log="$SCRIPT_DIR/${TEST_NAME}.start-initial.log"
+if ! run_bounded_command \
+    "systemctl start $TEST_UNIT" \
     "$service_log" \
-    systemd-run --unit="$TEST_UNIT" --property=Type=simple "$SLEEP_COMMAND" 300; then
-    fail_test "Could not create the test-owned transient service $TEST_UNIT"
+    systemctl start "$TEST_UNIT"; then
+    fail_test "Could not start the test-owned service $TEST_UNIT"
 fi
 
 if ! wait_for_unit_state "$TEST_UNIT" active; then
