@@ -39,7 +39,9 @@ audio playback and recording, camera, graphics, video, and sensors.
 Browse [Runner/suites](Runner/suites) or the
 [live test inventory](https://qualcomm-linux.github.io/qcom-linux-testkit/)
 for the available tests. The inventory is generated from the repository's
-`main` branch.
+`main` branch. It opens with **Test definitions (YAML)**, showing each configuration,
+its parameter defaults and launch steps. Switch to **Suites (run.sh)** to see the runners.
+These counts describe available suites and definitions, not executed testcases.
 
 ## Prepare the target
 
