@@ -1,0 +1,44 @@
+# Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+# SPDX-License-Identifier: BSD-3-Clause
+
+metadata:
+  name: Stress-ng_Mixed
+  format: Lava-Test Test Definition 1.0
+  description: Concurrent CPU, memory and disk-backed file stress
+  os:
+  - linux
+  scope:
+  - functional
+params:
+  WORKLOAD: mixed
+  DURATION: 300
+  REPEAT: 1
+  MEM_PERCENT: 15
+  MEM_HEADROOM_MB: 256
+  MEM_CAP_MB: null
+  CPU_LIST: null
+  VM_KEEP: 1
+  TIMEOUT_MARGIN: 120
+  SCRATCH_DIR: null
+  DISK_PERCENT: 5
+  DISK_CAP_MB: null
+run:
+  steps:
+  - REPO_PATH=$PWD
+  - cd Runner/suites/Kernel/Stress/Stress-ng
+  - rm -f Stress-ng.res
+  - set --
+  - set -- "$@" --sets "${WORKLOAD}"
+  - set -- "$@" --p2 "${DURATION}"
+  - set -- "$@" --repeat "${REPEAT}"
+  - set -- "$@" --mem-frac "${MEM_PERCENT}"
+  - set -- "$@" --mem-headroom-mb "${MEM_HEADROOM_MB}"
+  - if [ -n "${MEM_CAP_MB:-}" ]; then set -- "$@" --mem-cap-mb "${MEM_CAP_MB}"; fi
+  - if [ -n "${CPU_LIST:-}" ]; then set -- "$@" --cpu-list "${CPU_LIST}"; fi
+  - set -- "$@" --vm-keep "${VM_KEEP}"
+  - set -- "$@" --timeout-margin "${TIMEOUT_MARGIN}"
+  - if [ -n "${SCRATCH_DIR:-}" ]; then set -- "$@" --scratch-dir "${SCRATCH_DIR}"; fi
+  - set -- "$@" --disk-frac "${DISK_PERCENT}"
+  - if [ -n "${DISK_CAP_MB:-}" ]; then set -- "$@" --disk-cap-mb "${DISK_CAP_MB}"; fi
+  - TESTKIT_IMAGE_ONLY=1 ./run.sh "$@" || true
+  - $REPO_PATH/Runner/utils/send-to-lava.sh Stress-ng.res --strict --expected-testcase-id Stress-ng

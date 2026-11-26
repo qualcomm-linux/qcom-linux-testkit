@@ -1,26 +1,14 @@
 #!/bin/sh
 # Copyright (c) Qualcomm Technologies, Inc.
 # SPDX-License-Identifier: BSD-3-Clause#
-# stress-ng validation runner:
-# - Default: auto-sized CPU + VM/HDD sets with strict FAIL criteria
-# - Custom: pass any stress-ng CLI via --stressng-args "…" or after "--"
-# - --autosize: when user references vm/hdd/cpu without sizes, add safe values
-# - --append-defaults: add --times --metrics-brief --verify if not present
-# - --repeat N: run the chosen workload(s) N iterations
-# - --stability H: repeat chosen workload(s) for H hours (takes precedence)
-# - --dryrun / --dry-run: validate via stress-ng --dry-run (no load), PASS on 0 exit
-#
-# Uses helpers from functestlib.sh:
-# cpu_get_online_list_str, cpu_expand_list, cpu_snapshot_stat, cpu_get_active_ticks,
-# mem_bytes_from_percent, disk_bytes_from_percent_free, file_has_pattern,
-# test_finalize_result, scan_dmesg_errors, find_test_case_by_name, log_*
-
-###############################################################################
-# Source init_env + functestlib.sh
-###############################################################################
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# ---------- Repo env + helpers ----------
+SCRIPT_DIR="$(
+  cd "$(dirname "$0")" || exit 1
+  pwd
+)"
 INIT_ENV=""
 SEARCH="$SCRIPT_DIR"
+
 while [ "$SEARCH" != "/" ]; do
     if [ -f "$SEARCH/init_env" ]; then
         INIT_ENV="$SEARCH/init_env"
@@ -34,437 +22,458 @@ if [ -z "$INIT_ENV" ]; then
     exit 1
 fi
 
-if [ -z "$__INIT_ENV_LOADED" ]; then
+# Only source once (idempotent)
+# NOTE: We intentionally **do not export** any new vars. They stay local to this shell.
+if [ -z "${__INIT_ENV_LOADED:-}" ]; then
     # shellcheck disable=SC1090
     . "$INIT_ENV"
+    __INIT_ENV_LOADED=1
 fi
-# shellcheck disable=SC1090,SC1091
+
+# shellcheck disable=SC1090
+. "$INIT_ENV"
+# shellcheck disable=SC1091
 . "$TOOLS/functestlib.sh"
+# shellcheck disable=SC1091
+. "$TOOLS/lib_performance.sh"
 
 TESTNAME="Stress-ng"
-RES_FILE="./${TESTNAME}.res"
-test_path=$(find_test_case_by_name "$TESTNAME") || { echo "$TESTNAME SKIP" >"$RES_FILE"; exit 0; }
-cd "$test_path" || exit 1
-
-log_info "----------------------------------------------------------------------"
-log_info "------------------- Starting $TESTNAME Testcase ----------------------"
-
-###############################################################################
-# Defaults / CLI
-###############################################################################
+RES_FILE="$SCRIPT_DIR/${TESTNAME}.res"
+test_result_init "$TESTNAME" "$RES_FILE"
+RUN_DIR=$(test_create_run_directory "$SCRIPT_DIR/logs") ||
+    test_result_finish FAIL "Cannot create stress evidence directory"
 P1_SECS=60
 P2_SECS=60
 MEM_FRAC=15
 DISK_FRAC=5
+MEM_HEADROOM=256
+MEM_CAP=""
+DISK_CAP=""
 CPU_LIST=""
 TEMP_LIMIT=""
-SETS="cpu,vmhdd"
-STABILITY_HOURS=""
+SCRATCH_PATH=""
+SETS=cpu,vmhdd
 REPEAT=1
-STRESSNG_ARGS=""
+STABILITY_HOURS=""
 BY_CLASS=""
 AUTOSIZE=0
 APPEND_DEFAULTS=0
 DRYRUN=0
-SHOW_HELP=0
+VM_KEEP=1
+COMMAND_TIMEOUT=""
+TIMEOUT_MARGIN=120
+ARG_FILE="$RUN_DIR/arguments"
+: >"$ARG_FILE"
+SCRATCH_DIR=""
+# shellcheck disable=SC2034  # Shared timeout helper configuration.
+MANAGED_TIMEOUT_USE_SESSION=1
 
-print_usage() {
-cat <<EOF
-Usage: $0 [--p1 <sec>] [--p2 <sec>] [--mem-frac <pct>] [--disk-frac <pct>]
-          [--cpu-list <list>] [--temp-limit <degC>] [--sets <csv>]
-          [--repeat <N>] [--stability <hours>] [--by-class <csv>]
-          [--autosize] [--append-defaults] [--dryrun|--dry-run]
-          [--stressng-args "<args>"] [--help]
-          [-- <args passed verbatim to stress-ng>]
+usage() {
+    cat <<EOF
+Usage: $0 [options] [-- native stress-ng arguments]
+  --sets cpu,vmhdd|vm|io|mixed   Workloads, default cpu,vmhdd
+  --p1 SECONDS                  CPU phase, default 60
+  --p2 SECONDS                  Other phases, default 60
+  --repeat N | --stability HOURS
+  --mem-frac PERCENT            Total memory budget, default 15
+  --mem-headroom-mb MB          Reserve, default 256
+  --mem-cap-mb MB               Optional total memory cap
+  --disk-frac PERCENT           Free scratch-space budget, default 5
+  --disk-cap-mb MB              Optional scratch-space cap
+  --scratch-dir DIRECTORY       Writable disk-backed scratch location
+  --cpu-list LIST               Subset of allowed online CPUs
+  --vm-keep 0|1                 Mapping churn or reuse, default 1
+  --stressng-args STRING        Quoted argument list, no shell evaluation
+  --by-class CSV                Explicit native class selection
+  --autosize --append-defaults  Native argument defaults
+  --command-timeout SECONDS     Overall bound for each custom invocation
+  --timeout-margin SECONDS      Setup/cleanup margin, default 120
+  --temp-limit DEGREES          Requires this option in the installed tool
+  --dry-run                    Validate options without claiming load PASS
 EOF
 }
 
-# Parse CLI (support pass-through after "--")
-PASSTHRU=""
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --p1) shift; P1_SECS="$1" ;;
-    --p2) shift; P2_SECS="$1" ;;
-    --mem-frac) shift; MEM_FRAC="$1" ;;
-    --disk-frac) shift; DISK_FRAC="$1" ;;
-    --cpu-list) shift; CPU_LIST="$1" ;;
-    --temp-limit) shift; TEMP_LIMIT="$1" ;;
-    --sets) shift; SETS="$1" ;;
-    --repeat) shift; REPEAT="$1" ;;
-    --stability) shift; STABILITY_HOURS="$1" ;;
-    --by-class) shift; BY_CLASS="$1" ;;
-    --stressng-args) shift; STRESSNG_ARGS="$1" ;;
-    --autosize) AUTOSIZE=1 ;;
-    --append-defaults) APPEND_DEFAULTS=1 ;;
-    --dryrun|--dry-run) DRYRUN=1 ;;
-    --help) SHOW_HELP=1 ;;
-    --) shift; PASSTHRU="$*"; break ;;
-    *) log_error "Unknown argument: $1"; SHOW_HELP=1; shift; break ;;
-  esac
-  shift
+# parse_native_arguments STRING
+# Tokenize quotes and escapes as argument syntax without executing shell text.
+parse_native_arguments() {
+    printf '%s\n' "$1" | awk '
+        NR>1 {bad=1}
+        {
+            for (i=1; i<=length($0); i++) {
+                c=substr($0,i,1)
+                if (escaped) {word=word c; escaped=0; active=1; continue}
+                if (c=="\\" && quote!="\047") {escaped=1; active=1; continue}
+                if (quote!="") {
+                    if (c==quote) quote=""
+                    else word=word c
+                    continue
+                }
+                if (c=="\047" || c=="\042") {quote=c; active=1; continue}
+                if (c ~ /[ \t]/) {
+                    if (active) {print word; word=""; active=0}
+                } else {word=word c; active=1}
+            }
+        }
+        END {
+            if (bad || quote!="" || escaped) exit 1
+            if (active) print word
+        }' >"$ARG_FILE"
+}
+
+parse_args() {
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --help|-h)
+                usage
+                exit 0
+                ;;
+            --autosize)
+                AUTOSIZE=1
+                ;;
+            --append-defaults)
+                APPEND_DEFAULTS=1
+                ;;
+            --dryrun|--dry-run)
+                DRYRUN=1
+                ;;
+            --)
+                shift
+                if [ "$#" -gt 0 ]; then
+                    printf '%s\n' "$@" >"$ARG_FILE"
+                fi
+                return 0
+                ;;
+            *)
+                [ "$#" -ge 2 ] || return 1
+                case "$1" in
+                    --p1)
+                        P1_SECS=$2
+                        ;;
+                    --p2)
+                        P2_SECS=$2
+                        ;;
+                    --mem-frac)
+                        MEM_FRAC=$2
+                        ;;
+                    --disk-frac)
+                        DISK_FRAC=$2
+                        ;;
+                    --cpu-list)
+                        CPU_LIST=$2
+                        ;;
+                    --temp-limit)
+                        TEMP_LIMIT=$2
+                        ;;
+                    --sets)
+                        SETS=$2
+                        ;;
+                    --repeat)
+                        REPEAT=$2
+                        ;;
+                    --stability)
+                        STABILITY_HOURS=$2
+                        ;;
+                    --by-class)
+                        BY_CLASS=$2
+                        ;;
+                    --stressng-args)
+                        parse_native_arguments "$2" || return 1
+                        ;;
+                    --scratch-dir)
+                        SCRATCH_PATH=$2
+                        ;;
+                    --mem-headroom-mb)
+                        MEM_HEADROOM=$2
+                        ;;
+                    --mem-cap-mb)
+                        MEM_CAP=$2
+                        ;;
+                    --disk-cap-mb)
+                        DISK_CAP=$2
+                        ;;
+                    --vm-keep)
+                        VM_KEEP=$2
+                        ;;
+                    --command-timeout)
+                        COMMAND_TIMEOUT=$2
+                        ;;
+                    --timeout-margin)
+                        TIMEOUT_MARGIN=$2
+                        ;;
+                    *)
+                        return 1
+                        ;;
+                esac
+                shift
+                ;;
+        esac
+        shift
+    done
+}
+
+cleanup() {
+    managed_timeout_cancel_bounded || return 1
+    if [ -n "$SCRATCH_DIR" ]; then
+        # Only the unique directory created by this invocation is owned.
+        rm -rf -- "$SCRATCH_DIR" || return 1
+        SCRATCH_DIR=""
+    fi
+}
+# shellcheck disable=SC2034  # Shared result finalizer invokes cleanup.
+TEST_RESULT_CLEANUP=cleanup
+trap 'test_result_finish FAIL "Stress load interrupted"' HUP INT TERM
+trap cleanup EXIT
+
+parse_args "$@" || test_result_finish FAIL "Invalid or incomplete argument, use --help"
+for value in "$P1_SECS" "$P2_SECS" "$REPEAT" "$TIMEOUT_MARGIN"; do
+    perf_uint_in_range "$value" 1 2147483647 ||
+        test_result_finish FAIL "Duration, repeat and timeout values must be positive decimal integers"
 done
-[ "$SHOW_HELP" -eq 1 ] && { print_usage; exit 0; }
-[ -n "$PASSTHRU" ] && STRESSNG_ARGS="$PASSTHRU"
-
-# Validate numeric flags
+for value in "$MEM_FRAC" "$DISK_FRAC"; do
+    perf_uint_in_range "$value" 1 99 || test_result_finish FAIL "Resource percentages must be 1 through 99"
+done
+perf_uint_in_range "$MEM_HEADROOM" 0 2147483647 || test_result_finish FAIL "Invalid memory headroom"
+perf_uint_in_range "$VM_KEEP" 0 1 || test_result_finish FAIL "--vm-keep must be 0 or 1"
+for value in "$MEM_CAP" "$DISK_CAP" "$COMMAND_TIMEOUT" "$TEMP_LIMIT"; do
+    [ -z "$value" ] && continue
+    perf_uint_in_range "$value" 1 2147483647 || test_result_finish FAIL "Invalid resource or timeout override"
+done
 if [ -n "$STABILITY_HOURS" ]; then
-    case "$STABILITY_HOURS" in *[!0-9]*|"") log_error "Invalid --stability: $STABILITY_HOURS"; exit 1 ;; esac
+    perf_uint_in_range "$STABILITY_HOURS" 1 596000 || test_result_finish FAIL "Invalid stability duration in hours"
 fi
-case "$REPEAT" in *[!0-9]*|"") log_error "Invalid --repeat: $REPEAT"; exit 1 ;; esac
-
-###############################################################################
-# Dependencies
-###############################################################################
-check_dependencies stress-ng awk grep sed cut df stat sleep date getconf || {
-  test_finalize_result SKIP "$TESTNAME" "$RES_FILE" ""
-}
-
-###############################################################################
-# Helpers
-###############################################################################
-# Run stress-ng (argv style)
-run_stress() {
-    logf="$1"; shift
-    if [ "$DRYRUN" -eq 1 ]; then
-        stress-ng --dry-run "$@" 2> "$logf" 1>/dev/null
-    else
-        stress-ng "$@" 2> "$logf" 1>/dev/null
-    fi
-    return $?
-}
-
-# Run stress-ng given a single string of args (keeps user quoting)
-run_stress_str() {
-    logf="$1"; shift
-    args_str="$1"
-    # shellcheck disable=SC2086
-    eval "set -- $args_str"
-    if [ "$DRYRUN" -eq 1 ]; then
-        stress-ng --dry-run "$@" 2> "$logf" 1>/dev/null
-    else
-        stress-ng "$@" 2> "$logf" 1>/dev/null
-    fi
-    return $?
-}
-
-# Autosize helpers for pass-through
-autosize_args() {
-    args="$1"; logtmpdir="$2"; mem_pct="$3"; disk_pct="$4"
-    ONLINE_STR_LOCAL=$(cpu_get_online_list_str)
-    ONLINE_CPUS_LOCAL=$(cpu_expand_list "$ONLINE_STR_LOCAL")
-    num_cpus=$(printf "%s\n" "$ONLINE_CPUS_LOCAL" | wc -w | tr -d ' ')
-    [ "$num_cpus" -lt 1 ] && num_cpus=1
-
-    case " $args " in
-      *" --vm "*|*" -m "*)
-          printf "%s" "$args" | grep -Eq -- '(^|[[:space:]])--vm-bytes([[:space:]]|=)' || {
-              vm_bytes=$(mem_bytes_from_percent "$mem_pct")
-              args="$args --vm-bytes $vm_bytes"
-          }
-          ;;
-    esac
-    case " $args " in
-      *" --hdd "*|*" -d "*|*" --io "*|*" -i "*|*" --iomix "*)
-          printf "%s" "$args" | grep -Eq -- '(^|[[:space:]])--hdd-bytes([[:space:]]|=)' || {
-              hdd_bytes=$(disk_bytes_from_percent_free "$disk_pct" "$logtmpdir")
-              args="$args --hdd-bytes $hdd_bytes"
-          }
-          printf "%s" "$args" | grep -Eq -- '(^|[[:space:]])--temp-path([[:space:]]|=)' || {
-              args="$args --temp-path $logtmpdir"
-          }
-          ;;
-    esac
-    case " $args " in
-      *" --cpu "*|*" -c "*)
-          printf "%s" "$args" | grep -Eq -- '(^|[[:space:]])--cpu([[:space:]]+[0-9]+|=[0-9]+)' || {
-              args="$args --cpu $num_cpus"
-          }
-          ;;
-    esac
-
-    if [ -n "$TEMP_LIMIT" ]; then
-        case " $args " in *" --temp-limit "*) : ;; *) args="$args --temp-limit $TEMP_LIMIT" ;; esac
-    fi
-
-    printf "%s" "$args"
-}
-
-append_defaults() {
-    args="$1"
-    printf "%s" "$args" | grep -Eq -- '(^|[[:space:]])--times([[:space:]]|$)' || args="$args --times"
-    printf "%s" "$args" | grep -Eq -- '(^|[[:space:]])--metrics-brief([[:space:]]|$)' || args="$args --metrics-brief"
-    printf "%s" "$args" | grep -Eq -- '(^|[[:space:]])--verify([[:space:]]|$)' || args="$args --verify"
-    printf "%s" "$args"
-}
-
-check_logs() {
-    bad=0
-    for f in "$@"; do
-        [ -s "$f" ] || continue
-        if file_has_pattern "$f" '0\.00[[:space:]]+ops/sec|bogo-ops:[[:space:]]*0\b'; then
-            log_fail "[metrics] Zero throughput in $(basename "$f")"; bad=1
-        fi
-        if file_has_pattern "$f" 'out of memory|cannot allocate|disk full|no space left|I/O error|filesystem error|timer slack'; then
-            log_fail "[metrics] Resource error in $(basename "$f")"; bad=1
-        fi
-    done
-    return $bad
-}
-
-find_newest_log_dir() {
-    prefix="$1"
-    LAST_LOG=""
-    last_mtime=0
-    list_file="./.logscan_${TESTNAME}_$$.lst"
-    find . -maxdepth 1 -type d -name "${prefix}*" -print 2>/dev/null > "$list_file"
-    while IFS= read -r d; do
-        [ -d "$d" ] || continue
-        if stat -c %Y "$d" >/dev/null 2>&1; then
-            mtime=$(stat -c %Y "$d")
-        elif stat -f %m "$d" >/dev/null 2>&1; then
-            mtime=$(stat -f %m "$d")
-        else
-            mtime=0
-        fi
-        case "$mtime" in *[!0-9]*|"") mtime=0 ;; esac
-        if [ "$mtime" -ge "$last_mtime" ] 2>/dev/null; then
-            last_mtime="$mtime"; LAST_LOG="$d"
-        fi
-    done < "$list_file"
-    rm -f "$list_file"
-    [ -n "$LAST_LOG" ] && printf "%s\n" "$LAST_LOG" || printf ".\n"
-}
-
-###############################################################################
-# Built-in “auto sets”
-###############################################################################
-run_auto_set() {
-    name="$1" LOG_DIR="$2" NUM_CPUS="$3" VM_WORKERS="$4" HDD_WORKERS="$5" VM_BYTES="$6" HDD_BYTES="$7"
-
-    case "$name" in
-      cpu)
-        log_info "[cpu] --cpu $NUM_CPUS --matrix $NUM_CPUS --timeout ${P1_SECS}s"
-        if [ -n "$TEMP_LIMIT" ]; then
-          run_stress "$LOG_DIR/cpu.log" \
-            --cpu "$NUM_CPUS" --cpu-method all \
-            --matrix "$NUM_CPUS" \
-            --timeout "${P1_SECS}s" --times --metrics-brief \
-            --temp-limit "$TEMP_LIMIT" \
-            --verify
-        else
-          run_stress "$LOG_DIR/cpu.log" \
-            --cpu "$NUM_CPUS" --cpu-method all \
-            --matrix "$NUM_CPUS" \
-            --timeout "${P1_SECS}s" --times --metrics-brief \
-            --verify
-        fi
-        return $?
+case "$SETS" in
+    ''|,*|*,|*,,*)
+        test_result_finish FAIL "Empty workload selection"
         ;;
-      vmhdd)
-        log_info "[vmhdd] --vm $VM_WORKERS --vm-bytes $VM_BYTES --hdd $HDD_WORKERS --hdd-bytes $HDD_BYTES --timeout ${P2_SECS}s"
-        if [ -n "$TEMP_LIMIT" ]; then
-          run_stress "$LOG_DIR/vmhdd.log" \
-            --vm "$VM_WORKERS" --vm-bytes "$VM_BYTES" --vm-keep \
-            --hdd "$HDD_WORKERS" --hdd-bytes "$HDD_BYTES" \
-            --timeout "${P2_SECS}s" --times --metrics-brief \
-            --temp-limit "$TEMP_LIMIT" \
-            --verify --temp-path "$LOG_DIR/tmp"
-        else
-          run_stress "$LOG_DIR/vmhdd.log" \
-            --vm "$VM_WORKERS" --vm-bytes "$VM_BYTES" --vm-keep \
-            --hdd "$HDD_WORKERS" --hdd-bytes "$HDD_BYTES" \
-            --timeout "${P2_SECS}s" --times --metrics-brief \
-            --verify --temp-path "$LOG_DIR/tmp"
-        fi
-        return $?
-        ;;
-      io)
-        log_info "[io] --hdd $HDD_WORKERS --hdd-bytes $HDD_BYTES --timeout ${P2_SECS}s"
-        if [ -n "$TEMP_LIMIT" ]; then
-          run_stress "$LOG_DIR/io.log" \
-            --hdd "$HDD_WORKERS" --hdd-bytes "$HDD_BYTES" \
-            --timeout "${P2_SECS}s" --times --metrics-brief \
-            --temp-limit "$TEMP_LIMIT" \
-            --verify --temp-path "$LOG_DIR/tmp"
-        else
-          run_stress "$LOG_DIR/io.log" \
-            --hdd "$HDD_WORKERS" --hdd-bytes "$HDD_BYTES" \
-            --timeout "${P2_SECS}s" --times --metrics-brief \
-            --verify --temp-path "$LOG_DIR/tmp"
-        fi
-        return $?
-        ;;
-      *) log_warn "Unknown set '$name' (skipping)"; return 0 ;;
+esac
+for workload in $(printf '%s' "$SETS" | tr ',' ' '); do
+    case "$workload" in
+        cpu|vmhdd|vm|io|mixed) ;;
+        *)
+            test_result_finish FAIL "Unknown workload $workload"
+            ;;
     esac
-}
-
-###############################################################################
-# One iteration (auto / pass-through / by-class)
-###############################################################################
-run_iteration() {
-    ITER_TAG="$1"
-    FAIL=0
-
-    LOG_ROOT="./logs_${TESTNAME}_${ITER_TAG}"
-    mkdir -p "$LOG_ROOT/tmp" || { log_error "Cannot create $LOG_ROOT/tmp"; return 1; }
-
-    ONLINE_STR=$(cpu_get_online_list_str)
-    ONLINE_CPUS=$(cpu_expand_list "$ONLINE_STR")
-    [ -n "$ONLINE_CPUS" ] || { log_fail "Cannot determine online CPUs"; return 1; }
-
-    if [ -n "$CPU_LIST" ]; then REQ=$(cpu_expand_list "$CPU_LIST"); else REQ="$ONLINE_CPUS"; fi
-    USE_SET=""
-    for c in $REQ; do
-        printf "%s\n" "$ONLINE_CPUS" | grep -Eq "(^|[[:space:]])$c($|[[:space:]])" && USE_SET="$USE_SET $c"
-    done
-    USE_SET=$(printf "%s\n" "$USE_SET")
-    [ -n "$USE_SET" ] || { log_skip "$TESTNAME SKIP – no valid CPUs from requested set"; return 1; }
-    NUM_CPUS=$(printf "%s\n" "$USE_SET" | wc -w | tr -d ' ')
-    [ "$NUM_CPUS" -lt 1 ] && NUM_CPUS=1
-
-    VM_WORKERS=$(( (NUM_CPUS + 1) / 2 ))
-    HDD_WORKERS=1
-    VM_BYTES=$(mem_bytes_from_percent "$MEM_FRAC")
-    HDD_BYTES=$(disk_bytes_from_percent_free "$DISK_FRAC" "$LOG_ROOT/tmp")
-    CLK_TCK=$(getconf CLK_TCK 2>/dev/null); [ -z "$CLK_TCK" ] && CLK_TCK=100
-
-    log_info "Iteration: $ITER_TAG"
-    log_info "CPUs online: $ONLINE_STR"
-    log_info "Using CPUs: $(printf "%s " "$USE_SET")"
-    log_info "VM per-worker: $VM_BYTES | HDD per-worker: $HDD_BYTES"
-    [ -n "$TEMP_LIMIT" ] && log_info "Temp limit: ${TEMP_LIMIT}°C"
-    [ "$DRYRUN" -eq 1 ] && log_info "Mode: DRY-RUN (validation only; no load)"
-    log_info "Logs: $LOG_ROOT"
-
-    if [ "$DRYRUN" -eq 0 ]; then
-        cpu_snapshot_stat "$LOG_ROOT/stat_before"
+done
+for tool in stress-ng awk grep sed sort tr df taskset setsid; do
+    command -v "$tool" >/dev/null 2>&1 ||
+        test_result_finish SKIP "Image-provided $tool is required for bounded stress execution"
+done
+CPUS=$(perf_allowed_cpus "$CPU_LIST") || test_result_finish FAIL "Cannot select allowed online CPUs"
+CPU_COUNT=$(printf '%s\n' "$CPUS" | awk -F, '{print NF}')
+taskset -c "$CPUS" true || test_result_finish FAIL "Cannot apply CPU affinity $CPUS"
+stress-ng --help >"$RUN_DIR/help.log" 2>&1
+if [ -n "$TEMP_LIMIT" ] && ! grep -q -- '--temp-limit' "$RUN_DIR/help.log"; then
+    test_result_finish SKIP "Installed stress-ng has no --temp-limit, omit it or provide a tool with that capability"
+fi
+if [ -n "$BY_CLASS" ]; then
+    case "$BY_CLASS" in
+        *[!a-zA-Z0-9_,-]*|,*|*,|*,,*)
+            test_result_finish FAIL "Invalid class list"
+            ;;
+    esac
+fi
+CUSTOM=0
+if [ -s "$ARG_FILE" ] || [ -n "$BY_CLASS" ]; then
+    CUSTOM=1
+fi
+START_UPTIME=$(awk '{print $1}' /proc/uptime)
+START_TIME=$(awk '{print int($1)}' /proc/uptime)
+END_TIME=0
+if [ -n "$STABILITY_HOURS" ]; then
+    END_TIME=$((START_TIME + STABILITY_HOURS * 3600))
+fi
+ITERATION=1
+while [ "$ITERATION" -le "$REPEAT" ] || [ "$END_TIME" -gt 0 ]; do
+    if [ "$END_TIME" -gt 0 ] && [ "$(awk '{print int($1)}' /proc/uptime)" -ge "$END_TIME" ]; then
+        break
     fi
-
-    if [ -n "$BY_CLASS" ]; then
-        classes=$(printf "%s" "$BY_CLASS" | tr ',' ' ')
-        for cls in $classes; do
-            args="$STRESSNG_ARGS --class $cls"
-            [ "$APPEND_DEFAULTS" -eq 1 ] && args=$(append_defaults "$args")
-            [ "$AUTOSIZE" -eq 1 ] && args=$(autosize_args "$args" "$LOG_ROOT/tmp" "$MEM_FRAC" "$DISK_FRAC")
-            log_info "[class:$cls] stress-ng $args"
-            run_stress_str "$LOG_ROOT/class_$cls.log" "$args"
-            rc=$?; [ "$rc" -eq 0 ] || { log_fail "[class:$cls] exited $rc"; FAIL=1; break; }
-        done
-        if [ "$DRYRUN" -eq 0 ]; then check_logs "$LOG_ROOT"/class_*.log || FAIL=1; fi
-
-    elif [ -n "$STRESSNG_ARGS" ]; then
-        args="$STRESSNG_ARGS"
-        [ "$APPEND_DEFAULTS" -eq 1 ] && args=$(append_defaults "$args")
-        [ "$AUTOSIZE" -eq 1 ] && args=$(autosize_args "$args" "$LOG_ROOT/tmp" "$MEM_FRAC" "$DISK_FRAC")
-        log_info "[custom] stress-ng $args"
-        run_stress_str "$LOG_ROOT/custom.log" "$args"
-        rc=$?; [ "$rc" -eq 0 ] || { log_fail "[custom] exited $rc"; FAIL=1; }
-        if [ "$DRYRUN" -eq 0 ]; then check_logs "$LOG_ROOT/custom.log" || FAIL=1; fi
-
-    else
-        for s in $(printf "%s" "$SETS" | tr ',' ' '); do
-            if run_auto_set "$s" "$LOG_ROOT" "$NUM_CPUS" "$VM_WORKERS" "$HDD_WORKERS" "$VM_BYTES" "$HDD_BYTES"; then
-                log_pass "Set '$s' PASS"
-            else
-                log_fail "Set '$s' FAIL"; FAIL=1; break
+    WORKLOADS=$(printf '%s' "$SETS" | tr ',' ' ')
+    if [ "$CUSTOM" -eq 1 ]; then
+        WORKLOADS=${BY_CLASS:-custom}
+        WORKLOADS=$(printf '%s' "$WORKLOADS" | tr ',' ' ')
+    fi
+    for workload in $WORKLOADS; do
+        LOG="$RUN_DIR/iteration-${ITERATION}-${workload}.log"
+        LOAD_SECONDS=$P2_SECS
+        NEED_MEMORY=0
+        NEED_DISK=0
+        if [ "$CUSTOM" -eq 0 ]; then
+            case "$workload" in
+                cpu)
+                    LOAD_SECONDS=$P1_SECS
+                    ;;
+                vm)
+                    NEED_MEMORY=1
+                    ;;
+                vmhdd|mixed)
+                    NEED_MEMORY=1
+                    NEED_DISK=1
+                    ;;
+                io)
+                    NEED_DISK=1
+                    ;;
+            esac
+        elif [ "$AUTOSIZE" -eq 1 ]; then
+            if grep -Eq '^(--vm|-m)(=|$)' "$ARG_FILE"; then
+                NEED_MEMORY=1
             fi
-        done
+            if grep -Eq '^(--hdd|-d)(=|$)' "$ARG_FILE"; then
+                NEED_DISK=1
+            fi
+        fi
+        if [ "$NEED_MEMORY" -eq 1 ]; then
+            AVAILABLE=$(perf_available_memory_kb) || test_result_finish FAIL "Cannot determine the effective memory budget"
+            MEMORY=$(perf_memory_budget_mib "$AVAILABLE" "$MEM_FRAC" "$MEM_HEADROOM" "$MEM_CAP") ||
+                test_result_finish FAIL "Insufficient available memory after reserving ${MEM_HEADROOM} MiB"
+        fi
+        if [ "$NEED_DISK" -eq 1 ]; then
+            if [ -z "$SCRATCH_DIR" ]; then
+                SCRATCH_BASE=$(perf_stress_scratch "$SCRATCH_PATH") ||
+                    test_result_finish SKIP "File I/O requires a writable disk-backed --scratch-dir"
+                SCRATCH_DIR=$(mktemp -d "$SCRATCH_BASE/testkit-stress.XXXXXX") ||
+                    test_result_finish FAIL "Cannot create test-owned scratch directory"
+            fi
+            DISK_BYTES=$(perf_disk_budget_bytes "$SCRATCH_DIR" "$DISK_FRAC" "$DISK_CAP") ||
+                test_result_finish FAIL "Insufficient free scratch space after headroom"
+        fi
+        set --
+        if [ "$CUSTOM" -eq 1 ]; then
+            while IFS= read -r argument; do
+                set -- "$@" "$argument"
+            done <"$ARG_FILE"
+            if [ -n "$BY_CLASS" ]; then
+                set -- "$@" --class "$workload"
+            fi
+            if [ "$APPEND_DEFAULTS" -eq 1 ]; then
+                set -- "$@" --times --metrics-brief --verify
+            fi
+            if [ "$AUTOSIZE" -eq 1 ]; then
+                if [ "$NEED_MEMORY" -eq 1 ] && ! grep -q '^--vm-bytes' "$ARG_FILE"; then
+                    VM_INSTANCES=$(awk '
+                        value {print; exit}
+                        /^--vm=/ {sub(/^--vm=/, ""); print; exit}
+                        /^(--vm|-m)$/ {value=1}' "$ARG_FILE")
+                    [ "$VM_INSTANCES" = 1 ] || test_result_finish FAIL "Multi-worker custom VM load needs explicit --vm-bytes for the installed tool semantics"
+                    set -- "$@" --vm-bytes "${MEMORY}m"
+                fi
+                if [ "$NEED_DISK" -eq 1 ] && ! grep -q '^--hdd-bytes' "$ARG_FILE"; then
+                    HDD_INSTANCES=$(awk '
+                        value {print; exit}
+                        /^--hdd=/ {sub(/^--hdd=/, ""); print; exit}
+                        /^(--hdd|-d)$/ {value=1}' "$ARG_FILE")
+                    [ "$HDD_INSTANCES" = 1 ] || test_result_finish FAIL "Multi-worker custom HDD load needs explicit --hdd-bytes for the installed tool semantics"
+                    set -- "$@" --hdd-bytes "$DISK_BYTES"
+                fi
+                if [ "$NEED_DISK" -eq 1 ] && ! grep -q '^--temp-path' "$ARG_FILE"; then
+                    set -- "$@" --temp-path "$SCRATCH_DIR"
+                fi
+            fi
+            NATIVE_DURATION=$(awk '
+                next_timeout {print; exit}
+                /^--timeout=/ {sub(/^--timeout=/, ""); print; exit}
+                /^(--timeout|-t)$/ {next_timeout=1}
+            ' "$ARG_FILE")
+            if [ -n "$NATIVE_DURATION" ]; then
+                LOAD_SECONDS=$(printf '%s\n' "$NATIVE_DURATION" | awk '
+                    /^[0-9]+[smhd]?$/ {
+                        multiplier=1
+                        if ($0 ~ /m$/) multiplier=60
+                        if ($0 ~ /h$/) multiplier=3600
+                        if ($0 ~ /d$/) multiplier=86400
+                        printf "%.0f\n", $0*multiplier
+                    }')
+                perf_uint_in_range "$LOAD_SECONDS" 1 2147483647 ||
+                    test_result_finish FAIL "Custom native timeout must be positive seconds, minutes, hours or days"
+            else
+                set -- "$@" --timeout "${LOAD_SECONDS}s"
+            fi
+        else
+            case "$workload" in
+                cpu)
+                    set -- --cpu "$CPU_COUNT" --cpu-method all --matrix "$CPU_COUNT"
+                    ;;
+                vm|vmhdd)
+                    set -- --vm 1 --vm-bytes "${MEMORY}m"
+                    ;;
+                mixed)
+                    set -- --cpu "$CPU_COUNT" --cpu-method all --vm 1 --vm-bytes "${MEMORY}m"
+                    ;;
+            esac
+            if [ "$NEED_MEMORY" -eq 1 ] && [ "$VM_KEEP" -eq 1 ]; then
+                set -- "$@" --vm-keep
+            fi
+            if [ "$NEED_DISK" -eq 1 ]; then
+                set -- "$@" --hdd 1 --hdd-bytes "$DISK_BYTES" --temp-path "$SCRATCH_DIR"
+            fi
+            set -- "$@" --timeout "${LOAD_SECONDS}s" --times --metrics-brief --verify
+        fi
+        [ -z "$TEMP_LIMIT" ] || set -- "$@" --temp-limit "$TEMP_LIMIT"
+        DEADLINE=${COMMAND_TIMEOUT:-$((LOAD_SECONDS + TIMEOUT_MARGIN))}
+        if [ "$END_TIME" -gt 0 ]; then
+            REMAINING=$((END_TIME - $(awk '{print int($1)}' /proc/uptime)))
+            [ "$REMAINING" -gt 0 ] || break
+            if [ "$LOAD_SECONDS" -gt "$REMAINING" ]; then
+                set -- "$@" --timeout "${REMAINING}s"
+                DEADLINE=$((REMAINING + TIMEOUT_MARGIN))
+            fi
+        fi
+        if [ "$DRYRUN" -eq 1 ]; then
+            set -- "$@" --dry-run
+        fi
+        log_info "Iteration=$ITERATION workload=$workload cpus=$CPUS deadline=${DEADLINE}s"
+        log_info "Command: stress-ng $*"
+        perf_run_stress_load "$DEADLINE" "$RUN_DIR" "$LOG" \
+            taskset -c "$CPUS" stress-ng "$@"
+        RET=$?
+        [ "$RET" -eq 0 ] || test_result_finish FAIL "stress-ng exited $RET, evidence $LOG"
         if [ "$DRYRUN" -eq 0 ]; then
-            check_logs "$LOG_ROOT"/cpu.log "$LOG_ROOT"/vmhdd.log "$LOG_ROOT"/io.log || FAIL=1
+            if grep -Ei 'fail:|failed:[[:space:]]*[1-9]|skipped:[[:space:]]*[1-9]|out of memory|cannot allocate|no space left|I/O error' "$LOG"; then
+                test_result_finish FAIL "Selected workload failed or did not execute fully, evidence $LOG"
+            fi
+            if ! grep -Eq 'successful run completed|passed:[[:space:]]*[1-9]' "$LOG"; then
+                test_result_finish FAIL "Missing native completion evidence in $LOG"
+            fi
+            if [ "$CUSTOM" -eq 0 ]; then
+                case "$workload" in
+                    cpu)
+                        EXPECTED_STRESSORS="cpu matrix"
+                        ;;
+                    vm)
+                        EXPECTED_STRESSORS=vm
+                        ;;
+                    vmhdd)
+                        EXPECTED_STRESSORS="vm hdd"
+                        ;;
+                    io)
+                        EXPECTED_STRESSORS=hdd
+                        ;;
+                    mixed)
+                        EXPECTED_STRESSORS="cpu vm hdd"
+                        ;;
+                esac
+                for stressor in $EXPECTED_STRESSORS; do
+                    awk -v stressor="$stressor" '
+                        /metrc:/ {
+                            for (i=1; i<NF; i++) if ($i==stressor && $(i+1)+0>0) found=1
+                        }
+                        END {exit !found}' "$LOG" ||
+                        test_result_finish FAIL "No completed $stressor operations in $LOG"
+                done
+            fi
+            perf_stress_kernel_errors "$RUN_DIR/kernel-${ITERATION}-${workload}" "$START_UPTIME"
+            KERNEL_RC=$?
+            case "$KERNEL_RC" in
+                0)
+                    test_result_finish FAIL "Kernel fault during stress, inspect $RUN_DIR/kernel-${ITERATION}-${workload}"
+                    ;;
+                2)
+                    test_result_finish FAIL "Kernel log unavailable, cannot exclude OOM or kernel faults during stress"
+                    ;;
+            esac
+            test_result_record PASS "Completed iteration $ITERATION workload $workload"
         fi
-    fi
-
-    if [ "$DRYRUN" -eq 0 ]; then
-        cpu_snapshot_stat "$LOG_ROOT/stat_after"
-
-        # Compute TOTAL_SECS based on sets actually configured (cpu adds P1, vmhdd/io add P2)
-        TOTAL_SECS=0
-        case ",$SETS," in
-          *,cpu,*) TOTAL_SECS=$((TOTAL_SECS + P1_SECS)) ;;
-        esac
-        case ",$SETS," in
-          *,vmhdd,*) TOTAL_SECS=$((TOTAL_SECS + P2_SECS)) ;;
-        esac
-        case ",$SETS," in
-          *,io,*) TOTAL_SECS=$((TOTAL_SECS + P2_SECS)) ;;
-        esac
-        [ "$TOTAL_SECS" -le 0 ] && TOTAL_SECS=$((P1_SECS + P2_SECS))
-
-        # Heuristic CPU activity check only for auto sets
-        if [ -z "$STRESSNG_ARGS" ] && [ -z "$BY_CLASS" ]; then
-            THRESH=$(( (TOTAL_SECS * CLK_TCK) / 8 )); [ "$THRESH" -lt 5 ] && THRESH=5
-            ok=0; total=0
-            for c in $USE_SET; do
-              b=$(cpu_get_active_ticks "$c" "$LOG_ROOT/stat_before")
-              a=$(cpu_get_active_ticks "$c" "$LOG_ROOT/stat_after")
-              [ -z "$b" ] || [ -z "$a" ] && continue
-              d=$((a-b)); total=$((total+1))
-              log_info "[load] cpu$c delta=$d (thr=$THRESH)"
-              [ "$d" -ge "$THRESH" ] && ok=$((ok+1))
-            done
-            need=$(( (total*50 + 99) / 100 )) # >= 50%
-            if [ "$ok" -lt "$need" ]; then log_fail "[load] Insufficient CPU activity ($ok/$total)"; FAIL=1
-            else log_pass "[load] CPU activity sufficient ($ok/$total)"; fi
-        fi
-
-        DMESG_MODULES='BUG:|WARNING:|rcu|lockdep|hung task|soft lockup|hard lockup|oops|stack trace|call trace'
-        DMESG_EXCLUDE='dummy regulator|not found|-EEXIST|thermal throttle'
-        if scan_dmesg_errors "$SCRIPT_DIR" "$DMESG_MODULES" "$DMESG_EXCLUDE"; then
-            log_fail "Concerning kernel messages during stress (logs in $LOG_ROOT)"; FAIL=1
-        else
-            log_pass "No concerning kernel messages during stress"
-        fi
-    else
-        log_info "Dry-run: skipped CPU activity and dmesg checks"
-    fi
-
-    [ "$FAIL" -eq 0 ]
-    return $?
-}
-
-###############################################################################
-# Single run / repeat loop / stability loop
-###############################################################################
-NEWEST_LOG="."
-if [ -n "$STABILITY_HOURS" ]; then
-    END_TS=$(( $(date +%s) + STABILITY_HOURS*3600 ))
-    ITER=1
-    ANY_FAIL=0
-    while : ; do
-        now=$(date +%s)
-        [ "$now" -ge "$END_TS" ] && break
-        TAG="iter${ITER}_$(date +%Y%m%d-%H%M%S)"
-        log_info "===== Stability: $TESTNAME iteration $ITER ====="
-        if run_iteration "$TAG"; then
-            log_pass "Iteration $ITER PASS"
-        else
-            log_fail "Iteration $ITER FAIL"; ANY_FAIL=1; break
-        fi
-        ITER=$((ITER+1))
     done
-    NEWEST_LOG=$(find_newest_log_dir "logs_${TESTNAME}_")
-    if [ "$ANY_FAIL" -eq 0 ]; then
-        test_finalize_result PASS "$TESTNAME" "$RES_FILE" "$NEWEST_LOG"
-    else
-        test_finalize_result FAIL "$TESTNAME" "$RES_FILE" "$NEWEST_LOG"
-    fi
-else
-    i=1
-    ANY_FAIL=0
-    while [ "$i" -le "$REPEAT" ]; do
-        TAG="iter${i}_$(date +%Y%m%d-%H%M%S)"
-        log_info "===== Repeat: $TESTNAME iteration $i/$REPEAT ====="
-        if run_iteration "$TAG"; then
-            log_pass "Iteration $i PASS"
-        else
-            log_fail "Iteration $i FAIL"; ANY_FAIL=1; break
-        fi
-        i=$((i+1))
-    done
-    NEWEST_LOG=$(find_newest_log_dir "logs_${TESTNAME}_")
-    if [ "$ANY_FAIL" -eq 0 ]; then
-        test_finalize_result PASS "$TESTNAME" "$RES_FILE" "$NEWEST_LOG"
-    else
-        test_finalize_result FAIL "$TESTNAME" "$RES_FILE" "$NEWEST_LOG"
-    fi
-fi
+    [ "$DRYRUN" -eq 0 ] || test_result_finish SKIP "Arguments validated, no stress load executed"
+    ITERATION=$((ITERATION + 1))
+done
+test_result_finish
