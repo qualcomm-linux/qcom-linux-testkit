@@ -1,0 +1,17 @@
+metadata:
+  name: valgrind_tool
+  format: "Lava-Test Test Definition 1.0"
+  description: "Check whether the Valgrind tool is available on the DUT"
+  maintainer:
+    - "Qualcomm Linux Testkit"
+
+params: {}
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd "$REPO_PATH/Runner/suites/System/valgrind_tool"
+    - ./run.sh || true
+    - grep -Eq '^valgrind_tool (PASS|FAIL|SKIP)$' valgrind_tool.res
+    - cat valgrind_tool.res
+    - '"$REPO_PATH/Runner/utils/send-to-lava.sh" valgrind_tool.res --expected-testcase-id valgrind_tool'
