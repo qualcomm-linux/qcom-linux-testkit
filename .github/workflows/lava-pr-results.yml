@@ -99,7 +99,7 @@ jobs:
         run: python .github/workflows/lava_pr_validation.py collect
       - name: Save recovered evidence
         if: always()
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: lava-recovery-${{ inputs.validation_run }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: lava-output/results.json
@@ -190,7 +190,7 @@ jobs:
         run: python .github/workflows/lava_pr_validation.py publish
       - name: Save results and evidence
         if: always()
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: lava-results-${{ inputs.validation_run }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
