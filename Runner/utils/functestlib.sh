@@ -3658,6 +3658,54 @@ bounded_timeout_cancel() {
     return 1
 }
 
+# runner_finalize_interrupted_test STATUS [MESSAGE]
+# Stop the currently owned bounded child, publish FAIL through the shared
+# testcase result API, run any TEST_RESULT_CLEANUP callback, then preserve the
+# conventional signal exit status for HUP, INT or TERM.
+runner_finalize_interrupted_test() {
+    rfit_status="${1:-143}"
+    rfit_message="${2:-Test interrupted by signal (status $rfit_status)}"
+
+    case "$rfit_status" in
+        129|130|143)
+            ;;
+        *)
+            rfit_status=143
+            rfit_message="Test interrupted by an unexpected signal"
+            ;;
+    esac
+
+    trap '' HUP INT TERM
+
+    rfit_cleanup_failed=0
+    if ! bounded_timeout_cancel; then
+        rfit_cleanup_failed=1
+    fi
+
+    if [ -n "${TEST_RESULT_NAME:-}" ] && [ -n "${TEST_RESULT_FILE:-}" ]; then
+        (
+            if [ "$rfit_cleanup_failed" -eq 1 ]; then
+                test_result_record FAIL "Could not stop the active bounded command after interruption"
+            fi
+            test_result_record FAIL "$rfit_message"
+            # test_result_finish runs TEST_RESULT_CLEANUP and forces FAIL if
+            # restoration fails; run it in a child so this shell can retain
+            # the original signal status after the result has been written.
+            test_result_finish FAIL "$rfit_message"
+        )
+    fi
+
+    # init_env installs this cleanup for its stdout pipe/capture file. The
+    # signal handler replaced its signal traps, so invoke it explicitly after
+    # publishing the failed testcase and retain the conventional signal code.
+    if [ "${__RUN_STDOUT_ACTIVE:-0}" -eq 1 ] &&
+       command -v _runner_stdout_cleanup >/dev/null 2>&1; then
+        _runner_stdout_cleanup "$rfit_status"
+    fi
+
+    exit "$rfit_status"
+}
+
 # run_with_bounded_timeout SECONDS COMMAND [ARG...]
 # Opt-in deadline for a single executable, without an unbounded wait after KILL.
 # Preserve stdin and the process group. The command must not daemonize or spawn
