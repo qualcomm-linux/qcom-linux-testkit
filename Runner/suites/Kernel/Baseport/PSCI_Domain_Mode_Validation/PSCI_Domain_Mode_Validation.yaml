@@ -1,0 +1,16 @@
+metadata:
+  name: PSCI_Domain_Mode_Validation
+  format: Lava-Test Test Definition 1.0
+  description: Validate the PSCI CPU power-domain coordination mode reported by the kernel.
+  os:
+    - linux
+  scope:
+    - functional
+params:
+  EXPECTED_MODE: null
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/PSCI_Domain_Mode_Validation
+    - ./run.sh ${EXPECTED_MODE:+--expected-mode "${EXPECTED_MODE}"} || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh PSCI_Domain_Mode_Validation.res

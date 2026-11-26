@@ -1,0 +1,16 @@
+metadata:
+  name: ARM64_Boot_CPU_Validation
+  format: Lava-Test Test Definition 1.0
+  description: Validate the physical boot CPU identity recorded by the Arm64 kernel.
+  os:
+    - linux
+  scope:
+    - functional
+params:
+  EXPECTED_MPIDR: null
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/ARM64_Boot_CPU_Validation
+    - ./run.sh ${EXPECTED_MPIDR:+--expected-mpidr "${EXPECTED_MPIDR}"} || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh ARM64_Boot_CPU_Validation.res

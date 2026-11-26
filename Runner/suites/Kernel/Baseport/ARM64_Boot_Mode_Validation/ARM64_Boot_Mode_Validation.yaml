@@ -1,0 +1,16 @@
+metadata:
+  name: ARM64_Boot_Mode_Validation
+  format: Lava-Test Test Definition 1.0
+  description: Validate consistent Arm64 CPU entry exception levels.
+  os:
+    - linux
+  scope:
+    - functional
+params:
+  EXPECTED_MODE: null
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/ARM64_Boot_Mode_Validation
+    - ./run.sh ${EXPECTED_MODE:+--expected-mode "${EXPECTED_MODE}"} || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh ARM64_Boot_Mode_Validation.res
