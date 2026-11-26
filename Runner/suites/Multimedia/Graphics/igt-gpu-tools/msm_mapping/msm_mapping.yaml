@@ -1,0 +1,20 @@
+metadata:
+  name: msm_mapping
+  format: "Lava-Test Test Definition 1.0"
+  description: "Validates GPU address-space mappings and that invalid GPU accesses raise IOMMU faults. Uses the IGT msm_mapping test."
+  os:
+    - linux
+  scope:
+    - functional
+
+params:
+  IGT_BIN_PATH: "/usr/libexec/igt-gpu-tools/msm_mapping"
+  IGT_TIMEOUT: "300"
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Multimedia/Graphics/igt-gpu-tools/msm_mapping
+    - export IGT_TIMEOUT="${IGT_TIMEOUT}"
+    - ./run.sh --bin-path "${IGT_BIN_PATH}" || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh msm_mapping.res || true
