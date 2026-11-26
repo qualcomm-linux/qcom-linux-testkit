@@ -1,0 +1,18 @@
+metadata:
+  name: kvm_device_check
+  format: "Lava-Test Test Definition 1.0"
+  description: "Check whether the KVM device node /dev/kvm is exposed on the DUT"
+  maintainer:
+    - "Qualcomm Linux Testkit"
+
+params:
+  REQUIRE_KVM: "false"
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd "$REPO_PATH/Runner/suites/System/kvm_device_check"
+    - REQUIRE_KVM="${REQUIRE_KVM:-false}" ./run.sh || true
+    - grep -Eq '^kvm_device_check (PASS|FAIL|SKIP)$' kvm_device_check.res
+    - cat kvm_device_check.res
+    - '"$REPO_PATH/Runner/utils/send-to-lava.sh" kvm_device_check.res --expected-testcase-id kvm_device_check'
