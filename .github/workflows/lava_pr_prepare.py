@@ -836,6 +836,7 @@ def prepare(folder):
         rootfs_url = (overlay_images if image_type == "both" and variant == "overlay" else build["images"])[target]
         variant_fields = {"image_variant": variant} if image_type == "both" else {}
         context = dict(PROJECT="projects/meta-qcom/", PROJECT_NAME="meta-qcom", OS_INFO="qcom-distro",
+                       LAVA_JOB_PRIORITY=50,  # Match meta-qcom's CI queue priority.
                        BUILD_NUMBER=f"testkit-pr-{number}", BUILD_URL=build["prefix"],
                        ROOTFS_URL=rootfs_url, DEVICE_TYPE=target, overlays=[],
                        IMAGE_FILE_NAME=f"{image_name}-{target}.rootfs.qcomflash.tar.gz",
