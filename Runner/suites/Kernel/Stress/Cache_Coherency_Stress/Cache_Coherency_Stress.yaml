@@ -1,0 +1,36 @@
+# Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+# SPDX-License-Identifier: BSD-3-Clause
+
+metadata:
+  name: Cache_Coherency_Stress
+  format: Lava-Test Test Definition 1.0
+  description: Verify shared cache-line counters across CPUs under sustained load
+  os:
+  - linux
+  scope:
+  - functional
+params:
+  BINARY: null
+  DURATION: 300
+  REPEAT: 1
+  CPU_LIST: null
+  MEM_PERCENT: 15
+  MEM_HEADROOM_MB: 256
+  MEM_CAP_MB: 32
+  TIMEOUT_MARGIN: 120
+run:
+  steps:
+  - REPO_PATH=$PWD
+  - cd Runner/suites/Kernel/Stress/Cache_Coherency_Stress
+  - rm -f Cache_Coherency_Stress.res
+  - set --
+  - set -- "$@" --duration "${DURATION}"
+  - set -- "$@" --repeat "${REPEAT}"
+  - if [ -n "${CPU_LIST:-}" ]; then set -- "$@" --cpu-list "${CPU_LIST}"; fi
+  - set -- "$@" --mem-frac "${MEM_PERCENT}"
+  - set -- "$@" --mem-headroom-mb "${MEM_HEADROOM_MB}"
+  - if [ -n "${MEM_CAP_MB:-}" ]; then set -- "$@" --mem-cap-mb "${MEM_CAP_MB}"; fi
+  - set -- "$@" --timeout-margin "${TIMEOUT_MARGIN}"
+  - if [ -n "${BINARY:-}" ]; then set -- "$@" --binary "${BINARY}"; fi
+  - TESTKIT_IMAGE_ONLY=1 ./run.sh "$@" || true
+  - $REPO_PATH/Runner/utils/send-to-lava.sh Cache_Coherency_Stress.res --strict --expected-testcase-id Cache_Coherency_Stress

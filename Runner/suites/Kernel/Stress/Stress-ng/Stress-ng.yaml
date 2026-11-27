@@ -1,0 +1,30 @@
+# Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+# SPDX-License-Identifier: BSD-3-Clause
+
+metadata:
+  name: Stress-ng
+  format: "Lava-Test Test Definition 1.0"
+  description: "Run the default CPU and memory/disk stress-ng workloads with runtime resource sizing"
+  os:
+    - linux
+  scope:
+    - functional
+
+params:
+  BINARY: null
+  CPU_SECONDS: 60
+  MEMORY_IO_SECONDS: 60
+  MEM_PERCENT: 15
+  DISK_PERCENT: 5
+  CPU_LIST: null
+  TEMP_LIMIT: null
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Stress/Stress-ng
+    - rm -f Stress-ng.res
+    - set --
+    - if [ -n "${BINARY:-}" ]; then set -- "$@" --binary "${BINARY}"; fi
+    - TESTKIT_IMAGE_ONLY=1 ./run.sh --p1 "${CPU_SECONDS}" --p2 "${MEMORY_IO_SECONDS}" --mem-frac "${MEM_PERCENT}" --disk-frac "${DISK_PERCENT}" --cpu-list "${CPU_LIST:-}" --temp-limit "${TEMP_LIMIT:-}" "$@" || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh Stress-ng.res --strict --expected-testcase-id Stress-ng

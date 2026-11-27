@@ -1,0 +1,32 @@
+# Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+# SPDX-License-Identifier: BSD-3-Clause
+
+metadata:
+  name: Scheduler_IPC_Stress
+  format: Lava-Test Test Definition 1.0
+  description: Verify context switching, futex operations and pipe data under load
+  os:
+  - linux
+  scope:
+  - functional
+params:
+  BINARY: null
+  DURATION: 300
+  REPEAT: 1
+  CPU_LIST: null
+  WORKERS: null
+  TIMEOUT_MARGIN: 120
+run:
+  steps:
+  - REPO_PATH=$PWD
+  - cd Runner/suites/Kernel/Stress/Scheduler_IPC_Stress
+  - rm -f Scheduler_IPC_Stress.res
+  - set --
+  - set -- "$@" --duration "${DURATION}"
+  - set -- "$@" --repeat "${REPEAT}"
+  - if [ -n "${CPU_LIST:-}" ]; then set -- "$@" --cpu-list "${CPU_LIST}"; fi
+  - if [ -n "${WORKERS:-}" ]; then set -- "$@" --workers "${WORKERS}"; fi
+  - set -- "$@" --timeout-margin "${TIMEOUT_MARGIN}"
+  - if [ -n "${BINARY:-}" ]; then set -- "$@" --binary "${BINARY}"; fi
+  - TESTKIT_IMAGE_ONLY=1 ./run.sh "$@" || true
+  - $REPO_PATH/Runner/utils/send-to-lava.sh Scheduler_IPC_Stress.res --strict --expected-testcase-id Scheduler_IPC_Stress

@@ -1,0 +1,44 @@
+# Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+# SPDX-License-Identifier: BSD-3-Clause
+
+metadata:
+  name: Stressapptest_Warm
+  format: Lava-Test Test Definition 1.0
+  description: Checked warm memory copying with runtime resource sizing
+  os:
+  - linux
+  scope:
+  - functional
+params:
+  BINARY: null
+  DURATION: 300
+  LOOPS: 1
+  MEM_PERCENT: null
+  MEM_HEADROOM_MB: null
+  MEM_CAP_MB: null
+  COPY_WORKERS: null
+  INVERT_WORKERS: null
+  CHECK_WORKERS: null
+  CPU_WORKERS: null
+  CPU_LIST: null
+  TIMEOUT_MARGIN: 120
+run:
+  steps:
+  - REPO_PATH=$PWD
+  - cd Runner/suites/Kernel/Stress/Stressapptest
+  - rm -f Stressapptest.res
+  - set --
+  - set -- "$@" -s "${DURATION}"
+  - set -- "$@" --loops "${LOOPS}"
+  - if [ -n "${MEM_PERCENT:-}" ]; then set -- "$@" --mem-pct "${MEM_PERCENT}"; fi
+  - if [ -n "${MEM_HEADROOM_MB:-}" ]; then set -- "$@" --mem-headroom-mb "${MEM_HEADROOM_MB}"; fi
+  - if [ -n "${MEM_CAP_MB:-}" ]; then set -- "$@" --mem-cap-mb "${MEM_CAP_MB}"; fi
+  - if [ -n "${COPY_WORKERS:-}" ]; then set -- "$@" -m "${COPY_WORKERS}"; fi
+  - if [ -n "${INVERT_WORKERS:-}" ]; then set -- "$@" -i "${INVERT_WORKERS}"; fi
+  - if [ -n "${CHECK_WORKERS:-}" ]; then set -- "$@" -c "${CHECK_WORKERS}"; fi
+  - if [ -n "${CPU_WORKERS:-}" ]; then set -- "$@" -C "${CPU_WORKERS}"; fi
+  - if [ -n "${CPU_LIST:-}" ]; then set -- "$@" --cpu-list "${CPU_LIST}"; fi
+  - set -- "$@" --timeout-margin "${TIMEOUT_MARGIN}"
+  - if [ -n "${BINARY:-}" ]; then set -- "$@" --binary "${BINARY}"; fi
+  - TESTKIT_IMAGE_ONLY=1 ./run.sh -W "$@" || true
+  - $REPO_PATH/Runner/utils/send-to-lava.sh Stressapptest.res --strict --expected-testcase-id Stressapptest

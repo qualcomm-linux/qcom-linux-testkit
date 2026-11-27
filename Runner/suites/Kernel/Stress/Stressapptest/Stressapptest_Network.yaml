@@ -1,0 +1,37 @@
+# Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+# SPDX-License-Identifier: BSD-3-Clause
+
+metadata:
+  name: Stressapptest_Network
+  format: Lava-Test Test Definition 1.0
+  description: Checked memory and network transfers, local loopback unless an external listener IPv4 is supplied
+  os:
+  - linux
+  scope:
+  - functional
+params:
+  BINARY: null
+  DURATION: 300
+  LOOPS: 1
+  MEM_PERCENT: null
+  MEM_HEADROOM_MB: null
+  MEM_CAP_MB: null
+  COPY_WORKERS: null
+  CPU_LIST: null
+  TIMEOUT_MARGIN: 120
+  PEER_IPV4: null
+run:
+  steps:
+  - REPO_PATH=$PWD
+  - cd Runner/suites/Kernel/Stress/Stressapptest
+  - rm -f Stressapptest.res
+  - set -- -s "${DURATION}" --loops "${LOOPS}" --timeout-margin "${TIMEOUT_MARGIN}"
+  - if [ -n "${MEM_PERCENT:-}" ]; then set -- "$@" --mem-pct "${MEM_PERCENT}"; fi
+  - if [ -n "${MEM_HEADROOM_MB:-}" ]; then set -- "$@" --mem-headroom-mb "${MEM_HEADROOM_MB}"; fi
+  - if [ -n "${MEM_CAP_MB:-}" ]; then set -- "$@" --mem-cap-mb "${MEM_CAP_MB}"; fi
+  - if [ -n "${COPY_WORKERS:-}" ]; then set -- "$@" -m "${COPY_WORKERS}"; fi
+  - if [ -n "${CPU_LIST:-}" ]; then set -- "$@" --cpu-list "${CPU_LIST}"; fi
+  - if [ -n "${PEER_IPV4:-}" ]; then set -- "$@" -n "${PEER_IPV4}"; else set -- "$@" --auto-net=loopback; fi
+  - if [ -n "${BINARY:-}" ]; then set -- "$@" --binary "${BINARY}"; fi
+  - TESTKIT_IMAGE_ONLY=1 ./run.sh "$@" || true
+  - $REPO_PATH/Runner/utils/send-to-lava.sh Stressapptest.res --strict --expected-testcase-id Stressapptest
