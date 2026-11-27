@@ -11,7 +11,7 @@ jobs:
   stale:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/stale@v10
+    - uses: actions/stale@v11
       with:
         stale-issue-message: '@qualcomm/qualcomm-linux-testing.triage This issue has been marked as stale due to 30 days of inactivity and will automatically close after an additional 5 days'
         stale-pr-message: '@ualcomm/qualcomm-linux-testing.triage This pull request has been marked as stale due to 30 days of inactivity and will automatically close after an additional 5 days.'

@@ -77,7 +77,7 @@ jobs:
         run: python .github/workflows/lava_pr_validation.py resolve
       - name: Download prepared request
         if: steps.request.outputs.prepared == 'true'
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           github-token: ${{ github.token }}
           run-id: ${{ steps.request.outputs.run_id }}
@@ -85,7 +85,7 @@ jobs:
           path: lava-output
       - name: Download saved submission IDs
         if: steps.request.outputs.prepared == 'true' && steps.request.outputs.progress_available == 'true'
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           github-token: ${{ github.token }}
           run-id: ${{ steps.request.outputs.run_id }}
@@ -99,7 +99,7 @@ jobs:
         run: python .github/workflows/lava_pr_validation.py collect
       - name: Save recovered evidence
         if: always()
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: lava-recovery-${{ inputs.validation_run }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: lava-output/results.json
@@ -118,6 +118,8 @@ jobs:
       contents: read
       actions: read
       pull-requests: write
+      statuses: write
+      # Recovery can still finalize a check created before commit-status reporting.
       checks: write
     steps:
       - name: Checkout trusted controller
@@ -139,7 +141,7 @@ jobs:
         run: python .github/workflows/lava_pr_validation.py resolve
       - name: Download prepared request
         if: steps.request.outputs.prepared == 'true'
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           github-token: ${{ github.token }}
           run-id: ${{ steps.request.outputs.run_id }}
@@ -147,7 +149,7 @@ jobs:
           path: lava-output
       - name: Download request context
         if: steps.request.outputs.context_artifact != ''
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           github-token: ${{ github.token }}
           run-id: ${{ steps.request.outputs.run_id }}
@@ -155,7 +157,7 @@ jobs:
           path: lava-output
       - name: Download collected evidence
         if: needs.recover.outputs.evidence_id == '' && steps.request.outputs.evidence_available == 'true'
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           github-token: ${{ github.token }}
           run-id: ${{ steps.request.outputs.run_id }}
@@ -163,7 +165,7 @@ jobs:
           path: lava-output
       - name: Download controller progress
         if: steps.request.outputs.progress_available == 'true'
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           github-token: ${{ github.token }}
           run-id: ${{ steps.request.outputs.run_id }}
@@ -171,11 +173,11 @@ jobs:
           path: lava-output
       - name: Download recovered evidence
         if: needs.recover.outputs.evidence_id != ''
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           artifact-ids: ${{ needs.recover.outputs.evidence_id }}
           path: lava-output
-      - name: Publish workflow matrix, PR comment and commit check
+      - name: Publish workflow matrix, PR comment and commit status
         if: always()
         env:
           GH_TOKEN: ${{ github.token }}
@@ -188,7 +190,7 @@ jobs:
         run: python .github/workflows/lava_pr_validation.py publish
       - name: Save results and evidence
         if: always()
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: lava-results-${{ inputs.validation_run }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |

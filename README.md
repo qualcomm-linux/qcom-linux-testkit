@@ -156,6 +156,26 @@ dependencies, and assets. They are not arguments to `run-test.sh`.
 See the public [lava-test-plans](https://github.com/qualcomm-linux/lava-test-plans)
 repository for job orchestration.
 
+In **Actions → LAVA PR validation → Run workflow**, use `test_names` to select
+comma-separated suite or YAML names, for example
+`Ethernet_Inventory_Validation,AudioPlayback_Config01`. A suite name selects
+its default YAML, or its sole YAML when no default exists. Ambiguous names
+require a full YAML path. Leave the field empty to select changed PR suites
+automatically. Uncheck `include_meta_qcom` to omit baseline tests. Advanced
+`selections` JSON remains available for parameters, tags or fresh-boot tests,
+but a suite must not appear in both inputs.
+
+Approval by a repository writer or maintainer automatically requests one
+PR-only validation per approved commit, using the latest `meta-qcom-main`
+base multimedia images and enabled targets. Stale approvals and changes with
+no suite or configured association do not submit jobs. Shared-only changes,
+overlay images and tests needing explicit parameters use the manual workflow.
+Up to three validation jobs run concurrently on GitHub-hosted `ubuntu-latest`
+runners. Requests enter three queues in round-robin order, with up to 100 pending
+jobs per queue. A request waits for its assigned queue, even if another queue is
+idle. Runs for the same PR remain serialized. Short request, reporting and
+recovery jobs run separately, and LAVA schedules the selected board jobs.
+
 Other CI systems can invoke the same suites and collect their result files
 and artifacts.
 

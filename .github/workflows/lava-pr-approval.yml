@@ -1,0 +1,24 @@
+# Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+# SPDX-License-Identifier: BSD-3-Clause
+name: LAVA PR approval
+run-name: 'LAVA PR approval - PR #${{ github.event.pull_request.number }} review ${{ github.event.review.id }} - ${{ github.event.review.state }}'
+
+on:
+  pull_request_review:
+    types: [submitted]
+
+permissions: {}
+
+jobs:
+  approved:
+    if: >-
+      github.repository == 'qualcomm-linux/qcom-linux-testkit' &&
+      github.event.review.state == 'approved' &&
+      github.event.pull_request.base.ref == 'main' &&
+      !github.event.pull_request.draft
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # Fork reviews have a read-only token. This job never checks out PR code,
+      # uses secrets or submits jobs. The trusted workflow revalidates the IDs.
+      - run: echo 'Approval recorded for trusted validation dispatch.'

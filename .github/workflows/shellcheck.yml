@@ -7,6 +7,9 @@ on:
     branches: [ "main" ]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   shellcheck:
     # Ubuntu 24.04 provides the pinned ShellCheck 0.9.0-1 package below.
@@ -21,6 +24,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Install ShellCheck from apt
         run: |

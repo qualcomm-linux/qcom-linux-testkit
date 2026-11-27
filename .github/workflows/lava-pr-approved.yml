@@ -1,0 +1,48 @@
+# Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+# SPDX-License-Identifier: BSD-3-Clause
+name: Dispatch approved LAVA PR
+
+on:
+  # Fork reviews cannot dispatch with their read-only token. The privileged
+  # handler uses default-branch code and no PR artifacts, caches or commands.
+  # API checks bind the approval to a repository writer and the current PR SHA.
+  workflow_run: # zizmor: ignore[dangerous-triggers] Required trusted handoff for fork approvals, inputs are revalidated.
+    workflows: [LAVA PR approval]
+    types: [completed]
+
+permissions:
+  contents: read
+  pull-requests: read
+  actions: write
+  checks: write
+
+# Serialize repeated approval notifications for the same source branch only.
+# Different PR branches do not compete for one global pending slot.
+concurrency:
+  group: lava-approval-${{ github.event.workflow_run.head_repository.full_name }}-${{ github.event.workflow_run.head_branch }}
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  dispatch:
+    if: >-
+      github.repository == 'qualcomm-linux/qcom-linux-testkit' &&
+      github.event.workflow_run.event == 'pull_request_review' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      endsWith(github.event.workflow_run.display_title, ' - approved')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout trusted controller
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+        with:
+          python-version: '3.11'
+      - run: python -m pip install -r .github/ci/lava-pr-requirements.txt
+      - name: Revalidate approval and dispatch changed PR tests
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python .github/workflows/lava_pr_validation.py approve

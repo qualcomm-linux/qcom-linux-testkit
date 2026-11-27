@@ -10477,21 +10477,12 @@ detect_platform() {
         PLATFORM_SOC_FAMILY=""
     fi
  
-    # --- Device Tree model / compatible (strip NULs) ---
-    if [ -r /proc/device-tree/model ]; then
-        PLATFORM_DT_MODEL="$(tr -d '\000' </proc/device-tree/model 2>/dev/null | head -n 1)"
-    else
-        PLATFORM_DT_MODEL=""
-    fi
- 
+    # --- Root device-tree identity, never a child peripheral's compatible ---
+    PLATFORM_DT_MODEL=""
     PLATFORM_DT_COMPAT=""
-    if [ -d /proc/device-tree ]; then
-        for f in /proc/device-tree/compatible /proc/device-tree/*/compatible; do
-            if [ -f "$f" ]; then
-                PLATFORM_DT_COMPAT="$(tr -d '\000' <"$f" 2>/dev/null | tr '\n' ' ')"
-                break
-            fi
-        done
+    if dp_dt_root=$(dt_runtime_root); then
+        PLATFORM_DT_MODEL="$(dt_property_text "$dp_dt_root" model 2>/dev/null | head -n 1)"
+        PLATFORM_DT_COMPAT="$(dt_property_text "$dp_dt_root" compatible 2>/dev/null || true)"
     fi
  
     # --- OS (parse, do not source /etc/os-release) ---
@@ -12668,3 +12659,228 @@ rng_validate_entropy() (
         return 1
     fi
 )
+
+# kernel_attribute_value <path>
+# Print a trimmed first line. Propagate read_first_line failure.
+# An existing empty file is a successful empty read.
+# shellcheck disable=SC2317
+kernel_attribute_value() {
+    kav_path="$1"
+    kav_raw=$(read_first_line "$kav_path")
+    kav_rc=$?
+    [ "$kav_rc" -eq 0 ] || return "$kav_rc"
+    printf '%s\n' "$kav_raw" | tr -d '\r' | sed 's/[[:space:]]*$//'
+}
+
+# Return 0 for a decimal integer, including a leading minus.
+# shellcheck disable=SC2317
+is_signed_number() {
+    isn_value="$1"
+
+    case "$isn_value" in
+        -)
+            return 1
+            ;;
+        -*)
+            isn_value="${isn_value#-}"
+            ;;
+    esac
+    is_unsigned_number "$isn_value"
+}
+
+# kernel_record_attribute <label> <path> [unsigned|signed|1]
+# Record SKIP when the node is absent, FAIL when a present node cannot be
+# read or has the wrong numeric form, and PASS for a successful read.
+# shellcheck disable=SC2317
+kernel_record_attribute() {
+    kra_label="$1"
+    kra_path="$2"
+    kra_kind="${3:-}"
+
+    if [ ! -e "$kra_path" ]; then
+        test_result_record SKIP "$kra_label missing: $kra_path"
+        return 2
+    fi
+    if [ ! -r "$kra_path" ]; then
+        test_result_record FAIL "$kra_label not readable: $kra_path"
+        return 1
+    fi
+    kra_val=$(kernel_attribute_value "$kra_path") || {
+        test_result_record FAIL "$kra_label read failed: $kra_path"
+        return 1
+    }
+    case "$kra_kind" in
+        unsigned|1)
+            if ! is_unsigned_number "$kra_val"; then
+                test_result_record FAIL "$kra_label not an unsigned integer: $kra_path='$kra_val'"
+                return 1
+            fi
+            ;;
+        signed)
+            if ! is_signed_number "$kra_val"; then
+                test_result_record FAIL "$kra_label not an integer: $kra_path='$kra_val'"
+                return 1
+            fi
+            ;;
+    esac
+    test_result_record PASS "$kra_label ok: $kra_path='$kra_val'"
+    return 0
+}
+
+# kernel_config_state <CONFIG_NAME>
+# Print y, m, n, or another configured value. Return the status of
+# kernel_config_value so a missing config file is not reported as disabled.
+# shellcheck disable=SC2317
+kernel_config_state() {
+    kcs_line=$(kernel_config_value "$1") || return $?
+    printf '%s\n' "${kcs_line#*=}"
+}
+
+# kernel_config_is_enabled <CONFIG_NAME>
+# Return 0 for y or m. Return 1 when the option is disabled or its state
+# cannot be read. Callers that must distinguish those cases use
+# kernel_config_state.
+# shellcheck disable=SC2317
+kernel_config_is_enabled() {
+    kcie_state=$(kernel_config_state "$1") || return 1
+    case "$kcie_state" in
+        y|m)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+# kernel_count_lines
+# Count non-empty lines on stdin.
+# shellcheck disable=SC2317
+kernel_count_lines() {
+    awk 'NF { n++ } END { print n + 0 }'
+}
+
+# kernel_cpumask_valid <mask>
+# Return 0 for a nonempty comma-separated hexadecimal cpumask. Width is not
+# fixed, and offline CPU bits are allowed. Empty and non-hex masks fail.
+# shellcheck disable=SC2317
+kernel_cpumask_valid() {
+    kcm_mask="$1"
+    [ -n "$kcm_mask" ] || return 1
+    printf '%s\n' "$kcm_mask" | tr ',' '\n' |
+        while IFS= read -r kcm_part || [ -n "$kcm_part" ]; do
+            [ -n "$kcm_part" ] || exit 1
+            case "$kcm_part" in
+                *[!0-9a-fA-F]*)
+                    exit 1
+                    ;;
+            esac
+        done
+}
+
+# kernel_cpu_list_valid <list>
+# Return 0 only for a nonempty Linux CPU list whose every entry is numeric.
+# shellcheck disable=SC2317
+kernel_cpu_list_valid() {
+    kcl_list="$1"
+    [ -n "$kcl_list" ] || return 1
+    printf '%s\n' "$kcl_list" | tr ',' '\n' |
+        while IFS= read -r kcl_part || [ -n "$kcl_part" ]; do
+            [ -n "$kcl_part" ] || exit 1
+            case "$kcl_part" in
+                *-*)
+                    kcl_start="${kcl_part%-*}"
+                    kcl_end="${kcl_part#*-}"
+                    is_unsigned_number "$kcl_start" || exit 1
+                    is_unsigned_number "$kcl_end" || exit 1
+                    [ "$kcl_start" -le "$kcl_end" ] || exit 1
+                    ;;
+                *)
+                    is_unsigned_number "$kcl_part" || exit 1
+                    ;;
+            esac
+        done
+}
+
+# kernel_list_all_cpus
+# Print cpuN for every CPU directory, including CPUs that are offline.
+# shellcheck disable=SC2317
+kernel_list_all_cpus() {
+    for klc_dir in /sys/devices/system/cpu/cpu[0-9]*; do
+        [ -d "$klc_dir" ] || continue
+        klc_base="${klc_dir##*/}"
+        case "$klc_base" in
+            cpu*[!0-9]*)
+                continue
+                ;;
+        esac
+        printf '%s\n' "$klc_base"
+    done
+}
+
+# watchdog_provider_node <sysfs-dir>
+# Print the character device for a watchdog provider that has a readable
+# identity. Return 1 when identity or the character device is missing.
+# shellcheck disable=SC2317
+watchdog_provider_node() {
+    wpn_dir="$1"
+    wpn_name="${wpn_dir##*/}"
+    [ -d "$wpn_dir" ] || return 1
+    wpn_identity=$(kernel_attribute_value "$wpn_dir/identity") || return 1
+    [ -n "$wpn_identity" ] || return 1
+    if [ -c "/dev/$wpn_name" ]; then
+        printf '%s\n' "/dev/$wpn_name"
+        return 0
+    fi
+    if [ "$wpn_name" = "watchdog0" ] && [ -c /dev/watchdog ]; then
+        printf '%s\n' "/dev/watchdog"
+        return 0
+    fi
+    return 1
+}
+
+# watchdog_sysfs_dirs
+# Print registered /sys/class/watchdog/watchdogN directories.
+# shellcheck disable=SC2317
+watchdog_sysfs_dirs() {
+    [ -d /sys/class/watchdog ] || return 1
+    for wsd_dir in /sys/class/watchdog/watchdog[0-9]*; do
+        [ -d "$wsd_dir" ] || continue
+        printf '%s\n' "$wsd_dir"
+    done
+}
+
+# kernel_capture_evidence <output-root> [module-regex] [exclude-regex]
+# Capture one kernel log with scan_dmesg_errors.
+# Return 1 when the evidence directory cannot be created.
+# Return 2 when the log is unavailable. That is not a clean snapshot.
+# Return 0 when DMESG_ACCESS_STATUS is available.
+# shellcheck disable=SC2317
+kernel_capture_evidence() {
+    kce_root="$1"
+    kce_mod="${2:-.}"
+    kce_excl="${3:-dummy regulator|supply [^ ]+ not found|using dummy regulator}"
+
+    KERNEL_EVIDENCE_DIR=$(test_create_run_directory "$kce_root") || return 1
+    export KERNEL_LOG_JOURNAL_FALLBACK=1
+    scan_dmesg_errors "$KERNEL_EVIDENCE_DIR/kernel" "$kce_mod" "$kce_excl" || true
+    KERNEL_DMESG_SNAPSHOT="$KERNEL_EVIDENCE_DIR/kernel/dmesg_snapshot.log"
+    KERNEL_DMESG_ERRORS="$KERNEL_EVIDENCE_DIR/kernel/dmesg_errors.log"
+    export KERNEL_EVIDENCE_DIR KERNEL_DMESG_SNAPSHOT KERNEL_DMESG_ERRORS
+    log_info "Evidence: $KERNEL_EVIDENCE_DIR"
+    if [ "${DMESG_ACCESS_STATUS:-unavailable}" != available ]; then
+        test_result_record SKIP "kernel log evidence unavailable status=${DMESG_ACCESS_STATUS:-unavailable} provider=${DMESG_ACCESS_PROVIDER:-none} rc=${DMESG_ACCESS_RC:-unknown}"
+        return 2
+    fi
+    return 0
+}
+
+# kernel_log_has_pattern <extended-regex>
+# Return 0 on a match, 1 when the available log has no match, and 2 when
+# the kernel log was not captured.
+# shellcheck disable=SC2317
+kernel_log_has_pattern() {
+    [ "${DMESG_ACCESS_STATUS:-unavailable}" = available ] || return 2
+    [ -r "${KERNEL_DMESG_SNAPSHOT:-}" ] || return 2
+    grep -Eiq "$1" "$KERNEL_DMESG_SNAPSHOT"
+}

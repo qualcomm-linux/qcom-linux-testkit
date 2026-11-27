@@ -31,6 +31,7 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Compute tag
         id: tag
@@ -136,12 +137,16 @@ jobs:
         shell: bash
         env:
           TAG_NAME: ${{ steps.tag.outputs.tag }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
           TAG="$TAG_NAME"
 
-          git push origin "$TAG"
+          # Supply credentials only to this push, without saving them in Git config.
+          git -c credential.helper= \
+            -c 'credential.helper=!gh auth git-credential' \
+            push origin "$TAG"
 
       - name: Verify remote tag
         shell: bash

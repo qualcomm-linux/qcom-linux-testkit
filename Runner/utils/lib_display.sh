@@ -2265,6 +2265,121 @@ display_wayland_terminal_validate() {
 
   return 0
 }
+
+# Validate that the Wayland presentation-time protocol (wp_presentation) was
+# exercised and that the compositor returned at least one presented event with
+# valid timestamps.
+# Expects WAYLAND_DEBUG output in the provided logfile.
+#
+# The presented() event signature is:
+#   presented(tv_sec_hi, tv_sec_lo, tv_nsec, refresh, seq_hi, seq_lo, flags)
+#
+# A valid timestamp requires:
+#   - tv_nsec in the range [0, 999999999] (a valid nanosecond value)
+#   - at least one of tv_sec_hi, tv_sec_lo, tv_nsec is non-zero
+#
+# This rejects all-zero timestamps and out-of-range tv_nsec regardless of
+# non-zero refresh, sequence, or flags fields.
+#
+# Usage:
+# display_wayland_presentation_validate "/path/to/run.log"
+# Returns:
+# 0 = wp_presentation was bound and at least one presented event with
+#     a valid non-zero timestamp was received
+# 1 = missing required evidence or only invalid timestamps observed
+display_wayland_presentation_validate() {
+  logf="${1:-}"
+  [ -n "$logf" ] && [ -f "$logf" ] || return 1
+
+  # wp_presentation must appear in the log (bound via wl_registry or used
+  # directly as an object reference in send/receive lines).
+  if ! grep -Eq 'wp_presentation[@#]' "$logf"; then
+    return 1
+  fi
+
+  # At least one wp_presentation_feedback.presented event must exist.
+  if ! grep -Eq 'wp_presentation_feedback[@#][0-9]+\.presented\(' "$logf"; then
+    return 1
+  fi
+
+  # Parse the timestamp fields explicitly.  Extract only the first three
+  # positional arguments (tv_sec_hi, tv_sec_lo, tv_nsec) from each presented()
+  # line and apply field-level validation so that non-zero refresh, sequence,
+  # or flags values cannot satisfy the check on behalf of the timestamps.
+  grep -E 'wp_presentation_feedback[@#][0-9]+\.presented\(' "$logf" |
+  awk '
+    {
+      if (!match($0, /presented\(/)) next
+      rest = substr($0, RSTART + RLENGTH)
+      paren_pos = index(rest, ")")
+      if (paren_pos > 0) rest = substr(rest, 1, paren_pos - 1)
+      n = split(rest, f, /[[:space:]]*,[[:space:]]*/);
+      if (n < 3) next
+      tv_sec_hi = f[1] + 0
+      tv_sec_lo = f[2] + 0
+      tv_nsec   = f[3] + 0
+      if (tv_nsec < 0 || tv_nsec >= 1000000000) next
+      if (tv_sec_hi != 0 || tv_sec_lo != 0 || tv_nsec != 0) {
+        found = 1
+        exit 0
+      }
+    }
+    END { exit(found ? 0 : 1) }
+  '
+}
+
+# Validate that the Wayland damage-tracking path was exercised and that the
+# compositor advanced at least one frame in response to a surface frame
+# callback (wl_surface.frame), not merely a wl_display.sync roundtrip.
+# Expects WAYLAND_DEBUG output in the provided logfile.
+#
+# The check collects wl_callback IDs registered via wl_surface.frame() and
+# confirms that at least one of those IDs received a .done event.  Roundtrip
+# callbacks created by wl_display.sync() are ignored because those fire during
+# protocol setup before any rendering takes place.
+#
+# Usage:
+# display_wayland_damage_validate "/path/to/run.log"
+# Returns:
+# 0 = wl_surface damage calls were observed and at least one frame callback
+#     created by wl_surface.frame received a .done event
+# 1 = missing required evidence
+display_wayland_damage_validate() {
+  logf="${1:-}"
+  [ -n "$logf" ] && [ -f "$logf" ] || return 1
+
+  # wl_surface.damage or wl_surface.damage_buffer must have been called.
+  if ! grep -Eq 'wl_surface[@#][0-9]+\.(damage|damage_buffer)\(' "$logf"; then
+    return 1
+  fi
+
+  # Collect the wl_callback IDs created by wl_surface.frame() and check
+  # whether any of those IDs subsequently received a .done event.  This
+  # excludes wl_display.sync roundtrip callbacks that fire during setup.
+  awk '
+    /wl_surface[@#][0-9]+\.frame\(/ {
+      if (match($0, /wl_callback[@#][0-9]+/)) {
+        tok = substr($0, RSTART, RLENGTH)
+        gsub(/^wl_callback[@#]/, "", tok)
+        frame_cbs[tok] = 1
+      }
+      next
+    }
+    /wl_callback[@#][0-9]+\.done\(/ {
+      if (match($0, /wl_callback[@#][0-9]+/)) {
+        tok = substr($0, RSTART, RLENGTH)
+        gsub(/^wl_callback[@#]/, "", tok)
+        if (tok in frame_cbs) {
+          found = 1
+          exit 0
+        }
+      }
+      next
+    }
+    END { exit(found ? 0 : 1) }
+  ' "$logf"
+}
+
 ###############################################################################
 # Screenshot capture + delta validation
 ###############################################################################
