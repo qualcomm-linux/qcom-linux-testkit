@@ -14,6 +14,46 @@ log_error() { log "ERROR" "$@"; }
 log_skip()  { log "SKIP"  "$@"; }
 log_warn()  { log "WARN"  "$@"; }
 
+# result_read_verdict <file> <expected-id>
+# Read a runner result file and validate its identity and verdict.
+# A valid file contains exactly two whitespace-separated fields: the testcase
+# identity and one of PASS, FAIL, or SKIP. Anything missing, malformed, or
+# with a wrong identity is treated as FAIL (conservative).
+# Inputs: absolute path to the result file; expected testcase identity string.
+# Output: the verdict string on stdout (PASS, FAIL, or SKIP).
+# Returns: 0 always; callers inspect the printed value.
+result_read_verdict() {
+    rrv_file="$1"
+    rrv_expected_id="$2"
+    rrv_line=""
+    rrv_field_count=0
+    rrv_id_field=""
+    rrv_verdict=""
+
+    if [ -f "$rrv_file" ]; then
+        rrv_line="$(cat "$rrv_file" 2>/dev/null || true)"
+    fi
+
+    rrv_field_count="$(printf '%s\n' "$rrv_line" | awk '{print NF}')"
+    rrv_id_field="$(printf '%s\n' "$rrv_line" | awk '{print $1}')"
+    rrv_verdict="$(printf '%s\n' "$rrv_line" | awk '{print $2}')"
+
+    if [ "$rrv_field_count" -ne 2 ] || [ "$rrv_id_field" != "$rrv_expected_id" ]; then
+        printf '%s' "FAIL"
+        return 0
+    fi
+
+    case "$rrv_verdict" in
+        PASS|FAIL|SKIP)
+            printf '%s' "$rrv_verdict"
+            ;;
+        *)
+            printf '%s' "FAIL"
+            ;;
+    esac
+    return 0
+}
+
 # test_result_valid_name <value>
 # Check that a testcase id or result file-name fragment is a single safe token.
 # The value ends up both in a file name and in a LAVA signal line, so a path
