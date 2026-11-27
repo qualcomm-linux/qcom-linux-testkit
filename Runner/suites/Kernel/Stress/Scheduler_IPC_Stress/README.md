@@ -2,8 +2,13 @@
 
 Runs stress-ng context-switch, futex and pipe workloads together. Requires
 positive completed operations from all three, native success and no new kernel
-faults. Image-provided stress-ng, taskset and setsid are required on Yocto,
-Debian, Ubuntu and CentOS. Unsupported stressors skip before execution.
+faults. Requires stress-ng, taskset and setsid. Missing stress-ng is recovered
+through configured packages on Debian, Ubuntu and CentOS/RHEL as root when
+recovery is enabled. Yocto and `TESTKIT_IMAGE_ONLY=1` remain image-managed,
+using PATH and skipping if stress-ng is absent.
+Use `--binary /path/to/stress-ng` to select a supplied file, including in
+image-only mode. Missing owner execute permission is added when permitted.
+Other missing tools and unsupported stressors skip before execution.
 
 ```sh
 ./run.sh --duration 3600 --repeat 8

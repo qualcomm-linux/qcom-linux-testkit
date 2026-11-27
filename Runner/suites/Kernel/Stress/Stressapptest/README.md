@@ -1,8 +1,13 @@
 # Stressapptest memory validation
 
-Validates checked memory traffic using image-provided `stressapptest`,
-`taskset` and `setsid` on Yocto, Debian, Ubuntu and CentOS. Missing tools skip.
-No packages are installed and no cpuset controllers are modified.
+Validates checked memory traffic with `stressapptest`, without modifying cpuset
+controllers. Missing stressapptest is installed through the configured package
+provider on Debian, Ubuntu and CentOS/RHEL as root with recovery enabled.
+Yocto, `TESTKIT_IMAGE_ONLY=1`, dry runs and recovery opt-outs never install it.
+Without an override, image-only runs use PATH and skip if stressapptest is absent.
+Use `--binary /path/to/stressapptest` for a supplied file, including in image-only
+mode. Missing owner execute permission is added when permitted. The listener
+uses the same binary. Other missing tools, including `taskset` and `setsid`, skip.
 
 Normal defaults are 300 seconds, 60% of effective available memory and one
 copy worker per allowed online CPU. `--safe` uses 120 seconds, 35% memory,

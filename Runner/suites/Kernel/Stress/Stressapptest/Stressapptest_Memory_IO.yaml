@@ -10,6 +10,7 @@ metadata:
   scope:
   - functional
 params:
+  BINARY: null
   DURATION: 300
   LOOPS: 1
   MEM_PERCENT: null
@@ -34,5 +35,6 @@ run:
   - set -- "$@" --auto-disk
   - if [ -n "${SCRATCH_DIR:-}" ]; then set -- "$@" --scratch-dir "${SCRATCH_DIR}"; fi
   - if [ -n "${FILE_BYTES:-}" ]; then set -- "$@" --filesize "${FILE_BYTES}"; fi
+  - if [ -n "${BINARY:-}" ]; then set -- "$@" --binary "${BINARY}"; fi
   - TESTKIT_IMAGE_ONLY=1 ./run.sh "$@" || true
   - $REPO_PATH/Runner/utils/send-to-lava.sh Stressapptest.res --strict --expected-testcase-id Stressapptest

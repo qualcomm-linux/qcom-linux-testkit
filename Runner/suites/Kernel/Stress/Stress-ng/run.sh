@@ -36,10 +36,13 @@ fi
 . "$TOOLS/functestlib.sh"
 # shellcheck disable=SC1091
 . "$TOOLS/lib_performance.sh"
+# shellcheck disable=SC1091
+. "$TOOLS/lib_pkg_provider.sh"
 
 TESTNAME="Stress-ng"
 RES_FILE="$SCRIPT_DIR/${TESTNAME}.res"
 test_result_init "$TESTNAME" "$RES_FILE"
+BINARY_PATH=""
 RUN_DIR=$(test_create_run_directory "$SCRIPT_DIR/logs") ||
     test_result_finish FAIL "Cannot create stress evidence directory"
 P1_SECS=60
@@ -71,6 +74,7 @@ MANAGED_TIMEOUT_USE_SESSION=1
 usage() {
     cat <<EOF
 Usage: $0 [options] [-- native stress-ng arguments]
+  --binary PATH                Explicit stress-ng file, also in image-only mode
   --sets cpu,vmhdd|vm|io|mixed   Workloads, default cpu,vmhdd
   --p1 SECONDS                  CPU phase, default 60
   --p2 SECONDS                  Other phases, default 60
@@ -146,6 +150,10 @@ parse_args() {
             *)
                 [ "$#" -ge 2 ] || return 1
                 case "$1" in
+                    --binary)
+                        [ -n "$2" ] || return 1
+                        BINARY_PATH=$2
+                        ;;
                     --p1)
                         P1_SECS=$2
                         ;;
@@ -254,14 +262,33 @@ for workload in $(printf '%s' "$SETS" | tr ',' ' '); do
             ;;
     esac
 done
-for tool in stress-ng awk grep sed sort tr df taskset setsid; do
+for tool in awk grep sed sort tr df taskset setsid; do
     command -v "$tool" >/dev/null 2>&1 ||
         test_result_finish SKIP "Image-provided $tool is required for bounded stress execution"
 done
+STRESS_BIN=$(perf_resolve_binary stress-ng "$BINARY_PATH" "$((1 - DRYRUN))")
+case $? in
+    0)
+        log_info "Using stress-ng: $STRESS_BIN"
+        ;;
+    2)
+        test_result_finish SKIP "stress-ng is unavailable, see dependency diagnostics or provide --binary PATH"
+        ;;
+    *)
+        test_result_finish FAIL "Cannot prepare stress-ng, see binary or package diagnostics"
+        ;;
+esac
 CPUS=$(perf_allowed_cpus "$CPU_LIST") || test_result_finish FAIL "Cannot select allowed online CPUs"
 CPU_COUNT=$(printf '%s\n' "$CPUS" | awk -F, '{print NF}')
 taskset -c "$CPUS" true || test_result_finish FAIL "Cannot apply CPU affinity $CPUS"
-stress-ng --help >"$RUN_DIR/help.log" 2>&1
+if ! run_with_managed_timeout 10 "$RUN_DIR" tool-help "$STRESS_BIN" --help >"$RUN_DIR/help.log" 2>&1; then
+    cat "$RUN_DIR/help.log"
+    test_result_finish FAIL "Selected binary $STRESS_BIN could not report capabilities, check architecture, loader and permissions"
+fi
+if ! grep -Eq -- '--cpu-method[[:space:]]' "$RUN_DIR/help.log" ||
+   ! grep -q -- '--metrics-brief' "$RUN_DIR/help.log"; then
+    test_result_finish FAIL "$STRESS_BIN did not identify itself as stress-ng, see $RUN_DIR/help.log"
+fi
 if [ -n "$TEMP_LIMIT" ] && ! grep -q -- '--temp-limit' "$RUN_DIR/help.log"; then
     test_result_finish SKIP "Installed stress-ng has no --temp-limit, omit it or provide a tool with that capability"
 fi
@@ -421,9 +448,9 @@ while [ "$ITERATION" -le "$REPEAT" ] || [ "$END_TIME" -gt 0 ]; do
             set -- "$@" --dry-run
         fi
         log_info "Iteration=$ITERATION workload=$workload cpus=$CPUS deadline=${DEADLINE}s"
-        log_info "Command: stress-ng $*"
+        log_info "Command: $STRESS_BIN $*"
         perf_run_stress_load "$DEADLINE" "$RUN_DIR" "$LOG" \
-            taskset -c "$CPUS" stress-ng "$@"
+            taskset -c "$CPUS" "$STRESS_BIN" "$@"
         RET=$?
         [ "$RET" -eq 0 ] || test_result_finish FAIL "stress-ng exited $RET, evidence $LOG"
         if [ "$DRYRUN" -eq 0 ]; then

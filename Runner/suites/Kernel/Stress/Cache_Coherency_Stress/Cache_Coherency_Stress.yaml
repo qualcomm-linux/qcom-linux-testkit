@@ -10,6 +10,7 @@ metadata:
   scope:
   - functional
 params:
+  BINARY: null
   DURATION: 300
   REPEAT: 1
   CPU_LIST: null
@@ -30,5 +31,6 @@ run:
   - set -- "$@" --mem-headroom-mb "${MEM_HEADROOM_MB}"
   - if [ -n "${MEM_CAP_MB:-}" ]; then set -- "$@" --mem-cap-mb "${MEM_CAP_MB}"; fi
   - set -- "$@" --timeout-margin "${TIMEOUT_MARGIN}"
+  - if [ -n "${BINARY:-}" ]; then set -- "$@" --binary "${BINARY}"; fi
   - TESTKIT_IMAGE_ONLY=1 ./run.sh "$@" || true
   - $REPO_PATH/Runner/utils/send-to-lava.sh Cache_Coherency_Stress.res --strict --expected-testcase-id Cache_Coherency_Stress

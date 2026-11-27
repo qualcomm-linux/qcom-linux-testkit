@@ -36,10 +36,13 @@ fi
 . "$TOOLS/functestlib.sh"
 # shellcheck disable=SC1091
 . "$TOOLS/lib_performance.sh"
+# shellcheck disable=SC1091
+. "$TOOLS/lib_pkg_provider.sh"
 
 TESTNAME="Scheduler_IPC_Stress"
 RES_FILE="$SCRIPT_DIR/${TESTNAME}.res"
 test_result_init "$TESTNAME" "$RES_FILE"
+BINARY_PATH=""
 DURATION=300
 CPU_LIST=""
 WORKERS=""
@@ -49,6 +52,7 @@ TIMEOUT_MARGIN=120
 usage() {
     cat <<EOF
 Usage: $0 [--duration SECONDS] [--repeat COUNT] [--cpu-list LIST]
+  --binary PATH, explicit stress-ng file, also in image-only mode
   --workers N, default allowed online CPUs per selected stressor
   --timeout-margin SECONDS, default 120
 EOF
@@ -64,6 +68,10 @@ parse_args() {
         esac
         [ "$#" -ge 2 ] || return 1
         case "$1" in
+            --binary)
+                [ -n "$2" ] || return 1
+                BINARY_PATH=$2
+                ;;
             --duration)
                 DURATION=$2
                 ;;
@@ -100,9 +108,21 @@ parse_args "$@" || test_result_finish FAIL "Invalid argument, use --help"
 for value in "$DURATION" "$REPEAT" "$TIMEOUT_MARGIN"; do
     perf_uint_in_range "$value" 1 2147483647 || test_result_finish FAIL "Duration, repeat and timeout must be positive integers"
 done
-for tool in stress-ng awk grep sort taskset setsid; do
+for tool in awk grep sort taskset setsid; do
     command -v "$tool" >/dev/null 2>&1 || test_result_finish SKIP "Image-provided $tool is required"
 done
+STRESS_BIN=$(perf_resolve_binary stress-ng "$BINARY_PATH")
+case $? in
+    0)
+        log_info "Using stress-ng: $STRESS_BIN"
+        ;;
+    2)
+        test_result_finish SKIP "stress-ng is unavailable, see dependency diagnostics or provide --binary PATH"
+        ;;
+    *)
+        test_result_finish FAIL "Cannot prepare stress-ng, see binary or package diagnostics"
+        ;;
+esac
 CPUS=$(perf_allowed_cpus "$CPU_LIST") || test_result_finish FAIL "Cannot select allowed online CPUs"
 taskset -c "$CPUS" true || test_result_finish FAIL "Cannot apply CPU affinity $CPUS"
 CPU_COUNT=$(printf '%s\n' "$CPUS" | awk -F, '{print NF}')
@@ -112,7 +132,14 @@ ITERATION=1
 
 WORKERS=${WORKERS:-$CPU_COUNT}
 perf_uint_in_range "$WORKERS" 1 1048576 || test_result_finish FAIL "Invalid worker count"
-stress-ng --help >"$RUN_DIR/help.log" 2>&1
+if ! run_with_managed_timeout 10 "$RUN_DIR" tool-help "$STRESS_BIN" --help >"$RUN_DIR/help.log" 2>&1; then
+    cat "$RUN_DIR/help.log"
+    test_result_finish FAIL "Selected binary $STRESS_BIN could not report capabilities, check architecture, loader and permissions"
+fi
+if ! grep -Eq -- '--cpu-method[[:space:]]' "$RUN_DIR/help.log" ||
+   ! grep -q -- '--metrics-brief' "$RUN_DIR/help.log"; then
+    test_result_finish FAIL "$STRESS_BIN did not identify itself as stress-ng, see $RUN_DIR/help.log"
+fi
 for option in switch futex pipe; do
     grep -Eq -- "--${option}[[:space:]]" "$RUN_DIR/help.log" ||
         test_result_finish SKIP "Installed stress-ng lacks the $option stressor"
@@ -121,7 +148,7 @@ while [ "$ITERATION" -le "$REPEAT" ]; do
     LOG="$RUN_DIR/iteration-$ITERATION.log"
     log_info "Iteration=$ITERATION/$REPEAT duration=${DURATION}s CPUs=$CPUS workers=$WORKERS per stressor"
     perf_run_stress_load "$((DURATION + TIMEOUT_MARGIN))" "$RUN_DIR" "$LOG" \
-        taskset -c "$CPUS" stress-ng --switch "$WORKERS" --futex "$WORKERS" \
+        taskset -c "$CPUS" "$STRESS_BIN" --switch "$WORKERS" --futex "$WORKERS" \
         --pipe "$WORKERS" --timeout "${DURATION}s" --verify --metrics-brief
     RET=$?
     if [ "$RET" -ne 0 ] || grep -Eq 'fail:|failed:[[:space:]]*[1-9]|skipped:[[:space:]]*[1-9]' "$LOG"; then

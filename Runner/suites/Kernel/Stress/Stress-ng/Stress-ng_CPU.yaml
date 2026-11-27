@@ -1,0 +1,27 @@
+# Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+# SPDX-License-Identifier: BSD-3-Clause
+
+metadata:
+  name: Stress-ng_CPU
+  format: "Lava-Test Test Definition 1.0"
+  description: "Run the stress-ng CPU/matrix workload sized from online CPUs"
+  os:
+    - linux
+  scope:
+    - functional
+
+params:
+  BINARY: null
+  CPU_SECONDS: 60
+  CPU_LIST: null
+  TEMP_LIMIT: null
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Stress/Stress-ng
+    - rm -f Stress-ng.res
+    - set --
+    - if [ -n "${BINARY:-}" ]; then set -- "$@" --binary "${BINARY}"; fi
+    - TESTKIT_IMAGE_ONLY=1 ./run.sh --sets cpu --p1 "${CPU_SECONDS}" --cpu-list "${CPU_LIST:-}" --temp-limit "${TEMP_LIMIT:-}" "$@" || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh Stress-ng.res --strict --expected-testcase-id Stress-ng

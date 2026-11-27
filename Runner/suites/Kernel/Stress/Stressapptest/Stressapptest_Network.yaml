@@ -10,6 +10,7 @@ metadata:
   scope:
   - functional
 params:
+  BINARY: null
   DURATION: 300
   LOOPS: 1
   MEM_PERCENT: null
@@ -31,5 +32,6 @@ run:
   - if [ -n "${COPY_WORKERS:-}" ]; then set -- "$@" -m "${COPY_WORKERS}"; fi
   - if [ -n "${CPU_LIST:-}" ]; then set -- "$@" --cpu-list "${CPU_LIST}"; fi
   - if [ -n "${PEER_IPV4:-}" ]; then set -- "$@" -n "${PEER_IPV4}"; else set -- "$@" --auto-net=loopback; fi
+  - if [ -n "${BINARY:-}" ]; then set -- "$@" --binary "${BINARY}"; fi
   - TESTKIT_IMAGE_ONLY=1 ./run.sh "$@" || true
   - $REPO_PATH/Runner/utils/send-to-lava.sh Stressapptest.res --strict --expected-testcase-id Stressapptest

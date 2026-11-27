@@ -36,10 +36,13 @@ fi
 . "$TOOLS/functestlib.sh"
 # shellcheck disable=SC1091
 . "$TOOLS/lib_performance.sh"
+# shellcheck disable=SC1091
+. "$TOOLS/lib_pkg_provider.sh"
 
 TESTNAME="Stressapptest"
 RES_FILE="$SCRIPT_DIR/${TESTNAME}.res"
 test_result_init "$TESTNAME" "$RES_FILE"
+BINARY_PATH=""
 RUN_DIR=$(test_create_run_directory "$SCRIPT_DIR/logs") || test_result_finish FAIL "Cannot create evidence directory"
 SAFE=${SAFE:-0}
 DRYRUN=${DRYRUN:-0}
@@ -83,6 +86,7 @@ MANAGED_TIMEOUT_USE_SESSION=1
 usage() {
     cat <<EOF
 Usage: $0 [options]
+  --binary PATH                Explicit stressapptest file, also in image-only mode
   -s SECONDS                   Load duration, default 300 or safe 120
   -M MIB -m THREADS             Optional memory and copy-worker overrides
   -W                           Checked warm copying
@@ -164,6 +168,10 @@ parse_args() {
             *)
                 [ "$#" -ge 2 ] || return 1
                 case "$1" in
+                    --binary)
+                        [ -n "$2" ] || return 1
+                        BINARY_PATH=$2
+                        ;;
                     -s)
                         DURATION=$2
                         ;;
@@ -297,10 +305,22 @@ fi
 if [ "$AUTO_NET" -eq 1 ] && { [ -n "$PEER" ] || [ "$LISTEN" -eq 1 ]; }; then
     test_result_finish FAIL "Use --auto-net for a local peer, or -n/--listen for a separately managed peer"
 fi
-for tool in stressapptest awk grep sed sort tr taskset setsid; do
+for tool in awk grep sed sort tr taskset setsid; do
     command -v "$tool" >/dev/null 2>&1 ||
         test_result_finish SKIP "Image-provided $tool is required for bounded memory stress"
 done
+STRESS_BIN=$(perf_resolve_binary stressapptest "$BINARY_PATH" "$((1 - DRYRUN))")
+case $? in
+    0)
+        log_info "Using stressapptest: $STRESS_BIN"
+        ;;
+    2)
+        test_result_finish SKIP "stressapptest is unavailable, see dependency diagnostics or provide --binary PATH"
+        ;;
+    *)
+        test_result_finish FAIL "Cannot prepare stressapptest, see binary or package diagnostics"
+        ;;
+esac
 CPUS=$(perf_allowed_cpus "$CPU_LIST") || test_result_finish FAIL "Cannot select allowed online CPUs"
 CPU_COUNT=$(printf '%s\n' "$CPUS" | awk -F, '{print NF}')
 if [ -z "$THREADS" ]; then
@@ -318,7 +338,13 @@ if [ "$SAFE" -eq 1 ] && [ "$THREADS" -gt 0 ]; then
         {for (i=1; i<=NF && i<=count; i++) printf "%s%s", (i>1 ? "," : ""), $i; print ""}')
 fi
 taskset -c "$CPUS" true || test_result_finish FAIL "Cannot apply CPU affinity $CPUS"
-stressapptest --help >"$RUN_DIR/help.log" 2>&1
+if ! run_with_managed_timeout 10 "$RUN_DIR" tool-help "$STRESS_BIN" --help >"$RUN_DIR/help.log" 2>&1; then
+    cat "$RUN_DIR/help.log"
+    test_result_finish FAIL "Selected binary $STRESS_BIN could not report capabilities, check architecture, loader and permissions"
+fi
+if ! grep -q 'SAT revision' "$RUN_DIR/help.log"; then
+    test_result_finish FAIL "$STRESS_BIN did not identify itself as stressapptest, see $RUN_DIR/help.log"
+fi
 if ! grep -q -- '--no_affinity' "$RUN_DIR/help.log"; then
     test_result_finish SKIP "Installed stressapptest lacks --no_affinity required to preserve the selected CPU mask"
 fi
@@ -400,7 +426,7 @@ while [ "$ITERATION" -le "$LOOPS" ]; do
         test_result_finish FAIL "Select at least one memory, file or network worker"
     fi
     LOG="$RUN_DIR/iteration-${ITERATION}.log"
-    set -- stressapptest -s "$DURATION" -M "$MEMORY" -m "$THREADS" \
+    set -- "$STRESS_BIN" -s "$DURATION" -M "$MEMORY" -m "$THREADS" \
         -p 1048576 --no_affinity -v "$VERBOSITY"
     [ "$WARM" -eq 0 ] || set -- "$@" -W
     [ "$UNCHECKED" -eq 0 ] || set -- "$@" -F
@@ -416,7 +442,7 @@ while [ "$ITERATION" -le "$LOOPS" ]; do
     JSON_ACTIVE=1
     if [ "$AUTO_NET" -eq 1 ]; then
         LISTENER_LOG="$RUN_DIR/listener-${ITERATION}.log"
-        taskset -c "$CPUS" stressapptest --listen --no_affinity -M 32 -m 0 \
+        taskset -c "$CPUS" "$STRESS_BIN" --listen --no_affinity -M 32 -m 0 \
             -s "$((DURATION + TIMEOUT_MARGIN + 30))" >"$LISTENER_LOG" 2>&1 &
         LISTENER_PID=$!
         READY=0

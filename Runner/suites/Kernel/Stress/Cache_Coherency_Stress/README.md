@@ -2,9 +2,14 @@
 
 Runs stressapptest shared cache-line counter verification with at least two
 allowed online CPUs. Requires completed counter increments, native success and
-no new kernel faults. Uses image-provided stressapptest with `--cc_test` and
-`--no_affinity`, plus taskset and setsid, on Yocto, Debian, Ubuntu and CentOS.
-Unsupported capabilities skip before execution.
+no new kernel faults. Requires stressapptest with `--cc_test` and
+`--no_affinity`, plus taskset and setsid. Missing stressapptest is recovered
+through configured packages on Debian, Ubuntu and CentOS/RHEL as root when
+recovery is enabled. Yocto and `TESTKIT_IMAGE_ONLY=1` remain image-managed,
+using PATH and skipping if stressapptest is absent.
+Use `--binary /path/to/stressapptest` to select a supplied file, including in
+image-only mode. Missing owner execute permission is added when permitted.
+Other missing tools and unsupported capabilities skip before execution.
 
 ```sh
 ./run.sh --duration 3600 --repeat 8

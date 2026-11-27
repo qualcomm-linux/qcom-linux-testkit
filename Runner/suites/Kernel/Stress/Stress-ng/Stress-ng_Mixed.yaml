@@ -10,6 +10,7 @@ metadata:
   scope:
   - functional
 params:
+  BINARY: null
   WORKLOAD: mixed
   DURATION: 300
   REPEAT: 1
@@ -28,6 +29,7 @@ run:
   - cd Runner/suites/Kernel/Stress/Stress-ng
   - rm -f Stress-ng.res
   - set --
+  - if [ -n "${BINARY:-}" ]; then set -- "$@" --binary "${BINARY}"; fi
   - set -- "$@" --sets "${WORKLOAD}"
   - set -- "$@" --p2 "${DURATION}"
   - set -- "$@" --repeat "${REPEAT}"

@@ -1,8 +1,13 @@
 # Stress-ng stability validation
 
-Validates bounded CPU/matrix, memory and file-I/O loads using image-provided
-`stress-ng`, `taskset` and `setsid` on Yocto, Debian, Ubuntu and CentOS.
-Missing tools skip. No packages are installed at runtime.
+Validates bounded CPU/matrix, memory and file-I/O loads with `stress-ng`.
+Missing stress-ng is installed through the configured package provider on
+Debian, Ubuntu and CentOS/RHEL when running as root with recovery enabled.
+Yocto, `TESTKIT_IMAGE_ONLY=1`, dry runs and recovery opt-outs never install it.
+Without an override, image-only runs use PATH and skip if stress-ng is absent.
+Provide `--binary /path/to/stress-ng` to use a supplied file, including in
+image-only mode. Missing owner execute permission is added when permitted.
+Other missing prerequisites, including `taskset` and `setsid`, skip.
 
 The default selection runs CPU/matrix for 60 seconds, then VM/HDD for 60 seconds.
 `--sets vm` isolates memory, `--sets io` isolates file I/O, and `--sets mixed`

@@ -1,0 +1,29 @@
+# Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+# SPDX-License-Identifier: BSD-3-Clause
+
+metadata:
+  name: Stressapptest_Safe
+  format: "Lava-Test Test Definition 1.0"
+  description: "Run stressapptest with the existing safe-mode memory reserve and reduced worker count"
+  os:
+    - linux
+  scope:
+    - functional
+
+params:
+  BINARY: null
+  DURATION: 120
+  LOOPS: 1
+  MEM_PERCENT: null
+  MEM_CAP_MB: null
+  MEM_HEADROOM_MB: null
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Stress/Stressapptest
+    - rm -f Stressapptest.res
+    - set --
+    - if [ -n "${BINARY:-}" ]; then set -- "$@" --binary "${BINARY}"; fi
+    - TESTKIT_IMAGE_ONLY=1 ./run.sh --safe -s "${DURATION}" --loops="${LOOPS}" --mem-pct="${MEM_PERCENT:-}" --mem-cap-mb="${MEM_CAP_MB:-}" --mem-headroom-mb="${MEM_HEADROOM_MB:-}" "$@" || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh Stressapptest.res --strict --expected-testcase-id Stressapptest

@@ -36,10 +36,13 @@ fi
 . "$TOOLS/functestlib.sh"
 # shellcheck disable=SC1091
 . "$TOOLS/lib_performance.sh"
+# shellcheck disable=SC1091
+. "$TOOLS/lib_pkg_provider.sh"
 
 TESTNAME="Cache_Coherency_Stress"
 RES_FILE="$SCRIPT_DIR/${TESTNAME}.res"
 test_result_init "$TESTNAME" "$RES_FILE"
+BINARY_PATH=""
 DURATION=300
 CPU_LIST=""
 MEM_PERCENT=15
@@ -51,6 +54,7 @@ TIMEOUT_MARGIN=120
 usage() {
     cat <<EOF
 Usage: $0 [--duration SECONDS] [--repeat COUNT] [--cpu-list LIST]
+  --binary PATH, explicit stressapptest file, also in image-only mode
   --mem-frac PERCENT --mem-cap-mb MIB --mem-headroom-mb MIB
   --timeout-margin SECONDS, default 120
 EOF
@@ -66,6 +70,10 @@ parse_args() {
         esac
         [ "$#" -ge 2 ] || return 1
         case "$1" in
+            --binary)
+                [ -n "$2" ] || return 1
+                BINARY_PATH=$2
+                ;;
             --duration)
                 DURATION=$2
                 ;;
@@ -108,9 +116,21 @@ parse_args "$@" || test_result_finish FAIL "Invalid argument, use --help"
 for value in "$DURATION" "$REPEAT" "$TIMEOUT_MARGIN"; do
     perf_uint_in_range "$value" 1 2147483647 || test_result_finish FAIL "Duration, repeat and timeout must be positive integers"
 done
-for tool in stressapptest awk grep sort taskset setsid; do
+for tool in awk grep sort taskset setsid; do
     command -v "$tool" >/dev/null 2>&1 || test_result_finish SKIP "Image-provided $tool is required"
 done
+STRESS_BIN=$(perf_resolve_binary stressapptest "$BINARY_PATH")
+case $? in
+    0)
+        log_info "Using stressapptest: $STRESS_BIN"
+        ;;
+    2)
+        test_result_finish SKIP "stressapptest is unavailable, see dependency diagnostics or provide --binary PATH"
+        ;;
+    *)
+        test_result_finish FAIL "Cannot prepare stressapptest, see binary or package diagnostics"
+        ;;
+esac
 CPUS=$(perf_allowed_cpus "$CPU_LIST") || test_result_finish FAIL "Cannot select allowed online CPUs"
 taskset -c "$CPUS" true || test_result_finish FAIL "Cannot apply CPU affinity $CPUS"
 CPU_COUNT=$(printf '%s\n' "$CPUS" | awk -F, '{print NF}')
@@ -124,7 +144,13 @@ perf_uint_in_range "$HEADROOM" 0 2147483647 || test_result_finish FAIL "Invalid 
 if [ -n "$MEM_CAP" ]; then
     perf_uint_in_range "$MEM_CAP" 1 2147483647 || test_result_finish FAIL "Invalid memory cap"
 fi
-stressapptest --help >"$RUN_DIR/help.log" 2>&1
+if ! run_with_managed_timeout 10 "$RUN_DIR" tool-help "$STRESS_BIN" --help >"$RUN_DIR/help.log" 2>&1; then
+    cat "$RUN_DIR/help.log"
+    test_result_finish FAIL "Selected binary $STRESS_BIN could not report capabilities, check architecture, loader and permissions"
+fi
+if ! grep -q 'SAT revision' "$RUN_DIR/help.log"; then
+    test_result_finish FAIL "$STRESS_BIN did not identify itself as stressapptest, see $RUN_DIR/help.log"
+fi
 for option in --cc_test --no_affinity; do
     grep -q -- "$option" "$RUN_DIR/help.log" || test_result_finish SKIP "Installed stressapptest lacks $option"
 done
@@ -136,7 +162,7 @@ while [ "$ITERATION" -le "$REPEAT" ]; do
     LOG="$RUN_DIR/iteration-$ITERATION.log"
     log_info "Iteration=$ITERATION/$REPEAT duration=${DURATION}s CPUs=$CPUS memory=${MEMORY}MiB"
     perf_run_stress_load "$((DURATION + TIMEOUT_MARGIN))" "$RUN_DIR" "$LOG" \
-        taskset -c "$CPUS" stressapptest -s "$DURATION" -M "$MEMORY" -m 0 \
+        taskset -c "$CPUS" "$STRESS_BIN" -s "$DURATION" -M "$MEMORY" -m 0 \
         --cc_test --no_affinity -v 12
     RET=$?
     if [ "$RET" -ne 0 ] || ! grep -q 'Status: PASS' "$LOG" ||
