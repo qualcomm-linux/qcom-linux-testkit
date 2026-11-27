@@ -2724,6 +2724,103 @@ video_policy_lookup() {
 }
 
 # -----------------------------------------------------------------------------
+# video_bound_device <video-node>
+# Print the nearest driver-bound ancestor of a runtime video node.
+video_bound_device() (
+    node=${1##*/}
+    device=$(readlink -f "/sys/class/video4linux/$node/device") || exit 1
+    while [ "$device" != /sys/devices ] && [ "$device" != / ]; do
+        [ -d "$device" ] || exit 1
+        if [ -L "$device/driver" ]; then
+            printf '%s\n' "$device"
+            exit 0
+        fi
+        device=${device%/*}
+    done
+    exit 1
+)
+
+# video_device_nodes <resolved-device>
+# Print registered video nodes belonging to this device or its descendants.
+video_device_nodes() (
+    for node in /sys/class/video4linux/video*; do
+        [ -e "$node" ] || continue
+        device=$(readlink -f "$node/device") || continue
+        case "$device" in
+            "$1"|"$1"/*)
+                printf '/dev/%s\n' "${node##*/}"
+                ;;
+        esac
+    done
+)
+
+# video_quality_selected_node <child-artifact-directory>
+# Extract one actual FFmpeg V4L2 decode device, rejecting absent/mixed nodes.
+video_quality_selected_node() (
+    logs="$1/decode-logs.list"
+    find "$1/results/Video_Codec_Quality" -type f -name 'decode-*-1.log' >"$logs" || exit 1
+    nodes=""
+    while IFS= read -r log; do
+        selected=$(sed -n 's/.*Using device \(\/dev\/video[0-9][0-9]*\).*/\1/p' "$log")
+        nodes="$nodes
+$selected"
+    done <"$logs"
+    printf '%s\n' "$nodes" | awk 'NF {if (!seen[$0]++) count++; selected=$0} END {if (count!=1) exit 1; print selected}'
+)
+
+# video_restore_driver_binding
+# Restore only the exact binding owned by a lifecycle test, never switch drivers.
+video_restore_driver_binding() {
+    local current
+    [ "${VIDEO_REBIND_OWNED:-0}" = 1 ] || return 0
+    [ -d "$VIDEO_REBIND_DEVICE" ] || return 1
+    if [ -L "$VIDEO_REBIND_DEVICE/driver" ]; then
+        current=$(readlink -f "$VIDEO_REBIND_DEVICE/driver") || return 1
+        [ "$current" = "$VIDEO_REBIND_DRIVER" ] || return 1
+    else
+        # shellcheck disable=SC2016 # Positional arguments belong to the bounded child.
+        test_run_command restore-binding sh -c 'printf "%s\n" "$1" >"$2/bind"' \
+            sh "${VIDEO_REBIND_DEVICE##*/}" "$VIDEO_REBIND_DRIVER" || return 1
+        current=$(readlink -f "$VIDEO_REBIND_DEVICE/driver") || return 1
+        [ "$current" = "$VIDEO_REBIND_DRIVER" ] || return 1
+    fi
+    VIDEO_REBIND_OWNED=0
+}
+
+
+# video_quality_run_child <label> <runner> <ffmpeg> <streams> <codec> <timeout>
+# Run the existing decode verifier in fresh evidence, expose VIDEO_QUALITY_NODE.
+# Return 0 only for one PASS verdict with actual device evidence, 77 for SKIP.
+video_quality_run_child() {
+    local label="$1" directory="$TEST_RUN_DIR/$1" status=0 verdict
+    local TEST_RUN_TIMEOUT
+    # shellcheck disable=SC2034 # Timeout consumed by shared command execution.
+    TEST_RUN_TIMEOUT=$(($6 * 20 + 30))
+    VIDEO_QUALITY_NODE=""
+    mkdir -p "$directory" || return 1
+    # shellcheck disable=SC2016 # Positional arguments belong to the bounded child.
+    test_run_command "$label" sh -c '
+        cd "$1" || exit 1
+        exec sh "$2" --ffmpeg "$3" --streams "$4" --codecs "$5" --mode decode --rounds 1 --timeout "$6"
+    ' sh "$directory" "$2" "$3" "$4" "$5" "$6" || status=$?
+    [ "$status" -eq 0 ] || return 1
+    verdict=$(awk '
+        NR!=1 || NF!=2 || $1!="Video_Codec_Quality" || $2!~/^(PASS|FAIL|SKIP)$/ {bad=1}
+        END {if (bad || NR!=1) exit 1; print $2}
+    ' "$directory/Video_Codec_Quality.res") || return 1
+    case "$verdict" in
+        SKIP)
+            return 77
+            ;;
+        PASS)
+            # shellcheck disable=SC2034 # Returned to the calling lifecycle runner.
+            VIDEO_QUALITY_NODE=$(video_quality_selected_node "$directory") || return 1
+            return 0
+            ;;
+    esac
+    return 1
+}
+
 # video_stage_control_override <cfg_json_path> <control> <value> <output_dir>
 #
 # Rewrites the StaticControls entry with "Id": "<control>" to

@@ -1,0 +1,20 @@
+metadata:
+  name: Video_Driver_Rebind_Validation
+  format: Lava-Test Test Definition 1.0
+  description: Verify hardware decode correctness after driver unbind and rebind.
+  os:
+    - linux
+  scope:
+    - functional
+params:
+  EXERCISE: "0"
+  STREAMS: null
+  CODEC: "h264"
+  FFMPEG: "ffmpeg"
+  TIMEOUT: "60"
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Multimedia/Video/Video_Driver_Rebind_Validation
+    - ./run.sh ${EXERCISE:+--exercise "${EXERCISE}"} ${STREAMS:+--streams "${STREAMS}"} ${CODEC:+--codec "${CODEC}"} ${FFMPEG:+--ffmpeg "${FFMPEG}"} ${TIMEOUT:+--timeout "${TIMEOUT}"} || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh Video_Driver_Rebind_Validation.res
