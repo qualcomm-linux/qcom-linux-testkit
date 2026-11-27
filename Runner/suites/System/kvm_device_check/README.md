@@ -1,7 +1,6 @@
 # kvm_device_check
 
-Checks whether the KVM device node is exposed on the DUT. The test runs locally
-on the DUT and does not use `adb`.
+Checks whether the KVM device node is exposed on the DUT. The test runs locally on the DUT.
 
 ## What this test checks
 

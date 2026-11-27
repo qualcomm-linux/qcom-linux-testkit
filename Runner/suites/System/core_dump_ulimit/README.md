@@ -1,7 +1,7 @@
 # core_dump_ulimit
 
 Checks whether the core-dump size limit in the DUT's test shell is unlimited.
-The test runs locally on the DUT and does not use `adb`.
+The test runs locally on the DUT.
 
 ## Test procedure
 

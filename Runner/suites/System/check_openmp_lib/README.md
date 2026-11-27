@@ -1,7 +1,6 @@
 # check_openmp_lib
 
-Checks for the GNU OpenMP runtime library on the DUT. The test runs locally on
-the DUT and does not use `adb`.
+Checks for the GNU OpenMP runtime library on the DUT. The test runs locally on the DUT.
 
 ## What this test checks
 

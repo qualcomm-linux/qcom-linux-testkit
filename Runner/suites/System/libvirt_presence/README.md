@@ -1,7 +1,6 @@
 # libvirt_presence
 
-Checks whether the `virsh` libvirt client is executable and can report its
-version. The test runs locally on the DUT and does not use `adb`.
+Checks whether the `virsh` libvirt client is executable and can report its version. The test runs locally on the DUT.
 
 ## Result semantics
 
