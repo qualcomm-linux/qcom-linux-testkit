@@ -107,7 +107,8 @@ query_unit_state() {
 
     UNIT_LOAD_STATE=$(sed -n 's/^LoadState=//p' "$query_output" | head -n 1)
     UNIT_ACTIVE_STATE=$(sed -n 's/^ActiveState=//p' "$query_output" | head -n 1)
-    [ -n "$UNIT_LOAD_STATE" ] && [ -n "$UNIT_ACTIVE_STATE" ]
+    UNIT_SUB_STATE=$(sed -n 's/^SubState=//p' "$query_output" | head -n 1)
+    [ -n "$UNIT_LOAD_STATE" ] && [ -n "$UNIT_ACTIVE_STATE" ] && [ -n "$UNIT_SUB_STATE" ]
 }
 
 wait_for_unit_state() {
@@ -120,11 +121,11 @@ wait_for_unit_state() {
             return 1
         fi
 
-        case "$wait_expected:$UNIT_ACTIVE_STATE" in
-            active:active)
+        case "$wait_expected:$UNIT_LOAD_STATE:$UNIT_ACTIVE_STATE:$UNIT_SUB_STATE" in
+            active:loaded:active:running)
                 return 0
                 ;;
-            stopped:inactive|stopped:failed)
+            stopped:loaded:inactive:dead)
                 return 0
                 ;;
         esac
@@ -226,7 +227,7 @@ if ! run_bounded_command \
 fi
 
 if ! wait_for_unit_state "$TEST_UNIT" active; then
-    fail_test "$TEST_UNIT did not become active after creation"
+    fail_test "$TEST_UNIT did not reach ActiveState=active and SubState=running after creation"
 fi
 
 stop_log="$SCRIPT_DIR/${TEST_NAME}.stop.log"
@@ -238,7 +239,7 @@ if ! run_bounded_command \
 fi
 
 if ! wait_for_unit_state "$TEST_UNIT" stopped; then
-    fail_test "$TEST_UNIT did not reach inactive or failed after stop"
+    fail_test "$TEST_UNIT did not reach ActiveState=inactive and SubState=dead after stop"
 fi
 
 start_log="$SCRIPT_DIR/${TEST_NAME}.start.log"
@@ -250,11 +251,11 @@ if ! run_bounded_command \
 fi
 
 if ! wait_for_unit_state "$TEST_UNIT" active; then
-    fail_test "$TEST_UNIT did not become active after restart"
+    fail_test "$TEST_UNIT did not reach ActiveState=active and SubState=running after restart"
 fi
 
 log_pass "$TEST_UNIT passed its stop/start state checks"
 
 log_info "Completed $TEST_NAME"
-test_result_record PASS "systemctl stopped and restarted an isolated transient service successfully"
+test_result_record PASS "systemctl stopped and restarted an isolated temporary service successfully"
 test_result_finish

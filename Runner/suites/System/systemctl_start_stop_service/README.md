@@ -1,31 +1,35 @@
 # systemctl_start_stop_service
 
 Checks local `systemctl stop` and `systemctl start` behavior using a
-test-owned transient service. This test runs on-device and does not use `adb`.
+uniquely named, test-owned temporary systemd unit file. This test runs on the
+DUT.
 
 ## Test procedure
 
-The test performs the following steps for one uniquely named transient unit:
+The test performs the following steps for one uniquely named temporary unit:
 
-1. Creates a uniquely named transient service running `sleep`.
-2. Confirms the service becomes active.
-3. Stops it and confirms its `ActiveState` becomes `inactive` or `failed`.
-4. Starts it again and confirms it becomes active.
-5. Stops the test-owned service during result cleanup, including on failure or
-   interruption.
+1. Writes a unit file under `/run/systemd/system` for a service running
+   `sleep`.
+2. Runs `systemctl daemon-reload`, starts the service, and confirms it becomes
+   active and running.
+3. Stops it and confirms its `ActiveState` is `inactive` and its `SubState` is
+   `dead`.
+4. Starts it again and confirms it becomes active and running.
+5. Stops the test-owned service, removes its unit file, and reloads systemd
+   during cleanup, including on failure or interruption.
 
 ## Requirements and safety
 
 - Run on a dedicated DUT.
-- The DUT must use systemd and provide `systemctl` and `systemd-run`.
+- The DUT must use systemd and provide `systemctl` and `sleep`.
+- The test needs permission to write to `/run/systemd/system`.
 - The test requires the testkit shared `functestlib.sh` helper
   `run_with_bounded_timeout`.
-- The test needs permission to create and manage a transient systemd service.
 - It does not stop platform services such as journald or logind.
 
 ## Result semantics
 
-- **PASS** when the transient unit becomes active, stops, and restarts as
+- **PASS** when the temporary unit becomes active, stops, and restarts as
   expected.
 - **FAIL** if required commands are unavailable, a command fails or times out,
   or the unit does not reach the expected state.
