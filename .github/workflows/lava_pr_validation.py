@@ -226,16 +226,21 @@ def dispatch_approval():
     if any(check.get("conclusion") != "failure" for check in claims):
         print("This approved revision already has an automatic dispatch. Use a manual run for another validation.")
         return
+    image_type = os.environ.get("LAVA_APPROVAL_IMAGE_TYPE", "").strip() or "both"
+    if image_type not in {"base", "overlay", "both"}:
+        raise ValueError("Set repository Actions variable LAVA_APPROVAL_IMAGE_TYPE to base, overlay or both")
+    image_label = "base + overlay" if image_type == "both" else image_type
     # Record intent before POST. An interrupted or ambiguous dispatch must not
     # submit duplicate hardware work when another approval notification arrives.
     claim = gh.request("POST", f"{endpoint}/check-runs", json=dict(
         name="LAVA approval dispatch", head_sha=sha, external_id=marker, status="completed", conclusion="neutral",
         details_url=f"https://github.com/{REPOSITORY}/actions/runs/{os.environ['GITHUB_RUN_ID']}",
         output=dict(title="LAVA approval dispatch reserved", summary=(
-            "Automatic dispatch reserved. If this workflow does not confirm acceptance, use a manual validation run."
+            f"Automatic {image_label} dispatch reserved. "
+            "If this workflow does not confirm acceptance, use a manual validation run."
         )))).json()
     inputs = dict(pr=number, revision=sha, targets="meta-qcom", include_meta_qcom="false",
-                  distro="meta-qcom-main", image_type="base", submit="true", selections="{}")
+                  distro="meta-qcom-main", image_type=image_type, submit="true", selections="{}")
     try:
         gh.request("POST", f"{endpoint}/actions/workflows/lava-pr-validation.yml/dispatches",
                    json=dict(ref="main", inputs=inputs))
@@ -247,8 +252,9 @@ def dispatch_approval():
         raise
     gh.request("PATCH", f"{endpoint}/check-runs/{claim['id']}", json=dict(
         status="completed", conclusion="neutral", output=dict(title="LAVA approval dispatched",
-        summary="PR-only validation requested. Hardware results are reported by the separate LAVA PR validation check.")))
-    message = f"Dispatched PR #{number} at {sha}, changed tests only, latest meta-qcom-main base images."
+        summary=f"PR-only validation requested for {image_label} images. "
+        "Hardware results are reported by the separate LAVA PR validation check.")))
+    message = f"Dispatched PR #{number} at {sha}, changed tests only, latest meta-qcom-main {image_label} images."
     print(message)
     if os.environ.get("GITHUB_STEP_SUMMARY"):
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
