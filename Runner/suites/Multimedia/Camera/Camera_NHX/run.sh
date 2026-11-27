@@ -3,8 +3,6 @@
 # SPDX-License-Identifier: BSD-3-Clause
 # Camera NHX validation
 
-TESTNAME="Camera_NHX"
-
 SCRIPT_DIR="$(
   cd "$(dirname "$0")" || exit 1
   pwd
@@ -20,12 +18,9 @@ while [ "$SEARCH" != "/" ]; do
   SEARCH=$(dirname "$SEARCH")
 done
 
-RES_FILE="$SCRIPT_DIR/${TESTNAME}.res"
-
 if [ -z "${INIT_ENV:-}" ]; then
   echo "[ERROR] Could not find init_env (starting at $SCRIPT_DIR)" >&2
-  echo "$TESTNAME SKIP" >"$RES_FILE" 2>/dev/null || true
-  exit 0
+  exit 1
 fi
 
 if [ -z "${__INIT_ENV_LOADED:-}" ]; then
@@ -34,6 +29,8 @@ if [ -z "${__INIT_ENV_LOADED:-}" ]; then
   __INIT_ENV_LOADED=1
 fi
 
+# shellcheck disable=SC1090
+. "$INIT_ENV"
 # shellcheck disable=SC1090,SC1091
 . "$TOOLS/functestlib.sh"
 
@@ -48,6 +45,10 @@ if [ -r "$TOOLS/lib_pkg_provider.sh" ]; then
   . "$TOOLS/lib_pkg_provider.sh"
 fi
 
+TESTNAME="Camera_NHX"
+RES_FILE="$SCRIPT_DIR/${TESTNAME}.res"
+test_result_init "$TESTNAME" "$RES_FILE" || exit 1
+
 LOG_DIR="$SCRIPT_DIR/logs"
 OUT_DIR="$SCRIPT_DIR/out"
 DUMP_DIR="/var/cache/camera/nativehaltest"
@@ -60,6 +61,12 @@ SUMMARY_TXT="$OUT_DIR/${TESTNAME}_summary_${TS}.txt"
 DMESG_DIR="$LOG_DIR/dmesg_${TS}"
 CAMX_EFI_LOG="$LOG_DIR/${TESTNAME}_camx_efi_${TS}.log"
 CAMX_EFI_LIST_LOG="$LOG_DIR/${TESTNAME}_camx_efi_list_${TS}.log"
+RUNNING_DTS="$OUT_DIR/${TESTNAME}_running_${TS}.dts"
+RUNNING_DTS_WARNINGS="$LOG_DIR/${TESTNAME}_dtc_${TS}.log"
+CAMERA_DTS_MATCHES="$OUT_DIR/${TESTNAME}_runtime_camera_${TS}.log"
+SENSOR_DTS_MATCHES="$OUT_DIR/${TESTNAME}_runtime_sensors_${TS}.log"
+CAMX_DT_NODES_LOG="$OUT_DIR/${TESTNAME}_enabled_camx_nodes_${TS}.log"
+SENSOR_DT_NODES_LOG="$OUT_DIR/${TESTNAME}_enabled_sensor_nodes_${TS}.log"
 
 NHX_OUTDIR="$OUT_DIR/nhx_${TS}"
 
@@ -76,11 +83,28 @@ fi
 CAM_SERVER_PRESENT=0
 CAM_SERVER_SERVICE=""
 CAM_SERVER_STOPPED_FOR_TEST=0
+CAM_SERVER_RESTORE_FAILED=0
+NHX_CHECK_SETUP=0
 
 NHX_JSON="${NHX_JSON:-}"
 NHX_TARGET="${NHX_TARGET:-}"
 NHX_RUNNER=""
 NHX_RUNNER_SOURCE=""
+NHX_RUNNER_MODE="wrapper"
+NATIVE_REQUESTED=0
+NATIVE_TEST=""
+NATIVE_BIN=""
+NATIVE_FRAMES=150
+NATIVE_FRAMES_EXPLICIT=0
+NATIVE_CAMERA=""
+NATIVE_DUMP_OVERRIDE=""
+NATIVE_SELECTOR=""
+NATIVE_REPORT_VALID=1
+NATIVE_NO_TESTS=0
+NATIVE_MODE="test"
+NATIVE_JSON_STATE=""
+NATIVE_JSON_RESTORE_FAILED=0
+NATIVE_CAPTURE_ACTIVE=0
 NHX_JSON_RESOLVED=""
 NHX_JSON_ARG=""
 OVERLAY_REQUESTED=0
@@ -90,29 +114,51 @@ CAMX_FIT_DTB_SELECTED=0
 
 # shellcheck disable=SC2317
 cleanup() {
+  trap - EXIT INT TERM
+  if [ "$NATIVE_CAPTURE_ACTIVE" -eq 1 ]; then
+    if ! nhx_stop_native_capture; then
+      test_result_finish "FAIL" "$TESTNAME interrupted native capture could not be stopped safely"
+    fi
+  fi
+  if [ -n "${NATIVE_JSON_STATE:-}" ]; then
+    if ! nhx_restore_native_json "$NATIVE_JSON_STATE"; then
+      NATIVE_JSON_RESTORE_FAILED=1
+    fi
+  fi
   if command -v efi_restore_efivarfs_ro >/dev/null 2>&1; then
     efi_restore_efivarfs_ro >/dev/null 2>&1 || true
   fi
 
   if [ "$CAM_SERVER_STOPPED_FOR_TEST" -eq 1 ] && [ "$CAM_SERVER_PRESENT" -eq 1 ]; then
-    systemd_service_start_safe "$CAM_SERVER_SERVICE" >/dev/null 2>&1 || true
+    if ! nhx_restore_camera_service "$CAM_SERVER_SERVICE" "$LOG_DIR"; then
+      test_result_finish "FAIL" "$TESTNAME FAIL camera-server restoration failed: $CAM_SERVER_SERVICE"
+    fi
   fi
 
   if [ -n "${MARKER:-}" ]; then
     rm -f "$MARKER"
   fi
+  if [ "${NATIVE_JSON_RESTORE_FAILED:-0}" -ne 0 ]; then
+    test_result_finish "FAIL" "$TESTNAME native JSON cleanup failed, see $NATIVE_JSON_STATE"
+  fi
 }
 
-trap 'cleanup' EXIT INT TERM
+trap 'cleanup' EXIT
+trap 'test_result_finish "FAIL" "$TESTNAME interrupted, restoring owned camera state"' INT TERM
 
 usage() {
   cat <<EOF
-Usage: $0 [--overlay] [--fit-dtb NAME] [--json JSON_FILE] [--target TARGET] [--help]
+Usage: $0 [--check-setup] [--overlay] [--fit-dtb NAME] [--json JSON_FILE] [--target TARGET] [--help]
+       $0 --native-test Suite.Case [--native-bin /path/nativehaltest]
+          [--native-frames N] [--native-camera ID] [--native-dump-dir /path]
 
 Options:
-  --overlay        Install the Camera NHX CAMX package set on supported
-                   Debian, Ubuntu, or CentOS images and ensure the CAMX FIT
-                   DTB is selected for boot.
+  --check-setup    Read-only NHX runtime readiness, no capture, package changes,
+                   EFI writes or service changes. Writes Camera_NHX_Setup.res.
+                   Cannot be combined with --overlay, --fit-dtb, --json or --target.
+  --overlay        Verify the Camera NHX CAMX package set on supported Debian,
+                   Ubuntu, or CentOS images, install missing packages, and
+                   ensure the CAMX FIT DTB is selected for boot.
   --fit-dtb NAME    Select this FIT DTB compatibility name for the next boot.
                    Camera_NHX supports camx, which is the --overlay default.
                    This option requires --overlay.
@@ -121,20 +167,67 @@ Options:
                      to target folder when --target is provided.
   --target TARGET Target folder name: Kodiak, Lemans, Monaco, Talos.
                      Used to resolve/stage --json under /etc/camera/test/NHX.
+  --native-test NAME Run exactly one native HAL Suite.Case, no wildcards.
+                     Selects native mode even when an NHX wrapper is installed.
+                     Cannot be combined with --json or --target.
+  --native-bin PATH Override native executable discovery with an absolute path.
+  --native-frames N Number of native capture frames, 1..10000, default 150.
+  --native-camera ID Explicit camera ID. Otherwise retain the client default.
+  --native-dump-dir PATH Native image output directory to validate. Does not
+                     redirect the binary output. Default: $DUMP_DIR
+                     Native capture has a 180-second total timeout.
   --help Show this help.
 
 Examples:
   $0
+  $0 --check-setup
+  $0 --check-setup --native-bin /usr/libexec/camx-kodiak/nativehaltest
   $0 --overlay
   $0 --overlay --fit-dtb camx
   $0 --json Lemans/Prev_plus_Video_YUVNV12_MaxResolution_NHX.json
   $0 --json Snapshot_YUVNV12_MaxResolution_NHX.json --target Kodiak
+  $0 --json Kodiak/Preview_YUVNV12_MaxResolution_NHX.json --native-bin /usr/libexec/camx-kodiak/nativehaltest
   NHX_JSON=Talos/Video_YUVNV12_MaxResolution_NHX.json $0
 EOF
 }
 
+# parse_args arguments...
+# Parse NHX capture or read-only readiness options before any target mutation.
+parse_args() {
 while [ "$#" -gt 0 ]; do
   case "$1" in
+    --native-test|--native-bin|--native-frames|--native-camera|--native-dump-dir)
+      if [ "$#" -lt 2 ] || [ -z "$2" ]; then
+        test_result_finish "FAIL" "$TESTNAME $1 requires a nonempty argument"
+      fi
+      NATIVE_REQUESTED=1
+      case "$1" in
+        --native-test)
+          NATIVE_TEST="$2"
+          ;;
+        --native-bin)
+          NATIVE_BIN="$2"
+          ;;
+        --native-frames)
+          NATIVE_FRAMES="$2"
+          NATIVE_FRAMES_EXPLICIT=1
+          ;;
+        --native-camera)
+          NATIVE_CAMERA="$2"
+          ;;
+        --native-dump-dir)
+          NATIVE_DUMP_OVERRIDE="$2"
+          ;;
+      esac
+      shift 2
+      ;;
+    --check-setup)
+      NHX_CHECK_SETUP=1
+      TESTNAME="Camera_NHX_Setup"
+      RES_FILE="$SCRIPT_DIR/${TESTNAME}.res"
+      test_result_init "$TESTNAME" "$RES_FILE" || exit 1
+      shift
+      ;;
     --overlay)
       OVERLAY_REQUESTED=1
       shift
@@ -193,6 +286,113 @@ while [ "$#" -gt 0 ]; do
       ;;
   esac
 done
+}
+parse_args "$@"
+
+if [ "$NATIVE_REQUESTED" -eq 1 ]; then
+  if [ -n "$NATIVE_TEST" ] && [ -n "$NHX_JSON$NHX_TARGET" ]; then
+    test_result_finish "FAIL" "$TESTNAME choose either --native-test or --json, not both"
+  fi
+  if [ -n "$NHX_JSON" ] && { [ "$NATIVE_FRAMES_EXPLICIT" -eq 1 ] || [ -n "$NATIVE_CAMERA" ]; }; then
+    test_result_finish "FAIL" "$TESTNAME native JSON uses its own frames and camera, remove --native-frames and --native-camera"
+  fi
+  case "$NATIVE_BIN" in
+    ""|/*)
+      ;;
+    *)
+      test_result_finish "FAIL" "$TESTNAME --native-bin requires an absolute executable path"
+      ;;
+  esac
+  if [ -n "$NATIVE_TEST" ] && \
+    ! printf '%s\n' "$NATIVE_TEST" | grep -Eq '^[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*$'; then
+    test_result_finish "FAIL" "$TESTNAME --native-test requires one exact Suite.Case, no wildcard or multi-test filter"
+  fi
+  case "$NATIVE_FRAMES" in
+    ''|*[!0-9]*|0)
+      test_result_finish "FAIL" "$TESTNAME --native-frames requires an integer from 1 to 10000"
+      ;;
+  esac
+  if [ "${#NATIVE_FRAMES}" -gt 5 ] || [ "$NATIVE_FRAMES" -lt 1 ] || [ "$NATIVE_FRAMES" -gt 10000 ]; then
+    test_result_finish "FAIL" "$TESTNAME --native-frames must be within 1..10000"
+  fi
+  case "$NATIVE_CAMERA" in
+    *[!0-9]*)
+      test_result_finish "FAIL" "$TESTNAME --native-camera requires a nonnegative numeric camera ID"
+      ;;
+  esac
+  if [ -n "$NATIVE_CAMERA" ]; then
+    if [ "${#NATIVE_CAMERA}" -gt 10 ] || [ "$NATIVE_CAMERA" -gt 2147483647 ]; then
+      test_result_finish "FAIL" "$TESTNAME --native-camera exceeds the supported integer ID range"
+    fi
+  fi
+  case "$NATIVE_DUMP_OVERRIDE" in
+    "")
+      ;;
+    /|/./|*/../*|*/..)
+      test_result_finish "FAIL" "$TESTNAME --native-dump-dir must name the specific native capture directory"
+      ;;
+    /*)
+      DUMP_DIR="$NATIVE_DUMP_OVERRIDE"
+      ;;
+    *)
+      test_result_finish "FAIL" "$TESTNAME --native-dump-dir requires an absolute path"
+      ;;
+  esac
+fi
+
+if [ "$NHX_CHECK_SETUP" -eq 1 ]; then
+  TESTNAME="Camera_NHX_Setup"
+  RES_FILE="$SCRIPT_DIR/${TESTNAME}.res"
+  test_result_init "$TESTNAME" "$RES_FILE" || exit 1
+  if [ "$OVERLAY_REQUESTED" -eq 1 ] || [ -n "$FIT_DTB_NAME$NHX_JSON$NHX_TARGET" ]; then
+    test_result_finish "FAIL" "$TESTNAME accepts only --check-setup, no overlay or capture selections"
+  fi
+  if [ -n "$NATIVE_TEST$NATIVE_CAMERA$NATIVE_DUMP_OVERRIDE" ] || [ "$NATIVE_FRAMES_EXPLICIT" -eq 1 ]; then
+    test_result_finish "FAIL" "$TESTNAME accepts native executable discovery only, not native capture selections"
+  fi
+  if ! command -v pkg_detect_os_id >/dev/null 2>&1; then
+    test_result_finish "FAIL" "$TESTNAME requires the repository package-provider helper"
+  fi
+  if [ "$(pkg_detect_os_id)" = centos ]; then
+    nhx_check_rpm_setup "$LOG_DIR"
+    NHX_SETUP_RPM_STATUS=$?
+    case "$NHX_SETUP_RPM_STATUS" in
+      0)
+        ;;
+      2)
+        test_result_finish "SKIP" "$TESTNAME requires the image-provided CAMX core package set, inspect NHX-PACKAGE diagnostics"
+        ;;
+      *)
+        test_result_finish "FAIL" "$TESTNAME could not query CAMX packages, inspect NHX-PACKAGE diagnostics"
+        ;;
+    esac
+    if ! command -v efivar >/dev/null 2>&1; then
+      test_result_finish "SKIP" "$TESTNAME requires image-provided efivar and its matching libraries, private RPM installation is not automated"
+    fi
+    NHX_SETUP_EFI=$(efi_find_variable_by_name VendorDtbOverlays "$CAMX_EFI_LIST_LOG")
+    NHX_SETUP_EFI_STATUS=$?
+    if [ "$NHX_SETUP_EFI_STATUS" -ne 0 ] && [ "$NHX_SETUP_EFI_STATUS" -ne 2 ]; then
+      log_file_with_label "NHX-EFI" "$CAMX_EFI_LIST_LOG"
+      test_result_finish "FAIL" "$TESTNAME could not discover EFI variables, check efivar runtime libraries and EFI permissions"
+    fi
+    if [ "$NHX_SETUP_EFI_STATUS" -eq 2 ]; then
+      test_result_finish "SKIP" "$TESTNAME requires firmware exposing VendorDtbOverlays for CAMX selection"
+    fi
+    efi_text_variable_matches "$NHX_SETUP_EFI" camx "$CAMX_EFI_LOG" csv-token >/dev/null
+    NHX_SETUP_EFI_STATUS=$?
+    log_file_with_label NHX-EFI "$CAMX_EFI_LOG"
+    case "$NHX_SETUP_EFI_STATUS" in
+      0)
+        ;;
+      2)
+        test_result_finish "SKIP" "$TESTNAME requires camx in the EFI VendorDtbOverlays list, provision the overlay and reboot before checking runtime readiness"
+        ;;
+      *)
+        test_result_finish "FAIL" "$TESTNAME could not read or parse VendorDtbOverlays, inspect $CAMX_EFI_LOG. No EFI changes attempted"
+        ;;
+    esac
+  fi
+fi
 
 if [ "$OVERLAY_REQUESTED" -eq 1 ]; then
   if [ -z "$FIT_DTB_NAME" ]; then
@@ -216,6 +416,8 @@ fi
 if [ "$OVERLAY_REQUESTED" -eq 1 ]; then
   for required_helper in \
     pkg_provider_init \
+    pkg_detect_os_id \
+    pkg_lookup_package_set \
     pkg_ensure_optional_package_set_present \
     pkg_verify_package_set_installed; do
     if ! command -v "$required_helper" >/dev/null 2>&1; then
@@ -226,26 +428,52 @@ if [ "$OVERLAY_REQUESTED" -eq 1 ]; then
   done
 
   pkg_provider_init
+  CAMX_OVERLAY_OS_ID="$(pkg_detect_os_id 2>/dev/null || true)"
+  CAMX_APT_SOURCE="none"
 
-  if ! pkg_ensure_optional_package_set_present \
-    camera-nhx \
-    qli-staging \
-    auto \
-    --overlay; then
-    log_fail "$TESTNAME FAIL - failed to ensure Camera NHX CAMX package set"
-    echo "$TESTNAME FAIL" >"$RES_FILE"
+  if [ "$CAMX_OVERLAY_OS_ID" = "debian" ]; then
+    CAMX_APT_SOURCE="qli-staging"
+  fi
+
+  CAMX_PACKAGES="$(pkg_lookup_package_set camera-nhx 2>/dev/null || true)"
+  if [ -z "$CAMX_PACKAGES" ]; then
+    log_skip "$TESTNAME SKIP - no Camera NHX package-set mapping is available, os=${CAMX_OVERLAY_OS_ID:-unknown} action=add-a-camera-nhx-package-set-mapping-for-this-os"
+    echo "$TESTNAME SKIP" >"$RES_FILE"
     exit 0
+  fi
+
+  if pkg_verify_package_set_installed camera-nhx; then
+    log_info "Reusing installed CAMX package set, no repository refresh or package installation required"
+  else
+    if [ "$CAMX_OVERLAY_OS_ID" = centos ]; then
+      if ! pkg_prepare_camx_rpm_repositories "$LOG_DIR"; then
+        test_result_finish "FAIL" "$TESTNAME CAMX repository preparation failed, inspect EPEL, Qualcomm and CLO diagnostics"
+      fi
+    fi
+    log_info "Ensuring complete Camera NHX package set, os=${CAMX_OVERLAY_OS_ID:-unknown} packages=$CAMX_PACKAGES"
+    if ! pkg_ensure_optional_package_set_present \
+      camera-nhx \
+      "$CAMX_APT_SOURCE" \
+      auto \
+      --overlay; then
+      test_result_finish "FAIL" "$TESTNAME --overlay package-set installation failed, check configured repositories for $CAMX_PACKAGES"
+    fi
+    if ! pkg_verify_package_set_installed camera-nhx; then
+      test_result_finish "FAIL" "$TESTNAME CAMX package recovery left an incomplete package set: $CAMX_PACKAGES"
+    fi
   fi
 
   log_pass "Camera NHX CAMX package set is ready"
 
-  CAMX_OVERLAY_OS_ID="$(pkg_detect_os_id 2>/dev/null || true)"
   case "$CAMX_OVERLAY_OS_ID" in
     debian|ubuntu|centos)
       for required_helper in \
+        pkg_ensure_command \
+        efi_ensure_mounted \
         efi_find_variable_by_name \
         efi_text_variable_matches \
         efi_write_text_variable \
+        camx_ensure_fit_selection \
         efi_restore_efivarfs_ro; do
         if ! command -v "$required_helper" >/dev/null 2>&1; then
           log_fail "$TESTNAME FAIL - required EFI helper is unavailable: $required_helper"
@@ -254,83 +482,128 @@ if [ "$OVERLAY_REQUESTED" -eq 1 ]; then
         fi
       done
 
-      if ! CHECK_DEPS_NO_EXIT=1 check_dependencies efivar mount mktemp od tr sed grep sync awk; then
+      if ! pkg_ensure_command efivar; then
+        test_result_finish "FAIL" "$TESTNAME could not provide efivar from the configured package repositories. Check the mapped package and matching runtime libraries, private RPM replacement is not automated"
+      fi
+
+      if ! CHECK_DEPS_RECOVER=0 CHECK_DEPS_NO_EXIT=1 check_dependencies efivar mount mktemp od tr sed grep sync awk mv rm sort find; then
         log_skip "$TESTNAME SKIP - CAMX FIT DTB verification requires efivar and EFI runtime tools"
         echo "$TESTNAME SKIP" >"$RES_FILE"
         exit 0
       fi
 
+      efi_ensure_mounted "$LOG_DIR/${TESTNAME}_efi_mount_${TS}.log"
+      CAMX_EFI_MOUNT_STATUS=$?
+      case "$CAMX_EFI_MOUNT_STATUS" in
+        0)
+          ;;
+        2)
+          test_result_finish "SKIP" "$TESTNAME requires EFI runtime support for CAMX overlay selection"
+          ;;
+        *)
+          test_result_finish "FAIL" "$TESTNAME could not prepare efivarfs for CAMX overlay selection"
+          ;;
+      esac
+
       CAMX_DTB_OVERLAY_VARIABLE="$(efi_find_variable_by_name \
         VendorDtbOverlays \
         "$CAMX_EFI_LIST_LOG" 2>>"$CAMX_EFI_LOG")"
-      if [ -z "$CAMX_DTB_OVERLAY_VARIABLE" ]; then
-        log_skip "$TESTNAME SKIP - VendorDtbOverlays EFI variable was not found"
-        echo "$TESTNAME SKIP" >"$RES_FILE"
-        exit 0
-      fi
+      CAMX_EFI_DISCOVERY_STATUS=$?
+      case "$CAMX_EFI_DISCOVERY_STATUS" in
+        0)
+          ;;
+        2)
+          test_result_finish "SKIP" "$TESTNAME requires firmware exposing the VendorDtbOverlays EFI variable"
+          ;;
+        *)
+          log_file_with_label "NHX-EFI" "$CAMX_EFI_LIST_LOG"
+          log_file_with_label "NHX-EFI" "$CAMX_EFI_LOG"
+          test_result_finish "FAIL" "$TESTNAME could not discover one VendorDtbOverlays variable, check efivar runtime libraries, EFI permissions and duplicate variables"
+          ;;
+      esac
 
       log_info "CAMX FIT DTB EFI variable selected: $CAMX_DTB_OVERLAY_VARIABLE"
 
-      if efi_text_variable_matches \
+      camx_ensure_fit_selection \
         "$CAMX_DTB_OVERLAY_VARIABLE" \
         "$FIT_DTB_NAME" \
-        "$CAMX_EFI_LOG"; then
-        CAMX_FIT_DTB_SELECTED=1
-        log_pass "CAMX FIT DTB is selected in EFI, value=$FIT_DTB_NAME"
-        log_info "Continuing with runtime DT and camera module validation"
-      else
-        log_info "Selecting CAMX FIT DTB for the next boot, value=$FIT_DTB_NAME"
-
-        if ! efi_write_text_variable \
-          "$CAMX_DTB_OVERLAY_VARIABLE" \
-          "$FIT_DTB_NAME" \
-          "$CAMX_EFI_LOG"; then
-          log_fail "$TESTNAME FAIL - could not select CAMX FIT DTB in EFI"
-          echo "$TESTNAME FAIL" >"$RES_FILE"
-          exit 0
-        fi
-
-        log_skip "$TESTNAME SKIP - CAMX FIT DTB selected for the next boot, reboot the target manually and rerun Camera_NHX"
-        echo "$TESTNAME SKIP" >"$RES_FILE"
-        exit 0
-      fi
+        "$CAMX_EFI_LOG" \
+        "$LOG_DIR/camx-fit-selection.pending"
+      CAMX_SELECTION_STATUS=$?
+      case "$CAMX_SELECTION_STATUS" in
+        0)
+          CAMX_FIT_DTB_SELECTED=1
+          log_info "Continuing with camera runtime validation, no EFI setup changes needed"
+          ;;
+        2)
+          test_result_finish "SKIP" "$TESTNAME CAMX FIT DTB selection awaits a manual reboot, then rerun the same command"
+          ;;
+        *)
+          test_result_finish "FAIL" "$TESTNAME CAMX FIT selection could not be verified, inspect EFI before/write/readback diagnostics and any pending-selection record. No automatic rewrite or reboot retry"
+          ;;
+      esac
       ;;
     *)
       log_info "CAMX device-tree overlay selection is not applicable, os=${CAMX_OVERLAY_OS_ID:-unknown}"
       ;;
   esac
 else
-  log_info "Camera NHX overlay package installation not requested"
+  log_info "Camera NHX overlay package recovery not requested"
 fi
 
 # -----------------------------------------------------------------------------
 # Deps check
 # -----------------------------------------------------------------------------
-deps_list="date awk sed grep tee wc ls find stat rm tr head tail dmesg sort fdtdump mkfifo sha256sum md5sum cksum diff cp mkdir"
-if ! check_dependencies "$deps_list"; then
+deps_list="date awk sed grep tee wc ls find stat rm tr head tail sort mkfifo cp mkdir"
+if ! CHECK_DEPS_RECOVER=0 check_dependencies "$deps_list"; then
   log_skip "$TESTNAME SKIP missing one or more dependencies: $deps_list"
   echo "$TESTNAME SKIP" >"$RES_FILE"
   exit 0
 fi
 
-NHX_RUNNER="$(command -v nhx.sh 2>/dev/null || true)"
-if [ -n "$NHX_RUNNER" ] && [ -f "$NHX_RUNNER" ] && [ -x "$NHX_RUNNER" ]; then
-  NHX_RUNNER_SOURCE="PATH-nhx.sh"
-else
-  NHX_RUNNER="$(command -v camera-nhx 2>/dev/null || true)"
-fi
-
-if [ -z "$NHX_RUNNER_SOURCE" ] && \
-  [ -n "$NHX_RUNNER" ] && [ -f "$NHX_RUNNER" ] && [ -x "$NHX_RUNNER" ]; then
-  NHX_RUNNER_SOURCE="PATH-camera-nhx"
-elif [ -z "$NHX_RUNNER_SOURCE" ] && \
-  [ -f "/usr/libexec/camx/nhx.sh" ] && [ -x "/usr/libexec/camx/nhx.sh" ]; then
-  NHX_RUNNER="/usr/libexec/camx/nhx.sh"
-  NHX_RUNNER_SOURCE="packaged-libexec"
-elif [ -z "$NHX_RUNNER_SOURCE" ]; then
-  log_skip "$TESTNAME SKIP NHX launcher not found, provide executable nhx.sh or camera-nhx in PATH, or /usr/libexec/camx/nhx.sh"
+CKSUM_TOOL="$(nhx_pick_cksum_tool)"
+if [ -z "$CKSUM_TOOL" ]; then
+  log_skip "$TESTNAME SKIP checksum validation requires one image-provided utility: sha256sum, md5sum, or cksum"
   echo "$TESTNAME SKIP" >"$RES_FILE"
   exit 0
+fi
+
+if [ "$NATIVE_REQUESTED" -eq 0 ]; then
+  NHX_RUNNER=$(nhx_find_launcher wrapper "")
+  NHX_DISCOVERY_STATUS=$?
+else
+  NHX_DISCOVERY_STATUS=2
+fi
+if [ "$NHX_DISCOVERY_STATUS" -eq 2 ]; then
+  NHX_RUNNER_MODE=native
+  NHX_RUNNER=$(nhx_find_launcher native "$NATIVE_BIN")
+  NHX_DISCOVERY_STATUS=$?
+fi
+case "$NHX_DISCOVERY_STATUS" in
+  0)
+    ;;
+  2)
+    test_result_finish "SKIP" "$TESTNAME requires an executable nhx.sh, camera-nhx or nativehaltest from the image CAMX packages"
+    ;;
+  *)
+    test_result_finish "FAIL" "$TESTNAME could not select a unique executable, inspect discovery diagnostics or specify --native-bin"
+    ;;
+esac
+NHX_RUNNER_SOURCE="$NHX_RUNNER_MODE-runtime-discovery"
+
+if [ "$NHX_RUNNER_MODE" = native ]; then
+  if [ -n "$NHX_JSON" ]; then
+    NATIVE_MODE=json
+  elif [ -n "$NHX_TARGET" ]; then
+    test_result_finish "FAIL" "$TESTNAME native JSON selection requires --json with --target"
+  fi
+  if ! NATIVE_SELECTOR=$(nhx_native_check_cli "$NHX_RUNNER" "$LOG_DIR" "$NATIVE_CAMERA" "$NATIVE_MODE"); then
+    log_file_with_label NATIVE-HAL-HELP "$LOG_DIR/native-hal-help.log"
+    test_result_finish "FAIL" "$TESTNAME installed nativehaltest lacks the required capture CLI or its help probe failed"
+  fi
+  if [ "$NHX_CHECK_SETUP" -eq 0 ] && [ -z "$NATIVE_TEST$NHX_JSON" ]; then
+    test_result_finish "SKIP" "$TESTNAME nativehaltest found at $NHX_RUNNER. Select --json from the suite folder or --native-test Suite.Case supported by this client"
+  fi
 fi
 
 log_info "NHX runner selected, path=$NHX_RUNNER source=$NHX_RUNNER_SOURCE"
@@ -340,51 +613,107 @@ log_info "NHX runner selected, path=$NHX_RUNNER source=$NHX_RUNNER_SOURCE"
 # -----------------------------------------------------------------------------
 log_info "Checking CAMX proprietary prerequisites before running NHX"
 
-log_info "DT check"
+log_info "Decoding the active runtime device tree"
 
-PATTERNS="qcom,cam-sensor qcom,cam-gmsl-sensor qcom,cam-gmsl-deserializer qcom,eeprom qcom,cci qcom,csiphy qcom,cam-tpg1031 qcom,camera qcom,cam camera_kt cam-req-mgr cam-cpas cam-jpeg cam-ife cam-icp camera0-thermal"
-found_any=0
-missing_list=""
-
-for pat in $PATTERNS; do
-  out="$(dt_confirm_node_or_compatible "$pat" 2>/dev/null || true)"
-  if [ -n "$out" ]; then
-    printf '%s\n' "$out"
-    found_any=1
-  else
-    if [ -n "$missing_list" ]; then
-      missing_list="$missing_list, $pat"
-    else
-      missing_list="$pat"
+camx_dump_runtime_dts "$RUNNING_DTS" "$RUNNING_DTS_WARNINGS"
+DTC_RC=$?
+case "$DTC_RC" in
+  0)
+    log_pass "Active runtime DT decoded to $RUNNING_DTS"
+    if [ -s "$RUNNING_DTS_WARNINGS" ]; then
+      log_warn "dtc reported non-fatal warnings, retained in $RUNNING_DTS_WARNINGS"
     fi
-  fi
-done
+    ;;
+  2)
+    : >"$RUNNING_DTS_WARNINGS"
+    : >"$CAMERA_DTS_MATCHES"
+    : >"$SENSOR_DTS_MATCHES"
+    log_warn "dtc is not available in the image, continuing with enabled runtime-node validation"
+    ;;
+  3)
+    : >"$RUNNING_DTS_WARNINGS"
+    : >"$CAMERA_DTS_MATCHES"
+    : >"$SENSOR_DTS_MATCHES"
+    log_warn "No readable runtime device-tree root is exposed under procfs or sysfs"
+    ;;
+  *)
+    : >"$CAMERA_DTS_MATCHES"
+    : >"$SENSOR_DTS_MATCHES"
+    log_warn "Active runtime DT decoding failed, continuing with enabled runtime-node validation, inspect $RUNNING_DTS_WARNINGS"
+    ;;
+esac
 
-if [ "$found_any" -ne 1 ]; then
-  log_skip "$TESTNAME SKIP missing DT patterns $missing_list"
-  echo "$TESTNAME SKIP" >"$RES_FILE"
+if [ "$DTC_RC" -eq 0 ]; then
+  camx_extract_runtime_dts_evidence \
+    "$RUNNING_DTS" \
+    "$CAMERA_DTS_MATCHES" \
+    "$SENSOR_DTS_MATCHES"
+fi
+
+RUNTIME_DT_ROOT="$(dt_runtime_root 2>/dev/null || true)"
+RUNTIME_DT_MODEL="$(dt_property_text "$RUNTIME_DT_ROOT" model 2>/dev/null || true)"
+RUNTIME_DT_COMPATIBLE="$(dt_property_text "$RUNTIME_DT_ROOT" compatible 2>/dev/null || true)"
+log_info "Runtime DT model: ${RUNTIME_DT_MODEL:-unavailable}"
+log_info "Runtime DT compatible: ${RUNTIME_DT_COMPATIBLE:-unavailable}"
+if [ "$DTC_RC" -eq 0 ]; then
+  log_info "[CAMX-CDT-FIT] efi_camx_selected=$CAMX_FIT_DTB_SELECTED active_dt=$RUNNING_DTS"
+  log_info "Runtime camera DTS matches retained in $CAMERA_DTS_MATCHES"
+  log_info "Runtime sensor DTS matches retained in $SENSOR_DTS_MATCHES"
+else
+  log_info "[CAMX-CDT-FIT] efi_camx_selected=$CAMX_FIT_DTB_SELECTED active_dt=unavailable"
+fi
+
+CAMX_DT_NODES="$(camx_list_enabled_runtime_nodes)"
+: >"$CAMX_DT_NODES_LOG"
+if [ -n "$CAMX_DT_NODES" ]; then
+  printf '%s\n' "$CAMX_DT_NODES" >"$CAMX_DT_NODES_LOG"
+fi
+if [ -z "$CAMX_DT_NODES" ]; then
+  if [ "$CAMX_FIT_DTB_SELECTED" -eq 1 ]; then
+    log_fail "$TESTNAME FAIL - VendorDtbOverlays selects camx but the active runtime DT has no enabled downstream CamX nodes, verify the CDT-selected FIT configuration and rebooted image"
+    echo "$TESTNAME FAIL" >"$RES_FILE"
+  else
+    log_skip "$TESTNAME SKIP - the active runtime DT has no enabled downstream CamX nodes, provision a CAMX-capable FIT configuration selected by CDT"
+    echo "$TESTNAME SKIP" >"$RES_FILE"
+  fi
   exit 0
 fi
 
-log_info "fdtdump camera nodes sample"
+printf '%s\n' "$CAMX_DT_NODES" | while IFS= read -r camx_node; do
+  if [ -n "$camx_node" ]; then
+    log_info "Enabled CamX DT node: $camx_node"
+  fi
+done
+log_pass "Active runtime DT exposes enabled downstream CamX nodes"
+
+SENSOR_DT_NODES="$(camx_list_enabled_sensor_nodes)"
+: >"$SENSOR_DT_NODES_LOG"
+if [ -n "$SENSOR_DT_NODES" ]; then
+  printf '%s\n' "$SENSOR_DT_NODES" >"$SENSOR_DT_NODES_LOG"
+  printf '%s\n' "$SENSOR_DT_NODES" | while IFS= read -r sensor_node; do
+    if [ -n "$sensor_node" ]; then
+      log_info "Enabled camera sensor DT node: $sensor_node"
+    fi
+  done
+else
+  log_warn "No enabled IMX, OV, AR, CamX sensor, or GMSL sensor nodes were found, NHX execution remains authoritative"
+fi
+
+log_info "Checking optional raw FDT camera evidence"
 
 FDT_MATCHES="$(camx_fdtdump_has_cam_nodes 2>/dev/null)"
 rc=$?
-if [ "$rc" -ne 0 ]; then
-  if [ "$rc" -eq 2 ]; then
-    log_skip "$TESTNAME SKIP fdtdump not available"
-  else
-    log_skip "$TESTNAME SKIP fdtdump did not show conclusive camera nodes"
-  fi
-  echo "$TESTNAME SKIP" >"$RES_FILE"
-  exit 0
+if [ "$rc" -eq 0 ]; then
+  printf '%s\n' "$FDT_MATCHES" | while IFS= read -r fdt_match; do
+    if [ -n "$fdt_match" ]; then
+      log_info "Raw FDT camera match: $fdt_match"
+    fi
+  done
+elif [ "$rc" -eq 2 ]; then
+  log_warn "Optional fdtdump command is unavailable, continuing with enabled runtime-node evidence"
+else
+  log_warn "Optional raw FDT scan did not find camera nodes, continuing with enabled runtime DT evidence"
 fi
-
-printf '%s\n' "$FDT_MATCHES" | while IFS= read -r l; do
-  if [ -n "$l" ]; then
-    log_info " $l"
-  fi
-done
 
 log_info "driver load checks"
 
@@ -416,7 +745,7 @@ log_info "Camera module artifact found $CAM_KO"
 
 if ! is_module_loaded "$CAM_MOD" 2>/dev/null; then
   if [ "$CAMX_FIT_DTB_SELECTED" -eq 1 ]; then
-    log_skip "$TESTNAME SKIP - CAMX FIT DTB is selected in EFI but $CAM_MOD is not loaded, reboot the target manually and rerun Camera_NHX"
+    test_result_finish "FAIL" "$TESTNAME CAMX FIT DTB is selected in EFI but $CAM_MOD is not loaded, inspect the running-kernel CAMX module and probe diagnostics"
   else
     log_skip "$TESTNAME SKIP camera module not loaded $CAM_MOD"
   fi
@@ -507,7 +836,7 @@ else
   done
 fi
 
-log_info "sensor presence warn-only NHX may still work without cam sensors"
+log_info "libcamera sensor inventory is advisory, it does not enumerate the proprietary CAMX HAL"
 
 SENSOR_COUNT="$(libcam_list_sensors_count 2>/dev/null || true)"
 case "$SENSOR_COUNT" in
@@ -515,20 +844,25 @@ case "$SENSOR_COUNT" in
 esac
 log_info "cam list detected $SENSOR_COUNT cameras"
 if [ "$SENSOR_COUNT" -lt 1 ]; then
-  log_warn "No sensors reported by cam list continuing"
+  log_warn "No sensors reported by cam list, NHX capture must still prove the selected camera works"
 fi
 
-CKSUM_TOOL=""
-if command -v nhx_pick_cksum_tool >/dev/null 2>&1; then
-  CKSUM_TOOL="$(nhx_pick_cksum_tool)"
-else
-  if command -v sha256sum >/dev/null 2>&1; then
-    CKSUM_TOOL="sha256sum"
-  elif command -v md5sum >/dev/null 2>&1; then
-    CKSUM_TOOL="md5sum"
-  elif command -v cksum >/dev/null 2>&1; then
-    CKSUM_TOOL="cksum"
+if [ "$NHX_CHECK_SETUP" -eq 1 ]; then
+  test_result_finish "PASS" "$TESTNAME NHX runtime prerequisites are present. No capture, QMMF service or physical sensor functionality was tested"
+fi
+
+if [ "$NHX_RUNNER_MODE" = native ] && [ "$NATIVE_MODE" = json ]; then
+  if ! NHX_JSON_RESOLVED=$(nhx_resolve_json_file "$SCRIPT_DIR" "$NHX_JSON" "$NHX_TARGET"); then
+    test_result_finish "FAIL" "$TESTNAME cannot resolve one JSON: $NHX_JSON, check the path and specify --target if ambiguous"
   fi
+  if ! NATIVE_JSON_STATE=$(mktemp -d "$LOG_DIR/native-json.XXXXXX"); then
+    test_result_finish "FAIL" "$TESTNAME cannot create native JSON evidence directory in $LOG_DIR"
+  fi
+  if ! NHX_JSON_ARG=$(nhx_prepare_native_json "$SCRIPT_DIR" "$NHX_JSON_RESOLVED" "$NATIVE_JSON_STATE"); then
+    test_result_finish "FAIL" "$TESTNAME cannot safely stage native JSON $NHX_JSON_RESOLVED, inspect staging diagnostics"
+  fi
+  NATIVE_TEST="$NHX_JSON_ARG"
+  log_info "Native JSON source=$NHX_JSON_RESOLVED argument=$NHX_JSON_ARG, retained in $NATIVE_JSON_STATE/selected.json"
 fi
 
 log_info "$TESTNAME starting"
@@ -563,6 +897,7 @@ if [ -n "$CAM_SERVER_SERVICE" ]; then
 
   if systemd_service_is_active "$CAM_SERVER_SERVICE"; then
     log_info "Stopping active camera server before NHX launcher"
+    CAM_SERVER_STOPPED_FOR_TEST=1
 
     if ! systemd_service_stop_safe "$CAM_SERVER_SERVICE"; then
       log_fail "$TESTNAME FAIL - unable to stop active $CAM_SERVER_SERVICE before NHX launcher"
@@ -576,7 +911,6 @@ if [ -n "$CAM_SERVER_SERVICE" ]; then
       exit 0
     fi
 
-    CAM_SERVER_STOPPED_FOR_TEST=1
     CAM_SERVER_TS_AFTER_STOP="$(date '+%Y-%m-%d %H:%M:%S')"
 
     log_info "Camera server status after stop"
@@ -598,7 +932,13 @@ fi
 # -----------------------------------------------------------------------------
 : >"$MARKER" 2>/dev/null || touch "$MARKER"
 
-if [ -n "$NHX_JSON" ]; then
+if [ "$NHX_RUNNER_MODE" = native ]; then
+  NATIVE_CAPTURE_ACTIVE=1
+  nhx_run_native "$NHX_RUNNER" "$NATIVE_SELECTOR" "$NATIVE_TEST" \
+    "$NATIVE_FRAMES" "$NATIVE_CAMERA" "$RUN_LOG" "$LOG_DIR" "$NATIVE_MODE"
+  NHX_RC=$?
+  NATIVE_CAPTURE_ACTIVE=0
+elif [ -n "$NHX_JSON" ]; then
   if ! command -v nhx_resolve_json_file >/dev/null 2>&1; then
     log_skip "$TESTNAME SKIP nhx_resolve_json_file helper not available"
     echo "$TESTNAME SKIP" >"$RES_FILE"
@@ -687,9 +1027,15 @@ fi
 # -----------------------------------------------------------------------------
 # Restore camera server state after NHX
 # -----------------------------------------------------------------------------
+if [ -n "$NATIVE_JSON_STATE" ]; then
+  if ! nhx_restore_native_json "$NATIVE_JSON_STATE"; then
+    NATIVE_JSON_RESTORE_FAILED=1
+  fi
+fi
+
 if [ "$CAM_SERVER_STOPPED_FOR_TEST" -eq 1 ]; then
   log_info "Restoring camera server after NHX launcher: $CAM_SERVER_SERVICE"
-  if systemd_service_start_safe "$CAM_SERVER_SERVICE"; then
+  if nhx_restore_camera_service "$CAM_SERVER_SERVICE" "$LOG_DIR"; then
     CAM_SERVER_STOPPED_FOR_TEST=0
     CAM_SERVER_TS_AFTER_START="$(date '+%Y-%m-%d %H:%M:%S')"
 
@@ -701,7 +1047,8 @@ if [ "$CAM_SERVER_STOPPED_FOR_TEST" -eq 1 ]; then
     systemd_service_stdout_since "Camera server AFTER restore (stdout since restore marker)" \
       "$RUN_LOG" "$CAM_SERVER_TS_AFTER_START" "$CAM_SERVER_SERVICE" || true
   else
-    log_warn "Failed to restore camera server after NHX launcher: $CAM_SERVER_SERVICE"
+    CAM_SERVER_RESTORE_FAILED=1
+    log_fail "Failed to restore camera server after NHX launcher: $CAM_SERVER_SERVICE"
   fi
 else
   log_info "Camera server state was not changed for NHX, skipping restore"
@@ -712,10 +1059,32 @@ fi
 # -----------------------------------------------------------------------------
 DUMP_VALIDATION_FAIL=0
 
-mkdir -p "$NHX_OUTDIR" 2>/dev/null || true
+if ! {
+  mkdir -p "$NHX_OUTDIR" &&
+    : >"$DUMPS_LIST" &&
+    : >"$CHECKSUMS_TXT"
+}; then
+  test_result_finish "FAIL" "$TESTNAME cannot initialize capture artifacts in $NHX_OUTDIR, check permissions and free space"
+fi
 
-if command -v nhx_validate_dumps_and_checksums >/dev/null 2>&1; then
-  if ! nhx_validate_dumps_and_checksums "$DUMP_DIR" "$MARKER" "$NHX_OUTDIR" "$CHECKSUMS_TXT" "$CHECKSUMS_PREV"; then
+if [ "$NHX_RUNNER_MODE" = native ]; then
+  if NATIVE_COUNTS=$(nhx_native_result_counts "$RUN_LOG" "$NATIVE_TEST" "$NATIVE_MODE"); then
+    NATIVE_REPORT_VALID=1
+  else
+    NATIVE_RESULT_RC=$?
+    NATIVE_REPORT_VALID=0
+    if [ "$NATIVE_RESULT_RC" -eq 2 ]; then
+      NATIVE_NO_TESTS=1
+      log_fail "Native HAL executed zero tests for $NATIVE_TEST with $NHX_RUNNER, verify the selected JSON or Suite.Case is supported by this client"
+      log_info "Native CLI evidence: $LOG_DIR/native-hal-help.log, no alternate testcase or full-suite run will be attempted"
+    fi
+  fi
+fi
+
+if [ "$NATIVE_NO_TESTS" -eq 1 ]; then
+  log_info "Capture validation was not exercised because native HAL executed zero tests"
+elif command -v nhx_validate_dumps_and_checksums >/dev/null 2>&1; then
+  if ! nhx_validate_dumps_and_checksums "$DUMP_DIR" "$MARKER" "$NHX_OUTDIR" "$CHECKSUMS_TXT" "$CHECKSUMS_PREV" "$NHX_RUNNER_MODE"; then
     DUMP_VALIDATION_FAIL=1
   fi
 
@@ -749,7 +1118,13 @@ else
   fi
 fi
 
-DUMP_COUNT="$(wc -l <"$DUMPS_LIST" 2>/dev/null | awk '{print $1}')"
+DUMP_COUNT=0
+if [ -r "$DUMPS_LIST" ]; then
+  DUMP_COUNT="$(wc -l <"$DUMPS_LIST" | awk '{print $1}')"
+else
+  DUMP_VALIDATION_FAIL=1
+  log_fail "Capture list is unavailable at $DUMPS_LIST, inspect dump validation diagnostics"
+fi
 if [ -z "$DUMP_COUNT" ]; then
   DUMP_COUNT=0
 fi
@@ -764,6 +1139,15 @@ TOTAL_BYTES=0
   echo "NHX launcher exit code: $NHX_RC"
   echo "NHX runner: $NHX_RUNNER"
   echo "NHX runner source: $NHX_RUNNER_SOURCE"
+  echo "Execution mode: $NHX_RUNNER_MODE"
+  echo "Native testcase: ${NATIVE_TEST:-<not selected>}"
+  if [ "$NATIVE_MODE" = json ]; then
+    echo "Native capture settings: selected JSON"
+    echo "Native JSON evidence: $NATIVE_JSON_STATE/selected.json"
+  else
+    echo "Native frames: $NATIVE_FRAMES"
+    echo "Native camera: ${NATIVE_CAMERA:-<client default>}"
+  fi
   echo "NHX JSON requested: ${NHX_JSON:-<default>}"
   echo "NHX target requested: ${NHX_TARGET:-<unset>}"
   echo "NHX JSON resolved: ${NHX_JSON_RESOLVED:-<default>}"
@@ -842,6 +1226,21 @@ if [ -n "$FINAL_LINE" ]; then
   SKIPPED="$(echo "$FINAL_LINE" | sed -n 's/.*\[\([0-9][0-9]*\) SKIPPED\].*/\1/p')"
 fi
 
+if [ "$NHX_RUNNER_MODE" = native ]; then
+  if [ "$NATIVE_REPORT_VALID" -eq 1 ]; then
+    read -r PASSED FAILED SKIPPED <<EOF
+$NATIVE_COUNTS
+EOF
+    FINAL_LINE="Native HAL completed exactly the selected testcase: $NATIVE_TEST"
+  elif [ "$NATIVE_NO_TESTS" -eq 1 ]; then
+    PASSED=0
+    FAILED=0
+    SKIPPED=0
+  else
+    NATIVE_REPORT_VALID=0
+  fi
+fi
+
 {
   echo "Final Report parse"
   echo "----------------------------------------"
@@ -863,10 +1262,36 @@ else
   if [ "$FAILED" -gt 0 ]; then
     RESULT="FAIL"
     REASON="NHX reported FAILED=$FAILED"
+  elif [ "$PASSED" -eq 0 ]; then
+    RESULT="FAIL"
+    REASON="NHX reported no passing tests"
   else
     RESULT="PASS"
     REASON="NHX reported FAILED=0"
   fi
+fi
+
+if [ "$NHX_RC" -ne 0 ]; then
+  RESULT="FAIL"
+  REASON="$REASON. NHX launcher exited with rc=$NHX_RC"
+fi
+
+if [ "${NATIVE_NO_TESTS:-0}" -eq 1 ]; then
+  RESULT="FAIL"
+  REASON="Native HAL executed zero tests for $NATIVE_TEST using $NHX_RUNNER (exit=$NHX_RC). Verify the selected JSON or Suite.Case is supported by this client, see $LOG_DIR/native-hal-help.log and $RUN_LOG. Capture validation was not exercised"
+elif [ "$NATIVE_REPORT_VALID" -ne 1 ]; then
+  RESULT="FAIL"
+  REASON="$REASON. Native HAL did not report exactly one completed passing testcase matching $NATIVE_TEST, inspect the native stdout before changing result parsing"
+fi
+
+if [ "$CAM_SERVER_RESTORE_FAILED" -ne 0 ]; then
+  RESULT="FAIL"
+  REASON="$REASON. Camera-server restoration failed"
+fi
+
+if [ "${NATIVE_JSON_RESTORE_FAILED:-0}" -ne 0 ]; then
+  RESULT="FAIL"
+  REASON="$REASON. Native JSON cleanup failed, see $NATIVE_JSON_STATE"
 fi
 
 if [ "$ZERO_OR_MISSING" -gt 0 ]; then
@@ -878,7 +1303,7 @@ if [ "$ZERO_OR_MISSING" -gt 0 ]; then
   fi
 fi
 
-if [ "$DUMP_COUNT" -eq 0 ]; then
+if [ "$DUMP_COUNT" -eq 0 ] && [ "${NATIVE_NO_TESTS:-0}" -eq 0 ]; then
   RESULT="FAIL"
   if [ -n "$REASON" ]; then
     REASON="$REASON no dumps detected"
@@ -896,6 +1321,13 @@ if [ "$DUMP_VALIDATION_FAIL" -ne 0 ]; then
   fi
 fi
 
+if [ "$RESULT" = FAIL ] && [ "${NHX_RUNNER_MODE:-wrapper}" = native ] &&
+  [ -s "$DMESG_DIR/dmesg_errors.log" ]; then
+  log_warn "Camera warnings/errors were already present before native capture, see $DMESG_DIR/dmesg_errors.log"
+  log_warn "Firmware file presence does not prove a successful ICP load. Pre-run messages alone do not establish the cause of this invocation failure"
+  REASON="$REASON. Pre-run camera diagnostics: $DMESG_DIR/dmesg_errors.log"
+fi
+
 log_info "========================================"
 log_info "$TESTNAME final"
 log_info "Final Report PASSED=${PASSED:-?} FAILED=${FAILED:-?} SKIPPED=${SKIPPED:-?}"
@@ -906,12 +1338,4 @@ log_info "Log $RUN_LOG"
 log_info "Decision $RESULT $REASON"
 log_info "========================================"
 
-if [ "$RESULT" = "PASS" ]; then
-  log_pass "$TESTNAME PASS $REASON"
-  echo "$TESTNAME PASS" >"$RES_FILE"
-else
-  log_fail "$TESTNAME FAIL $REASON"
-  echo "$TESTNAME FAIL" >"$RES_FILE"
-fi
-
-exit 0
+test_result_finish "$RESULT" "$TESTNAME $RESULT $REASON"
