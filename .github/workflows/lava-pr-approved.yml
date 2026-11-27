@@ -45,4 +45,6 @@ jobs:
       - name: Revalidate approval and dispatch changed PR tests
         env:
           GH_TOKEN: ${{ github.token }}
+          # Repository Actions variable: base, overlay or both. Empty defaults to both.
+          LAVA_APPROVAL_IMAGE_TYPE: ${{ vars.LAVA_APPROVAL_IMAGE_TYPE }}
         run: python .github/workflows/lava_pr_validation.py approve
