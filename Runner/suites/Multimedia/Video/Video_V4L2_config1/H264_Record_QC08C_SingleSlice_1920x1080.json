@@ -1,0 +1,67 @@
+{
+    "ExecutionMode": "Sequential",
+    "TestCases": [
+        {
+            "Name": "Test 1",
+            "TestConfigs": {
+                "Domain": "Encoder",
+                "InputPath": "/usr/v4l2/input/1080p24_ParkScene_nv12_ubwc.yuv",
+                "NumFrames": 240,
+                "CodecName": "AVC",
+                "PixelFormat": "QC08C",
+                "Width": 1920,
+                "Height": 1080,
+                "Outputpath": "../Video_V4L2_config1/H264_Record_QC08C_SingleSlice_1920x1080.264",
+                "UseMinBufferCtrl": false,
+                "InputBufferCount": 32,
+                "OutputBufferCount": 32,
+                "OperatingRate": 30,
+                "FrameRate": 30,
+                "StaticControls": [
+                    {
+                        "Id": "Profile",
+                        "Vtype": "String",
+                        "Value": "HIGH"
+                    },
+                    {
+                        "Id": "Level",
+                        "Vtype": "String",
+                        "Value": "5.0"
+                    },
+                    {
+                        "Id": "FrameRC",
+                        "Vtype": "Int",
+                        "Value": 1
+                    },
+                    {
+                        "Id": "BitRate",
+                        "Vtype": "Int",
+                        "Value": 20000000
+                    },
+                    {
+                        "Id": "BitRateMode",
+                        "Vtype": "String",
+                        "Value": "VBR"
+                    },
+                    {
+                        "Id": "PrefixHeaderMode",
+                        "Vtype": "String",
+                        "Value": "JOINED"
+                    },
+                    {
+                        "Id": "GOPSize",
+                        "Vtype": "Int",
+                        "Value": 59
+                    },
+                    {
+                        "Id": "MultiSliceMode",
+                        "Vtype": "String",
+                        "Value": "SINGLE"
+                    }
+                ],
+                "DynamicControls": [],
+                "MemoryType": "MMAP"
+            }
+        }
+    ]
+}

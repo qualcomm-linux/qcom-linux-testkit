@@ -1,0 +1,22 @@
+{
+    "ExecutionMode": "Sequential",
+    "TestCases": [
+        {
+            "Name": "10026124_Dec_AVC_CNF_EOS0",
+            "TestConfigs": {
+                "Domain": "Decoder",
+                "InputPath": "/usr/v4l2/AVC_High_352_288_60Iframe.264",
+                "NumFrames": -1,
+                "CodecName": "AVC",
+                "PixelFormat": "QC08C",
+                "Width": 352,
+                "Height": 288,
+                "Outputpath": "",
+                "InputBufferCount": 16,
+                "OutputBufferCount": 16,
+                "UseMinBufferCtrl": false,
+                "MemoryType": "MMAP"
+            }
+        }
+    ]
+}
