@@ -27,6 +27,68 @@ esc() {
     printf '%s' "$1" | sed 's/\\/\\\\/g;s/"/\\"/g'
 }
 
+# perf_resolve_binary COMMAND [PATH] [RECOVER=1]
+# Print one absolute invocation path, with diagnostics on stderr. Return 0 when
+# ready, 1 for an invalid selection or failed recovery, 2 when unavailable.
+# Explicit files may gain owner execute permission. Without an override, reuse
+# PATH or recover mapped packages on supported distros when policy permits.
+# Requires lib_pkg_provider.sh. Callers must probe native tool capabilities.
+perf_resolve_binary() (
+    command_name=$1
+    requested_path=${2:-}
+    recover=${3:-1}
+    if [ -n "$requested_path" ]; then
+        candidate=$requested_path
+    else
+        candidate=$(command -v "$command_name" 2>/dev/null || true)
+        if [ -z "$candidate" ]; then
+            if [ "${TESTKIT_IMAGE_ONLY:-0}" = 1 ]; then
+                log_warn "$command_name is absent from PATH and image-only mode disables installation, provide --binary PATH or include it in the image" >&2
+                return 2
+            fi
+            os_id=$(pkg_detect_os_id)
+            if ! pkg_package_recovery_supported_os "$os_id"; then
+                log_warn "$command_name is absent on image-managed os=$os_id, provide --binary PATH or include it in the image" >&2
+                return 2
+            fi
+            if [ "$recover" != 1 ] || [ "${CHECK_DEPS_RECOVER:-1}" != 1 ] ||
+               ! pkg_check_dependencies_recover_enabled >&2 || ! pkg_can_install >&2; then
+                log_warn "$command_name is absent and package recovery is disabled or unavailable, provide --binary PATH or run as root with recovery enabled" >&2
+                return 2
+            fi
+            if ! pkg_ensure_command "$command_name" >&2; then
+                log_error "Cannot prepare $command_name on os=$os_id, check package-provider output and configured repositories" >&2
+                return 1
+            fi
+            candidate=$(command -v "$command_name" 2>/dev/null || true)
+        fi
+    fi
+    if [ -z "$candidate" ] || [ ! -f "$candidate" ] ||
+       [ ! -r "$candidate" ] || [ ! -s "$candidate" ]; then
+        log_error "Invalid $command_name binary '$candidate', provide a nonempty readable regular file" >&2
+        return 1
+    fi
+    case "$candidate" in
+        /*)
+            ;;
+        *)
+            candidate="$PWD/$candidate"
+            ;;
+    esac
+    if [ -n "$requested_path" ] && [ ! -x "$candidate" ]; then
+        log_info "Adding owner execute permission to $candidate" >&2
+        if ! chmod u+x "$candidate"; then
+            log_error "Cannot make $candidate executable, check ownership and mount permissions" >&2
+            return 1
+        fi
+    fi
+    if [ ! -x "$candidate" ]; then
+        log_error "$candidate is not executable, check file and mount permissions" >&2
+        return 1
+    fi
+    printf '%s\n' "$candidate"
+)
+
 # perf_uint_in_range VALUE MIN MAX
 # Validate decimal CLI limits before shell arithmetic, rejecting octal forms.
 perf_uint_in_range() {
