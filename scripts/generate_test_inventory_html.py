@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import html
+import json
 import os
 import sys
 from collections import defaultdict
@@ -10,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
+import yaml
 
 REPO = "qualcomm-linux/qcom-linux-testkit"
 API = f"https://api.github.com/repos/{REPO}"
@@ -125,6 +127,41 @@ def discover_tests():
     for runsh in sorted(BASE.rglob("run.sh")):
         tests.append(parse_suite_path(runsh))
     return tests
+
+
+def discover_definitions():
+    """Inventory runnable suite YAMLs without counting plans or configuration data."""
+    definitions = []
+    paths = sorted(path for path in BASE.rglob("*") if path.suffix in {".yaml", ".yml"})
+    for path in paths:
+        try:
+            document = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except yaml.YAMLError as error:
+            raise ValueError(f"Cannot parse test definition {path}: {error}") from error
+        if not isinstance(document, dict):
+            continue
+        metadata = document.get("metadata")
+        run = document.get("run")
+        if not isinstance(metadata, dict) or not isinstance(run, dict):
+            continue
+        steps = run.get("steps")
+        if not isinstance(steps, list) or not steps or not all(isinstance(step, str) for step in steps):
+            raise ValueError(f"Expected nonempty run.steps containing strings in {path}")
+        params = document.get("params")
+        if params is None:
+            params = {}
+        if not isinstance(params, dict):
+            raise ValueError(f"Expected a params mapping in {path}")
+        definition = parse_suite_path(path)
+        definition.update({
+            "Definition Name": metadata.get("name") or path.stem,
+            "Definition Path": path.relative_to(REPO_ROOT).as_posix(),
+            "Description": metadata.get("description") or "",
+            "Parameters": params,
+            "Steps": steps,
+        })
+        definitions.append(definition)
+    return definitions
 
 
 def mark_open_pr_tests(tests):
@@ -337,9 +374,47 @@ def build_test_table_rows(items):
     return "\n".join(rows)
 
 
-def build_sections(tests):
+def build_definition_table_rows(items):
+    rows = []
+    for definition in items:
+        path = definition["Definition Path"]
+        parameters = definition["Parameters"]
+        params_html = '<span class="hint">No YAML parameters</span>'
+        if parameters:
+            values = "".join(
+                f"<dt><code>{h(name)}</code></dt><dd><code>{h(json.dumps(value, ensure_ascii=False))}</code></dd>"
+                for name, value in parameters.items()
+            )
+            params_html = (
+                f'<details class="definition-detail"><summary>Defaults ({len(parameters)})</summary>'
+                f'<dl class="parameter-list">{values}</dl></details>'
+            )
+        steps = "".join(f"<li><pre><code>{h(step)}</code></pre></li>" for step in definition["Steps"])
+        rows.append(
+            "<tr>"
+            f"<td>{h(definition['Subarea'])}</td>"
+            f"<td>{definition['Test Case Link']}</td>"
+            f"<td>{html_link(str(definition['Definition Name']), f'{REPO_WEB}/blob/main/{path}')}"
+            f"<div class=\"hint\"><code>{h(path)}</code></div></td>"
+            f"<td>{h(definition['Description'])}</td>"
+            f"<td>{params_html}</td>"
+            '<td><details class="definition-detail"><summary>Run steps</summary>'
+            f'<ol class="run-steps">{steps}</ol></details></td>'
+            "</tr>"
+        )
+    return "\n".join(rows)
+
+
+def build_sections(tests, definitions=False):
     grouped = group_tests(tests)
     sections = []
+    unit = "definition(s)" if definitions else "suite(s)"
+    columns = (
+        ("Subarea", "Suite", "Test definition", "Description", "YAML parameters", "Launch")
+        if definitions else
+        ("Subarea", "Suite", "Present on main", "Open PR", "Update PR", "Suite Path")
+    )
+    headings = "".join(f"<th>{h(column)}</th>" for column in columns)
 
     for area in sorted(grouped.keys()):
         functional_area_map = grouped[area]
@@ -349,28 +424,23 @@ def build_sections(tests):
         for functional_area in sorted(functional_area_map.keys()):
             items = sorted(
                 functional_area_map[functional_area],
-                key=lambda x: (x["Subarea"], x["Test Case Name"], x["Suite Path"]),
+                key=lambda x: (x["Subarea"], x["Test Case Name"], x.get("Definition Path", x["Suite Path"])),
             )
             functional_area_count = len(items)
-            rows_html = build_test_table_rows(items)
+            rows_html = build_definition_table_rows(items) if definitions else build_test_table_rows(items)
 
             functional_area_blocks.append(
                 f"""
 <details class="fa-block" open data-functional-area="{h(functional_area)}">
   <summary>
     <span class="summary-title">{h(functional_area)}</span>
-    <span class="summary-count">{functional_area_count} test(s)</span>
+    <span class="summary-count">{functional_area_count} {unit}</span>
   </summary>
   <div class="table-wrap inventory-table-wrap">
     <table class="inventory-table">
       <thead>
         <tr>
-          <th>Subarea</th>
-          <th>Test Case Name</th>
-          <th>Present on main</th>
-          <th>Open PR</th>
-          <th>Update PR</th>
-          <th>Suite Path</th>
+          {headings}
         </tr>
       </thead>
       <tbody>
@@ -388,7 +458,7 @@ def build_sections(tests):
   <details class="area-block" open>
     <summary>
       <span class="summary-title">{h(area)}</span>
-      <span class="summary-count">{area_count} test(s)</span>
+      <span class="summary-count">{area_count} {unit}</span>
     </summary>
     <div class="fa-container">
       {''.join(functional_area_blocks)}
@@ -413,6 +483,7 @@ def build_html(
     existing_suites_updated_in_open_prs,
     functional_area_chart_html,
     sections_html,
+    definitions,
 ):
     template = """<!DOCTYPE html>
 <html lang="en">
@@ -548,7 +619,8 @@ def build_html(
       margin-bottom: 14px;
     }
     .toolbar input {
-      min-width: 320px;
+      width: min(100%, 560px);
+      min-width: 0;
       padding: 10px 12px;
       border-radius: 10px;
       border: 1px solid var(--line);
@@ -850,6 +922,48 @@ def build_html(
       color: var(--muted);
       padding: 20px 0 4px;
     }
+    .view-switch {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin: 0 0 20px;
+    }
+    .view-switch a {
+      padding: 12px 18px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--panel);
+    }
+    .view-switch a[aria-current="page"] {
+      border-color: var(--accent);
+      background: #20335c;
+      color: var(--text);
+    }
+    .definition-detail {
+      min-width: 160px;
+      max-width: 540px;
+    }
+    .definition-detail summary {
+      padding: 8px 10px;
+      font-size: 13px;
+    }
+    .parameter-list {
+      margin: 0;
+      padding: 10px;
+    }
+    .parameter-list dt {
+      color: var(--muted);
+    }
+    .parameter-list dd {
+      margin: 0 0 10px;
+    }
+    .run-steps {
+      padding: 0 14px 0 30px;
+    }
+    pre, .parameter-list code, .hint code {
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
   </style>
 </head>
 <body>
@@ -859,17 +973,14 @@ def build_html(
         <h1 class="hero-title">qcom-linux-testkit Test Inventory</h1>
       </div>
       <p class="hero-subtitle">
-        Generated from <code>Runner/suites/**/run.sh</code>. Expand an area, then a functional area, and click the test case name to open the suite directory.
+        Explore each YAML test definition and its configuration. Switch to Suites to see the runners shared by those definitions.
       </p>
 
       <div class="badges">
         <div class="badge"><strong>Repository:</strong> __REPO__</div>
         <div class="badge"><strong>Generated:</strong> __GENERATED__</div>
-        <div class="badge"><strong>Total:</strong> __TOTAL__</div>
-        <div class="badge"><strong>On main:</strong> __ON_MAIN__</div>
-        <div class="badge"><strong>Open PRs touching tests:</strong> __OPEN_PR_COUNT__</div>
-        <div class="badge"><strong>New suites in open PRs:</strong> __NEW_OPEN__</div>
-        <div class="badge"><strong>Existing suites updated in open PRs:</strong> __UPDATED_OPEN__</div>
+        <div class="badge"><strong>Definitions on main:</strong> __DEFINITION_COUNT__</div>
+        <div class="badge"><strong>Suites on main:</strong> __ON_MAIN__</div>
       </div>
 
       <div class="hero-links">
@@ -879,9 +990,15 @@ def build_html(
       </div>
     </div>
 
+    <nav class="view-switch" aria-label="Inventory view">
+      <a href="#definitions" aria-current="page">Test definitions (YAML)</a>
+      <a href="#suites">Suites (run.sh)</a>
+    </nav>
+
+    <div id="inventory-suites" class="inventory-view hidden">
     <div class="cards">
       <div class="card">
-        <div class="label">Total discovered tests</div>
+        <div class="label">Suites, including open PRs</div>
         <div class="value">__TOTAL__</div>
       </div>
       <div class="card">
@@ -903,7 +1020,8 @@ def build_html(
     </div>
 
     <div class="section">
-      <h2>Summary</h2>
+      <h2>Suite summary</h2>
+      <p>One entry per <code>run.sh</code> under <code>Runner/suites</code>. Counts describe available suites, not executed testcase results.</p>
       <div class="summary-grid">
         <div>
           <h3>By Functional Area</h3>
@@ -923,34 +1041,57 @@ def build_html(
     </div>
 
     <div class="section">
-      <h2>Detailed Inventory</h2>
+      <h2>Suite inventory</h2>
       <div class="toolbar">
-        <input id="filterInput" type="text" placeholder="Filter by area, functional area, subarea, test case, path...">
-        <div class="count">Visible tests: <span id="visibleCount">__TOTAL__</span></div>
+        <input class="filter-input" type="search" aria-label="Filter suites" placeholder="Filter by area, suite, path or PR...">
+        <div class="count">Visible suites: <span class="visible-count">__TOTAL__</span></div>
       </div>
 
-      <div id="inventorySections">
+      <div class="inventory-sections">
         __SECTIONS_HTML__
       </div>
 
-      <div id="emptyState" class="empty-state hidden">No tests match the current filter.</div>
+      <div class="empty-state hidden">No suites match the current filter.</div>
       <div class="hint">Click a table header to sort within a functional area. Filtering auto-expands matching groups.</div>
+    </div>
+    </div>
+
+    <div id="inventory-definitions" class="inventory-view">
+      <div class="cards">
+        <div class="card"><div class="label">Test definitions on main</div><div class="value">__DEFINITION_COUNT__</div></div>
+        <div class="card"><div class="label">Suite directories with definitions</div><div class="value">__DEFINED_SUITE_COUNT__</div></div>
+      </div>
+      <div class="section">
+        <h2>Test definition summary</h2>
+        <p>One entry per runnable YAML under <code>Runner/suites</code>, including variants sharing the same runner. Plans and configuration data are excluded. These are available definitions, not a count of executed testcases or current CI usage.</p>
+        <details open><summary>Definitions by functional area</summary>
+          <div class="chart-wrap"><div class="fa-chart">__DEFINITION_CHART_HTML__</div></div>
+        </details>
+      </div>
+      <div class="section">
+        <h2>Test definition inventory</h2>
+        <p>Each row links to its YAML. Expand defaults and run steps to compare configurations. Values are declared YAML defaults, jobs can override them. Run steps retain shell expressions as written.</p>
+        <div class="toolbar">
+          <input class="filter-input" type="search" aria-label="Filter test definitions" placeholder="Filter by area, suite, definition, parameter or command...">
+          <div class="count">Visible definitions: <span class="visible-count">__DEFINITION_COUNT__</span></div>
+        </div>
+        <div class="inventory-sections">__DEFINITION_SECTIONS_HTML__</div>
+        <div class="empty-state hidden">No definitions match the current filter.</div>
+        <div class="hint">Null, empty strings, zero and false are shown separately. A YAML definition can emit multiple testcase results at runtime.</div>
+      </div>
     </div>
   </div>
 
   <script>
     (function() {
-      const input = document.getElementById('filterInput');
-      const visibleCount = document.getElementById('visibleCount');
-      const emptyState = document.getElementById('emptyState');
-      const inventorySections = document.getElementById('inventorySections');
+      const views = document.querySelectorAll('.inventory-view');
 
       function sortTable(table, colIdx, asc) {
         const tbody = table.tBodies[0];
         const rows = Array.from(tbody.rows);
         rows.sort((a, b) => {
-          const av = a.cells[colIdx].innerText.trim().toLowerCase();
-          const bv = b.cells[colIdx].innerText.trim().toLowerCase();
+          const av = a.cells[colIdx].textContent.trim().toLowerCase();
+          const bv = b.cells[colIdx].textContent.trim().toLowerCase();
           if (av < bv) return asc ? -1 : 1;
           if (av > bv) return asc ? 1 : -1;
           return 0;
@@ -970,12 +1111,17 @@ def build_html(
         });
       }
 
-      function applyFilter() {
+      function applyFilter(view) {
+        const input = view.querySelector('.filter-input');
+        const visibleCount = view.querySelector('.visible-count');
+        const emptyState = view.querySelector('.empty-state');
+        const inventorySections = view.querySelector('.inventory-sections');
         const q = input.value.trim().toLowerCase();
         let visibleTests = 0;
 
-        document.querySelectorAll('.area-section').forEach((areaSection) => {
+        inventorySections.querySelectorAll('.area-section').forEach((areaSection) => {
           let areaHasVisible = false;
+          let areaVisibleRows = 0;
           const areaDetails = areaSection.querySelector('.area-block');
 
           areaSection.querySelectorAll('.fa-block').forEach((faBlock) => {
@@ -984,7 +1130,7 @@ def build_html(
             const rows = Array.from(table.tBodies[0].rows);
 
             rows.forEach((row) => {
-              const text = row.innerText.toLowerCase();
+              const text = (areaSection.dataset.area + ' ' + faBlock.dataset.functionalArea + ' ' + row.textContent).toLowerCase();
               const match = q === '' || text.includes(q);
               row.classList.toggle('hidden', !match);
               if (match) {
@@ -1000,6 +1146,7 @@ def build_html(
 
             if (faHasVisible) {
               areaHasVisible = true;
+              areaVisibleRows += faVisibleRows;
               visibleTests += faVisibleRows;
               if (q !== '') {
                 faBlock.open = true;
@@ -1009,6 +1156,7 @@ def build_html(
           });
 
           areaSection.classList.toggle('hidden', !areaHasVisible);
+          areaDetails.querySelector('.summary-count').textContent = areaVisibleRows + ' visible';
         });
 
         visibleCount.textContent = visibleTests;
@@ -1016,9 +1164,22 @@ def build_html(
         inventorySections.classList.toggle('hidden', visibleTests === 0 && q !== '');
       }
 
-      input.addEventListener('input', applyFilter);
+      function selectView() {
+        const selected = location.hash === '#suites' ? 'suites' : 'definitions';
+        views.forEach((view) => view.classList.toggle('hidden', view.id !== 'inventory-' + selected));
+        document.querySelectorAll('.view-switch a').forEach((link) => {
+          if (link.hash === '#' + selected) link.setAttribute('aria-current', 'page');
+          else link.removeAttribute('aria-current');
+        });
+      }
+
+      views.forEach((view) => {
+        view.querySelector('.filter-input').addEventListener('input', () => applyFilter(view));
+        applyFilter(view);
+      });
+      window.addEventListener('hashchange', selectView);
       initSorters();
-      applyFilter();
+      selectView();
     })();
   </script>
 </body>
@@ -1038,11 +1199,16 @@ def build_html(
         .replace("__REPO_SUITES__", h(repo_suites))
         .replace("__FUNCTIONAL_AREA_CHART_HTML__", functional_area_chart_html)
         .replace("__SECTIONS_HTML__", sections_html)
+        .replace("__DEFINITION_COUNT__", str(len(definitions)))
+        .replace("__DEFINED_SUITE_COUNT__", str(len({row["Suite Path"] for row in definitions})))
+        .replace("__DEFINITION_CHART_HTML__", build_functional_area_chart(definitions))
+        .replace("__DEFINITION_SECTIONS_HTML__", build_sections(definitions, definitions=True))
     )
 
 
 def main():
     tests = discover_tests()
+    definitions = discover_definitions()
     open_pr_numbers = mark_open_pr_tests(tests)
 
     tests = sorted(
@@ -1086,6 +1252,7 @@ def main():
             existing_suites_updated_in_open_prs=existing_suites_updated_in_open_prs,
             functional_area_chart_html=functional_area_chart_html,
             sections_html=sections_html,
+            definitions=definitions,
         )
     )
 
