@@ -1,0 +1,20 @@
+metadata:
+  name: msm_submitoverhead
+  format: "Lava-Test Test Definition 1.0"
+  description: "Measures msm submit ioctl overhead with varying buffer object counts. Uses the IGT msm_submitoverhead test."
+  os:
+    - linux
+  scope:
+    - functional
+
+params:
+  IGT_BIN_PATH: "/usr/libexec/igt-gpu-tools/msm_submitoverhead"
+  IGT_TIMEOUT: "600"
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Multimedia/Graphics/igt-gpu-tools/msm_submitoverhead
+    - export IGT_TIMEOUT="${IGT_TIMEOUT}"
+    - ./run.sh --bin-path "${IGT_BIN_PATH}" || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh msm_submitoverhead.res || true

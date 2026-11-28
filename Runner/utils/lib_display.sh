@@ -6711,3 +6711,157 @@ display_kmscube_has_initialization_evidence() {
         END { exit(have_egl && have_gl ? 0 : 1) }
     ' "$dkhie_log"
 }
+
+# display_drm_node_minor <dev-node>
+# Print the DRM minor of /dev/dri/cardN or /dev/dri/renderDN.
+display_drm_node_minor() {
+    ddnm_name="${1##*/}"
+    case "$ddnm_name" in
+        card[0-9]*)
+            ddnm_minor="${ddnm_name#card}"
+            ;;
+        renderD[0-9]*)
+            ddnm_minor="${ddnm_name#renderD}"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    case "$ddnm_minor" in
+        ''|*[!0-9]*)
+            return 1
+            ;;
+    esac
+    printf '%s\n' "$ddnm_minor"
+}
+
+# display_drm_sibling_node <dev-node> <card|renderD>
+# Print the card or render node of the DRM device that owns dev-node.
+display_drm_sibling_node() {
+    ddsn_name="${1##*/}"
+    display_drm_node_minor "$1" >/dev/null || return 1
+    [ -e "/sys/class/drm/$ddsn_name" ] || return 1
+    case "$ddsn_name" in
+        "$2"[0-9]*)
+            printf '/dev/dri/%s\n' "$ddsn_name"
+            return 0
+            ;;
+    esac
+    for ddsn_node in "/sys/class/drm/$ddsn_name/device/drm/$2"[0-9]*; do
+        [ -e "$ddsn_node" ] || continue
+        printf '/dev/dri/%s\n' "${ddsn_node##*/}"
+        return 0
+    done
+    return 1
+}
+
+# display_drm_debugfs_dirs <dev-node>
+# Print the DRM debugfs directories of the device that owns dev-node,
+# render node first, then the primary node.
+display_drm_debugfs_dirs() {
+    debugfs_try_mount >/dev/null 2>&1 || true
+    for dddd_kind in renderD card; do
+        dddd_node="$(display_drm_sibling_node "$1" "$dddd_kind" 2>/dev/null)" || continue
+        dddd_minor="$(display_drm_node_minor "$dddd_node")" || continue
+        if [ -r "/sys/kernel/debug/dri/$dddd_minor/name" ]; then
+            printf '/sys/kernel/debug/dri/%s\n' "$dddd_minor"
+        fi
+    done
+}
+
+# display_drm_driver_name <dev-node>
+# Print the DRM driver name of the device that owns dev-node, for example msm.
+# The driver's module link in sysfs identifies built-in and modular drivers
+# without debugfs. The debugfs name file is only a fallback.
+display_drm_driver_name() {
+    dddn_node="${1##*/}"
+    display_drm_node_minor "$1" >/dev/null || return 1
+    dddn_module="$(cd -P "/sys/class/drm/$dddn_node/device/driver/module" 2>/dev/null && pwd)"
+    if [ -n "$dddn_module" ]; then
+        printf '%s\n' "${dddn_module##*/}"
+        return 0
+    fi
+    for dddn_dir in $(display_drm_debugfs_dirs "$1"); do
+        dddn_name="$(cat "$dddn_dir/name" 2>/dev/null)" || continue
+        [ -n "$dddn_name" ] || continue
+        printf '%s\n' "${dddn_name%% *}"
+        return 0
+    done
+    return 1
+}
+
+# display_drm_first_render_node <driver>
+# Print the first render node, in minor order, whose DRM driver is <driver>.
+display_drm_first_render_node() {
+    for ddfrn_minor in $(
+        for ddfrn_entry in /sys/class/drm/renderD[0-9]*; do
+            [ -e "$ddfrn_entry" ] || continue
+            ddfrn_value="${ddfrn_entry##*/renderD}"
+            case "$ddfrn_value" in
+                *[!0-9]*)
+                    continue
+                    ;;
+            esac
+            printf '%s\n' "$ddfrn_value"
+        done | sort -n
+    ); do
+        if [ "$(display_drm_driver_name "/dev/dri/renderD$ddfrn_minor" 2>/dev/null)" = "$1" ]; then
+            printf '/dev/dri/renderD%s\n' "$ddfrn_minor"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# display_gpu_err_irq_snapshot <state-file> <dev-node>
+# Save the disable_err_irq path and value of the DRM device that owns dev-node.
+# Returns: 0 when saved, 1 when the control is absent, 2 on read or write failure.
+display_gpu_err_irq_snapshot() {
+    dgeis_state="$1"
+    rm -f "$dgeis_state"
+
+    dgeis_path=""
+    for dgeis_dir in $(display_drm_debugfs_dirs "$2"); do
+        if [ -e "$dgeis_dir/disable_err_irq" ]; then
+            dgeis_path="$dgeis_dir/disable_err_irq"
+            break
+        fi
+    done
+    [ -n "$dgeis_path" ] || return 1
+
+    dgeis_value="$(cat "$dgeis_path" 2>/dev/null)" || return 2
+    [ -n "$dgeis_value" ] || return 2
+
+    printf 'node=%s\npath=%s\nvalue=%s\n' "$2" "$dgeis_path" "$dgeis_value" >"$dgeis_state" || return 2
+    return 0
+}
+
+# display_gpu_err_irq_restore <state-file>
+# Restore and verify the value saved by display_gpu_err_irq_snapshot.
+# The state file is removed only after a verified restore.
+# Returns: 0 when restored or nothing was saved, 1 when restoration failed.
+display_gpu_err_irq_restore() {
+    dgeir_state="$1"
+    [ -f "$dgeir_state" ] || return 0
+
+    dgeir_path="$(sed -n 's/^path=//p' "$dgeir_state")"
+    dgeir_value="$(sed -n 's/^value=//p' "$dgeir_state")"
+    if [ -z "$dgeir_path" ] || [ -z "$dgeir_value" ]; then
+        log_fail "GPU error-interrupt state file is incomplete: $dgeir_state"
+        return 1
+    fi
+
+    dgeir_current="$(cat "$dgeir_path" 2>/dev/null || true)"
+    if [ "$dgeir_current" != "$dgeir_value" ]; then
+        printf '%s\n' "$dgeir_value" >"$dgeir_path" 2>/dev/null || true
+        dgeir_current="$(cat "$dgeir_path" 2>/dev/null || true)"
+    fi
+    if [ "$dgeir_current" != "$dgeir_value" ]; then
+        log_fail "Failed to restore $dgeir_path to $dgeir_value, current=${dgeir_current:-unreadable}"
+        return 1
+    fi
+
+    rm -f "$dgeir_state"
+    log_info "GPU error-interrupt state restored, $dgeir_path=$dgeir_value"
+    return 0
+}

@@ -1,0 +1,20 @@
+metadata:
+  name: msm_perfcntrs
+  format: "Lava-Test Test Definition 1.0"
+  description: "Validates msm GPU performance counter group discovery, reservation and conflict handling. Counter samples are not read. Uses the IGT msm_perfcntrs test."
+  os:
+    - linux
+  scope:
+    - functional
+
+params:
+  IGT_BIN_PATH: "/usr/libexec/igt-gpu-tools/msm_perfcntrs"
+  IGT_TIMEOUT: "300"
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Multimedia/Graphics/igt-gpu-tools/msm_perfcntrs
+    - export IGT_TIMEOUT="${IGT_TIMEOUT}"
+    - ./run.sh --bin-path "${IGT_BIN_PATH}" || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh msm_perfcntrs.res || true
