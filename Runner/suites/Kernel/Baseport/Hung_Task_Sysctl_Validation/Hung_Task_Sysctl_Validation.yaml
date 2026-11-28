@@ -1,0 +1,14 @@
+metadata:
+  name: hung-task-sysctl-validation
+  format: "Lava-Test Test Definition 1.0"
+  description: "Validate hung-task detector sysctls used to catch D-state hangs."
+  os:
+    - linux
+  scope:
+    - functional
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/Hung_Task_Sysctl_Validation
+    - ./run.sh
+    - $REPO_PATH/Runner/utils/send-to-lava.sh Hung_Task_Sysctl_Validation.res

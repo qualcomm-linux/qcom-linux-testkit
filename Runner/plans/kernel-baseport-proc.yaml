@@ -1,0 +1,79 @@
+metadata:
+    format: Lava-Test Test Definition 1.0
+    name: kernel-baseport-proc
+    description: "Core kernel proc, sysfs, RCU, workqueue, and memory validation present on this branch"
+    maintainer:
+        - vnarapar@qti.qualcomm.com
+    os:
+        - openembedded
+    scope:
+        - functional
+    devices:
+        - rb3gen2
+
+run:
+    steps:
+        - REPO_PATH=$(pwd)
+        - export REPO_PATH
+        - export CHECK_DEPS_RECOVER=0 TESTKIT_IMAGE_ONLY=1
+        - cd "$REPO_PATH/Runner/suites/Kernel/Baseport/RCU_Validation" || exit 1
+        - rm -f "RCU_Validation.res"
+        - ./run.sh || true
+        - >-
+            "$REPO_PATH/Runner/utils/send-to-lava.sh" "RCU_Validation.res" --strict --expected-testcase-id "RCU_Validation" || lava-test-case "RCU_Validation_result_publication" --result fail
+        - cd "$REPO_PATH/Runner/suites/Kernel/Baseport/Workqueue_Validation" || exit 1
+        - rm -f "Workqueue_Validation.res"
+        - ./run.sh || true
+        - >-
+            "$REPO_PATH/Runner/utils/send-to-lava.sh" "Workqueue_Validation.res" --strict --expected-testcase-id "Workqueue_Validation" || lava-test-case "Workqueue_Validation_result_publication" --result fail
+        - cd "$REPO_PATH/Runner/suites/Kernel/Baseport/Memory_VM_Validation" || exit 1
+        - rm -f "Memory_VM_Validation.res"
+        - ./run.sh || true
+        - >-
+            "$REPO_PATH/Runner/utils/send-to-lava.sh" "Memory_VM_Validation.res" --strict --expected-testcase-id "Memory_VM_Validation" || lava-test-case "Memory_VM_Validation_result_publication" --result fail
+        - cd "$REPO_PATH/Runner/suites/Kernel/Baseport/Cgroup_V2_Validation" || exit 1
+        - rm -f "Cgroup_V2_Validation.res"
+        - ./run.sh || true
+        - >-
+            "$REPO_PATH/Runner/utils/send-to-lava.sh" "Cgroup_V2_Validation.res" --strict --expected-testcase-id "Cgroup_V2_Validation" || lava-test-case "Cgroup_V2_Validation_result_publication" --result fail
+        - cd "$REPO_PATH/Runner/suites/Kernel/Baseport/Kernel_Sysctl_Validation" || exit 1
+        - rm -f "Kernel_Sysctl_Validation.res"
+        - ./run.sh || true
+        - >-
+            "$REPO_PATH/Runner/utils/send-to-lava.sh" "Kernel_Sysctl_Validation.res" --strict --expected-testcase-id "Kernel_Sysctl_Validation" || lava-test-case "Kernel_Sysctl_Validation_result_publication" --result fail
+        - cd "$REPO_PATH/Runner/suites/Kernel/Baseport/Ftrace_Perf_Validation" || exit 1
+        - rm -f "Ftrace_Perf_Validation.res"
+        - ./run.sh || true
+        - >-
+            "$REPO_PATH/Runner/utils/send-to-lava.sh" "Ftrace_Perf_Validation.res" --strict --expected-testcase-id "Ftrace_Perf_Validation" || lava-test-case "Ftrace_Perf_Validation_result_publication" --result fail
+        - cd "$REPO_PATH/Runner/suites/Kernel/Baseport/VDSO_Validation" || exit 1
+        - rm -f "VDSO_Validation.res"
+        - ./run.sh || true
+        - >-
+            "$REPO_PATH/Runner/utils/send-to-lava.sh" "VDSO_Validation.res" --strict --expected-testcase-id "VDSO_Validation" || lava-test-case "VDSO_Validation_result_publication" --result fail
+        - cd "$REPO_PATH/Runner/suites/Kernel/Baseport/Modules_Firmware_Validation" || exit 1
+        - rm -f "Modules_Firmware_Validation.res"
+        - ./run.sh || true
+        - >-
+            "$REPO_PATH/Runner/utils/send-to-lava.sh" "Modules_Firmware_Validation.res" --strict --expected-testcase-id "Modules_Firmware_Validation" || lava-test-case "Modules_Firmware_Validation_result_publication" --result fail
+        - cd "$REPO_PATH/Runner/suites/Kernel/Baseport/Hung_Task_Sysctl_Validation" || exit 1
+        - rm -f "Hung_Task_Sysctl_Validation.res"
+        - ./run.sh || true
+        - >-
+            "$REPO_PATH/Runner/utils/send-to-lava.sh" "Hung_Task_Sysctl_Validation.res" --strict --expected-testcase-id "Hung_Task_Sysctl_Validation" || lava-test-case "Hung_Task_Sysctl_Validation_result_publication" --result fail
+        - cd "$REPO_PATH/Runner/suites/Kernel/Baseport/Kernel_Taint_Oops_Validation" || exit 1
+        - rm -f "Kernel_Taint_Oops_Validation.res"
+        - ./run.sh || true
+        - >-
+            "$REPO_PATH/Runner/utils/send-to-lava.sh" "Kernel_Taint_Oops_Validation.res" --strict --expected-testcase-id "Kernel_Taint_Oops_Validation" || lava-test-case "Kernel_Taint_Oops_Validation_result_publication" --result fail
+        - cd "$REPO_PATH/Runner/suites/Kernel/Baseport/Softirq_Proc_Validation" || exit 1
+        - rm -f "Softirq_Proc_Validation.res"
+        - ./run.sh || true
+        - >-
+            "$REPO_PATH/Runner/utils/send-to-lava.sh" "Softirq_Proc_Validation.res" --strict --expected-testcase-id "Softirq_Proc_Validation" || lava-test-case "Softirq_Proc_Validation_result_publication" --result fail
+        - cd "$REPO_PATH/Runner/suites/Kernel/Baseport/Random_CRNG_Validation" || exit 1
+        - rm -f "Random_CRNG_Validation.res"
+        - ./run.sh || true
+        - >-
+            "$REPO_PATH/Runner/utils/send-to-lava.sh" "Random_CRNG_Validation.res" --strict --expected-testcase-id "Random_CRNG_Validation" || lava-test-case "Random_CRNG_Validation_result_publication" --result fail
+        - "$REPO_PATH/Runner/utils/result_parse.sh"
