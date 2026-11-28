@@ -1,0 +1,15 @@
+metadata:
+  name: soc-infra-video-cc-clock-rate-validation
+  format: "Lava-Test Test Definition 1.0"
+  description: "Smoke test: video_cc clocks are registered in debugfs and every video_cc clock rate is a readable integer (Hz)"
+  os:
+    - linux
+  scope:
+    - functional
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/SoC_Infra_VIDEO_CC_Clock_Rate_Validation
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh SoC_Infra_VIDEO_CC_Clock_Rate_Validation.res --strict --expected-testcase-id SoC_Infra_VIDEO_CC_Clock_Rate_Validation
