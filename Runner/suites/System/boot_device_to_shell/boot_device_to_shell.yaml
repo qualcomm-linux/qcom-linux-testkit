@@ -1,0 +1,17 @@
+metadata:
+  name: boot_device_to_shell
+  format: "Lava-Test Test Definition 1.0"
+  description: "Check that the connected LAVA shell has systemd as PID 1 and systemd reports running, degraded, or starting"
+  maintainer:
+    - "Qualcomm Linux Testkit"
+
+params: {}
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd "$REPO_PATH/Runner/suites/System/boot_device_to_shell"
+    - ./run.sh || true
+    - grep -Eq '^boot_device_to_shell (PASS|FAIL|SKIP)$' boot_device_to_shell.res
+    - cat boot_device_to_shell.res
+    - '"$REPO_PATH/Runner/utils/send-to-lava.sh" boot_device_to_shell.res --expected-testcase-id boot_device_to_shell'

@@ -54,6 +54,10 @@ test_result_init() {
     TEST_RESULT_PASS_COUNT=0
     TEST_RESULT_FAIL_COUNT=0
     TEST_RESULT_SKIP_COUNT=0
+    TEST_RESULT_INITIALIZED=0
+    TEST_RESULT_FINALIZED=0
+    TEST_RESULT_FINAL_STATUS=""
+    TEST_RESULT_CLEANUP_DONE=0
 
     if [ -z "$TEST_RESULT_NAME" ] || [ -z "$TEST_RESULT_FILE" ]; then
         log_error "test_result_init requires a test name and result file"
@@ -68,10 +72,15 @@ test_result_init() {
     if [ "${TEST_RESULT_FILE_PREPARED:-0}" -eq 1 ] &&
        [ -f "$TEST_RESULT_FILE" ] &&
        [ ! -L "$TEST_RESULT_FILE" ]; then
-        : >"$TEST_RESULT_FILE"
+        if ! : >"$TEST_RESULT_FILE"; then
+            return 1
+        fi
     else
-        rm -f "$TEST_RESULT_FILE"
+        if ! rm -f "$TEST_RESULT_FILE"; then
+            return 1
+        fi
     fi
+    TEST_RESULT_INITIALIZED=1
 }
 
 # test_result_record <PASS|FAIL|SKIP> <message>
@@ -100,11 +109,12 @@ test_result_record() {
     esac
 }
 
-# test_result_finish [PASS|FAIL|SKIP] [message]
-# Writes the final result and exits successfully for LAVA result processing.
-# Without an explicit status, failures take precedence, then passes, then skip.
-test_result_finish() {
-    if [ -n "${TEST_RESULT_CLEANUP:-}" ]; then
+# test_result_finalize [PASS|FAIL|SKIP] [message]
+# Write the final result without exiting, for signal and cleanup handlers.
+test_result_finalize() {
+    if [ -n "${TEST_RESULT_CLEANUP:-}" ] &&
+       [ "${TEST_RESULT_CLEANUP_DONE:-0}" -ne 1 ]; then
+        TEST_RESULT_CLEANUP_DONE=1
         if ! "$TEST_RESULT_CLEANUP"; then
             test_result_record FAIL "Test-owned state restoration failed"
             # A requested PASS/SKIP must not replace cleanup failure.
@@ -149,7 +159,21 @@ test_result_finish() {
             ;;
     esac
 
-    printf '%s %s\n' "$TEST_RESULT_NAME" "$test_result_status" >"$TEST_RESULT_FILE"
+    if ! printf '%s %s\n' "$TEST_RESULT_NAME" "$test_result_status" >"$TEST_RESULT_FILE"; then
+        log_error "Could not write testcase result file: $TEST_RESULT_FILE"
+        TEST_RESULT_FINALIZED=0
+        return 1
+    fi
+    TEST_RESULT_FINALIZED=1
+    TEST_RESULT_FINAL_STATUS="$test_result_status"
+    return 0
+}
+
+# test_result_finish [PASS|FAIL|SKIP] [message]
+# Writes the final result and exits successfully for LAVA result processing.
+# Without an explicit status, failures take precedence, then passes, then skip.
+test_result_finish() {
+    test_result_finalize "$@" || exit 1
     exit 0
 }
 
@@ -3759,6 +3783,7 @@ bounded_timeout_capture_process_state() {
 
     (
         # Isolate ownership and disable capture recursion for the reader.
+        # shellcheck disable=SC2030 # This diagnostic-reader subshell intentionally clears only its private timeout PID.
         BOUNDED_TIMEOUT_PID=""
         # shellcheck disable=SC2030  # Reader isolation is intentional, parent state must survive.
         BOUNDED_TIMEOUT_DIAGNOSTIC_FILE=""
@@ -8481,6 +8506,136 @@ systemd_service_is_active() {
     fi
 
     systemctl is-active --quiet "$svc"
+}
+
+# Check whether a systemd-specific testcase applies to the current DUT.
+# Set SYSTEMD_SERVICE_APPLICABILITY_REASON on failure so callers can report a
+# useful SKIP instead of marking non-systemd images as broken.
+# shellcheck disable=SC2034 # Public reason consumed by systemd suite runners after this helper returns.
+systemd_service_is_applicable() {
+    if ! command -v systemctl >/dev/null 2>&1; then
+        SYSTEMD_SERVICE_APPLICABILITY_REASON="systemctl is not installed on the DUT"
+        return 1
+    fi
+
+    if [ ! -r /proc/1/comm ]; then
+        SYSTEMD_SERVICE_APPLICABILITY_REASON="cannot identify PID 1; systemd service checks are not applicable"
+        return 1
+    fi
+
+    ssi_pid1_name=$(cat /proc/1/comm 2>/dev/null)
+    if [ "$ssi_pid1_name" != systemd ]; then
+        SYSTEMD_SERVICE_APPLICABILITY_REASON="PID 1 is '${ssi_pid1_name:-unknown}', not systemd"
+        return 1
+    fi
+
+    SYSTEMD_SERVICE_APPLICABILITY_REASON=""
+    return 0
+}
+
+# systemd_service_show <unit> <output-file> <timeout-seconds> [systemctl args...]
+# Query structured unit properties with the shared bounded timeout helper.
+# Callers inspect SYSTEMD_SERVICE_SHOW_STATUS,
+# SYSTEMD_SERVICE_SHOW_TIMED_OUT, and the parsed SYSTEMD_SERVICE_* state
+# variables. The systemctl exit status and timeout state remain distinct.
+# shellcheck disable=SC2034 # SYSTEMD_SERVICE_* values are this sourced helper's public outputs, consumed by suite runners.
+systemd_service_show() {
+    [ "$#" -ge 3 ] || return 125
+
+    sss_unit="$1"
+    sss_output="$2"
+    sss_timeout="$3"
+    shift 3
+
+    if [ "$#" -eq 0 ]; then
+        set -- --property=LoadState --property=ActiveState --property=SubState
+    fi
+
+    SYSTEMD_SERVICE_SHOW_STATUS=125
+    SYSTEMD_SERVICE_SHOW_TIMED_OUT=0
+    SYSTEMD_SERVICE_LOAD_STATE=""
+    SYSTEMD_SERVICE_ACTIVE_STATE=""
+    SYSTEMD_SERVICE_SUB_STATE=""
+    SYSTEMD_SERVICE_CONDITION_RESULT=""
+    SYSTEMD_SERVICE_CONDITIONS=""
+    SYSTEMD_SERVICE_FRAGMENT_PATH=""
+
+    if ! command -v systemctl >/dev/null 2>&1 ||
+       ! command -v run_with_bounded_timeout >/dev/null 2>&1; then
+        SYSTEMD_SERVICE_SHOW_STATUS=127
+        return 127
+    fi
+
+    if ! : > "$sss_output"; then
+        SYSTEMD_SERVICE_SHOW_STATUS=125
+        return 125
+    fi
+
+    BOUNDED_TIMEOUT_EXPIRED=0
+    run_with_bounded_timeout "$sss_timeout" systemctl show "$sss_unit" "$@" \
+        --no-pager > "$sss_output" 2>&1
+    SYSTEMD_SERVICE_SHOW_STATUS=$?
+    SYSTEMD_SERVICE_SHOW_TIMED_OUT=${BOUNDED_TIMEOUT_EXPIRED:-0}
+    SYSTEMD_SERVICE_LOAD_STATE=$(sed -n 's/^LoadState=//p' "$sss_output" | head -n 1)
+    SYSTEMD_SERVICE_ACTIVE_STATE=$(sed -n 's/^ActiveState=//p' "$sss_output" | head -n 1)
+    SYSTEMD_SERVICE_SUB_STATE=$(sed -n 's/^SubState=//p' "$sss_output" | head -n 1)
+    SYSTEMD_SERVICE_CONDITION_RESULT=$(sed -n 's/^ConditionResult=//p' "$sss_output" | head -n 1)
+    SYSTEMD_SERVICE_CONDITIONS=$(sed -n 's/^Conditions=//p' "$sss_output" | head -n 1)
+    SYSTEMD_SERVICE_FRAGMENT_PATH=$(sed -n 's/^FragmentPath=//p' "$sss_output" | head -n 1)
+    return "$SYSTEMD_SERVICE_SHOW_STATUS"
+}
+
+# Install bounded child cleanup without discarding init_env's stdout capture
+# cleanup. The runner's EXIT handler cancels any active bounded query, then
+# delegates to the stdout handler when capture is enabled.
+runner_bounded_timeout_cleanup() {
+    rbtc_status=$?
+    trap - EXIT HUP INT TERM
+    trap '' HUP INT TERM
+
+    rbtc_signal=0
+    case "$rbtc_status" in
+        129|130|143) rbtc_signal=1 ;;
+    esac
+
+    rbtc_cleanup_failed=0
+    # shellcheck disable=SC2031 # This EXIT trap reads the PID owned by direct parent-shell timeout calls.
+    if [ -n "${BOUNDED_TIMEOUT_PID:-}" ] && ! bounded_timeout_cancel; then
+        rbtc_cleanup_failed=1
+    fi
+
+    if [ "${TEST_RESULT_INITIALIZED:-0}" -eq 1 ]; then
+        if [ "$rbtc_signal" -eq 1 ]; then
+            if [ "${TEST_RESULT_FINAL_STATUS:-}" != FAIL ]; then
+                test_result_record FAIL "Runner interrupted by signal (exit status $rbtc_status)"
+            fi
+            test_result_finalize FAIL "Runner interrupted by signal (exit status $rbtc_status)" || true
+        elif [ "$rbtc_cleanup_failed" -eq 1 ]; then
+            if [ "${TEST_RESULT_FINAL_STATUS:-}" != FAIL ]; then
+                test_result_record FAIL "Bounded child cleanup failed"
+            fi
+            test_result_finalize FAIL "Bounded child cleanup failed" || true
+            rbtc_status=1
+        elif [ "$rbtc_status" -ne 0 ] &&
+             [ "${TEST_RESULT_FINALIZED:-0}" -ne 1 ]; then
+            test_result_record FAIL "Runner exited before finalizing the testcase (status $rbtc_status)"
+            test_result_finalize FAIL "Runner exited before finalizing the testcase (status $rbtc_status)" || true
+        fi
+    fi
+
+    if [ "${__RUN_STDOUT_ACTIVE:-0}" -eq 1 ] &&
+       command -v _runner_stdout_cleanup >/dev/null 2>&1; then
+        _runner_stdout_cleanup "$rbtc_status"
+    fi
+
+    exit "$rbtc_status"
+}
+
+runner_install_bounded_timeout_cleanup() {
+    trap 'runner_bounded_timeout_cleanup' EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
 }
 
 # Start a systemd service/unit quietly.

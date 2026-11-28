@@ -1,0 +1,17 @@
+metadata:
+  name: check_ssh_command
+  format: "Lava-Test Test Definition 1.0"
+  description: "Verify that the SSH client found in PATH runs and reports an OpenSSH version"
+  maintainer:
+    - "Qualcomm Linux Testkit"
+
+params: {}
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd "$REPO_PATH/Runner/suites/System/check_ssh_command"
+    - ./run.sh || true
+    - grep -Eq '^check_ssh_command (PASS|FAIL|SKIP)$' check_ssh_command.res
+    - cat check_ssh_command.res
+    - '"$REPO_PATH/Runner/utils/send-to-lava.sh" check_ssh_command.res --expected-testcase-id check_ssh_command'

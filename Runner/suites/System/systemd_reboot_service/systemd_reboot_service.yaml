@@ -1,0 +1,17 @@
+metadata:
+  name: systemd_reboot_service
+  format: "Lava-Test Test Definition 1.0"
+  description: "Check that systemd-reboot.service is loaded and inactive on a systemd image"
+  maintainer:
+    - "Qualcomm Linux Testkit"
+
+params: {}
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd "$REPO_PATH/Runner/suites/System/systemd_reboot_service"
+    - ./run.sh || true
+    - grep -Eq '^systemd_reboot_service (PASS|FAIL|SKIP)$' systemd_reboot_service.res
+    - cat systemd_reboot_service.res
+    - '"$REPO_PATH/Runner/utils/send-to-lava.sh" systemd_reboot_service.res --expected-testcase-id systemd_reboot_service'
