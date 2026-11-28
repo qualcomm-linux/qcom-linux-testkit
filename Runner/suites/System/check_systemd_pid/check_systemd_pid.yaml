@@ -1,0 +1,15 @@
+metadata:
+  name: check_systemd_pid
+  format: "Lava-Test Test Definition 1.0"
+  description: "Verify that systemd is running as PID 1"
+  maintainer:
+    - "Qualcomm Linux Testkit"
+
+params: {}
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/System/check_systemd_pid
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh check_systemd_pid.res

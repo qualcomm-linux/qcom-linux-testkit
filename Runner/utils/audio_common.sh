@@ -2708,26 +2708,8 @@ audio_overlay_read_units() {
     log_fail "Overlay systemctl show failed: rc=$aoru_rc units=$*, artifact=$aoru_file.raw"
     return 1
   fi
-  if ! awk '
-    BEGIN { RS=""; FS="\n" }
-    {
-      id=""; state=""; substate=""; result=""; job=""; job_seen=0
-      for (i=1; i<=NF; i++) {
-        key=$i; sub(/=.*/, "", key)
-        value=$i; sub(/^[^=]*=/, "", value)
-        if (key=="Id") id=value
-        if (key=="ActiveState") state=value
-        if (key=="SubState") substate=value
-        if (key=="Result") result=value
-        if (key=="Job") { job=value; job_seen=1 }
-      }
-      sub(/[[:space:]].*$/, "", job)
-      if (job=="") job="0"
-      if (id=="" || state=="" || substate=="" || !job_seen || job !~ /^[0-9]+$/) bad=1
-      else if (!seen[id]++) print id "|" state "|" substate "|" result "|" job
-    }
-    END { if (bad || NR==0) exit 1 }
-  ' "$aoru_file.raw" >"$aoru_file"; then
+  if ! systemd_unit_parse_show "$aoru_file.raw" "$aoru_file" \
+      Id ActiveState SubState Result Job; then
     log_fail "Overlay unit properties are incomplete, artifact=$aoru_file.raw"
     return 1
   fi
@@ -2770,12 +2752,11 @@ audio_overlay_service_action() {
       return 1
     fi
   done
-  if ! awk -F '|' '$5 != "0" { bad=1 } END { exit bad }' "$aosa_prefix.before"; then
+  if ! systemd_unit_no_pending_jobs "$aosa_prefix.before" "$@"; then
     log_fail "Overlay $aosa_action was not queued, units already have pending jobs"
     log_file_with_label AUDIO-OVERLAY-JOBS "$aosa_prefix.before" 32
     return 1
   fi
-  aosa_start="$(get_monotonic_seconds)"
   log_info "Overlay command: systemctl --no-block --no-ask-password $aosa_action $*, completion_timeout=${aosa_limit}s"
   if audio_exec_with_timeout 10s systemctl --no-block --no-ask-password \
       "$aosa_action" "$@" >"$aosa_prefix.command.log" 2>&1; then
@@ -2786,52 +2767,15 @@ audio_overlay_service_action() {
   log_info "Overlay command submission: action=$aosa_action rc=$aosa_rc, artifact=$aosa_prefix.command.log"
   log_file_with_label AUDIO-OVERLAY-COMMAND "$aosa_prefix.command.log" 40
   [ "$aosa_rc" -eq 0 ] || return 1
-  aosa_previous=""
-  aosa_next_log=0
-  while :; do
-    audio_overlay_read_units "$aosa_prefix.current" "$@" || return 1
-    aosa_elapsed=$(( $(get_monotonic_seconds) - aosa_start ))
-    aosa_current="$(cat "$aosa_prefix.current")"
-    if [ "$aosa_current" != "$aosa_previous" ] || [ "$aosa_elapsed" -ge "$aosa_next_log" ]; then
-      log_info "Overlay $aosa_action progress: elapsed_s=$aosa_elapsed, fields=unit|active|substate|result|job"
-      log_file_with_label AUDIO-OVERLAY-JOB "$aosa_prefix.current" 32
-      aosa_previous="$aosa_current"
-      aosa_next_log=$((aosa_elapsed + 10))
-    fi
-    if awk -F '|' -v action="$aosa_action" '
-      NR==FNR { initial[$1]=$2; count++; next }
-      {
-        seen++
-        if (!($1 in initial)) bad=1
-        if ($5 != "0") { pending=1; next }
-        if (action=="start") {
-          if ($2=="failed") bad=1
-          else if ($2!="active") pending=1
-        } else {
-          if ($2=="failed" && initial[$1]!="failed") bad=1
-          else if ($2!="inactive" && $2!="failed") pending=1
-        }
-      }
-      END {
-        if (bad || seen!=count) exit 3
-        if (pending) exit 1
-      }
-    ' "$aosa_prefix.before" "$aosa_prefix.current"; then
-      log_info "Overlay $aosa_action completed: elapsed_s=$aosa_elapsed, no pending unit jobs"
-      return 0
-    else
-      aosa_state_rc=$?
-      if [ "$aosa_state_rc" -eq 3 ]; then
-        log_fail "Overlay $aosa_action failed, inspect unit states/results in $aosa_prefix.current.raw"
-        return 1
-      fi
-    fi
-    if [ "$aosa_elapsed" -ge "$aosa_limit" ]; then
-      log_fail "Overlay $aosa_action completion timed out after ${aosa_elapsed}s, outstanding states/jobs are in $aosa_prefix.current. Systemd jobs may still be pending"
-      return 1
-    fi
-    sleep 1
-  done
+  systemd_unit_wait_for_action "$aosa_prefix" "$aosa_limit" \
+    audio_overlay_read_units "$aosa_action" '*' "$@"
+  aosa_state_rc=$?
+  if [ "$aosa_state_rc" -eq 0 ]; then
+    log_info "Overlay $aosa_action completed with no pending unit jobs"
+    return 0
+  fi
+  log_file_with_label AUDIO-OVERLAY-JOB "$aosa_prefix.current" 32
+  return "$aosa_state_rc"
 }
 
 # audio_overlay_client_prerequisites <playback|capture|loopback>

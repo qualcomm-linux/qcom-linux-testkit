@@ -1,0 +1,15 @@
+metadata:
+  name: check_esrt_mount_point
+  format: "Lava-Test Test Definition 1.0"
+  description: "Verify that the EFI System Resource Table sysfs directory and expected entries are present"
+  maintainer:
+    - "Qualcomm Linux Testkit"
+
+params: {}
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/System/check_esrt_mount_point
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh check_esrt_mount_point.res
