@@ -6,6 +6,7 @@
 from collections import defaultdict
 from copy import deepcopy
 from functools import partial
+from fnmatch import fnmatchcase
 import base64
 import io
 import json
@@ -31,7 +32,7 @@ IMAGE_DISTROS = {"meta-qcom-main": "qcom-distro", "meta-qcom-lts-6.18": "qcom-di
 sys.path.insert(1, str(ROOT / "scripts"))
 
 import generate_test_inventory_html as inventory
-from lava_pr_validation import API, GITHUB, LAVA, REPOSITORY, artifact_token_name, digest, github, lava, previous_request, save_json
+from lava_pr_validation import API, APIError, GITHUB, LAVA, REPOSITORY, artifact_token_name, digest, github, lava, previous_request, save_json
 
 
 def git(directory, *arguments):
@@ -267,28 +268,120 @@ def producer_file(gh, repository, revision, path):
     return base64.b64decode(response["content"]).decode("utf-8")
 
 
+def producer_run(gh, endpoint, reference):
+    """Resolve a run or an exact run-attempt without substituting newer images."""
+    match = re.fullmatch(r"([1-9][0-9]*)(?:-([1-9][0-9]*))?", reference.strip())
+    if not match:
+        raise ValueError("Image build must be RUN_ID or RUN_ID-ATTEMPT, for example 45989101207-1")
+    path = f"{endpoint}/runs/{match[1]}"
+    if match[2]:
+        path += f"/attempts/{match[2]}"
+    try:
+        run = gh.get(path)
+    except APIError as error:
+        if error.status == 404:
+            raise ValueError(f"Image run/attempt {reference.strip()} was not found or is not readable. "
+                             "Check its repository, attempt number and producer read-token access.") from None
+        raise
+    if run.get("id") != int(match[1]) or (match[2] and run.get("run_attempt") != int(match[2])):
+        raise ValueError("The image producer returned a different run or attempt")
+    return run
+
+
+def debian_build_inventory(gh, build):
+    """Read actual packaged boards from the successful image job in this attempt."""
+    endpoint = f"/repos/{build['repository']}/actions"
+    jobs = gh.pages(f"{endpoint}/runs/{build['id']}/attempts/{build['attempt']}/jobs", "jobs", per_page=100)
+    name = rf"build \({re.escape(build['release'])}(?:, console, default)?\) / Build and upload images"
+    matches = [job for job in jobs if re.fullmatch(name, job["name"]) and
+               job.get("run_attempt") == build["attempt"] and job.get("conclusion") == "success"]
+    if len(matches) != 1:
+        raise ValueError(f"No unique successful {build['release']} console image build in "
+                         f"{build['id']}-{build['attempt']}. Select an attempt that built and uploaded images.")
+    job = matches[0]
+    steps = {step["name"]: step for step in job["steps"]}
+    required = ["Build flashable files with debos", "Stage debos artifacts for publishing", "Upload private artifacts (S3)"]
+    if any(steps.get(name, {}).get("conclusion") != "success" for name in required):
+        raise ValueError("Debian flash packaging/upload steps did not complete successfully")
+    stage = steps["Stage debos artifacts for publishing"]
+    # Read one bounded log, without executing producer code or downloading GBs of images.
+    payload = bytearray()
+    deadline = time.monotonic() + 120
+    try:
+        response = gh.request("GET", f"{endpoint}/jobs/{job['id']}/logs", stream=True)
+    except APIError as error:
+        if error.status in {401, 403, 404, 410}:
+            raise ValueError(f"Cannot read Debian packaging evidence for job {job['id']} (HTTP {error.status}). "
+                             "Check META_QCOM_READ_TOKEN/PAT Actions read access and producer log retention.") from None
+        raise
+    with response:
+        for chunk in response.iter_content(chunk_size=65536):
+            payload.extend(chunk)
+            if len(payload) > 64 * 1024 * 1024 or time.monotonic() > deadline:
+                raise ValueError("Debian packaging inventory exceeds its log size/time limit")
+    bundles, files, roots, uploaded = {}, defaultdict(set), set(), set()
+    destinations = {storage: " to s3://" + urlsplit(build["prefix"]).path.lstrip("/") +
+                    f"{build['release']}-flash-{storage}.tar.gz" for storage in ("emmc", "ufs")}
+    for line in payload.decode("utf-8", errors="replace").splitlines():
+        timestamp, separator, message = line.partition(" ")
+        if not separator:
+            continue
+        if message.startswith("upload: "):
+            uploaded.update(storage for storage, destination in destinations.items() if message.endswith(destination))
+        if not stage["started_at"][:19] <= timestamp[:19] <= stage["completed_at"][:19]:
+            continue
+        # These are bundle-flash-dirs.sh output and tar's member listing, not recipe declarations.
+        chosen = re.fullmatch(r"choosen target (emmc|ufs) for (flash_[a-z0-9-]+_(?:emmc|ufs|nvme))", message)
+        if chosen:
+            bundles[chosen[2]] = chosen[1]
+        member = re.fullmatch(r"(flash_[a-z0-9-]+_(?:emmc|ufs|nvme))/(.+)", message)
+        if member and ".." not in PurePosixPath(member[2]).parts:
+            files[member[1]].add(member[2])
+        if message in {"disk-ufs.img2", "disk-sdcard.img2"}:
+            roots.add(message)
+    deployments = defaultdict(list)
+    for directory, storage in bundles.items():
+        rootfs = "disk-ufs.img2" if storage == "ufs" else "disk-sdcard.img2"
+        if storage not in uploaded or rootfs not in roots or "rawprogram0.xml" not in files[directory]:
+            continue
+        board, board_storage = directory.removeprefix("flash_").rsplit("_", 1)
+        deployments[board].append(dict(directory=directory, storage=board_storage, rootfs=rootfs,
+                                       tarball=f"flash-{storage}.tar.gz", files=sorted(files[directory])))
+    if not deployments:
+        raise ValueError("No verified Debian flash inventory. Check the selected attempt's packaging/upload log.")
+    build.update(deployments=dict(deployments), inventory_job=job["id"])
+    print(f"Debian image inventory {build['id']}-{build['attempt']}: {', '.join(sorted(deployments))}")
+    return list(deployments)
+
+
 def native_image_source(gh, config, distro, override):
-    """Pin the newest successful scheduled native build and its declared coverage."""
+    """Pin a successful nightly or an explicitly selected published build attempt."""
     provider = config["native_images"][distro]
     repository = provider["repository"]
     endpoint = f"/repos/{repository}/actions"
     workflow = gh.get(f"{endpoint}/workflows/{provider['workflow']}")
-    runs = ([gh.get(f"{endpoint}/runs/{int(override)}")] if override else
+    runs = ([producer_run(gh, endpoint, override)] if override else
             gh.get(f"{endpoint}/workflows/{provider['workflow']}/runs",
                    branch="main", event="schedule", status="success", per_page=30)["workflow_runs"])
+    allowed = {f".github/workflows/{provider['workflow']}"}
+    if override:
+        allowed.update(f".github/workflows/{name}" for name in provider.get("manual_workflows", []))
     eligible = [run for run in runs if run.get("status") == "completed" and
-                run.get("conclusion") == "success" and run.get("event") == "schedule" and
-                run.get("head_branch") == "main" and run.get("workflow_id") == workflow["id"] and
-                run.get("path") == f".github/workflows/{provider['workflow']}" and
+                (run.get("conclusion") == "success" or (override and distro == "debian")) and
+                run.get("event") in ({"schedule", "workflow_dispatch", "push"} if override else {"schedule"}) and
+                run.get("head_branch") == "main" and run.get("path") in allowed and
+                (override or run.get("workflow_id") == workflow["id"]) and
                 run.get("repository", {}).get("full_name") == repository]
     if not eligible:
-        raise ValueError(f"No successful scheduled main build in {repository}/{provider['workflow']}")
+        raise ValueError(f"No eligible completed main image build in {repository}. "
+                         "Automatic selection requires a successful scheduled build. "
+                         "Explicit runs must use a configured image workflow and successful image build/upload.")
     run = max(eligible, key=lambda item: (item["created_at"], item["id"]))
     revision = run["head_sha"]
     if not re.fullmatch(r"[0-9a-f]{40}", revision):
         raise ValueError("The nightly producer did not return a full source SHA")
     build = dict(id=run["id"], attempt=run["run_attempt"], revision=revision,
-                 repository=repository, workflow=provider["workflow"], url=run["html_url"],
+                 repository=repository, workflow=Path(run["path"]).name, url=run["html_url"],
                  prefix=f"https://qli-prod-artifacts.qualcomm.com/{provider['bucket']}/"
                         f"{repository}/{run['id']}-{run['run_attempt']}/")
     source = partial(producer_file, gh, repository, revision)
@@ -302,19 +395,30 @@ def native_image_source(gh, config, distro, override):
             raise ValueError("Debian nightly no longer declares a default qcom-next console image")
         build.update(release=suites[0], variant="console", kernel="qcom-next")
         coverage = yaml.safe_load(source(".github/lava-boards.yml"))["qcom-next"]
-        boards = coverage.get("premerge") or coverage["boot"]
+        build["default_boards"] = coverage.get("premerge") or coverage["boot"]
+        boards = debian_build_inventory(gh, build)
         pin = yaml.safe_load(source(".github/workflows/test-distro.yml"))["env"]["LAVA_TEST_PLANS_REF"]
         if not isinstance(pin, str) or not re.fullmatch(r"[A-Za-z0-9_./-]+", pin):
             raise ValueError("Debian producer must declare a literal lava-test-plans reference")
         build["plans_revision"] = gh.get(f"/repos/qualcomm-linux/lava-test-plans/commits/{quote(pin, safe='')}")["sha"]
     elif distro == "ubuntu":
-        images = json.loads(source("config/build-matrix.json"))
-        choices = [row for row in images if row.get("platform") == "iot" and row.get("variant") == "server"]
+        # Manual producer runs construct their own matrix, which can differ
+        # from the scheduled build-matrix.json. Resolve the image actually built.
+        jobs = gh.pages(f"{endpoint}/runs/{build['id']}/attempts/{build['attempt']}/jobs", "jobs", per_page=100)
+        choices = [(job, re.fullmatch(r"build \(([a-z0-9-]+), iot, server\)", job["name"])) for job in jobs]
+        choices = [(job, match[1]) for job, match in choices if match and
+                   job.get("run_attempt") == build["attempt"] and job.get("conclusion") == "success"]
         if len(choices) != 1:
-            raise ValueError("Ubuntu nightly must declare one IoT server image")
-        release = choices[0]["suite"]
-        if not re.fullmatch(r"[a-z0-9-]+", release):
-            raise ValueError("Invalid Ubuntu release in the producer matrix")
+            raise ValueError(f"Ubuntu {build['id']}-{build['attempt']} must contain one successful IoT server build. "
+                             "Desktop-only runs and attempts that did not rebuild the server image are not supported.")
+        job, release = choices[0]
+        steps = {step["name"]: step.get("conclusion") for step in job["steps"]}
+        required = ["Build Rootfs", "Deploy image and manifest products (flat-meta path)",
+                    "Generate Final Image Tarballs", "Upload Image Tarballs to S3"]
+        if any(steps.get(name) != "success" for name in required):
+            raise ValueError(f"Ubuntu {build['id']}-{build['attempt']} did not publish a QDL IoT server image to its run prefix. "
+                             "Select a server build with targets.json and successful flat-meta deployment/upload steps.")
+        build["inventory_job"] = job["id"]
         product = yaml.safe_load(source(f"config/{release}/iot/qcom-product.conf"))
         if product.get("Distro") != "ubuntu" or "qcom-next" not in product.get("kernel_variants", "qcom-next").split():
             raise ValueError("Ubuntu server nightly no longer provides the qcom-next image")
@@ -352,7 +456,6 @@ def native_target_matrix(gh, config, distro, requested, override):
     build = native_image_source(gh, config, distro, override)
     aliases = config["native_images"][distro].get("board_aliases", {})
     board_map = {}
-    unmapped = []
     for board in build["boards"]:
         machine = aliases.get(board, board)
         if machine not in config["targets"]:
@@ -362,20 +465,21 @@ def native_target_matrix(gh, config, distro, requested, override):
             if machine in board_map:
                 raise ValueError(f"Several native image boards map to {machine}, configure an explicit mapping")
             board_map[machine] = board
-        else:
-            unmapped.append(f"{board}: no configured pre-merge device mapping for the published {distro} image")
     if requested.strip() == "meta-qcom":
-        selected = list(board_map)
-        unavailable = unmapped
+        supplied = build.get("default_boards", build["boards"])
     else:
         supplied = list(dict.fromkeys(value.strip() for value in requested.split(",") if value.strip()))
-        selected, unavailable = [], []
-        for value in supplied:
-            matches = [name for name in board_map if value in {name, board_map[name], config['targets'][name]}]
-            if len(matches) != 1:
-                unavailable.append(f"{value}: no published and mapped {distro} image in nightly {build['id']}")
-            elif matches[0] not in selected:
-                selected.append(matches[0])
+    selected, unavailable = [], []
+    for value in supplied:
+        matches = [name for name in board_map if value in {name, board_map[name], config['targets'][name]} or
+                   aliases.get(value) == name]
+        if len(matches) != 1:
+            unavailable.append(f"{value}: no published and mapped {distro} image in "
+                               f"{build['id']}-{build['attempt']}. Available: {', '.join(board_map)}")
+        elif matches[0] not in selected:
+            selected.append(matches[0])
+            if value != matches[0]:
+                print(f"Resolved {distro} board {value} to {matches[0]} ({board_map[matches[0]]})")
     if not selected:
         raise ValueError("No runnable distro targets. " + ". ".join(unavailable))
     matrix.update(targets=list(board_map), selected=selected, native_build=build, native_boards=board_map,
@@ -430,7 +534,7 @@ def select_build(gh, config, targets, distro, override, image_name, access=None)
     repository = config["artifact_repository"]
     endpoint = f"/repos/{repository}/actions"
     if override:
-        runs = [gh.get(f"{endpoint}/runs/{int(override)}")]
+        runs = [producer_run(gh, endpoint, override)]
     else:
         runs = []
         for workflow in config["artifact_workflows"]:
@@ -443,6 +547,16 @@ def select_build(gh, config, targets, distro, override, image_name, access=None)
                 run["head_branch"] != "master" or
                 Path(run["path"]).name not in config["artifact_workflows"]):
             continue
+        if override and "-" in override.strip():
+            # GitHub build-URL artifacts may be overwritten by a later attempt.
+            # Validate this exact published prefix instead of following that pointer.
+            prefix = f"{config['artifact_prefix']}{run['id']}-{run['run_attempt']}/"
+            urls = {target: prefix + f"{distro}/{target}/{image_name}-{target}.rootfs.qcomflash.tar.gz"
+                    for target in targets}
+            for url in urls.values():
+                check_download(url, access)
+            return dict(id=run["id"], attempt=run["run_attempt"], url=run["html_url"],
+                        sha=run["head_sha"], prefix=prefix, images=urls)
         artifacts = list(gh.pages(f"{endpoint}/runs/{run['id']}/artifacts", "artifacts", per_page=100))
         names = {artifact["name"]: artifact for artifact in artifacts if not artifact["expired"]}
         prefixes = set()
@@ -601,11 +715,60 @@ def native_context(environment, target, context, matrix, distro_plans):
     if distro == "debian":
         if git(distro_plans, "rev-parse", "HEAD").decode().strip() != build["plans_revision"]:
             raise ValueError("Debian deployment checkout does not match the image producer's template pin")
-        native = plan_environment(distro_plans).get_template(f"projects/qcom-deb-images/devices/{board}").make_module(
-            dict(context, PROJECT="projects/qcom-deb-images/", BUILD_DOWNLOAD_URL=build["prefix"]))
-        directory, rootfs = native.qdl_image_dir, native.qdl_rootfs_image
-        filename = f"{build['release']}-{native.qdl_tarball}"
+        template = f"projects/qcom-deb-images/devices/{board}"
+        device_root = distro_plans / "lava_test_plans"
+        if not (device_root / template).is_file() and "deployments" in build:
+            # Producer board names and LAVA project names can differ, e.g.
+            # RB3Gen2's vision-kit package. Match the declared flash directory.
+            directories = {item["directory"] for item in build["deployments"].get(board, [])}
+            matches = [path for path in (device_root / "projects/qcom-deb-images/devices").glob("*")
+                       if path.is_file() and any(directory in directories for directory in
+                           re.findall(r'''{%\s*set\s+qdl_image_dir\s*=\s*["']([a-z0-9_-]+)["']\s*-?%}''',
+                                      path.read_text(encoding="utf-8")))]
+            if len(matches) == 1:
+                template = matches[0].relative_to(device_root).as_posix()
+            elif len(matches) > 1:
+                raise ValueError(f"{board}: several pinned Debian devices declare the packaged flash directory")
+        recovery = not (distro_plans / "lava_test_plans" / template).is_file()
+        if recovery:
+            template = f"devices/{board}"
+        native_environment = plan_environment(distro_plans)
+        native_values = dict(context, PROJECT="projects/qcom-deb-images/", BUILD_DOWNLOAD_URL=build["prefix"])
+        native = native_environment.get_template(template).make_module(native_values)
+        policy = native_environment.get_template("projects/qcom-deb-images/include/excluded-tests.jinja2").make_module(native_values)
+        context["EXCLUDED_TESTS"] = getattr(native, "EXCLUDED_TESTS", policy.EXCLUDED_TESTS)
+        context["native_excluded_groups"] = getattr(native, "EXCLUDED_TESTPLANS", policy.EXCLUDED_TESTPLANS)
         stages = deepcopy(native.qdl_stages)
+        if not stages:
+            raise ValueError(f"{board}: pinned device has no QDL stages")
+        if "deployments" in build:
+            layouts = [item for item in build["deployments"].get(board, []) if item["storage"] == stages[-1]["storage"]]
+            if len(layouts) != 1:
+                raise ValueError(f"{board}: no unique packaged layout for pinned QDL storage {stages[-1]['storage']}")
+            layout = layouts[0]
+            directory, rootfs, tarball = layout["directory"], layout["rootfs"], layout["tarball"]
+            if not recovery and (directory, rootfs, tarball) != (native.qdl_image_dir, native.qdl_rootfs_image, native.qdl_tarball):
+                raise ValueError(f"{board}: packaged layout differs from the pinned Debian device template")
+            # A discovered directory alone is insufficient. Require each flash
+            # stage's programmer, rawprogram and patch files before submitting.
+            for stage in stages:
+                required = [stage.get("firehose_program", native.firehose_program),
+                            *stage.get("rawprogram", native.rawprogram).split(),
+                            *stage.get("patch", native.patch).split()]
+                for name in required:
+                    pattern = str(PurePosixPath(stage.get("path", "")) / name)
+                    if not any(fnmatchcase(path, pattern) for path in layout["files"]):
+                        raise ValueError(f"{board}: packaged image lacks {pattern} required by the pinned QDL stage")
+            if recovery:
+                print(f"Recovered Debian {board} deployment from {template} at {build['plans_revision']} "
+                      f"and verified {directory} in image build {build['id']}-{build['attempt']}")
+            context.update(firehose_program=native.firehose_program, rawprogram=native.rawprogram, patch=native.patch)
+        elif recovery:
+            raise ValueError(f"{board}: no Debian device template or verified packaging inventory")
+        else:
+            # Previously saved requests retain their already-resolved layout.
+            directory, rootfs, tarball = native.qdl_image_dir, native.qdl_rootfs_image, native.qdl_tarball
+        filename = f"{build['release']}-{tarball}"
         username, hostname = "debian", "debian"
     elif distro == "ubuntu":
         filename = build["image_name"] + ".tar.gz"
@@ -647,8 +810,9 @@ def render_baseline(plans, target, context, config, native=None, distro_plans=No
         native_context(environment, target, context, native, distro_plans)
     context["device_type"] = f"projects/meta-qcom/devices/{target}"
     device = environment.get_template(context["device_type"]).make_module(context)
-    excluded_groups = getattr(device, "EXCLUDED_TESTPLANS", [])
-    context["EXCLUDED_TESTS"] = getattr(device, "EXCLUDED_TESTS", [])
+    excluded_groups = context.get("native_excluded_groups", getattr(device, "EXCLUDED_TESTPLANS", []))
+    if not native or native["image_distro"] != "debian":
+        context["EXCLUDED_TESTS"] = getattr(device, "EXCLUDED_TESTS", [])
     jobs, excluded = {}, []
     context["excluded_definitions"] = []
     for group in config["groups"]:
@@ -898,6 +1062,8 @@ def append_tests(jobs, affected, documents, by_suite, selections, config, source
 
 
 def prepare(folder):
+    from jinja2 import TemplateError
+
     token_name = artifact_token_name()
     run_id = os.environ["VALIDATION_RUN_ID"]
     attempt = os.environ.get("GITHUB_RUN_ATTEMPT", "1")
@@ -936,7 +1102,8 @@ def prepare(folder):
     plans = Path(os.environ["LAVA_PLANS_PATH"]).resolve()
     if git(plans, "rev-parse", "HEAD").decode().strip() != plans_revision:
         raise ValueError("lava-test-plans checkout does not match the resolved meta-qcom pin")
-    validate_target_templates(plans, targets, config)
+    if not native:
+        validate_target_templates(plans, targets, config)
     # Keep historical names in saved requests so older reruns select the same artifact.
     image_variants = {"base": "multimedia", "overlay": "proprietary",
                       "multimedia": "multimedia", "proprietary": "proprietary", "both": "both"}
@@ -1057,18 +1224,19 @@ def prepare(folder):
                        TEST_DEFINITIONS_REVISION=sha, TEST_DEFINITIONS_REVISION_SHA=sha,
                        PR_NUMBER=str(number), PR_URL=pr["html_url"])
         if native:
-            jobs, excluded = render_baseline(plans, target, context, config, native=target_matrix,
-                                             distro_plans=Path(os.environ.get("LAVA_DISTRO_PLANS_PATH", "distro-lava-test-plans")))
-            url = context["ROOTFS_URL"]
-            if previous and build["images"].get(target, url) != url:
-                raise ValueError("Native deployment no longer matches the immutable image request")
             try:
+                validate_target_templates(plans, [target], config)
+                jobs, excluded = render_baseline(plans, target, context, config, native=target_matrix,
+                                                 distro_plans=Path(os.environ.get("LAVA_DISTRO_PLANS_PATH", "distro-lava-test-plans")))
+                url = context["ROOTFS_URL"]
+                if previous and build["images"].get(target, url) != url:
+                    raise ValueError("Native deployment no longer matches the immutable image request")
                 if url not in verified_native_urls:
                     check_download(url, access)
                     if dispatcher_access is not access and dispatcher_access.get("qli_token") != access.get("qli_token"):
                         check_download(url, dispatcher_access)
                     verified_native_urls.add(url)
-            except ValueError as failure:
+            except (ValueError, TemplateError) as failure:
                 reason = f"{target}: {failure}"
                 print(reason)
                 manifest["unavailable_targets"].append(reason)
