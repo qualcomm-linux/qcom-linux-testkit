@@ -1,0 +1,15 @@
+metadata:
+  name: soc-infra-cpu-available-freq-validation
+  format: "Lava-Test Test Definition 1.0"
+  description: "Smoke test: every cpufreq policy that exposes scaling_available_frequencies advertises a readable list of valid frequencies (kHz)"
+  os:
+    - linux
+  scope:
+    - functional
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/SoC_Infra_CPU_Available_Freq_Validation
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh SoC_Infra_CPU_Available_Freq_Validation.res --strict --expected-testcase-id SoC_Infra_CPU_Available_Freq_Validation
