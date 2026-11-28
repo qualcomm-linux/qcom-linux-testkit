@@ -1,0 +1,15 @@
+metadata:
+  name: soc-infra-gcc-clock-rate-validation
+  format: "Lava-Test Test Definition 1.0"
+  description: "Smoke test: GCC clocks are registered in debugfs and every GCC clock rate is a readable integer (Hz)"
+  os:
+    - linux
+  scope:
+    - functional
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/SoC_Infra_GCC_Clock_Rate_Validation
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh SoC_Infra_GCC_Clock_Rate_Validation.res --strict --expected-testcase-id SoC_Infra_GCC_Clock_Rate_Validation
