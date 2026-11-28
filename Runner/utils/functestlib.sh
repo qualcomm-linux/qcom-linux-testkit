@@ -9130,10 +9130,11 @@ probe_classify_kernel_failures() (
     return 1
 )
 
-# scan_dmesg_errors OUTPUT_DIR MODULE_REGEX [EXCLUDE_REGEX]
+# scan_dmesg_errors OUTPUT_DIR MODULE_REGEX [EXCLUDE_REGEX] [FAULT_REGEX]
 # Capture the kernel log once and report non-benign errors for selected modules.
 # Inputs: retained output directory, extended module regex, and optional exclusion
-# regex. Set KERNEL_LOG_JOURNAL_FALLBACK=1 to permit journalctl fallback.
+# regex. Optional FAULT_REGEX selects fault headers and stack symbols, defaulting
+# to MODULE_REGEX. Set KERNEL_LOG_JOURNAL_FALLBACK=1 to permit journalctl fallback.
 # Outputs: retained snapshot, filtered errors, access diagnostics, timestamped
 # history, and exported DMESG_ACCESS_STATUS, DMESG_ACCESS_RC,
 # DMESG_ACCESS_PROVIDER, and DMESG_ACCESS_LOG values.
@@ -9144,6 +9145,7 @@ scan_dmesg_errors() {
     prefix="$1"
     module_regex="$2"   # e.g. 'qcom_camss|camss|isp'
     exclude_regex="${3:-"dummy regulator|supply [^ ]+ not found|using dummy regulator"}"
+    sde_fault_regex="${4:-$module_regex}"
 
     mkdir -p "$prefix"
 
@@ -9265,7 +9267,7 @@ scan_dmesg_errors() {
     # 2. Exclude lines with harmless patterns (using dummy regulator etc)
     grep -iE "^(\[[^]]+\][[:space:]]*)*($module_regex)([[:space:]][^:]*)?:.*($err_patterns)" "$DMESG_SNAPSHOT" \
         | grep -vEi -- "$exclude_regex" > "$DMESG_ERRORS" || true
-    kernel_log_filter_faults "$DMESG_SNAPSHOT" "$module_regex" "$exclude_regex" \
+    kernel_log_filter_faults "$DMESG_SNAPSHOT" "$sde_fault_regex" "$exclude_regex" \
         >>"$DMESG_ERRORS"
 
     cp "$DMESG_ERRORS" "$DMESG_HISTORY"
