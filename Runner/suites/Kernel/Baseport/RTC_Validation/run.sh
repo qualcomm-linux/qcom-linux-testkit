@@ -449,10 +449,14 @@ else
 fi
 
 export KERNEL_LOG_JOURNAL_FALLBACK=1
+# Match RTC identifier segments such as pm8xxx_rtc_* and qcom_pmic_rtc_glink.
+# Bound fault symbols without changing the existing ordinary-error selection.
+rtc_fault_regex='([[:alnum:]_]+[-_])*rtc([-_][[:alnum:]_-]+|[0-9]*)'
 scan_dmesg_errors \
     "$RESULT_DIR/kernel" \
     'rtc[-_0-9 ]|qpnp_rtc|pmic.*rtc|qcom.*rtc' \
-    'registered as rtc[0-9]+|setting system clock|system clock set'
+    'registered as rtc[0-9]+|setting system clock|system clock set' \
+    "(^|[^[:alnum:]_])($rtc_fault_regex)([^[:alnum:]_]|$)"
 rtc_dmesg_rc=$?
 if [ "${DMESG_ACCESS_STATUS:-unavailable}" != "available" ]; then
     test_result_record "SKIP" "Kernel log access is unavailable for RTC health validation, status=${DMESG_ACCESS_STATUS:-unknown} provider=${DMESG_ACCESS_PROVIDER:-none} rc=${DMESG_ACCESS_RC:-unknown} artifact=$RESULT_DIR/kernel/dmesg_access.log"
