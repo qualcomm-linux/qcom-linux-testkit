@@ -11,7 +11,7 @@ on:
         required: true
         type: string
       targets:
-        description: meta-qcom selects all enabled machines except qcm6490-idp, or enter comma-separated machine names or configured Foundries device types
+        description: meta-qcom selects enabled boards published for the image distro, or enter comma-separated machine names or Foundries device types
         required: true
         default: meta-qcom
         type: string
@@ -26,14 +26,17 @@ on:
         description: Full PR commit SHA, empty resolves current PR head. Reruns retain the original SHA.
         type: string
       distro:
-        description: Meta-qcom build
+        description: Image distro. meta-qcom-main and meta-qcom-lts-6.18 are Yocto builds.
         default: meta-qcom-main
         type: choice
         options:
           - meta-qcom-main
           - meta-qcom-lts-6.18
+          - debian
+          - ubuntu
+          - centos
       image_type:
-        description: Multimedia image configuration
+        description: Yocto multimedia configuration. For Debian/Ubuntu/CentOS select base to use the native console/server image.
         default: base
         type: choice
         options:
@@ -41,7 +44,7 @@ on:
           - overlay
           - both
       nightly_run:
-        description: Optional successful meta-qcom nightly or extended build run ID. Reruns reuse the original images.
+        description: Optional successful nightly run ID from the selected image repository. Reruns reuse the original images.
         type: string
       selections:
         description: Advanced JSON suite selections for params, tags or fresh_boot. Do not repeat suites from test_names.
@@ -164,8 +167,10 @@ jobs:
         id: plans
         env:
           GH_TOKEN: ${{ github.token }}
-          META_QCOM_READ_TOKEN: ${{ secrets.META_QCOM_READ_TOKEN }}
+          META_QCOM_READ_TOKEN: ${{ secrets.META_QCOM_READ_TOKEN || (inputs.distro == 'ubuntu' && secrets.PAT) || '' }}
           IMAGE_DISTRO: ${{ inputs.distro }}
+          IMAGE_TYPE: ${{ inputs.image_type }}
+          NIGHTLY_RUN_ID: ${{ inputs.nightly_run }}
           TARGETS: ${{ inputs.targets }}
         run: python .github/workflows/lava_pr_validation.py plans
 
@@ -180,15 +185,25 @@ jobs:
       - name: Install the selected plan renderer
         run: python -m pip install ./lava-test-plans
 
+      - name: Checkout Debian producer deployment templates
+        if: steps.plans.outputs.distro_plans_revision != ''
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: qualcomm-linux/lava-test-plans
+          ref: ${{ steps.plans.outputs.distro_plans_revision }}
+          path: distro-lava-test-plans
+          persist-credentials: false
+
       - name: Prepare selected PR tests and optional meta-qcom baseline
         id: prepare
         env:
           GH_TOKEN: ${{ github.token }}
-          META_QCOM_READ_TOKEN: ${{ secrets.META_QCOM_READ_TOKEN }}
+          META_QCOM_READ_TOKEN: ${{ secrets.META_QCOM_READ_TOKEN || (inputs.distro == 'ubuntu' && secrets.PAT) || '' }}
           QLI_S3_TOKEN: ${{ secrets.QLI_S3_TOKEN }}
           LAVATOKEN: ${{ secrets.LAVATOKEN }}
           LAVA_ARTIFACT_TOKEN_NAME: ${{ vars.FOUNDRIES_ARTIFACT_TOKEN_NAME || 'Q_QLI_S3_TOKEN' }}
           LAVA_PLANS_PATH: lava-test-plans
+          LAVA_DISTRO_PLANS_PATH: distro-lava-test-plans
           PR_NUMBER: ${{ inputs.pr }}
           TARGETS: ${{ inputs.targets }}
           PR_REVISION: ${{ needs.request.outputs.sha }}

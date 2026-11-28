@@ -4,6 +4,24 @@
   "target_ref": "master",
   "excluded_targets": ["qcm6490-idp"],
   "artifact_workflows": ["nightly-build.yml", "extended-build.yml"],
+  "native_images": {
+    "debian": {
+      "repository": "qualcomm-linux/qcom-deb-images",
+      "workflow": "build.yml",
+      "bucket": "qcom-prd-gh-artifacts"
+    },
+    "ubuntu": {
+      "repository": "qualcomm-linux/qcom-distro-images",
+      "workflow": "build-distro-workflow.yml",
+      "bucket": "qli-prd-lecore-gh-artifacts",
+      "board_aliases": {"qcs6490-rb3gen2-vision-kit": "rb3gen2-core-kit", "shikra-iq-evk": "shikra-evk"}
+    },
+    "centos": {
+      "repository": "qualcomm-linux/rpm-images",
+      "workflow": "nightly-build.yml",
+      "bucket": "qli-prd-platform-gh-artifacts"
+    }
+  },
   "artifact_prefix": "https://qli-prod-artifacts.qualcomm.com/qcom-prd-gh-artifacts/qualcomm-linux/meta-qcom/",
   "audio_url": "https://github.com/qualcomm-linux/qcom-linux-testkit/releases/download/AudioClips-v1.1/AudioClips.tar.gz",
   "audio_sha256": "847b5a4027777d99fa8362fed349a07d08453a1be40f3929c628c6f4b3e96432",

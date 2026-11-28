@@ -5,6 +5,7 @@
 
 from collections import defaultdict
 from copy import deepcopy
+from functools import partial
 import base64
 import io
 import json
@@ -18,6 +19,7 @@ import tarfile
 import time
 from urllib.parse import quote, urljoin, urlsplit
 import zipfile
+from xml.etree import ElementTree
 
 import requests
 import yaml
@@ -259,6 +261,128 @@ def select_targets(gh, config, distro, requested):
                 excluded=excluded)
 
 
+def producer_file(gh, repository, revision, path):
+    """Read configuration from the image-producing commit, never execute it."""
+    response = gh.get(f"/repos/{repository}/contents/{path}", ref=revision)
+    return base64.b64decode(response["content"]).decode("utf-8")
+
+
+def native_image_source(gh, config, distro, override):
+    """Pin the newest successful scheduled native build and its declared coverage."""
+    provider = config["native_images"][distro]
+    repository = provider["repository"]
+    endpoint = f"/repos/{repository}/actions"
+    workflow = gh.get(f"{endpoint}/workflows/{provider['workflow']}")
+    runs = ([gh.get(f"{endpoint}/runs/{int(override)}")] if override else
+            gh.get(f"{endpoint}/workflows/{provider['workflow']}/runs",
+                   branch="main", event="schedule", status="success", per_page=30)["workflow_runs"])
+    eligible = [run for run in runs if run.get("status") == "completed" and
+                run.get("conclusion") == "success" and run.get("event") == "schedule" and
+                run.get("head_branch") == "main" and run.get("workflow_id") == workflow["id"] and
+                run.get("path") == f".github/workflows/{provider['workflow']}" and
+                run.get("repository", {}).get("full_name") == repository]
+    if not eligible:
+        raise ValueError(f"No successful scheduled main build in {repository}/{provider['workflow']}")
+    run = max(eligible, key=lambda item: (item["created_at"], item["id"]))
+    revision = run["head_sha"]
+    if not re.fullmatch(r"[0-9a-f]{40}", revision):
+        raise ValueError("The nightly producer did not return a full source SHA")
+    build = dict(id=run["id"], attempt=run["run_attempt"], revision=revision,
+                 repository=repository, workflow=provider["workflow"], url=run["html_url"],
+                 prefix=f"https://qli-prod-artifacts.qualcomm.com/{provider['bucket']}/"
+                        f"{repository}/{run['id']}-{run['run_attempt']}/")
+    source = partial(producer_file, gh, repository, revision)
+    if distro == "debian":
+        workflow_config = yaml.safe_load(source(".github/workflows/build.yml"))
+        images = workflow_config["jobs"]["build"]["strategy"]["matrix"]["include"]
+        suites = [row["suite"] for row in images if row.get("variant") == "console" and
+                  row.get("profile") == "default" and
+                  "linux-image-qcom-next" in row.get("kernelpackages", "").split(",")]
+        if not suites:
+            raise ValueError("Debian nightly no longer declares a default qcom-next console image")
+        build.update(release=suites[0], variant="console", kernel="qcom-next")
+        coverage = yaml.safe_load(source(".github/lava-boards.yml"))["qcom-next"]
+        boards = coverage.get("premerge") or coverage["boot"]
+        pin = yaml.safe_load(source(".github/workflows/test-distro.yml"))["env"]["LAVA_TEST_PLANS_REF"]
+        if not isinstance(pin, str) or not re.fullmatch(r"[A-Za-z0-9_./-]+", pin):
+            raise ValueError("Debian producer must declare a literal lava-test-plans reference")
+        build["plans_revision"] = gh.get(f"/repos/qualcomm-linux/lava-test-plans/commits/{quote(pin, safe='')}")["sha"]
+    elif distro == "ubuntu":
+        images = json.loads(source("config/build-matrix.json"))
+        choices = [row for row in images if row.get("platform") == "iot" and row.get("variant") == "server"]
+        if len(choices) != 1:
+            raise ValueError("Ubuntu nightly must declare one IoT server image")
+        release = choices[0]["suite"]
+        if not re.fullmatch(r"[a-z0-9-]+", release):
+            raise ValueError("Invalid Ubuntu release in the producer matrix")
+        product = yaml.safe_load(source(f"config/{release}/iot/qcom-product.conf"))
+        if product.get("Distro") != "ubuntu" or "qcom-next" not in product.get("kernel_variants", "qcom-next").split():
+            raise ValueError("Ubuntu server nightly no longer provides the qcom-next image")
+        build.update(release=release, variant="server", kernel="qcom-next")
+        boards = [row["name"] for row in json.loads(source(f"config/{release}/iot/targets.json"))]
+        build["image_name"] = f"qcom-ubuntu-iot-{release}-server-qcom-next.images"
+    else:
+        workflow_text = source(".github/workflows/build-rpm.yml")
+        declared = set(re.findall(r"\bTARGET_BOARDS=([a-z0-9,-]+)(?=\s)", workflow_text))
+        if len(declared) != 1:
+            raise ValueError("CentOS nightly must declare one literal TARGET_BOARDS list")
+        boards = next(iter(declared)).split(",")
+        workflow_config = yaml.safe_load(workflow_text)
+        kernel_refs = [step["with"]["kernel-ref"] for job in workflow_config["jobs"].values()
+                       for step in job.get("steps", []) if step.get("uses") == "./.github/actions/build-kernel-rpm"]
+        kiwi = ElementTree.fromstring(source("kiwi/config.xml"))
+        release = re.fullmatch(r"centos-(stream[0-9]+)-aarch64", kiwi.get("name", ""))
+        profiles = {profile.get("name") for profile in kiwi.findall("./profiles/profile")}
+        if not release or "console" not in profiles or len(kernel_refs) != 1:
+            raise ValueError("CentOS nightly no longer declares a Stream console image and one kernel reference")
+        build.update(release=release[1], variant="console", kernel=kernel_refs[0])
+    if (not boards or len(boards) != len(set(boards)) or
+            any(not isinstance(board, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]*", board) for board in boards) or
+            not re.fullmatch(r"[a-z0-9-]+", build["release"])):
+        raise ValueError(f"Invalid {distro} nightly board or release configuration")
+    build["boards"] = boards
+    return build
+
+
+def native_target_matrix(gh, config, distro, requested, override):
+    """Intersect native image coverage with the maintained pre-merge device mappings."""
+    if os.environ.get("IMAGE_TYPE", "base") not in {"base", "multimedia"}:
+        raise ValueError(f"{distro} publishes native console/server images, no base/overlay pair. Select image_type=base.")
+    matrix = select_targets(gh, config, "qcom-distro", "meta-qcom")
+    build = native_image_source(gh, config, distro, override)
+    aliases = config["native_images"][distro].get("board_aliases", {})
+    board_map = {}
+    unmapped = []
+    for board in build["boards"]:
+        machine = aliases.get(board, board)
+        if machine not in config["targets"]:
+            matches = [name for name, device in config["targets"].items() if device == board]
+            machine = matches[0] if len(matches) == 1 else None
+        if machine in config["targets"] and machine not in config.get("excluded_targets", []):
+            if machine in board_map:
+                raise ValueError(f"Several native image boards map to {machine}, configure an explicit mapping")
+            board_map[machine] = board
+        else:
+            unmapped.append(f"{board}: no configured pre-merge device mapping for the published {distro} image")
+    if requested.strip() == "meta-qcom":
+        selected = list(board_map)
+        unavailable = unmapped
+    else:
+        supplied = list(dict.fromkeys(value.strip() for value in requested.split(",") if value.strip()))
+        selected, unavailable = [], []
+        for value in supplied:
+            matches = [name for name in board_map if value in {name, board_map[name], config['targets'][name]}]
+            if len(matches) != 1:
+                unavailable.append(f"{value}: no published and mapped {distro} image in nightly {build['id']}")
+            elif matches[0] not in selected:
+                selected.append(matches[0])
+    if not selected:
+        raise ValueError("No runnable distro targets. " + ". ".join(unavailable))
+    matrix.update(targets=list(board_map), selected=selected, native_build=build, native_boards=board_map,
+                  image_distro=distro, unavailable=unavailable)
+    return matrix
+
+
 def resolve_plans(folder):
     """Freeze meta-qcom's target list and template pin before installing its renderer."""
     config = json.loads((ROOT / ".github/ci/lava-pr-validation.json").read_text(encoding="utf-8"))
@@ -267,18 +391,25 @@ def resolve_plans(folder):
         target_matrix = dict(previous["target_matrix"], plans_revision=previous["plans_revision"])
     else:
         distro_choice = os.environ.get("IMAGE_DISTRO", "meta-qcom-main")
-        if distro_choice not in IMAGE_DISTROS:
-            raise ValueError("Choose meta-qcom-main or meta-qcom-lts-6.18")
-        distro = IMAGE_DISTROS[distro_choice]
         producer = API(GITHUB, os.environ.get("META_QCOM_READ_TOKEN") or os.environ.get("GH_TOKEN", ""))
-        target_matrix = select_targets(producer, config, distro, os.environ.get("TARGETS", "meta-qcom"))
+        if distro_choice in config.get("native_images", {}):
+            target_matrix = native_target_matrix(producer, config, distro_choice, os.environ.get("TARGETS", "meta-qcom"),
+                                                 os.environ.get("NIGHTLY_RUN_ID", ""))
+        elif distro_choice in IMAGE_DISTROS:
+            target_matrix = select_targets(producer, config, IMAGE_DISTROS[distro_choice], os.environ.get("TARGETS", "meta-qcom"))
+        else:
+            raise ValueError("Choose meta-qcom-main, meta-qcom-lts-6.18, debian, ubuntu or centos")
     revision = target_matrix["plans_revision"]
     if not re.fullmatch(r"[0-9a-f]{40}", revision):
         raise ValueError("Invalid saved lava-test-plans commit")
+    distro_revision = target_matrix.get("native_build", {}).get("plans_revision", "")
+    if distro_revision and not re.fullmatch(r"[0-9a-f]{40}", distro_revision):
+        raise ValueError("Invalid Debian producer lava-test-plans commit")
     save_json(folder / "target-matrix.json", target_matrix)
     if os.environ.get("GITHUB_OUTPUT"):
         with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
             output.write(f"plans_revision={revision}\n")
+            output.write(f"distro_plans_revision={distro_revision}\n")
     print(f"meta-qcom {target_matrix['revision']} selects lava-test-plans {revision}")
 
 
@@ -442,26 +573,78 @@ def affected_suites(changes, owners, config):
     return reasons
 
 
-def render_baseline(plans, target, context, config):
+def plan_environment(plans):
     # Resolution runs before the selected plan's Python dependencies are installed.
     from jinja2 import Environment, FileSystemLoader, StrictUndefined
     from lava_test_plans.utils import compression
 
+    templates = plans / "lava_test_plans"
+    # Pinned LAVA templates produce YAML and shell, HTML escaping corrupts their values.
+    environment = Environment(  # nosemgrep: python.flask.security.xss.audit.direct-use-of-jinja2.direct-use-of-jinja2
+        loader=FileSystemLoader([
+            str(templates), str(templates / "testplans"),
+            str(templates / "testcases"), str(templates / "devices"), str(ROOT / ".github/ci")]),
+        undefined=StrictUndefined,
+        autoescape=False,
+        extensions=["jinja2.ext.loopcontrols"])
+    environment.globals["compression"] = compression
+    return environment
+
+
+def native_context(environment, target, context, matrix, distro_plans):
+    """Use native flash layouts, retaining board-specific QDL programmers and stages."""
+    build = matrix["native_build"]
+    distro = matrix["image_distro"]
+    board = matrix["native_boards"][target]
+    device = environment.get_template(f"projects/meta-qcom/devices/{target}").make_module(context)
+    stages = deepcopy(device.qdl_stages)
+    if distro == "debian":
+        if git(distro_plans, "rev-parse", "HEAD").decode().strip() != build["plans_revision"]:
+            raise ValueError("Debian deployment checkout does not match the image producer's template pin")
+        native = plan_environment(distro_plans).get_template(f"projects/qcom-deb-images/devices/{board}").make_module(
+            dict(context, PROJECT="projects/qcom-deb-images/", BUILD_DOWNLOAD_URL=build["prefix"]))
+        directory, rootfs = native.qdl_image_dir, native.qdl_rootfs_image
+        filename = f"{build['release']}-{native.qdl_tarball}"
+        stages = deepcopy(native.qdl_stages)
+        username, hostname = "debian", "debian"
+    elif distro == "ubuntu":
+        filename = build["image_name"] + ".tar.gz"
+        directory = f"{build['image_name']}/{board}"
+        rootfs = f"{build['image_name']}/rootfs.img"
+        # qcom-build-utils places each storage in a sibling directory, including
+        # spinor before the OS storage. The rootfs is shared at the archive root.
+        stages = [dict(stage, path=stage["storage"]) for stage in stages]
+        username, hostname = "qcom", "qcom"
+    else:
+        if len(stages) != 1 or stages[0]["storage"] != "ufs":
+            raise ValueError(f"{target}: the CentOS publisher currently provides UFS packages only")
+        filename = f"console-flash_{board}_ufs.tar.gz"
+        directory, rootfs = ".", "rootfs.img"
+        username, hostname = "qcom", "centos"
+    context.update(PROJECT="lava-distros/", OS_INFO=distro,
+                   ROOTFS_URL=build["prefix"] + filename, IMAGE_FILE_NAME=filename,
+                   qdl_image_dir=directory, qdl_rootfs_image=rootfs, qdl_stages=stages,
+                   AUTO_LOGIN_USERNAME=username, AUTO_LOGIN_PASSWORD=username,
+                   AUTO_LOGIN_SU_COMMAND="sudo -i", AUTO_LOGIN_PASSWORD_PROMPT="Password",
+                   BOOT_OS_PROMPT=[f"{username}@{hostname}", f"root@{hostname}"],
+                   user_pre_boot_commands=["network_turn_on"])
+    if distro in {"debian", "centos"}:
+        context["AUTO_LOGIN_NEW_PASSWORD"] = "Testkit-validation-42"
+        context["AUTO_LOGIN_PASSWORD_CHANGE_PROMPTS"] = ["[Cc]urrent.*password", "[Nn]ew password", "Retype new password"]
+    else:
+        context["BOOT_OS_PROMPT"].append(r"password for qcom:")
+
+
+def render_baseline(plans, target, context, config, native=None, distro_plans=None):
     templates = plans / "lava_test_plans"
     plan_groups = {path.stem for path in (templates / "testplans/meta-qcom/qcom-distro/pre-merge").glob("*.yaml")}
     if plan_groups != set(config["groups"]):
         raise ValueError("meta-qcom pre-merge groups changed, review the controller's supported groups. "
                          f"Plan: {', '.join(sorted(plan_groups)) or 'none'}. "
                          f"Controller: {', '.join(config['groups'])}")
-    # Pinned LAVA templates produce YAML and shell, HTML escaping corrupts their values.
-    environment = Environment(  # nosemgrep: python.flask.security.xss.audit.direct-use-of-jinja2.direct-use-of-jinja2
-        loader=FileSystemLoader([
-            str(templates), str(templates / "testplans"),
-            str(templates / "testcases"), str(templates / "devices")]),
-        undefined=StrictUndefined,
-        autoescape=False,
-        extensions=["jinja2.ext.loopcontrols"])
-    environment.globals["compression"] = compression
+    environment = plan_environment(plans)
+    if native:
+        native_context(environment, target, context, native, distro_plans)
     context["device_type"] = f"projects/meta-qcom/devices/{target}"
     device = environment.get_template(context["device_type"]).make_module(context)
     excluded_groups = getattr(device, "EXCLUDED_TESTPLANS", [])
@@ -487,6 +670,17 @@ def render_baseline(plans, target, context, config):
         # This output is parsed as a LAVA job, never served as HTML.
         # nosemgrep: python.flask.security.xss.audit.direct-use-of-jinja2.direct-use-of-jinja2
         job = yaml.safe_load(template.render(context))
+        if native:
+            # Ubuntu's default qcom user requires its password for sudo.
+            if native["image_distro"] == "ubuntu":
+                for action in job["actions"]:
+                    if action.get("boot", {}).get("method") == "minimal":
+                        action["boot"]["auto_login"]["login_commands"].append("qcom")
+            # Retain the producer's RB3Gen2 alias. LAVA owns its canonical
+            # device-type mapping, aliases do not replace fixture tags.
+            board = native["native_boards"][target]
+            if board == "qcs6490-rb3gen2-vision-kit" or (native["image_distro"] == "debian" and board == "qcs6490-rb3gen2"):
+                job["device_type"] = "qcs6490-rb3gen2-vision-kit"
         if not any(action.get("test", {}).get("definitions") for action in job["actions"]):
             raise ValueError(f"Mandatory group {group} rendered no tests")
         jobs[group] = job
@@ -729,11 +923,14 @@ def prepare(folder):
     if pr["state"] != "open" or pr["base"]["ref"] != "main":
         raise ValueError("Select an open PR targeting main")
     distro_choice = os.environ.get("IMAGE_DISTRO", "meta-qcom-main")
-    if distro_choice not in IMAGE_DISTROS:
-        raise ValueError("Choose meta-qcom-main or meta-qcom-lts-6.18")
-    distro = IMAGE_DISTROS[distro_choice]
+    native = distro_choice in config.get("native_images", {})
+    if distro_choice not in IMAGE_DISTROS and not native:
+        raise ValueError("Choose meta-qcom-main, meta-qcom-lts-6.18, debian, ubuntu or centos")
+    distro = distro_choice if native else IMAGE_DISTROS[distro_choice]
     producer = API(GITHUB, os.environ.get("META_QCOM_READ_TOKEN") or os.environ.get("GH_TOKEN", ""))
     target_matrix = json.loads((folder / "target-matrix.json").read_text(encoding="utf-8"))
+    if native and target_matrix.get("image_distro") != distro:
+        raise ValueError("The resolved nightly does not match the selected distro")
     targets = target_matrix["selected"]
     plans_revision = target_matrix["plans_revision"]
     plans = Path(os.environ["LAVA_PLANS_PATH"]).resolve()
@@ -747,12 +944,18 @@ def prepare(folder):
     if image_choice not in image_variants:
         raise ValueError("Choose the base or overlay multimedia image, or both")
     image_type = image_variants[image_choice]
+    if native:
+        if image_type != "multimedia":
+            raise ValueError(f"{distro} has no published base/overlay pair. Select image_type=base for its native image.")
+        image_type = "native"
     if previous and (previous["pr"] != number or previous["distro"] != distro or
                      previous["image_type"] != image_type or
                      previous["plans_revision"] != plans_revision):
         raise ValueError("Rerun inputs differ from the saved request, use a new manual validation run")
     variants = {"base": "qcom-multimedia-image", "overlay": "qcom-multimedia-proprietary-image"}
-    if image_type != "both":
+    if native:
+        variants = {"native": "native"}
+    elif image_type != "both":
         variant = "base" if image_type == "multimedia" else "overlay"
         variants = {variant: variants[variant]}
     image_name = next(iter(variants.values()))
@@ -792,6 +995,8 @@ def prepare(folder):
     check_download(audio_url, access)
     if previous:
         build = previous["build"]
+    elif native:
+        build = dict(target_matrix["native_build"], images={})
     else:
         build = select_build(producer, config, targets, distro, os.environ.get("NIGHTLY_RUN_ID", ""), image_name, access)
         if image_type == "both":
@@ -802,9 +1007,10 @@ def prepare(folder):
     overlay_images = build.get("overlay_images", {}) if image_type == "both" else {}
     if image_type == "both" and set(overlay_images) != set(targets):
         raise ValueError("Saved request does not contain both images for every selected target")
-    for url in [*(build["images"].values() if previous else []), *overlay_images.values()]:
+    for url in [*(build["images"].values() if previous and not native else []), *overlay_images.values()]:
         check_download(url, access)
-    image_urls = [*build["images"].values(), *overlay_images.values()]
+    image_urls = [] if native else [*build["images"].values(), *overlay_images.values()]
+    dispatcher_access = access
     if os.environ.get("QLI_S3_TOKEN") or os.environ.get("QLI_ARTIFACT_TOKEN"):
         # GitHub and the dispatcher can use different registered credentials.
         # A successful controller probe alone cannot prove LAVA can fetch images.
@@ -827,13 +1033,15 @@ def prepare(folder):
                     audio_url=audio_url, audio_sha256=audio_sha256,
                     artifact_token_name=token_name,
                     artifact_verification="controller",
+                    unavailable_targets=list(target_matrix.get("unavailable", [])),
                     submit_requested=os.environ.get("SUBMIT_REQUEST", "false").lower() == "true",
                     request_minutes=config["request_minutes"])
     (folder / "jobs").mkdir()
     baseline_job_count = 0
+    verified_native_urls = set()
     for target, variant in ((target, variant) for target in targets for variant in variants):
         image_name = variants[variant]
-        rootfs_url = (overlay_images if image_type == "both" and variant == "overlay" else build["images"])[target]
+        rootfs_url = "" if native else (overlay_images if image_type == "both" and variant == "overlay" else build["images"])[target]
         variant_fields = {"image_variant": variant} if image_type == "both" else {}
         context = dict(PROJECT="projects/meta-qcom/", PROJECT_NAME="meta-qcom", OS_INFO="qcom-distro",
                        LAVA_JOB_PRIORITY=50,  # Match meta-qcom's CI queue priority.
@@ -848,7 +1056,26 @@ def prepare(folder):
                        TEST_DEFINITIONS_REPOSITORY=f"https://github.com/{repository}",
                        TEST_DEFINITIONS_REVISION=sha, TEST_DEFINITIONS_REVISION_SHA=sha,
                        PR_NUMBER=str(number), PR_URL=pr["html_url"])
-        jobs, excluded = render_baseline(plans, target, context, config)
+        if native:
+            jobs, excluded = render_baseline(plans, target, context, config, native=target_matrix,
+                                             distro_plans=Path(os.environ.get("LAVA_DISTRO_PLANS_PATH", "distro-lava-test-plans")))
+            url = context["ROOTFS_URL"]
+            if previous and build["images"].get(target, url) != url:
+                raise ValueError("Native deployment no longer matches the immutable image request")
+            try:
+                if url not in verified_native_urls:
+                    check_download(url, access)
+                    if dispatcher_access is not access and dispatcher_access.get("qli_token") != access.get("qli_token"):
+                        check_download(url, dispatcher_access)
+                    verified_native_urls.add(url)
+            except ValueError as failure:
+                reason = f"{target}: {failure}"
+                print(reason)
+                manifest["unavailable_targets"].append(reason)
+                continue
+            build["images"][target] = url
+        else:
+            jobs, excluded = render_baseline(plans, target, context, config)
         if include_meta_qcom:
             baseline_job_count += len(jobs)
         manifest["exclusions"].extend(f"{variant}: {item}" if image_type == "both" else item for item in excluded)
@@ -881,7 +1108,11 @@ def prepare(folder):
             manifest["baseline_helpers"].append(dict(target=target, path=changed, definitions=coverage, **variant_fields))
         manifest["selections"].extend(dict(target=target, **variant_fields, **row) for row in selection)
         for group, job in jobs.items():
-            if job["device_type"] != config["targets"][target]:
+            expected_device = config["targets"][target]
+            if native and (target_matrix["native_boards"][target] == "qcs6490-rb3gen2-vision-kit" or
+                           (distro == "debian" and target_matrix["native_boards"][target] == "qcs6490-rb3gen2")):
+                expected_device = "qcs6490-rb3gen2-vision-kit"
+            if job["device_type"] != expected_device:
                 raise ValueError(f"{target}: Foundries device type differs from the pinned template")
             job["timeouts"]["queue"] = {"minutes": config["queue_minutes"]}
             # Retain native meta-qcom deployment, flashing stages and device setup.
@@ -910,6 +1141,10 @@ def prepare(folder):
                                                      "testkit-workflow-run": run_id,
                                                      "testkit-workflow-attempt": attempt,
                                                      "testkit-sha": sha})
+            if native:
+                job["metadata"].update({"distro": distro, "suite": build["release"], "variant": build["variant"],
+                                        "build-url": build["prefix"], "build-run-id": str(build["id"]),
+                                        "source-repo": build["repository"], "source-sha": build["revision"]})
             filename = f"jobs/{target}-{group}.yaml"
             if image_type == "both":
                 filename = f"jobs/{target}-{variant}-{group}.yaml"

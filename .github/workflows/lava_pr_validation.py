@@ -226,16 +226,21 @@ def dispatch_approval():
     if any(check.get("conclusion") != "failure" for check in claims):
         print("This approved revision already has an automatic dispatch. Use a manual run for another validation.")
         return
+    image_type = os.environ.get("LAVA_APPROVAL_IMAGE_TYPE", "").strip() or "both"
+    if image_type not in {"base", "overlay", "both"}:
+        raise ValueError("Set repository Actions variable LAVA_APPROVAL_IMAGE_TYPE to base, overlay or both")
+    image_label = "base + overlay" if image_type == "both" else image_type
     # Record intent before POST. An interrupted or ambiguous dispatch must not
     # submit duplicate hardware work when another approval notification arrives.
     claim = gh.request("POST", f"{endpoint}/check-runs", json=dict(
         name="LAVA approval dispatch", head_sha=sha, external_id=marker, status="completed", conclusion="neutral",
         details_url=f"https://github.com/{REPOSITORY}/actions/runs/{os.environ['GITHUB_RUN_ID']}",
         output=dict(title="LAVA approval dispatch reserved", summary=(
-            "Automatic dispatch reserved. If this workflow does not confirm acceptance, use a manual validation run."
+            f"Automatic Yocto {image_label} dispatch reserved. "
+            "If this workflow does not confirm acceptance, use a manual validation run."
         )))).json()
     inputs = dict(pr=number, revision=sha, targets="meta-qcom", include_meta_qcom="false",
-                  distro="meta-qcom-main", image_type="base", submit="true", selections="{}")
+                  distro="meta-qcom-main", image_type=image_type, submit="true", selections="{}")
     try:
         gh.request("POST", f"{endpoint}/actions/workflows/lava-pr-validation.yml/dispatches",
                    json=dict(ref="main", inputs=inputs))
@@ -247,8 +252,9 @@ def dispatch_approval():
         raise
     gh.request("PATCH", f"{endpoint}/check-runs/{claim['id']}", json=dict(
         status="completed", conclusion="neutral", output=dict(title="LAVA approval dispatched",
-        summary="PR-only validation requested. Hardware results are reported by the separate LAVA PR validation check.")))
-    message = f"Dispatched PR #{number} at {sha}, changed tests only, latest meta-qcom-main base images."
+        summary=f"PR-only validation requested for Yocto {image_label} images. "
+        "Hardware results are reported by the separate LAVA PR validation check.")))
+    message = f"Dispatched PR #{number} at {sha}, changed tests only, latest meta-qcom-main {image_label} images."
     print(message)
     if os.environ.get("GITHUB_STEP_SUMMARY"):
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
@@ -689,6 +695,16 @@ def validate_jobs(api, folder, manifest):
     tags = {tag["name"]: tag["id"] for tag in api.pages("/api/v0.2/tags/", limit=100)}
     devices = list(api.pages("/api/v0.2/devices/", limit=100))
     workers = {worker["hostname"]: worker for worker in api.pages("/api/v0.2/workers/", limit=100)}
+    # Native producer plans can name an alias, while /devices/ reports only
+    # canonical types. Resolve aliases from LAVA, retaining all tag checks.
+    requested_types = {entry["device_type"] for entry in manifest["jobs"]}
+    visible_types = {device["device_type"] for device in devices}
+    accepted_types = {name: {name} for name in requested_types}
+    if requested_types - visible_types:
+        device_types = list(api.pages("/api/v0.2/devicetypes/", limit=100))
+        canonical = {item["name"] for item in device_types}
+        for name in requested_types - canonical:
+            accepted_types[name] = {item["name"] for item in device_types if name in item.get("aliases", [])}
     scheduling = []
     for entry in manifest["jobs"]:
         definition = (folder / entry["file"]).read_text(encoding="utf-8")
@@ -707,7 +723,7 @@ def validate_jobs(api, folder, manifest):
         unknown = required - tags.keys()
         boards, eligible = [], []
         for device in devices:
-            if device["device_type"] != entry["device_type"]:
+            if device["device_type"] not in accepted_types[entry["device_type"]]:
                 continue
             worker = workers.get(device.get("worker_host"), {})
             available = sorted(name for name, tag_id in tags.items() if tag_id in device.get("tags", []))
@@ -1326,6 +1342,11 @@ def finish_jobs(folder, manifest, lifecycle=True):
                             for error in row["errors"]})
     if status_errors:
         table_lines += ["Setup or workflow errors are recorded in diagnostics.md in the workflow artifacts.", ""]
+    if manifest.get("unavailable_targets"):
+        table_lines += ["Boards not submitted:", ""]
+        table_lines += ["- " + reason.replace("\n", " ").replace("\r", " ").replace("<", "&lt;")
+                        for reason in manifest["unavailable_targets"]]
+        table_lines.append("")
     (folder / "test-results.md").write_text("\n".join(table_lines) + "\n", encoding="utf-8")
     pr_lines = [marker, f"<!-- testkit-lava-attempt:{attempt} -->",
                 f"## Test run [workflow]({workflow_url})",
@@ -1337,6 +1358,8 @@ def finish_jobs(folder, manifest, lifecycle=True):
     build_label = {"qcom-distro": "meta-qcom-main", "qcom-distro_linux-qcom-6.18": "meta-qcom-lts-6.18"}.get(
         manifest.get("distro"), manifest.get("distro") or "Validation")
     image_type = manifest.get("image_type")
+    if image_type == "native":
+        build_label = f"{build_label.title()} {manifest['build']['release']} ({manifest['build']['variant']})"
     variants = ("base", "overlay") if image_type == "both" else (
         "overlay" if image_type in {"proprietary", "overlay"} else "base",)
     definitions = {(result_target(entry), entry["group"], definition["name"]):
@@ -1354,7 +1377,7 @@ def finish_jobs(folder, manifest, lifecycle=True):
                 definition = definitions.get((row["target"], row["group"], row["name"]),
                                              (row["group"], row["name"]))
                 unique_tests.update((*definition, case["name"]) for case in row.get("tests", []))
-        label = f"{build_label} ({variant})" if image_type else build_label
+        label = f"{build_label} ({variant})" if image_type and image_type != "native" else build_label
         total = counts["pass"] + counts["fail"] + counts["skip"]
         precheck_skips = sum(row["counts"].get("skip", 0) for row in rows
                              if row.get("precheck") and row["coverage"] in functional and
