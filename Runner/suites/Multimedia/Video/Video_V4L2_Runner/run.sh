@@ -101,6 +101,20 @@ if [ -z "${INTER_TEST_SLEEP:-}" ]; then INTER_TEST_SLEEP="2"; fi
 # --- New: log flavor for --stack both sub-runs ---
 LOG_FLAVOR=""
 
+# --- Result identity (separate from TESTNAME to avoid changing find_test_case_by_name) ---
+# --testname sets RESULT_ID only; TESTNAME stays as Video_V4L2_Runner for directory selection.
+RESULT_ID=""
+
+# --- Explicit result file destination (internal; used by --stack both for child destinations) ---
+# When set, overrides the default $(pwd)/RESULT_ID.res so children write to dedicated files
+# that are independent of the caller CWD and do not share state between base/overlay passes.
+RESULT_FILE_OVERRIDE=""
+
+# --- Opt-in: treat missing input media as SKIP instead of FAIL ---
+# Default 0 = FAIL (existing behaviour). Set to 1 for opt-in configs that require
+# manually pre-staged clips so images without those clips produce SKIP, not FAIL.
+MISSING_MEDIA_SKIP="0"
+
 usage() {
     cat <<EOF
 Usage: $0 [--config path.json|/path/dir] [--dir DIR] [--pattern GLOB]
@@ -125,6 +139,15 @@ Usage: $0 [--config path.json|/path/dir] [--dir DIR] [--pattern GLOB]
           # --- Media bundle (opt-in, local tar) ---
           [--clips-tar /path/to/clips.tar.gz] # extract locally even if --dir/--config is used
           [--clips-dest DIR] # extraction destination (defaults to cfg/dir root or testcase dir)
+          [--testname NAME] # override result identity only (default: Video_V4L2_Runner)
+                            # changes the .res filename and verdict string but does NOT
+                            # affect find_test_case_by_name() or working-directory selection.
+                            # NAME is validated; use alphanumeric, underscore, hyphen, dot only.
+          [--result-file PATH] # internal: explicit absolute path for the result file.
+                               # Used by --stack both to give each child a dedicated,
+                               # pre-initialized destination independent of caller CWD.
+          [--missing-media-skip] # opt-in: record SKIP (not FAIL) when required input clips
+                                 # are absent. Preserves genuine codec FAILures. Default: FAIL.
 
 Platform notes:
   shikra  Upstream-only platform (qcom_iris driver, modular or built-in).
@@ -287,6 +310,20 @@ while [ $# -gt 0 ]; do
             shift
             CLIPS_DEST="$1"
             ;;
+        # --- Result identity override (does NOT change TESTNAME/directory selection) ---
+        --testname)
+            shift
+            RESULT_ID="$1"
+            ;;
+        # --- Explicit result file destination (internal; used by --stack both) ---
+        --result-file)
+            shift
+            RESULT_FILE_OVERRIDE="$1"
+            ;;
+        # --- Opt-in missing-media SKIP ---
+        --missing-media-skip)
+            MISSING_MEDIA_SKIP="1"
+            ;;
         --help|-h)
             usage
             exit 0
@@ -297,6 +334,50 @@ while [ $# -gt 0 ]; do
     esac
     shift
 done
+
+# Resolve result identity: default to TESTNAME when --testname was not supplied.
+# RESULT_ID is used ONLY for the .res filename and verdict string; TESTNAME continues
+# to control find_test_case_by_name(), log headers, and re-execution paths.
+if [ -z "$RESULT_ID" ]; then
+    RESULT_ID="$TESTNAME"
+fi
+
+# Validate RESULT_ID: allow alphanumeric, underscore, hyphen, dot only.
+# test_result_valid_name() from functestlib.sh performs the same check; call it
+# when available so the validation stays in sync with the library.
+if command -v test_result_valid_name >/dev/null 2>&1; then
+    if ! test_result_valid_name "$RESULT_ID"; then
+        echo "[ERROR] --testname '$RESULT_ID' is not a valid result identity" >&2
+        exit 1
+    fi
+else
+    case "$RESULT_ID" in
+        *[!A-Za-z0-9_.:-]*)
+            echo "[ERROR] --testname '$RESULT_ID' contains invalid characters (use A-Za-z0-9_.:-)" >&2
+            exit 1
+            ;;
+    esac
+fi
+
+# Use an absolute path so all early-exit paths (before cd test_path) and the
+# final PASS/FAIL path (after cd test_path) all write to the same file.
+# --result-file overrides this for --stack both child processes so each child
+# gets its own dedicated, pre-initialized file independent of the caller CWD.
+if [ -n "$RESULT_FILE_OVERRIDE" ]; then
+    RES_FILE="$RESULT_FILE_OVERRIDE"
+else
+    RES_FILE="$(pwd)/${RESULT_ID}.res"
+fi
+
+# Remove any stale result file left by a previous run so an early exit cannot
+# reuse an old verdict. test_result_init() from functestlib.sh performs the
+# same removal with name validation; call it here once both RESULT_ID and
+# RES_FILE are resolved, while keeping RES_FILE as the authoritative path.
+if command -v test_result_init >/dev/null 2>&1; then
+    test_result_init "$RESULT_ID" "$RES_FILE" || true
+else
+    rm -f "$RES_FILE" 2>/dev/null || true
+fi
 
 # Export envs used by lib
 export VIDEO_APP
@@ -387,7 +468,7 @@ fi
 
 if [ -z "$final_app" ]; then
     log_skip "$TESTNAME SKIP - iris_v4l2_test not available (VIDEO_APP=$VIDEO_APP). Provide --app or install the binary."
-    printf '%s\n' "$TESTNAME SKIP" >"$RES_FILE"
+    printf '%s\n' "$RESULT_ID SKIP" >"$RES_FILE"
     exit 0
 fi
 
@@ -397,18 +478,18 @@ export VIDEO_APP
 # --- Resolve testcase path and cd so outputs land here ---
 if ! check_dependencies grep sed awk find sort; then
     log_skip "$TESTNAME SKIP - required tools missing"
-    printf '%s\n' "$TESTNAME SKIP" >"$RES_FILE"
+    printf '%s\n' "$RESULT_ID SKIP" >"$RES_FILE"
     exit 0
 fi
 
 if ! video_verify_settings_valid; then
     log_fail "$TESTNAME FAIL - invalid VIDEO_VERIFY='$VIDEO_VERIFY' (on, off), VIDEO_MIN_PSNR='$VIDEO_MIN_PSNR' or VIDEO_VERIFY_TIMEOUT='$VIDEO_VERIFY_TIMEOUT'"
-    printf '%s\n' "$TESTNAME FAIL" >"$RES_FILE"
+    printf '%s\n' "$RESULT_ID FAIL" >"$RES_FILE"
     exit 0
 fi
 if [ "$VIDEO_VERIFY" = "on" ] && ! video_exist_cmd "$VIDEO_FFMPEG"; then
     log_skip "$TESTNAME SKIP - $VIDEO_FFMPEG not found: install FFmpeg to verify outputs, or set VIDEO_VERIFY=off"
-    printf '%s\n' "$TESTNAME SKIP" >"$RES_FILE"
+    printf '%s\n' "$RESULT_ID SKIP" >"$RES_FILE"
     exit 0
 fi
 # Fill the decoder cache here: the per-case check runs in a subshell.
@@ -420,7 +501,7 @@ test_path="$(find_test_case_by_name "$TESTNAME" 2>/dev/null || echo "$SCRIPT_DIR
 
 if ! cd "$test_path"; then
     log_error "cd failed: $test_path"
-    printf '%s\n' "$TESTNAME FAIL" >"$RES_FILE"
+    printf '%s\n' "$RESULT_ID FAIL" >"$RES_FILE"
     exit 1
 fi
 
@@ -521,7 +602,7 @@ case "${VIDEO_POLICY_SCOPE:-}" in
         ;;
     *)
         log_fail "$TESTNAME FAIL - invalid VIDEO_POLICY_SCOPE='${VIDEO_POLICY_SCOPE}'; accepted values: bundled, all"
-        printf '%s\n' "$TESTNAME FAIL" >"$RES_FILE"
+        printf '%s\n' "$RESULT_ID FAIL" >"$RES_FILE"
         exit 1
         ;;
 esac
@@ -540,7 +621,7 @@ if [ "$early_plat" = "shikra" ]; then
     case "$early_stack" in
         downstream|both)
             log_fail "$TESTNAME FAIL - Shikra is upstream-only; --stack downstream/both is not supported"
-            printf '%s\n' "$TESTNAME FAIL" >"$RES_FILE"
+            printf '%s\n' "$RESULT_ID FAIL" >"$RES_FILE"
             exit 1
             ;;
     esac
@@ -551,7 +632,7 @@ if [ "$early_plat" = "kodiak" ]; then
         downstream|both)
             if [ -n "${VIDEO_FW_DS:-}" ] && [ ! -f "$VIDEO_FW_DS" ]; then
                 log_fail "$TESTNAME FAIL - requested Kodiak firmware override does not exist: $VIDEO_FW_DS"
-                printf '%s\n' "$TESTNAME FAIL" >"$RES_FILE"
+                printf '%s\n' "$RESULT_ID FAIL" >"$RES_FILE"
                 exit 1
             fi
 
@@ -734,48 +815,83 @@ if [ "${VIDEO_STACK}" = "both" ]; then
             args="$args --clips-dest '$esc_dst'"
         fi
 
+        # --- Result identity passthrough (RESULT_ID, not TESTNAME) ---
+        if [ -n "${RESULT_ID:-}" ] && [ "$RESULT_ID" != "$TESTNAME" ]; then
+            esc_rid="$(printf %s "$RESULT_ID" | sed "s/'/'\\\\''/g")"
+            args="$args --testname '$esc_rid'"
+        fi
+
+        # --- Missing-media SKIP passthrough ---
+        if [ "${MISSING_MEDIA_SKIP:-0}" = "1" ]; then
+            args="$args --missing-media-skip"
+        fi
+
         printf "%s" "$args"
     }
 
     reexec_args="$(build_reexec_args)"
 
+    # Give each child a dedicated, pre-initialized result file so they do not
+    # share state and stale data from a previous run cannot be read. The files
+    # are placed alongside the parent RES_FILE so they stay on the same filesystem.
+    _res_dir="$(dirname "$RES_FILE")"
+    _base_res="${_res_dir}/.child_base_$$.res"
+    _overlay_res="${_res_dir}/.child_overlay_$$.res"
+    : > "$_base_res"
+    : > "$_overlay_res"
+
+    # Escape paths for single-quote insertion in sh -c strings (same method used
+    # throughout build_reexec_args) so apostrophes in directory names do not break
+    # the child launch with "Unterminated quoted string".
+    _esc_base_res="$(printf %s "$_base_res" | sed "s/'/'\\\\''/g")"
+    _esc_overlay_res="$(printf %s "$_overlay_res" | sed "s/'/'\\\\''/g")"
+
     log_info "[both] starting BASE (upstream) pass"
     # shellcheck disable=SC2086
-    sh -c "'$0' --stack base --log-flavor upstream $reexec_args"
+    sh -c "'$0' --stack base --log-flavor upstream --result-file '$_esc_base_res' $reexec_args"
     rc_base=$?
-
-    base_res_line=""
-    if [ -f "$RES_FILE" ]; then
-        base_res_line="$(cat "$RES_FILE" 2>/dev/null || true)"
-    fi
 
     log_info "[both] starting OVERLAY (downstream) pass"
     # shellcheck disable=SC2086
-    sh -c "'$0' --stack overlay --log-flavor downstream $reexec_args"
+    sh -c "'$0' --stack overlay --log-flavor downstream --result-file '$_esc_overlay_res' $reexec_args"
     rc_overlay=$?
 
-    overlay_res_line=""
-    if [ -f "$RES_FILE" ]; then
-        overlay_res_line="$(cat "$RES_FILE" 2>/dev/null || true)"
-    fi
+    # Validate each child result using the shared result_read_verdict() helper
+    # from functestlib.sh. It checks field count, identity match, and verdict
+    # validity, treating anything malformed or mismatched as FAIL (conservative).
+    # Must be called before rm -f so the files are still readable.
+    base_status="$(result_read_verdict "$_base_res" "$RESULT_ID")"
+    overlay_status="$(result_read_verdict "$_overlay_res" "$RESULT_ID")"
+    rm -f "$_base_res" "$_overlay_res" 2>/dev/null || true
 
-    base_status="$(printf '%s\n' "$base_res_line" | awk '{print $2}')"
-    overlay_status="$(printf '%s\n' "$overlay_res_line" | awk '{print $2}')"
+    # A non-zero exit always overrides to FAIL regardless of .res content.
+    if [ "$rc_base" -ne 0 ]; then base_status="FAIL"; fi
+    if [ "$rc_overlay" -ne 0 ]; then overlay_status="FAIL"; fi
 
-    if [ "$rc_base" -eq 0 ] && [ "$rc_overlay" -eq 0 ] ; then
+    log_info "[both] child verdicts: base=$base_status overlay=$overlay_status"
+
+    # Aggregate verdicts. PASS requires at least one executed PASS with the
+    # other being PASS or SKIP. Both SKIP means no codec ran. Everything else
+    # (FAIL, invalid, missing) is FAIL.
+    if [ "$base_status" = "SKIP" ] && [ "$overlay_status" = "SKIP" ]; then
+        log_skip "[both] both passes SKIPped; no codec executed. Overall SKIP."
+        printf '%s\n' "$RESULT_ID SKIP" >"$RES_FILE"
+        exit 0
+    elif { [ "$base_status" = "PASS" ] && [ "$overlay_status" = "PASS" ]; } ||
+         { [ "$base_status" = "PASS" ] && [ "$overlay_status" = "SKIP" ]; } ||
+         { [ "$base_status" = "SKIP" ] && [ "$overlay_status" = "PASS" ]; }; then
         if [ "$base_status" = "PASS" ] && [ "$overlay_status" = "SKIP" ]; then
-            log_info "[both] upstream/base executed and PASS; downstream/overlay SKIP. Overall PASS."
+            log_info "[both] upstream/base PASS; downstream/overlay SKIP. Overall PASS."
         elif [ "$base_status" = "SKIP" ] && [ "$overlay_status" = "PASS" ]; then
-            log_info "[both] downstream/overlay executed and PASS; upstream/base SKIP. Overall PASS."
+            log_info "[both] downstream/overlay PASS; upstream/base SKIP. Overall PASS."
         else
             log_pass "[both] both passes succeeded"
         fi
-
-        printf '%s\n' "$TESTNAME PASS" > "$RES_FILE"
+        printf '%s\n' "$RESULT_ID PASS" >"$RES_FILE"
         exit 0
     else
-        log_fail "[both] one or more passes failed (base rc=$rc_base, overlay rc=$rc_overlay; base=$base_status overlay=$overlay_status)"
-        printf '%s\n' "$TESTNAME FAIL" >"$RES_FILE"
+        log_fail "[both] child verdicts not acceptable (base=$base_status overlay=$overlay_status)"
+        printf '%s\n' "$RESULT_ID FAIL" >"$RES_FILE"
         exit 1
     fi
 fi
@@ -849,7 +965,7 @@ if [ "$VIDEO_PACKAGE_RECOVERY_APPLICABLE" -eq 1 ]; then
         pkg_ensure_optional_package_set_present; do
         if ! command -v "$required_helper" >/dev/null 2>&1; then
             log_fail "$TESTNAME FAIL - required video overlay package helper is unavailable: $required_helper"
-            printf '%s\n' "$TESTNAME FAIL" >"$RES_FILE"
+            printf '%s\n' "$RESULT_ID FAIL" >"$RES_FILE"
             exit 1
         fi
     done
@@ -866,7 +982,7 @@ if [ "$VIDEO_PACKAGE_RECOVERY_APPLICABLE" -eq 1 ]; then
         auto \
         --overlay; then
         log_fail "$TESTNAME FAIL - failed to ensure Qualcomm video overlay package set"
-        printf '%s\n' "$TESTNAME FAIL" >"$RES_FILE"
+        printf '%s\n' "$RESULT_ID FAIL" >"$RES_FILE"
         exit 1
     fi
 
@@ -1005,7 +1121,7 @@ case "$gate_stack" in
                 ;;
         esac
         log_fail "[STACK] Upstream requested but $msg; aborting."
-        printf '%s\n' "$TESTNAME FAIL" >"$RES_FILE"
+        printf '%s\n' "$RESULT_ID FAIL" >"$RES_FILE"
         exit 1
     fi
     ;;
@@ -1023,13 +1139,13 @@ case "$gate_stack" in
                 ;;
         esac
         log_fail "[STACK] Downstream requested but $msg; aborting."
-        printf '%s\n' "$TESTNAME FAIL" >"$RES_FILE"
+        printf '%s\n' "$RESULT_ID FAIL" >"$RES_FILE"
         exit 1
     fi
     ;;
   *)
     log_fail "[STACK] Cannot validate requested stack=$VIDEO_STACK, runtime selection=$gate_stack platform=$plat"
-    printf '%s\n' "$TESTNAME FAIL" >"$RES_FILE"
+    printf '%s\n' "$RESULT_ID FAIL" >"$RES_FILE"
     exit 1
     ;;
 esac
@@ -1132,7 +1248,7 @@ fi
 
 if [ ! -s "$CFG_LIST" ]; then
     log_skip "$TESTNAME SKIP - no JSON configs found"
-    printf '%s\n' "$TESTNAME SKIP" >"$RES_FILE"
+    printf '%s\n' "$RESULT_ID SKIP" >"$RES_FILE"
     exit 0
 fi
 
@@ -1305,14 +1421,23 @@ while IFS= read -r cfg; do
     rm -f "$clips_file" 2>/dev/null || true
 
     if [ "$missing_case" -eq 1 ] 2>/dev/null; then
-        log_fail "[$id] Required input clip(s) not present — $pretty"
-        printf '%s\n' "$id FAIL $pretty" >> "$LOG_DIR/summary.txt"
-        printf '%s\n' "$mode,$id,FAIL,$pretty,$elapsed,0,0" >> "$LOG_DIR/results.csv"
-        fail=$((fail + 1))
-        suite_rc=1
+        if [ "${MISSING_MEDIA_SKIP:-0}" = "1" ]; then
+            # Opt-in path: missing clips on an image that never pre-staged them
+            # is treated as SKIP, not FAIL, so codec-ready images are not penalised.
+            log_skip "[$id] SKIP - required input clip(s) not present (--missing-media-skip) — $pretty"
+            printf '%s\n' "$id SKIP $pretty" >> "$LOG_DIR/summary.txt"
+            printf '%s\n' "$mode,$id,SKIP,$pretty,0,0,0" >> "$LOG_DIR/results.csv"
+            skip=$((skip + 1))
+        else
+            log_fail "[$id] Required input clip(s) not present — $pretty"
+            printf '%s\n' "$id FAIL $pretty" >> "$LOG_DIR/summary.txt"
+            printf '%s\n' "$mode,$id,FAIL,$pretty,0,0,0" >> "$LOG_DIR/results.csv"
+            fail=$((fail + 1))
+            suite_rc=1
 
-        if [ "$STOP_ON_FAIL" -eq 1 ]; then
-            break
+            if [ "$STOP_ON_FAIL" -eq 1 ]; then
+                break
+            fi
         fi
 
         continue
@@ -1641,16 +1766,16 @@ fi
 # Otherwise: suite_rc==0 -> PASS, else FAIL.
 if [ "$pass" -eq 0 ] && [ "$fail" -eq 0 ] && [ "$skip" -gt 0 ]; then
     log_skip "$TESTNAME: SKIP (all $skip test(s) skipped)"
-    printf '%s\n' "$TESTNAME SKIP" >"$RES_FILE"
+    printf '%s\n' "$RESULT_ID SKIP" >"$RES_FILE"
     exit 0
 fi
 
 if [ "$suite_rc" -eq 0 ] 2>/dev/null; then
     log_pass "$TESTNAME: PASS"
-    printf '%s\n' "$TESTNAME PASS" >"$RES_FILE"
+    printf '%s\n' "$RESULT_ID PASS" >"$RES_FILE"
     exit 0
 else
     log_fail "$TESTNAME: FAIL"
-    printf '%s\n' "$TESTNAME FAIL" >"$RES_FILE"
+    printf '%s\n' "$RESULT_ID FAIL" >"$RES_FILE"
     exit 1
 fi
