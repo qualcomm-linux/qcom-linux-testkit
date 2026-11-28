@@ -1,0 +1,17 @@
+metadata:
+  name: systemctl_start_stop_service
+  format: "Lava-Test Test Definition 1.0"
+  description: "Check systemctl stop/start behavior for an isolated temporary service"
+  maintainer:
+    - "Qualcomm Linux Testkit"
+
+params: {}
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd "$REPO_PATH/Runner/suites/System/systemctl_start_stop_service"
+    - ./run.sh || true
+    - grep -Eq '^systemctl_start_stop_service (PASS|FAIL|SKIP)$' systemctl_start_stop_service.res
+    - cat systemctl_start_stop_service.res
+    - '"$REPO_PATH/Runner/utils/send-to-lava.sh" systemctl_start_stop_service.res --expected-testcase-id systemctl_start_stop_service'

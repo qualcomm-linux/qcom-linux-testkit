@@ -1,0 +1,17 @@
+metadata:
+  name: core_dump_ulimit
+  format: "Lava-Test Test Definition 1.0"
+  description: "Verify that the DUT shell core-dump size limit is unlimited"
+  maintainer:
+    - "Qualcomm Linux Testkit"
+
+params: {}
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd "$REPO_PATH/Runner/suites/System/core_dump_ulimit"
+    - ./run.sh || true
+    - grep -Eq '^core_dump_ulimit (PASS|FAIL|SKIP)$' core_dump_ulimit.res
+    - cat core_dump_ulimit.res
+    - '"$REPO_PATH/Runner/utils/send-to-lava.sh" core_dump_ulimit.res --expected-testcase-id core_dump_ulimit'

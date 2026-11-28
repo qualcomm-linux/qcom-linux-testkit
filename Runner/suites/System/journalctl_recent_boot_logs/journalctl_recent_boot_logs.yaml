@@ -1,0 +1,17 @@
+metadata:
+  name: journalctl_recent_boot_logs
+  format: "Lava-Test Test Definition 1.0"
+  description: "Verify systemd-journald is active and current-boot journal entries can be read"
+  maintainer:
+    - "Qualcomm Linux Testkit"
+
+params: {}
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd "$REPO_PATH/Runner/suites/System/journalctl_recent_boot_logs"
+    - ./run.sh || true
+    - grep -Eq '^journalctl_recent_boot_logs (PASS|FAIL|SKIP)$' journalctl_recent_boot_logs.res
+    - cat journalctl_recent_boot_logs.res
+    - '"$REPO_PATH/Runner/utils/send-to-lava.sh" journalctl_recent_boot_logs.res --expected-testcase-id journalctl_recent_boot_logs'

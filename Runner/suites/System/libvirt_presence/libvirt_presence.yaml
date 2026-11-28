@@ -1,0 +1,18 @@
+metadata:
+  name: libvirt_presence
+  format: "Lava-Test Test Definition 1.0"
+  description: "Check whether the virsh libvirt client is available on the DUT"
+  maintainer:
+    - "Qualcomm Linux Testkit"
+
+params:
+  REQUIRE_LIBVIRT: "false"
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd "$REPO_PATH/Runner/suites/System/libvirt_presence"
+    - REQUIRE_LIBVIRT="${REQUIRE_LIBVIRT:-false}" ./run.sh || true
+    - grep -Eq '^libvirt_presence (PASS|FAIL|SKIP)$' libvirt_presence.res
+    - cat libvirt_presence.res
+    - '"$REPO_PATH/Runner/utils/send-to-lava.sh" libvirt_presence.res --expected-testcase-id libvirt_presence'
