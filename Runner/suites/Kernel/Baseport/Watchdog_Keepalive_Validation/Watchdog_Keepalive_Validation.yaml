@@ -1,0 +1,14 @@
+metadata:
+  name: watchdog-keepalive-validation
+  format: "Lava-Test Test Definition 1.0"
+  description: "Safely ping the watchdog character device using magic-close. Skips when nowayout is set so the DUT is not armed."
+  os:
+    - linux
+  scope:
+    - functional
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/Watchdog_Keepalive_Validation
+    - ./run.sh
+    - $REPO_PATH/Runner/utils/send-to-lava.sh Watchdog_Keepalive_Validation.res
