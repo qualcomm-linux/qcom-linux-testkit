@@ -1,0 +1,14 @@
+metadata:
+  name: cpu-freq-sysfs-validation
+  format: "Lava-Test Test Definition 1.0"
+  description: "Read-only cpufreq sysfs validation: policies, governors, freq range, related_cpus, and stats. Does not change frequency (see CPUFreq_Validation)."
+  os:
+    - linux
+  scope:
+    - functional
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/CPU/CPU_Freq_Sysfs_Validation
+    - ./run.sh
+    - $REPO_PATH/Runner/utils/send-to-lava.sh CPU_Freq_Sysfs_Validation.res
