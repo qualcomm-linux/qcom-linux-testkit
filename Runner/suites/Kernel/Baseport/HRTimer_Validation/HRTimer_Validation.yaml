@@ -1,0 +1,14 @@
+metadata:
+  name: hrtimer-validation
+  format: "Lava-Test Test Definition 1.0"
+  description: "Validate high-resolution timer support via kernel config, /proc/timer_list hrtimer bases, and per-CPU clock bases."
+  os:
+    - linux
+  scope:
+    - functional
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/HRTimer_Validation
+    - ./run.sh
+    - $REPO_PATH/Runner/utils/send-to-lava.sh HRTimer_Validation.res
