@@ -113,6 +113,7 @@ if [ "$INITIAL_LOAD_STATE" != "loaded" ]; then
 fi
 
 if ! systemd_unit_rows_match_state "$STATE_PREFIX.initial" active running "$SERVICE_NAME"; then
+    log_file_with_label SYSTEMD-UNIT-STATE "$STATE_PREFIX.initial.raw" 40
     test_result_record FAIL "$SERVICE_NAME was not active/running with no pending job before the test"
     test_result_finish
 fi
