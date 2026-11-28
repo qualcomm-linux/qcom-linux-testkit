@@ -8,7 +8,9 @@
     "debian": {
       "repository": "qualcomm-linux/qcom-deb-images",
       "workflow": "build.yml",
-      "bucket": "qcom-prd-gh-artifacts"
+      "manual_workflows": ["build-on-push.yml"],
+      "bucket": "qcom-prd-gh-artifacts",
+      "board_aliases": {"qcs6490-rb3gen2-vision-kit": "rb3gen2-core-kit", "qcs8300-ride": "qcs8300-ride-sx", "qcs9100-ride-r3": "qcs9100-ride-sx"}
     },
     "ubuntu": {
       "repository": "qualcomm-linux/qcom-distro-images",

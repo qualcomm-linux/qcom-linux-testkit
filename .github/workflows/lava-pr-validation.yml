@@ -44,7 +44,7 @@ on:
           - overlay
           - both
       nightly_run:
-        description: Optional successful nightly run ID from the selected image repository. Reruns reuse the original images.
+        description: Image RUN_ID or RUN_ID-ATTEMPT (e.g. 45989101207-2). Empty selects the latest successful nightly. Reruns retain the images.
         type: string
       selections:
         description: Advanced JSON suite selections for params, tags or fresh_boot. Do not repeat suites from test_names.
@@ -167,7 +167,7 @@ jobs:
         id: plans
         env:
           GH_TOKEN: ${{ github.token }}
-          META_QCOM_READ_TOKEN: ${{ secrets.META_QCOM_READ_TOKEN || (inputs.distro == 'ubuntu' && secrets.PAT) || '' }}
+          META_QCOM_READ_TOKEN: ${{ secrets.META_QCOM_READ_TOKEN || ((inputs.distro == 'debian' || inputs.distro == 'ubuntu') && secrets.PAT) || '' }}
           IMAGE_DISTRO: ${{ inputs.distro }}
           IMAGE_TYPE: ${{ inputs.image_type }}
           NIGHTLY_RUN_ID: ${{ inputs.nightly_run }}
@@ -198,7 +198,7 @@ jobs:
         id: prepare
         env:
           GH_TOKEN: ${{ github.token }}
-          META_QCOM_READ_TOKEN: ${{ secrets.META_QCOM_READ_TOKEN || (inputs.distro == 'ubuntu' && secrets.PAT) || '' }}
+          META_QCOM_READ_TOKEN: ${{ secrets.META_QCOM_READ_TOKEN || ((inputs.distro == 'debian' || inputs.distro == 'ubuntu') && secrets.PAT) || '' }}
           QLI_S3_TOKEN: ${{ secrets.QLI_S3_TOKEN }}
           LAVATOKEN: ${{ secrets.LAVATOKEN }}
           LAVA_ARTIFACT_TOKEN_NAME: ${{ vars.FOUNDRIES_ARTIFACT_TOKEN_NAME || 'Q_QLI_S3_TOKEN' }}
