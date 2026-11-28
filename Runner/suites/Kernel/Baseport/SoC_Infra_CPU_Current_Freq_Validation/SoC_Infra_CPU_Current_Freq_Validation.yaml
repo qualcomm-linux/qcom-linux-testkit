@@ -1,0 +1,15 @@
+metadata:
+  name: soc-infra-cpu-current-freq-validation
+  format: "Lava-Test Test Definition 1.0"
+  description: "Smoke test: every online CPU reports a readable current frequency (kHz) within its hardware limits"
+  os:
+    - linux
+  scope:
+    - functional
+
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/Baseport/SoC_Infra_CPU_Current_Freq_Validation
+    - ./run.sh || true
+    - $REPO_PATH/Runner/utils/send-to-lava.sh SoC_Infra_CPU_Current_Freq_Validation.res --strict --expected-testcase-id SoC_Infra_CPU_Current_Freq_Validation
