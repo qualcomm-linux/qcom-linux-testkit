@@ -1117,10 +1117,14 @@ pkg_apt_install_sources_if_present() {
             return 1
         fi
 
-        cp "$apt_src_file" "$apt_target_path" || {
-            pkg_log_fail "Failed to install APT source file, $apt_target_path"
-            return 1
-        }
+        if cmp -s "$apt_src_file" "$apt_target_path"; then
+            pkg_log_info "APT source already installed, $apt_target_path"
+        else
+            cp "$apt_src_file" "$apt_target_path" || {
+                pkg_log_fail "Failed to install APT source file, $apt_target_path"
+                return 1
+            }
+        fi
 
         chmod 644 "$apt_target_path" 2>/dev/null || true
         pkg_log_pass "Installed APT source file, $apt_target_path"
@@ -1194,8 +1198,10 @@ pkg_apt_source_file_matches() {
 }
 
 # Configure a built-in Qualcomm Debusine apt source when requested.
+# Optional $1 overrides the output directory for staging before installation.
 pkg_apt_install_debusine_source_if_configured() {
     debusine_source_name="$PKG_APT_DEBUSINE_SOURCE"
+    debusine_source_dir="${1:-/etc/apt/sources.list.d}"
 
     case "$PKG_APT_DEBUSINE_SUITE" in
         ''|auto)
@@ -1212,12 +1218,12 @@ pkg_apt_install_debusine_source_if_configured() {
             return 0
             ;;
         qli)
-            debusine_target="/etc/apt/sources.list.d/qli.sources"
+            debusine_target="$debusine_source_dir/qli.sources"
             debusine_uri="https://deb.debusine.qualcomm.com/qualcomm/qli"
             debusine_components="main contrib non-free-firmware non-free"
             ;;
         qli-staging)
-            debusine_target="/etc/apt/sources.list.d/qli-staging.sources"
+            debusine_target="$debusine_source_dir/qli-staging.sources"
             debusine_uri="https://deb.debusine.qualcomm.com/qualcomm/qli-staging"
             debusine_components="main contrib non-free non-free-firmware"
             ;;
@@ -1227,8 +1233,8 @@ pkg_apt_install_debusine_source_if_configured() {
             ;;
     esac
 
-    mkdir -p /etc/apt/sources.list.d || {
-        pkg_log_fail "Failed to create /etc/apt/sources.list.d"
+    mkdir -p "$debusine_source_dir" || {
+        pkg_log_fail "Failed to create $debusine_source_dir"
         return 1
     }
 
@@ -1341,7 +1347,7 @@ pkg_apt_tool_check() {
     return 0
 }
 
-# Run apt update once per test session.
+# Run apt update once per test session. Optional arguments are passed to apt-get.
 pkg_apt_update() {
     pkg_apt_tool_check || return 1
 
@@ -1365,7 +1371,8 @@ pkg_apt_update() {
         --allow-releaseinfo-change-label \
         -o Acquire::Retries=2 \
         -o Acquire::Languages=none \
-        -o "DPkg::Lock::Timeout=${PKG_APT_LOCK_TIMEOUT}"
+        -o "DPkg::Lock::Timeout=${PKG_APT_LOCK_TIMEOUT}" \
+        "$@"
 
     apt_update_rc=$?
 
@@ -2576,6 +2583,405 @@ pkg_ensure_required_package_set_present() {
 
     pkg_verify_package_set_installed "$perps_set"
 }
+
+# pkg_imsdk_apt_suite
+# Print the supported IMSDK suite from os-release, without changing the system.
+# Returns 0 for Ubuntu Resolute or Debian Trixie/Forky, 2 otherwise.
+pkg_imsdk_apt_suite() {
+    imsdk_os="$(pkg_detect_os_id)"
+    imsdk_suite="$(pkg_os_release_value VERSION_CODENAME || true)"
+    if [ "$imsdk_os" = ubuntu ] && [ -z "$imsdk_suite" ]; then
+        imsdk_suite="$(pkg_os_release_value UBUNTU_CODENAME || true)"
+    fi
+
+    case "$imsdk_os:$imsdk_suite" in
+        ubuntu:resolute|debian:trixie|debian:forky)
+            printf '%s\n' "$imsdk_suite"
+            return 0
+            ;;
+    esac
+    return 2
+}
+
+# pkg_apt_validate_source_suite SOURCE_FILE SUITE
+# Check operator-provided deb822 sources before importing them. Each enabled
+# stanza must use HTTPS without URI credentials, the exact requested suite,
+# and Signed-By. APT remains responsible for key and signature verification.
+# Returns 0 for valid input, 1 otherwise. No stdout or system changes.
+pkg_apt_validate_source_suite() {
+    [ "$#" -eq 2 ] && [ -r "$1" ] && [ -n "$2" ] || return 1
+    awk -v suite="$2" '
+        function check_stanza(    count, values, pos, has_deb) {
+            if (!fields || tolower(value["enabled"]) == "no") {
+                return
+            }
+            active++
+            if (value["suites"] != suite || value["signed-by"] == "" ||
+                value["components"] == "" || value["uris"] == "") {
+                bad = 1
+            }
+            count = split(value["types"], values, /[ \t]+/)
+            for (pos = 1; pos <= count; pos++) {
+                if (values[pos] == "deb") {
+                    has_deb = 1
+                } else if (values[pos] != "deb-src") {
+                    bad = 1
+                }
+            }
+            if (!has_deb) {
+                bad = 1
+            }
+            count = split(value["uris"], values, /[ \t]+/)
+            for (pos = 1; pos <= count; pos++) {
+                if (values[pos] !~ /^https:\/\/[^\/]+/ || values[pos] ~ /@/) {
+                    bad = 1
+                }
+            }
+            if (tolower(value["trusted"]) ~ /^(yes|true|1)$/ ||
+                tolower(value["allow-insecure"]) ~ /^(yes|true|1)$/ ||
+                tolower(value["allow-weak"]) ~ /^(yes|true|1)$/ ||
+                tolower(value["allow-downgrade-to-insecure"]) ~ /^(yes|true|1)$/) {
+                bad = 1
+            }
+        }
+        /^[ \t]*#/ { next }
+        /^[ \t]*$/ {
+            check_stanza()
+            for (key in value) {
+                delete value[key]
+            }
+            fields = 0
+            field = ""
+            next
+        }
+        /^[^ \t][^:]*:/ {
+            field = tolower(substr($0, 1, index($0, ":") - 1))
+            text = substr($0, index($0, ":") + 1)
+            fields++
+            if (field in value) {
+                bad = 1
+            }
+        }
+        /^[ \t]/ { text = $0 }
+        {
+            if (field == "" || ($0 !~ /^[ \t]/ && $0 !~ /^[^ \t][^:]*:/)) {
+                bad = 1
+            }
+            gsub(/^[ \t]+|[ \t]+$/, "", text)
+            value[field] = value[field] (value[field] == "" ? "" : " ") text
+        }
+        END {
+            check_stanza()
+            exit (bad || !active)
+        }
+    ' "$1"
+}
+
+# pkg_prepare_imsdk_apt_repositories SET
+# Stage the guide's CLO source, priority 1001 preference and verified public key.
+# Full SDK/plugin sets also need Debian QLI or Ubuntu QSC proprietary sources.
+# Returns 0 when configured, 1 on failure, 2 when installation is not applicable
+# or permitted. Logs to stdout. Installs bootstrap packages if missing and
+# persists repository/key files. Existing conflicting sources/preferences are
+# preserved. Subshell scope contains temporary configuration and cleanup traps.
+pkg_prepare_imsdk_apt_repositories() (
+    case "${1:-}" in
+        imsdk|imsdk-plugins)
+            imsdk_repo_full=1
+            ;;
+        imsdk-oss|imsdk-plugins-oss)
+            imsdk_repo_full=0
+            ;;
+        *)
+            pkg_log_fail "Unknown IMSDK repository package set, ${1:-missing}"
+            return 1
+            ;;
+    esac
+    pkg_provider_init
+    imsdk_repo_suite="$(pkg_imsdk_apt_suite)" || return 2
+    if [ "$(pkg_active_provider)" != apt ] ||
+       [ "$(dpkg --print-architecture 2>/dev/null)" != arm64 ] ||
+       ! pkg_can_install; then
+        return 2
+    fi
+
+    imsdk_repo_work="$(mktemp -d "${TMPDIR:-/tmp}/qcom-testkit-imsdk-apt.XXXXXX")" || return 1
+    imsdk_repo_key_temp=""
+    trap 'rm -f "$imsdk_repo_key_temp"; rm -rf "$imsdk_repo_work"' 0
+    trap 'exit 1' HUP INT TERM
+    mkdir -p "$imsdk_repo_work/sources" "$imsdk_repo_work/keys" || return 1
+    cat > "$imsdk_repo_work/sources/clo.sources" <<EOF || return 1
+Types: deb
+URIs: https://artifacts.codelinaro.org/artifactory/qli-debian/
+Suites: $imsdk_repo_suite
+Components: main contrib
+Signed-By: /etc/apt/keyrings/clo.gpg
+EOF
+    cat > "$imsdk_repo_work/clo.pref" <<'EOF' || return 1
+Package: *
+Pin: origin "artifacts.codelinaro.org"
+Pin-Priority: 1001
+EOF
+
+    if [ "$imsdk_repo_full" -eq 1 ]; then
+        if [ "$imsdk_repo_suite" = resolute ]; then
+            cat > "$imsdk_repo_work/sources/qsc-deb-releases.sources" <<'EOF' || return 1
+Types: deb
+URIs: https://qartifactory-edge.qualcomm.com/artifactory/qsc-deb-releases
+Suites: resolute
+Components: main
+Signed-By: /etc/apt/keyrings/qsc-deb-releases.asc
+EOF
+        else
+            PKG_APT_DEBUSINE_SOURCE=qli
+            PKG_APT_DEBUSINE_SUITE="$imsdk_repo_suite"
+            pkg_apt_install_debusine_source_if_configured "$imsdk_repo_work/sources" || return 1
+        fi
+    fi
+
+    # Check all existing configuration before installing keys or sources.
+    for imsdk_repo_source in "$imsdk_repo_work/sources"/*.sources; do
+        pkg_apt_validate_source_suite "$imsdk_repo_source" "$imsdk_repo_suite" || return 1
+        imsdk_repo_target="/etc/apt/sources.list.d/$(basename "$imsdk_repo_source")"
+        if [ -e "$imsdk_repo_target" ] || [ -L "$imsdk_repo_target" ]; then
+            imsdk_repo_uri="$(sed -n 's/^URIs:[[:space:]]*//p' "$imsdk_repo_source")"
+            if ! pkg_apt_source_file_matches "$imsdk_repo_target" "$imsdk_repo_uri" "$imsdk_repo_suite" ||
+               ! pkg_apt_validate_source_suite "$imsdk_repo_target" "$imsdk_repo_suite"; then
+                pkg_log_fail "IMSDK repository conflicts with existing configuration, file=$imsdk_repo_target"
+                return 1
+            fi
+            # Keep compatible administrator formatting, components and key paths.
+            cp "$imsdk_repo_target" "$imsdk_repo_source" || return 1
+        fi
+    done
+    if [ -e /etc/apt/preferences.d/clo.pref ] || [ -L /etc/apt/preferences.d/clo.pref ]; then
+        if ! awk '!/^[[:space:]]*(#|$)/ { $1=$1; print }' \
+            /etc/apt/preferences.d/clo.pref > "$imsdk_repo_work/existing.pref" ||
+           ! cmp -s "$imsdk_repo_work/clo.pref" "$imsdk_repo_work/existing.pref"; then
+            pkg_log_fail "CLO preference conflicts with the guide's priority 1001, file=/etc/apt/preferences.d/clo.pref"
+            return 1
+        fi
+        cp /etc/apt/preferences.d/clo.pref "$imsdk_repo_work/clo.pref" || return 1
+    fi
+
+    # Existing sources may use administrator-managed or shared keyrings. Seed
+    # only missing default keys actually referenced by the selected sources.
+    # APT's strict refresh checks existing keys without replacing their trust.
+    imsdk_repo_download_key=0
+    if awk 'tolower($1) == "signed-by:" && $2 == "/etc/apt/keyrings/clo.gpg" { found=1 }
+        END { exit !found }' "$imsdk_repo_work/sources/clo.sources" &&
+       [ ! -e /etc/apt/keyrings/clo.gpg ] && [ ! -L /etc/apt/keyrings/clo.gpg ]; then
+        imsdk_repo_download_key=1
+    fi
+    if [ -f "$imsdk_repo_work/sources/qsc-deb-releases.sources" ] &&
+       awk 'tolower($1) == "signed-by:" && $2 == "/etc/apt/keyrings/qsc-deb-releases.asc" { found=1 }
+        END { exit !found }' "$imsdk_repo_work/sources/qsc-deb-releases.sources" &&
+       [ ! -e /etc/apt/keyrings/qsc-deb-releases.asc ] &&
+       [ ! -L /etc/apt/keyrings/qsc-deb-releases.asc ]; then
+        # Key and source reference: qualcomm-linux/docker-pkg-build,
+        # 6b81e1497bdb1219290ec7907e0009fedd1a37e2, Dockerfiles/keyrings.
+        imsdk_qsc_key="$(pkg_resolve_path config/apt/qsc-deb-releases.asc)"
+        if ! cp "$imsdk_qsc_key" "$imsdk_repo_work/keys/qsc-deb-releases.asc"; then
+            pkg_log_fail "QSC signing key is unavailable, file=$imsdk_qsc_key"
+            return 1
+        fi
+    fi
+
+    # Bootstrap using existing distro repositories, without broad upgrades or
+    # accidentally configuring the generic Trixie source on another release.
+    PKG_APT_DEBUSINE_SOURCE=none
+    PKG_APT_SOURCES_ARTIFACT_DIR=""
+    PKG_PACKAGE_UPGRADE=0
+    PKG_PACKAGE_SET_UPGRADE=0
+    PKG_APT_FIX_BROKEN=0
+    imsdk_repo_login_file="$PKG_APT_AUTH_LOGIN_FILE"
+    imsdk_repo_password_file="$PKG_APT_AUTH_PASSWORD_FILE"
+    PKG_APT_AUTH_LOGIN_FILE=""
+    PKG_APT_AUTH_PASSWORD_FILE=""
+    if [ "$imsdk_repo_download_key" -eq 1 ] || [ -f "$imsdk_repo_work/keys/qsc-deb-releases.asc" ]; then
+        if ! pkg_verify_package_set_installed imsdk-apt-prerequisites; then
+            rm -f "$PKG_APT_UPDATED_MARK" || return 1
+            pkg_apt_update -o APT::Update::Error-Mode=any || return 1
+            pkg_ensure_required_package_set_present imsdk-apt-prerequisites || return 1
+        fi
+    fi
+    if [ "$imsdk_repo_download_key" -eq 1 ]; then
+        if ! pkg_run_cmd_retry imsdk-clo-key curl --fail --silent --show-error \
+            --location --proto '=https' --proto-redir '=https' \
+            --connect-timeout 20 --max-time 120 \
+            --output "$imsdk_repo_work/keys/clo.asc" \
+            https://artifacts.codelinaro.org/artifactory/api/security/keypair/public/repositories/qli-debian; then
+            pkg_log_fail "CLO signing key download failed"
+            return 1
+        fi
+    fi
+    for imsdk_repo_key in "$imsdk_repo_work/keys"/*.asc; do
+        [ -f "$imsdk_repo_key" ] || continue
+        if ! gpg --batch --no-options --homedir "$imsdk_repo_work" \
+            --show-keys --with-colons "$imsdk_repo_key" > "$imsdk_repo_work/key-info" ||
+           ! grep -q '^pub:' "$imsdk_repo_work/key-info"; then
+            pkg_log_fail "Invalid APT public signing key, file=$imsdk_repo_key"
+            return 1
+        fi
+        awk -F: '$1 == "fpr" { print "APT signing key fingerprint: " $10 }' "$imsdk_repo_work/key-info"
+    done
+    if [ "$imsdk_repo_download_key" -eq 1 ]; then
+        if ! gpg --batch --no-options --homedir "$imsdk_repo_work" \
+            --output "$imsdk_repo_work/keys/clo.gpg" \
+            --dearmor "$imsdk_repo_work/keys/clo.asc"; then
+            pkg_log_fail "Could not convert the CLO signing key"
+            return 1
+        fi
+        rm -f "$imsdk_repo_work/keys/clo.asc" || return 1
+    fi
+
+    # Public key/config directories must remain readable by APT's sandbox user.
+    umask 022
+    mkdir -p /etc/apt/keyrings /etc/apt/preferences.d || return 1
+    for imsdk_repo_key in "$imsdk_repo_work/keys"/*; do
+        [ -f "$imsdk_repo_key" ] || continue
+        imsdk_repo_key_target="/etc/apt/keyrings/$(basename "$imsdk_repo_key")"
+        if ! cmp -s "$imsdk_repo_key" "$imsdk_repo_key_target"; then
+            imsdk_repo_key_temp="$(mktemp "${imsdk_repo_key_target}.XXXXXX")" || return 1
+            install -m 0644 "$imsdk_repo_key" "$imsdk_repo_key_temp" || return 1
+            mv -f "$imsdk_repo_key_temp" "$imsdk_repo_key_target" || return 1
+            imsdk_repo_key_temp=""
+        fi
+    done
+    PKG_APT_SOURCES_ARTIFACT_DIR="$imsdk_repo_work/sources"
+    pkg_apt_install_sources_if_present || return 1
+    if ! cmp -s "$imsdk_repo_work/clo.pref" /etc/apt/preferences.d/clo.pref; then
+        install -m 0644 "$imsdk_repo_work/clo.pref" /etc/apt/preferences.d/clo.pref || return 1
+    fi
+    if [ "$imsdk_repo_full" -eq 1 ] && [ "$imsdk_repo_suite" != resolute ]; then
+        PKG_APT_SOURCES_ARTIFACT_DIR=""
+        PKG_APT_AUTH_MACHINE_FALLBACK=deb.debusine.qualcomm.com
+        PKG_APT_AUTH_LOGIN_FILE="$imsdk_repo_login_file"
+        PKG_APT_AUTH_PASSWORD_FILE="$imsdk_repo_password_file"
+        if [ -e "$PKG_APT_AUTH_CONF" ] || [ -L "$PKG_APT_AUTH_CONF" ]; then
+            pkg_log_info "Reusing existing APT auth configuration, $PKG_APT_AUTH_CONF"
+        else
+            pkg_apt_install_auth_if_secrets_present || return 1
+        fi
+    fi
+    rm -f "$PKG_APT_UPDATED_MARK" || return 1
+    pkg_log_pass "Configured IMSDK repositories, suite=$imsdk_repo_suite CLO priority=1001"
+)
+
+# pkg_ensure_imsdk_package_set SET [auto|existing|SOURCES_DIRECTORY]
+# Explicit IMSDK provisioning for arm64 Ubuntu Resolute and Debian Trixie/Forky.
+# SET is imsdk, imsdk-oss, imsdk-plugins, or imsdk-plugins-oss. Existing packages
+# are reused. Otherwise configure the guide's repositories by default. Use
+# existing to retain operator-managed APT configuration, or supply a directory
+# of signed .sources files with its own provisioned keyrings and credentials.
+# Returns 0 when all mapped packages are installed, 1 for invalid input or failed
+# setup/install, 2 for unsupported OS/architecture/provider or disabled recovery.
+# Logs to stdout. May persist source files and install missing packages. Subshell
+# scope preserves the caller policy, including its Debusine suite and upgrades.
+pkg_ensure_imsdk_package_set() (
+    if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
+        pkg_log_fail "Expected an IMSDK package set and optional sources directory"
+        return 1
+    fi
+    imsdk_set="$1"
+    imsdk_sources="${2:-auto}"
+    case "$imsdk_set" in
+        imsdk|imsdk-oss|imsdk-plugins|imsdk-plugins-oss)
+            ;;
+        *)
+            pkg_log_fail "Unknown IMSDK package set, $imsdk_set"
+            return 1
+            ;;
+    esac
+
+    pkg_provider_init
+    if ! imsdk_release="$(pkg_imsdk_apt_suite)"; then
+        pkg_log_info "IMSDK APT recovery requires Ubuntu Resolute or Debian Trixie/Forky, use image-provided components on this OS"
+        return 2
+    fi
+    if [ "$(pkg_active_provider)" != apt ] ||
+       [ "$(dpkg --print-architecture 2>/dev/null)" != arm64 ]; then
+        pkg_log_info "IMSDK APT recovery requires the apt provider and native arm64 packages"
+        return 2
+    fi
+    if ! pkg_lookup_package_set "$imsdk_set" >/dev/null; then
+        pkg_log_fail "IMSDK package mapping is unavailable, set=$imsdk_set"
+        return 1
+    fi
+    if pkg_verify_package_set_installed "$imsdk_set"; then
+        return 0
+    fi
+    if ! pkg_can_install; then
+        pkg_log_info "IMSDK packages are missing, installation requires root and enabled auto_install without TESTKIT_IMAGE_ONLY=1"
+        return 2
+    fi
+
+    if [ "$imsdk_sources" != auto ] && [ "$imsdk_sources" != existing ]; then
+        imsdk_source_count=0
+        for imsdk_source in "$imsdk_sources"/*.sources; do
+            [ -f "$imsdk_source" ] || continue
+            imsdk_filename="$(basename "$imsdk_source")"
+            case "$imsdk_filename" in
+                *[!A-Za-z0-9_.-]*)
+                    pkg_log_fail "IMSDK source filename is not accepted by APT, file=$imsdk_source"
+                    return 1
+                    ;;
+            esac
+            if ! pkg_apt_validate_source_suite "$imsdk_source" "$imsdk_release"; then
+                pkg_log_fail "Invalid IMSDK source, require signed HTTPS deb822 entries for suite=$imsdk_release, file=$imsdk_source"
+                return 1
+            fi
+            imsdk_target="/etc/apt/sources.list.d/$imsdk_filename"
+            if [ -e "$imsdk_target" ] || [ -L "$imsdk_target" ]; then
+                if ! cmp -s "$imsdk_source" "$imsdk_target"; then
+                    pkg_log_fail "IMSDK source conflicts with existing APT configuration, file=$imsdk_target"
+                    return 1
+                fi
+            fi
+            imsdk_source_count=$((imsdk_source_count + 1))
+        done
+        if [ "$imsdk_source_count" -eq 0 ]; then
+            pkg_log_fail "No IMSDK .sources files found, directory=$imsdk_sources"
+            return 1
+        fi
+    fi
+
+    # The default path owns CLO setup and adds proprietary sources only for full
+    # sets. Explicit source overrides retain their operator-provisioned keys.
+    case "$imsdk_sources" in
+        auto)
+            if ! pkg_prepare_imsdk_apt_repositories "$imsdk_set"; then
+                pkg_log_fail "IMSDK repository configuration failed"
+                return 1
+            fi
+            imsdk_sources=""
+            ;;
+        existing)
+            imsdk_sources=""
+            ;;
+    esac
+
+    # Do not inherit the generic Debian source, credentials or upgrade policy.
+    PKG_APT_DEBUSINE_SOURCE=none
+    PKG_APT_SOURCES_ARTIFACT_DIR="$imsdk_sources"
+    PKG_APT_AUTH_LOGIN_FILE=""
+    PKG_APT_AUTH_PASSWORD_FILE=""
+    PKG_PACKAGE_UPGRADE=0
+    PKG_PACKAGE_SET_UPGRADE=0
+    PKG_APT_FIX_BROKEN=0
+
+    pkg_log_info "Preparing IMSDK packages, suite=$imsdk_release set=$imsdk_set"
+    # Refresh even if an earlier test used a different repository configuration.
+    if ! rm -f "$PKG_APT_UPDATED_MARK"; then
+        pkg_log_fail "Cannot invalidate the APT update marker"
+        return 1
+    fi
+    if ! pkg_apt_update -o APT::Update::Error-Mode=any; then
+        pkg_log_fail "IMSDK APT setup failed, check signed sources, target credentials and network access"
+        return 1
+    fi
+    pkg_ensure_required_package_set_present "$imsdk_set"
+)
 
 # Ensure a mapped required package set on supported general-purpose distros.
 #

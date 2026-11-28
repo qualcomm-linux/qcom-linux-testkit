@@ -105,6 +105,34 @@ Source additional libraries explicitly after the bootstrap. For example,
 OS/package helpers require `lib_pkg_provider.sh` to be sourced separately.
 Keep `TESTNAME` immediately before `RES_FILE`, after helper sourcing.
 
+For explicit IMSDK provisioning on arm64 Ubuntu Resolute or Debian Trixie/Forky,
+call `pkg_ensure_imsdk_package_set imsdk-oss` after sourcing the package library.
+Choose `imsdk` for the full SDK, or `imsdk-plugins[-oss]` for plugins only.
+Package sets follow [pkg-qimsdk](https://github.com/qualcomm-linux/pkg-qimsdk).
+The helper reuses installed packages, respects image-only and installation
+opt-outs, and leaves other suites' package policies unchanged.
+
+When packages are missing, the helper configures CLO's `qli-debian` repository,
+downloads and validates a missing signing key, and writes `clo.pref` with priority 1001
+as specified in the QIMSDK APT guide. Full sets also include `qti-camera-server`
+and configure Debian QLI or Ubuntu QSC for proprietary dependencies. Missing
+`curl`, `gpg` and CA certificates are installed through the existing package
+provider. The configuration persists.
+
+Pass `existing` as the second argument to retain operator-managed repositories.
+Alternatively, supply a directory of signed `.sources` files for the release,
+for example `pkg_ensure_imsdk_package_set imsdk-oss /opt/qcom-testkit/metadata/imsdk`.
+Custom sources require their referenced keyrings and any APT auth beforehand.
+Conflicting existing source files and CLO preferences are not overwritten.
+Existing keyrings and APT credentials are preserved, including shared keyrings.
+APT verifies them during metadata refresh. Debian QLI uses the provider's
+target-local auth support only when its auth file is absent.
+Return codes are `0` for packages ready,
+`1` for setup/installation failure, and `2` for unsupported or disabled recovery.
+On `1`, report setup failure. On `2`, check image-provided components and skip
+only when a prerequisite is absent. Package readiness is not a functional PASS,
+and camera services, firmware, models and media still need their own checks.
+
 Put command-line usage and argument handling in named functions such as
 `usage()` and `parse_args()`, then call `parse_args "$@"`. Validate arguments
 before changing DUT state. Document each option and preserve existing defaults
