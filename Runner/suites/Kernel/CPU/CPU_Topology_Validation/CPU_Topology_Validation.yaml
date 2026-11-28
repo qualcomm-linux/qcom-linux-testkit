@@ -1,0 +1,14 @@
+metadata:
+  name: cpu-topology-validation
+  format: "Lava-Test Test Definition 1.0"
+  description: "Validate per-CPU topology sysfs: package_id, core_id, thread/core siblings, and physical package count."
+  os:
+    - linux
+  scope:
+    - functional
+run:
+  steps:
+    - REPO_PATH=$PWD
+    - cd Runner/suites/Kernel/CPU/CPU_Topology_Validation
+    - ./run.sh
+    - $REPO_PATH/Runner/utils/send-to-lava.sh CPU_Topology_Validation.res
