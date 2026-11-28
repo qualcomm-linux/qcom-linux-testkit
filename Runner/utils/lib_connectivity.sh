@@ -492,6 +492,7 @@ wifi_classify_probe_failures() (
         log_file_with_label WIFI-FALLBACK "$wcp_dir/wifi_fallbacks.log"
     fi
     if [ -s "$wcp_dir/wifi_probe_failures.log" ]; then
+        log_info "WiFi probe/runtime findings phase=$wcp_phase, full findings follow and are saved in $wcp_dir/wifi_probe_failures.log"
         log_file_with_label WIFI-ERROR "$wcp_dir/wifi_probe_failures.log"
         return 0
     fi
@@ -518,7 +519,7 @@ wifi_has_probe_failures() {
 }
 
 # wifi_dump_runtime_info [output-directory]
-# Print bounded iw/ip and sysfs diagnostics, retaining full command output in CWD.
+# Print full captured iw/ip and sysfs diagnostics, retaining command output in CWD.
 # No radio changes or kernel reads occur. Return 1 only for artifact setup failure.
 wifi_dump_runtime_info() {
     wdr_out="${1:-$PWD/wifi_runtime}"
@@ -542,9 +543,11 @@ wifi_dump_runtime_info() {
             run_with_timeout_log 5 "$wdr_out/$wdr_label.log" "$@"
             wdr_status=$?
             log_info "WiFi diagnostic=$wdr_label exit_status=$wdr_status artifact=$wdr_out/$wdr_label.log"
-            log_file_with_label "$wdr_label" "$wdr_out/$wdr_label.log" 80
+            log_file_with_label "$wdr_label" "$wdr_out/$wdr_label.log"
         else
-            log_warn "WiFi diagnostic=$wdr_label unavailable, image has no $1"
+            wdr_message="WiFi diagnostic=$wdr_label unavailable, image has no $1"
+            printf '%s\n' "$wdr_message" >"$wdr_out/$wdr_label.log" || return 1
+            log_warn "$wdr_message"
         fi
     done
     : >"$wdr_out/sysfs.log" || return 1
@@ -588,7 +591,7 @@ wifi_dump_runtime_info() {
             "$(cat "$wdr_radio/name" 2>/dev/null)" "$(cat "$wdr_radio/soft" 2>/dev/null)" \
             "$(cat "$wdr_radio/hard" 2>/dev/null)" >>"$wdr_out/sysfs.log"
     done
-    log_file_with_label WIFI-SYSFS "$wdr_out/sysfs.log" 80
+    log_file_with_label WIFI-SYSFS "$wdr_out/sysfs.log"
     return 0
 }
 

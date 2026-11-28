@@ -96,7 +96,7 @@ probe_rc=$?
 case "$probe_rc" in
     0)
         wifi_dump_runtime_info "$RESULT_DIR/runtime" || true
-        test_result_finish FAIL "WiFi driver probe/runtime errors captured in $WIFI_FW_PROBE_LOG_DIR/initial"
+        test_result_finish FAIL "WiFi driver probe/runtime errors shown above as WIFI-ERROR, saved in $WIFI_FW_PROBE_LOG_DIR/initial/wifi_probe_failures.log"
         ;;
     2)
         WIFI_HEALTH_UNVERIFIED=1
